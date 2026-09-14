@@ -294,12 +294,15 @@ class ManagerDevice:
                 finally:
                     self._running = None
         restart = bool(res.pop("restart", False))
+        started = res.pop("started", None)
         res = {"action": action, **res, "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
         self.last_action = res
         if rec is not None:
             self.publisher._finish(rec, "ok" if res.get("ok") else "failed", res.get("error"))  # noqa: SLF001
-        self.publisher.publish_manager_result(res)
-        self.publisher.publish_manager()
+        # outcome first: the reconnect after a start and the restart would drop it
+        await self.publisher.async_publish_manager_result(res)
+        if started is not None:
+            await self.publisher.async_after_start(started)
         events.emit("mqtt", f"manager action {action} from MQTT: "
                     + (("ok" + (f", {res['note']}" if res.get("note") else "") + ("; restarting" if restart else "")) if res.get("ok") else f"failed: {res.get('error')}"),
                     action=action)
@@ -329,8 +332,7 @@ class ManagerDevice:
         res = await inst.start(domain, tag)
         if not res.get("ok"):
             raise ValueError(f"start of {domain} {tag} failed: {res.get('error')}")
-        await self.publisher.async_after_start(res)
-        return {"ok": True, "note": f"{domain} {tag} started", "restart": bool(res.get("restart_required"))}
+        return {"ok": True, "note": f"{domain} {tag} started", "restart": bool(res.get("restart_required")), "started": res}
 
     async def _do_install_home_assistant(self) -> dict[str, Any]:
         from .views import async_change_ha_version
