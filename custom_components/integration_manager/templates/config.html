@@ -20,8 +20,15 @@
 
 <div class="card"><h2>Patches</h2>
  <div class="mut" style="margin-bottom:8px">Bundled patches (shipped in the image under <code>patches/&lt;domain&gt;/</code>) plus your uploads in <code>integration_manager/patches/&lt;domain&gt;/</code>, applied in name order after the requirements when the integration starts (and at every boot). <code>.py</code> = patch module with <code>apply(ctx)</code>/<code>status(ctx)</code>; <code>.patch</code> = unified diff (context-checked, idempotent). Headers: <code># integration-version: 1.2.0, 1.2.1</code> limits a patch to those versions (default: all), <code># applies-to: some-lib&lt;2.0</code> retires it once the requirement moves on. Status is shown for the running version; failures never block the integration.</div>
- <div class="row" style="margin-bottom:8px"><input type="file" id="pfile" accept=".py,.patch" style="width:auto"><button id="pupload">Upload patch</button><button id="papply">Re-apply now</button><span id="pmsg" class="mut"></span></div>
+ <div class="row" style="margin-bottom:8px"><input type="file" id="pfile" accept=".py,.patch" style="width:auto"><button id="pupload">Upload patch</button><button id="pnewpy">New .py patch</button><button id="pnewdiff">New .patch diff</button><button id="papply">Re-apply now</button><span id="pmsg" class="mut"></span></div>
  <table id="plist"><tr><th>patch</th><th>scope</th><th>status</th><th>detail</th><th></th></tr></table>
+ <div id="ped" hidden style="margin-top:12px;border-top:1px solid #232c34;padding-top:10px">
+  <div class="row" style="flex-wrap:nowrap"><input id="pedname" type="text" placeholder="fix_something.py" style="max-width:340px" spellcheck="false"><span id="pednote" class="mut"></span></div>
+  <textarea id="pedtext" rows="20" spellcheck="false" style="margin-top:8px"></textarea>
+  <div class="row" style="margin-top:8px"><button id="pedcheck">Check against the running code</button><button id="pedsave" class="primary">Save</button><button id="pedclose">Close</button><span id="pedmsg" class="mut"></span></div>
+  <div class="mut" style="margin-top:4px">Check changes nothing: a diff shows where each hunk lands (or the closest lines when its context is gone), a module runs its <code>status(ctx)</code>. Save stores the file; it is applied when the integration starts, or now with Re-apply.</div>
+  <div id="pedreport" style="margin-top:8px"></div>
+ </div>
 </div>
 
 <div class="card"><h2>YAML config</h2>

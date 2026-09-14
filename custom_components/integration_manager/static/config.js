@@ -48,13 +48,87 @@ async function runPreflight(tag){
 async function loadPatches(){
   const t=$('#plist'); t.querySelectorAll('tr:not(:first-child)').forEach(e=>e.remove()); if(!DOM) return;
   const r=await (await fetch(`api/patches/${encodeURIComponent(DOM)}`)).json(); if(!r.ok) return;
-  for(const p of r.patches){const tr=document.createElement('tr'); tr.innerHTML=`<td>${esc(p.name)}${p.bundled?' <span class="tag" title="shipped with the image (patches/<domain>/ in the repo); a user upload of the same name overrides it">bundled</span>':''}</td><td class="mut">${p.scope?p.scope.map(esc).join(', '):'all'}</td><td><span class="${p.status==='applied'||p.status==='already applied'?'ok':p.status==='skipped'?'mut':'warn'}">${esc(p.status)}</span></td><td class="mut">${esc(p.detail||'')}</td><td>${p.bundled?'':`<button data-n="${esc(p.name)}">Delete</button>`}</td>`; t.appendChild(tr);}
-  t.querySelectorAll('button').forEach(b=>b.onclick=async()=>{ if(!confirm(`Delete patch ${b.dataset.n}?`)) return; await post(`api/patches/${encodeURIComponent(DOM)}/${encodeURIComponent(b.dataset.n)}/delete`); loadPatches(); });
+  for(const p of r.patches){const tr=document.createElement('tr'); tr.innerHTML=`<td>${esc(p.name)}${p.bundled?' <span class="tag" title="shipped with the image (patches/<domain>/ in the repo); a user upload of the same name overrides it">bundled</span>':''}</td><td class="mut">${p.scope?p.scope.map(esc).join(', '):'all'}</td><td><span class="${p.status==='applied'||p.status==='already applied'?'ok':p.status==='skipped'?'mut':'warn'}">${esc(p.status)}</span></td><td class="mut">${esc(p.detail||'')}</td><td><button data-e="${esc(p.name)}">${p.bundled?'View / override':'Edit'}</button>${p.bundled?'':` <button data-n="${esc(p.name)}">Delete</button>`}</td>`; t.appendChild(tr);}
+  t.querySelectorAll('button[data-e]').forEach(b=>b.onclick=()=>pedEdit(b.dataset.e));
+  t.querySelectorAll('button[data-n]').forEach(b=>b.onclick=async()=>{ if(!confirm(`Delete patch ${b.dataset.n}?`)) return; await post(`api/patches/${encodeURIComponent(DOM)}/${encodeURIComponent(b.dataset.n)}/delete`); loadPatches(); });
   $('#papply').disabled=!(ST.running&&ST.running.domain===DOM);
 }
 $('#pupload').onclick=async()=>{const f=$('#pfile').files[0]; if(!DOM||!f){$('#pmsg').textContent='choose a .py or .patch file';return;}
   const fd=new FormData(); fd.append('file',f); const r=await (await fetch(`api/patches/${encodeURIComponent(DOM)}/upload`,{method:'POST',headers:{'X-Requested-With':'fetch'},body:fd})).json();
   $('#pmsg').textContent=r.ok?`uploaded ${r.name} (scope: ${r.scope?r.scope.join(', '):'all versions'}); applied when the integration starts`:'ERROR: '+r.error; loadPatches();};
+// ----- patch editor -----
+const PATCH_TEMPLATES={py:`# integration-version: all
+# applies-to: some-lib<2.0
+"""What this patch fixes, and where upstream tracks it."""
+
+import os
+
+MARKER = "LOCAL PATCH (my-fix)"
+OLD = "    return None\\n"
+NEW = "    return None  # LOCAL PATCH (my-fix)\\n"
+
+
+def _target(ctx):
+    return os.path.join(ctx.site_packages, "some_lib", "module.py")
+
+
+def status(ctx):
+    path = _target(ctx)
+    if not os.path.isfile(path):
+        return "absent"
+    with open(path, encoding="utf-8") as fh:
+        src = fh.read()
+    if MARKER in src:
+        return "applied"
+    return "pending" if OLD in src else "not applicable"
+
+
+def apply(ctx):
+    state = status(ctx)
+    if state != "pending":
+        return "already applied" if state == "applied" else state
+    path = _target(ctx)
+    with open(path, encoding="utf-8") as fh:
+        src = fh.read().replace(OLD, NEW, 1)
+    compile(src, path, "exec")  # never leave broken Python behind
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(src)
+    return "applied"
+`, patch:`# integration-version: all
+--- a/some_lib/module.py
++++ b/some_lib/module.py
+@@ -10,3 +10,3 @@
+ def value():
+-    return None
++    return 0
+`};
+function pedShow(name,text,bundled,isNew){ $('#ped').hidden=false; $('#pedname').value=name; $('#pedname').disabled=!isNew; $('#pedtext').value=text;
+  $('#pednote').textContent=bundled?'bundled with the image: Save stores your copy under the same name, which takes its place':isNew?'the extension decides the format: .py module or .patch diff':'';
+  $('#pedreport').innerHTML=''; $('#pedmsg').textContent=''; $('#ped').scrollIntoView({behavior:'smooth',block:'nearest'}); }
+async function pedEdit(name){ const r=await (await fetch(`api/patch_editor/${encodeURIComponent(DOM)}?name=${encodeURIComponent(name)}`,{headers:{'X-Requested-With':'fetch'}})).json();
+  if(!r.ok){ $('#pmsg').textContent='ERROR: '+r.error; return; } pedShow(r.name,r.text,r.bundled,false); }
+$('#pnewpy').onclick=()=>{ if(DOM) pedShow('my_fix.py',PATCH_TEMPLATES.py,false,true); };
+$('#pnewdiff').onclick=()=>{ if(DOM) pedShow('my_fix.patch',PATCH_TEMPLATES.patch,false,true); };
+$('#pedclose').onclick=()=>{ $('#ped').hidden=true; };
+function renderPatchCheck(r){
+  const cls=s=>/^(applied|already applied|pending)$/.test(s)?'ok':s==='skipped'?'mut':'warn';
+  let h=`<div><b>${esc(r.name)}</b> against ${esc(r.against)} · scope ${r.scope?r.scope.map(esc).join(', '):'all versions'} · status <span class="${cls(r.status)}">${esc(r.status)}</span>${r.applies?'':` <span class="mut">(${esc(r.detail)}; would be <span class="${cls(r.status_if_applied)}">${esc(r.status_if_applied)}</span>)</span>`}</div>`;
+  for(const f of (r.files||[])){
+    h+=`<div style="margin-top:6px"><code>${esc(f.path)}</code> → ${f.target?`<code>${esc(f.target)}</code>`:'<span class="bad">no such file in the component or its site-packages</span>'}</div>`;
+    for(const x of (f.hunks||[])){
+      h+=`<div style="margin:2px 0 0 12px"><code>${esc(x.header)}</code> <span class="${cls(x.state)}">${esc(x.state)}</span>${x.line?` · line ${x.line}`:''}${x.found_diff?' · closest lines:':''}</div>`;
+      if(x.found_diff) h+=`<pre class="pdiff">${x.found_diff.map(l=>`<span class="${l[0]==='+'?'add':l[0]==='-'?'del':''}">${esc(l)}</span>`).join('\n')}</pre><div class="mut" style="margin-left:12px;font-size:12px">− what the hunk expects · + what the file has there now</div>`;
+    }
+  }
+  return h;
+}
+$('#pedcheck').onclick=async()=>{ if(!DOM) return; $('#pedreport').innerHTML='<span class="mut">checking…</span>';
+  const r=await post(`api/patch_editor/${encodeURIComponent(DOM)}/check`,{name:$('#pedname').value.trim(),text:$('#pedtext').value});
+  $('#pedreport').innerHTML=r.ok?renderPatchCheck(r):`<span class="bad">${esc(r.error)}</span>`; };
+$('#pedsave').onclick=async()=>{ if(!DOM) return; const name=$('#pedname').value.trim();
+  const r=await post(`api/patch_editor/${encodeURIComponent(DOM)}/save`,{name,text:$('#pedtext').value});
+  $('#pedmsg').textContent=r.ok?`saved ${r.name}${r.overrides_bundled?' (overrides the bundled file)':''}; ${ST.running&&ST.running.domain===DOM?'Re-apply now applies it':'applied when the integration starts'}`:'ERROR: '+r.error;
+  if(r.ok){ $('#pedname').disabled=true; loadPatches(); } };
 $('#papply').onclick=async()=>{const r=await post(`api/patches/${encodeURIComponent(DOM)}/_all/apply`); $('#pmsg').textContent=r.ok?r.result:'ERROR: '+r.error; loadPatches();};
 async function loadYaml(){ if(!DOM){$('#yamltext').value='';return;} const r=await (await fetch(`api/yaml/${encodeURIComponent(DOM)}`)).json(); if(!r.ok) return; $('#yamltext').value=r.text||''; $('#yamlmsg').textContent=r.text?(r.applied_at_boot?'applied at boot (running integration)':'stored; applied when this integration runs'):''; }
 $('#yamlsave').onclick=async()=>{ const r=await post(`api/yaml/${encodeURIComponent(DOM)}`,{text:$('#yamltext').value}); $('#yamlmsg').textContent=r.ok?(r.removed?'YAML removed':`saved, ${r.keys} top-level key(s)`)+(r.restart_required?' — restart required to apply':''):'ERROR: '+r.error; };

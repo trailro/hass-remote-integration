@@ -195,20 +195,84 @@ class PatchUploadView(ManagerView):
             if len(data) > MAX_PATCH:
                 return self.json({"ok": False, "error": "patch too large"})
         text = data.decode("utf-8", errors="replace")
-        if name.endswith(".py"):
-            try:
-                compile(text, name, "exec")
-            except SyntaxError as err:
-                return self.json({"ok": False, "error": f"not valid Python: {err}"})
-            if "def apply(" not in text or "def status(" not in text:
-                return self.json({"ok": False, "error": "a .py patch must define apply(ctx) and status(ctx)"})
-        elif not patches.parse_unified(text):
-            return self.json({"ok": False, "error": "no hunks found: not a unified diff"})
+        if (err := patches.validate(name, text)):
+            return self.json({"ok": False, "error": err})
         d = patches.patch_dir(self.hass.config.config_dir, domain)
         os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, name), "wb") as fh:
             fh.write(data)
         return self.json({"ok": True, "name": name, "scope": patches.version_scope(text)})
+
+
+class PatchReadView(ManagerView):
+    """GET /api/patch_editor/<domain>?name=: a patch's text for the editor
+    (a bundled one too: saving it stores the user copy that overrides it)."""
+
+    url = "/api/patch_editor/{domain}"
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request: web.Request, domain: str) -> web.Response:
+        if request.headers.get("X-Requested-With") != "fetch":
+            return self.json_message("X-Requested-With: fetch required", status_code=400)
+        name = request.query.get("name", "")
+        if not _DOMAIN_RE.match(domain) or not patches.valid_name(name):
+            return self.json({"ok": False, "error": "bad domain or patch name"})
+        cfg = self.hass.config.config_dir
+
+        def _read() -> str:
+            with open(patches.patch_path(cfg, domain, name), encoding="utf-8", errors="replace") as fh:
+                return fh.read(MAX_PATCH)
+
+        try:
+            text = await self.hass.async_add_executor_job(_read)
+        except OSError:
+            return self.json({"ok": False, "error": "no such patch"})
+        return self.json({"ok": True, "name": name, "text": text, "bundled": patches.is_bundled(cfg, domain, name)})
+
+
+class PatchEditView(ManagerView):
+    """POST /api/patch_editor/<domain>/check: dry run of {name, text}
+    against the deployed code (patches.check), nothing written.
+    POST /api/patch_editor/<domain>/save: validated like an upload, stored
+    in the user patch directory."""
+
+    url = "/api/patch_editor/{domain}/{op}"
+
+    def __init__(self, hass: HomeAssistant, installer: Installer) -> None:
+        self.hass = hass
+        self.installer = installer
+
+    @with_body
+    async def post(self, request: web.Request, body: dict[str, Any], domain: str, op: str) -> web.Response:
+        name, text = body.get("name"), body.get("text")
+        if not _DOMAIN_RE.match(domain) or not isinstance(name, str) or not isinstance(text, str):
+            return self.json({"ok": False, "error": "domain, name and text required"})
+        if len(text.encode("utf-8")) > MAX_PATCH:
+            return self.json({"ok": False, "error": "patch too large"})
+        name = name.strip()
+        cfg = self.hass.config.config_dir
+        if op == "check":
+            tag = self.installer.running_tag if domain == self.installer.running else None
+            res = await self.hass.async_add_executor_job(patches.check, cfg, domain, self.installer.site_packages_for(domain),
+                                                         self.installer.component_dir(domain), tag, name, text)
+            return self.json(res)
+        if op != "save":
+            return self.json_message("unknown operation", status_code=400)
+        if (err := patches.validate(name, text)):
+            return self.json({"ok": False, "error": err})
+        overrides = patches.is_bundled(cfg, domain, name)
+
+        def _write() -> None:
+            d = patches.patch_dir(cfg, domain)
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, name + ".tmp"), "w", encoding="utf-8") as fh:
+                fh.write(text)
+            os.replace(os.path.join(d, name + ".tmp"), os.path.join(d, name))
+
+        await self.hass.async_add_executor_job(_write)
+        return self.json({"ok": True, "name": name, "scope": patches.version_scope(text), "overrides_bundled": overrides})
 
 
 class PatchActionView(ManagerView):

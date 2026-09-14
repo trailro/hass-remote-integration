@@ -1487,7 +1487,25 @@ class Installer:
     def _apply_patches(self, domain: str) -> str:
         parts = []
         tag = self.state.installed.get(domain, {}).get("running_tag")
-        for res in patches.apply_all(self.config_dir, domain, self.site_packages_for(domain), self._component_dir(domain), tag):
+        results = patches.apply_all(self.config_dir, domain, self.site_packages_for(domain), self._component_dir(domain), tag)
+        for res in results:
             parts.append(f"{res['name']}: {res['status']}")
         self._patch_rows(domain)  # refresh the cached summary
+        self._notify_patches(domain, results)
         return "; ".join(parts) if parts else "n/a"
+
+    def _notify_patches(self, domain: str, results: list[dict[str, Any]]) -> None:
+        """Blocking-safe: a persistent notification while a patch does not fit
+        the code it targets (upstream changed it, a file is gone, the module
+        failed), dismissed once every patch applies again.  A patch retired
+        by its headers ("skipped") is fine."""
+        from homeassistant.components import persistent_notification as pn
+
+        nid = f"integration_manager_patches_{domain}"
+        bad = [r for r in results if str(r["status"]) not in ("applied", "already applied", "skipped")]
+        if not bad:
+            pn.dismiss(self.hass, nid)
+            return
+        lines = "\n".join(f"- {r['name']}: {r['status']}" for r in bad)
+        pn.create(self.hass, f"{lines}\n\nThe integration runs without them. On the Integration page, *Edit* a patch and *Check* it "
+                  "against the running code to see what changed.", title=f"Patches of {domain} no longer fit", notification_id=nid)

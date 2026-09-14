@@ -13,7 +13,7 @@ from .flows import FlowDriver
 from .installer import Installer, track_delayed_stores
 from . import events, notifications
 from .build_views import BuildCheckView, BuildOptionsView, BuildPageView, BuildPrepareView, DevInstallView, DevView, PreflightView
-from .manage_views import EventsView, InstalledActionView, PatchActionView, PatchUploadView, PatchesView, ReleaseCheckView, ReleasePreviewView, RunView, SettingsView, YamlView
+from .manage_views import EventsView, InstalledActionView, PatchActionView, PatchEditView, PatchReadView, PatchUploadView, PatchesView, ReleaseCheckView, ReleasePreviewView, RunView, SettingsView, YamlView
 from .mqtt_publisher import MqttPublisher
 from .backup_views import BackupActionView, BackupCreateView, BackupsView, BackupUploadView, RestoreCancelView
 from .ha_import import RegistryAligner, async_finish_rebuild
@@ -213,6 +213,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         YamlView(hass, installer),
         PatchUploadView(hass, installer),
         PatchActionView(hass, installer),
+        PatchReadView(hass),
+        PatchEditView(hass, installer),
         HaStatusView(ha_updater),
         DiagnosticsView(hass, installer, publisher, ha_updater),
         ParityPageView(),
