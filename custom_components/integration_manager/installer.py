@@ -25,6 +25,8 @@ from __future__ import annotations
 import importlib
 import io
 import json
+import weakref
+import functools
 import logging
 import os
 import re
@@ -105,6 +107,29 @@ def _mtime(path: str) -> int:
         return os.stat(path).st_mtime_ns
     except OSError:
         return -1
+
+
+_DELAYED_STORES: "weakref.WeakSet[Any]" = weakref.WeakSet()
+
+
+def track_delayed_stores() -> None:
+    """Remember every Store that schedules a delayed save (integrations use
+    async_delay_save for caches, paired devices and the like), so a backup can
+    write what they still hold: Home Assistant itself only does that at its
+    final write.  Weak references: a store that goes away is forgotten."""
+    from homeassistant.helpers.storage import Store
+
+    if getattr(Store.async_delay_save, "_hri_tracked", False):
+        return
+    original = Store.async_delay_save
+
+    @functools.wraps(original)
+    def async_delay_save(self, *args: Any, **kwargs: Any) -> None:
+        _DELAYED_STORES.add(self)
+        return original(self, *args, **kwargs)
+
+    async_delay_save._hri_tracked = True  # type: ignore[attr-defined]
+    Store.async_delay_save = async_delay_save
 
 
 class Installer:
@@ -1110,9 +1135,9 @@ class Installer:
         return ps
 
     async def async_flush_stores(self) -> int:
-        """Write what Home Assistant still holds in memory: config entries and
-        the registries save with a delay (a backup taken right after a
-        config change would miss it).  Returns how many stores had data
+        """Write what Home Assistant still holds in memory: config entries, the
+        registries and every store an integration saves with a delay (a
+        backup taken right after a change would miss it).  Returns how many stores had data
         pending.  Uses the same path HA runs at its final write."""
         from homeassistant.helpers import (
             area_registry as ar, category_registry as cr, device_registry as dr, entity_registry as er,
@@ -1125,8 +1150,13 @@ class Installer:
                 stores.append(getattr(mod.async_get(self.hass), "_store", None))
             except Exception:  # noqa: BLE001 - a registry that is not loaded yet
                 pass
+        stores += list(_DELAYED_STORES)  # the integration's own stores with a delayed save pending
         flushed = 0
+        seen: set[int] = set()
         for store in stores:
+            if store is None or id(store) in seen:
+                continue
+            seen.add(id(store))
             if store is None or getattr(store, "_data", None) is None:
                 continue
             try:

@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.typing import ConfigType
 
 from .flows import FlowDriver
-from .installer import Installer
+from .installer import Installer, track_delayed_stores
 from . import events, notifications
 from .build_views import BuildCheckView, BuildOptionsView, BuildPageView, BuildPrepareView, DevInstallView, DevView, PreflightView
 from .manage_views import EventsView, InstalledActionView, PatchActionView, PatchUploadView, PatchesView, ReleaseCheckView, ReleasePreviewView, RunView, SettingsView, YamlView
@@ -72,6 +72,7 @@ def _recent(stamp: str, window_s: int = 900) -> bool:
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     events.EVENTS = events.Events(hass.config.path("integration_manager", "events.jsonl"))
+    track_delayed_stores()  # before the integration is set up: backups write its pending saves
     installer = Installer(hass)
     hass.data[DOMAIN] = installer
 
