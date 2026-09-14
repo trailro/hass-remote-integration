@@ -105,16 +105,25 @@ async function doRestore(n,parts,ha){
   setTimeout(()=>location.reload(),r.ha?20000:10000);
 }
 // a backup made on another Home Assistant version: Home Assistant only migrates a configuration forward
+function pendingConfigSwitch(){ const c=BK.change; return c&&['restore','rebuild'].includes(c.mode)&&c.to!==BK.ha_current?c:null; }
 function restorePlan(n,parts,made,boot){
-  const box=$('#bkrestore'), newer=vcmp(made,boot)>0, installed=(BK.ha_installed||[]).includes(made);
-  const what=parts?parts.join(' + '):'everything';
+  const box=$('#bkrestore'), newer=vcmp(made,boot)>0, installed=(BK.ha_installed||[]).includes(made), sw=pendingConfigSwitch();
+  const what=parts?parts.join(' + '):'everything', replaces=boot!==BK.ha_current?` It replaces the scheduled switch to ${esc(boot)}.`:'';
   const venv=installed?'its venv is still on the volume':'it is downloaded and installed at the restart (a few minutes)';
   const opt=(value,checked,title,note)=>`<label style="display:flex;gap:8px;align-items:flex-start;margin:6px 0;cursor:pointer"><input type="radio" name="bkha" value="${value}" ${checked?'checked':''} style="margin-top:3px"><span><b>${title}</b><br><span class="mut">${note}</span></span></label>`;
+  let body;
+  if(made===BK.ha_current){  // made on the running version while a switch to another one is scheduled
+    body=opt('backup',true,`Stay on Home Assistant ${esc(made)}`,`Cancels the scheduled switch to ${esc(boot)} and restores the backup on the running version.`);
+  }else if(newer){
+    body=`<div class="warn">Home Assistant ${esc(boot)} cannot read a configuration made on ${esc(made)}, so the restore switches Home Assistant to ${esc(made)}: ${venv}. A backup of the current configuration is taken first and brought back if ${esc(made)} does not start.${replaces}</div><input type="radio" name="bkha" value="backup" checked hidden>`;
+  }else{
+    body=(sw?`<div class="warn" style="margin-bottom:4px">A switch to Home Assistant ${esc(sw.to)} with a ${sw.mode==='restore'?'configuration restore':'clean start'} is scheduled, so the backup cannot be restored on it: cancel that switch under Home Assistant first, or go back to ${esc(made)} instead.</div>`
+          :opt('keep',true,`Keep Home Assistant ${esc(boot)} (default)`,`The restored configuration is migrated forward when Home Assistant starts; nothing to download.`))
+      +opt('backup',!!sw,`Go back to Home Assistant ${esc(made)}`,`Exactly the state of the backup: ${venv}. A backup of the current configuration is taken first and brought back if ${esc(made)} does not start.${replaces}`);
+  }
   box.innerHTML=`<div style="font-weight:600;margin-bottom:6px">Restore ${esc(n)} (${esc(what)})</div>
    <div style="margin-bottom:6px">This backup was made on Home Assistant <b>${esc(made)}</b>; this container ${boot===BK.ha_current?'runs':'boots next with'} <b>${esc(boot)}</b>. Home Assistant migrates a configuration forward, never back.</div>
-   ${newer?`<div class="warn">Home Assistant ${esc(boot)} cannot read a configuration made on ${esc(made)}, so the restore switches Home Assistant to ${esc(made)}: ${venv}. A backup of the current configuration is taken first and brought back if ${esc(made)} does not start.</div><input type="radio" name="bkha" value="backup" checked hidden>`
-   :opt('keep',true,`Keep Home Assistant ${esc(boot)} (default)`,`The restored configuration is migrated forward when Home Assistant starts; nothing to download.`)
-    +opt('backup',false,`Go back to Home Assistant ${esc(made)}`,`Exactly the state of the backup: ${venv}. A backup of the current configuration is taken first and brought back if ${esc(made)} does not start.`)}
+   ${body}
    <div class="row" style="margin-top:8px"><button id="bkrgo" class="primary">Restore and restart</button><button id="bkrcancel">Cancel</button></div>`;
   box.hidden=false; box.scrollIntoView({behavior:'smooth',block:'center'});
   $('#bkrcancel').onclick=()=>{box.hidden=true;box.innerHTML='';};
@@ -137,6 +146,8 @@ async function backups(){
       const bk=(BK.backups||[]).find(x=>x.name===n)||{}, boot=BK.ha_boot||BK.ha_current;
       // the Home Assistant version only matters when .storage comes back
       if(bk.ha_version&&boot&&vcmp(bk.ha_version,boot)!==0&&(!parts||parts.includes('storage'))) return restorePlan(n,parts,bk.ha_version,boot);
+      const sw=pendingConfigSwitch();
+      if(sw){ $('#bkmsg').textContent=`ERROR: a switch to Home Assistant ${sw.to} with a ${sw.mode==='restore'?'configuration restore':'clean start'} is scheduled: cancel it under Home Assistant first`; return; }
       if(!confirm(`Restore ${n}${parts?' ('+parts.join(' + ')+' only)':''}?
 
 The process restarts now; the entrypoint replaces ${parts?parts.join(', '):'.storage, custom_components and integration_manager'} from the backup (a pre-restore backup is taken first) and boots HA again.`)) return;

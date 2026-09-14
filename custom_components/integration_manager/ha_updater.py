@@ -177,6 +177,7 @@ class HaUpdater:
         state = self._read_for_update()
         state["desired"] = version
         state["last_error"] = ""
+        state.pop("recovery", None)  # a new intention supersedes what a failed fallback left behind
         if change:
             state["change"] = change
         else:

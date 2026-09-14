@@ -90,9 +90,10 @@ class DevView(ManagerView):
 class DevInstallView(ManagerView):
     url = "/api/dev/install"
 
-    def __init__(self, hass: HomeAssistant, installer: Installer) -> None:
+    def __init__(self, hass: HomeAssistant, installer: Installer, publisher: Any = None) -> None:
         self.hass = hass
         self.installer = installer
+        self.publisher = publisher
 
     @with_body
     async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
@@ -101,6 +102,8 @@ class DevInstallView(ManagerView):
         if not _DOMAIN_RE.match(domain) or (path is not None and not isinstance(path, str)):
             return self.json({"ok": False, "error": "domain required"})
         res = await self.installer.install_local(domain, path, replace=bool(body.get("replace")))
+        if res.get("ok") and res.get("replaced") and self.publisher is not None:
+            await self.publisher.async_reconnect()  # the MQTT identity follows the new integration
         if res.get("ok") and body.get("restart") and res.get("redeployed"):
             await self.installer.restart()
             res["restarting"] = True
@@ -202,11 +205,12 @@ class BuildCheckView(ManagerView):
 class BuildPrepareView(ManagerView):
     url = "/api/build/prepare"
 
-    def __init__(self, hass: HomeAssistant, installer: Installer, updater: HaUpdater, check_view: BuildCheckView) -> None:
+    def __init__(self, hass: HomeAssistant, installer: Installer, updater: HaUpdater, check_view: BuildCheckView, publisher: Any = None) -> None:
         self.hass = hass
         self.installer = installer
         self.updater = updater
         self._check = check_view
+        self.publisher = publisher
 
     @with_body
     async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
@@ -222,18 +226,32 @@ class BuildPrepareView(ManagerView):
         if not self._check.checked(domain, ref, ha, str(body.get("check_id") or "")):
             return self.json({"ok": False, "error": "run Check for exactly this integration, version and Home Assistant version first (the report on screen belongs to another combination or is older than an hour)"})
         steps: list[dict[str, Any]] = []
+        ha_state = await self.updater.status()
+        ha_changes = bool(ha) and ha != ha_state.get("current")
+        if ha_changes:
+            try:
+                await self.updater.validate(ha)  # before anything is installed, let alone replaced
+            except ValueError as err:
+                return self.json({"ok": False, "error": f"Home Assistant {ha}: {err}", "steps": steps})
         res = await self.installer.install(ref, domain=domain, replace=bool(body.get("replace")))
         steps.append({"step": "install", **res})
         if not res.get("ok"):
             return self.json({"ok": False, "error": f"install: {res.get('error')}", "steps": steps})
+        if res.get("replaced") and self.publisher is not None:
+            await self.publisher.async_reconnect()  # the MQTT identity follows the new integration
         restart_required = False
-        ha_state = await self.updater.status()
-        ha_changes = bool(ha) and ha != ha_state.get("current")
         if ha and not ha_changes and ha_state.get("pending"):
             # the running version was chosen explicitly: an older intention to
             # move to another version at the next restart contradicts it
-            self.updater.set_desired(ha)
-            dropped = await self.installer.hass.async_add_executor_job(self.updater.cancel_config_change)
+            from .views import _HA_CHANGE_LOCK
+
+            if _HA_CHANGE_LOCK.locked():
+                return self.json({"ok": False, "error": "a Home Assistant version change is being prepared: try again in a moment", "steps": steps})
+            try:
+                dropped = await self.installer.hass.async_add_executor_job(self.updater.cancel_config_change)
+                self.updater.set_desired(ha)
+            except ValueError as err:  # an unreadable ha.json
+                return self.json({"ok": False, "error": f"Home Assistant {ha}: {err}", "steps": steps})
             steps.append({"step": "ha", "ok": True, "desired": ha, "note": f"cancelled the scheduled move to {ha_state.get('desired')}"
                           + (f" (dropped: {', '.join(dropped)})" if dropped else "")})
             events.emit("ha", f"scheduled Home Assistant {ha_state.get('desired')} cancelled: {ha} chosen in the environment builder", version=ha)
@@ -241,7 +259,6 @@ class BuildPrepareView(ManagerView):
             try:
                 from .views import async_change_ha_version  # the same backup and change record as the System page
 
-                await self.updater.validate(ha)
                 st = await async_change_ha_version(self.installer, self.updater, ha, "keep", "environment builder")
                 steps.append({"step": "ha", "ok": True, "desired": st["desired"], "backup": st["backup"]})
                 restart_required = True
@@ -261,6 +278,8 @@ class BuildPrepareView(ManagerView):
             steps.append({"step": "start", **res})
             if not res.get("ok"):
                 return self.json({"ok": False, "error": f"start: {res.get('error')}", "steps": steps, "restart_required": restart_required})
+            if self.publisher is not None:
+                await self.publisher.async_after_start(res)  # as a start from the Overview: MQTT follows, stale documents go
             restart_required = restart_required or bool(res.get("restart_required"))
         events.emit("build", f"{domain} {ref}" + (f" on Home Assistant {ha}" if ha else "")
                     + (" starts after the restart" if deferred else " started" if body.get("start") else " prepared")

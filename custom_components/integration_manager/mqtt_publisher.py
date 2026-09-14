@@ -235,6 +235,7 @@ class MqttPublisher:
         self._topics: dict[str, str] = {}
         self.manager = None  # ManagerDevice (manager_device.py), set by __init__
         self._manager_absent_sent = False  # this connection already told the consumer there is no manager device
+        self._resync_excluded = False  # integrations were excluded while disconnected: sweep the broker at the next connect
         self._health_soon_handle: asyncio.TimerHandle | None = None
         self._health_announced: str | None = None  # the verdict last published (and put in the timeline)
 
@@ -384,6 +385,8 @@ class MqttPublisher:
                     self._topics.pop(eid, None)
                     self._last_hash.pop(topic, None)
                     self._pending_clears.add(topic)
+            if not self._connected:
+                self._resync_excluded = True  # after a restart this process does not know every topic of theirs
         for t in ("_registry_timer", "_services_timer"):
             h = getattr(self, t, None)
             if h is not None:
@@ -710,16 +713,15 @@ class MqttPublisher:
             # (re)subscription: physical effects must never replay
             _LOGGER.warning("MQTT: ignoring retained command on %s (commands must not be retained)", msg.topic)
             return
-        if not msg.payload:
-            # clearing a retained command reaches live subscribers as an empty payload, and this
-            # process clears retained cmd/call topics itself when its identity moves: never a command
-            return
         manager_prefix = self._manager_cmd_base() + "/"
         if msg.topic.startswith(manager_prefix):
             self._on_manager_command(msg.topic[len(manager_prefix):], msg.payload.decode(errors="replace"))
             return
         call_prefix = self._call_base() + "/"
         if msg.topic.startswith(call_prefix):
+            if not msg.payload:
+                self._reject_empty_call(msg.topic[len(call_prefix):])
+                return
             self._on_call(msg.topic[len(call_prefix):], msg.payload.decode(errors="replace"))
             return
         prefix = self._cmd_base() + "/"
@@ -730,6 +732,11 @@ class MqttPublisher:
             return
         domain, object_id, field = parts
         payload = msg.payload.decode(errors="replace")
+        if not payload and ((domain, field) not in (("text", "value"), ("notify", "message")) or self._moving):
+            # clearing a retained command reaches live subscribers as an empty payload (this process
+            # clears retained cmd topics itself when its identity moves): only text/notify take "" as a value
+            self._finish(self._remember("cmd", f"{domain}.{object_id}/{field}", ""), "ignored", "empty payload")
+            return
         rec = self._remember("cmd", f"{domain}.{object_id}/{field}", payload)
         if f"{domain}.{object_id}" not in self._topics:
             self._finish(rec, "rejected", "not an entity this container publishes")
@@ -824,6 +831,14 @@ class MqttPublisher:
         iso = lambda t: time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t)) if t else None
         rows = list(self.history)[-limit:]
         return [{**r, "received": iso(r["received"]), "finished": iso(r["finished"]), "result": None} for r in reversed(rows)]
+
+    def _reject_empty_call(self, rest: str) -> None:
+        """A call needs a JSON object ({} without data); an empty payload is what clearing a retained call looks like."""
+        parts = rest.split("/")
+        rec = self._remember("call", rest[:80], "")
+        self._finish(rec, "rejected", "empty payload: send {} to call a service without data")
+        if len(parts) == 2 and _SERVICE_NAME.fullmatch(parts[0].lower()) and _SERVICE_NAME.fullmatch(parts[1].lower()) and not self._moving:
+            self._publish_result(parts[0].lower(), parts[1].lower(), {"ok": False, "error": "empty payload: send {} to call a service without data"})
 
     def _on_call(self, rest: str, payload: str) -> None:
         """Generic service call: <base>/call/<domain>/<service> with a JSON
@@ -1268,6 +1283,40 @@ class MqttPublisher:
         for t in [t for t in list(self._last_hash) if t.startswith(topic_prefix)]:
             del self._last_hash[t]
 
+    async def _async_resync_excluded(self) -> None:
+        """Retained documents of excluded integrations, and discovery configs of
+        devices no longer announced, swept from the broker (what an exclusion
+        while disconnected could not clear)."""
+        base, prefix = self.base_topic, self.config.discovery_prefix
+        excluded = set(self.config.exclude_integrations)
+        try:
+            found = await self.hass.async_add_executor_job(self._retained_scan, "resync", [(f"{base}/#", 1), (f"{prefix}/device/+/config", 1)])
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("MQTT: sweep of excluded integrations failed: %s", err)
+            self._resync_excluded = True
+            return
+        docs, configs = [], []
+        for topic, payload in found.items():
+            if not self._is_ours(topic, payload, base):
+                continue
+            if topic.startswith(f"{prefix}/device/"):
+                configs.append(topic)
+                continue
+            try:
+                doc = json.loads(payload)
+            except ValueError:
+                continue
+            if isinstance(doc, dict) and doc.get("integration") in excluded:
+                docs.append(topic)
+        if docs:
+            await self.hass.async_add_executor_job(self._clear_topics, "resync", docs)
+        if self.config.discovery_enabled:
+            groups, _ = self._group_by_device()
+            for topic in configs:
+                if topic.split("/")[-2] not in groups and topic != self._discovery_topic(f"{base}_manager"):
+                    self._publish(topic, None, qos=1)
+        _LOGGER.info("MQTT: swept %s retained documents of excluded integrations", len(docs))
+
     async def async_after_start(self, res: dict[str, Any]) -> None:
         """After a successful start (UI or MQTT action): the identity follows
         the running integration; a version switch clears the retained
@@ -1621,6 +1670,9 @@ class MqttPublisher:
             self._publish_discovery_all()
         self._publish_manager_discovery()
         self.publish_manager()
+        if self._resync_excluded:
+            self._resync_excluded = False
+            await self._async_resync_excluded()
         await self._publish_services()
         _LOGGER.info(
             "MQTT full republish: %s entities, %s services, discovery: %s devices / %s components",

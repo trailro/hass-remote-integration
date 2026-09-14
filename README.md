@@ -556,9 +556,11 @@ Assistant runs, is not protected; it only shows the progress.
 Behind a reverse proxy, note that Home Assistant's HTTP server in the container
 is not set up for proxies: it answers `400 Bad Request` to any request that
 carries an `X-Forwarded-For` header, so configure the proxy not to send one.
-Every request then comes from the proxy's address, which means five wrong
-passwords from anywhere lock everyone behind that proxy out for 15 minutes; an
-SSH tunnel or a VPN avoids both.
+Every request then comes from the proxy's address: five wrong passwords from
+anywhere block new logins and `Bearer` scripts behind that proxy for 15 minutes
+(browsers already logged in keep working). The server cannot tell that the
+proxy speaks TLS, so set `HRI_COOKIE_SECURE=1` to mark the session cookie
+`Secure`. An SSH tunnel or a VPN avoids all of this.
 
 Without a password, anyone who can reach the port controls the container. The UI installs code
 from any GitHub repository, accepts Python patches and runs service calls, so
@@ -616,6 +618,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | `HRI_DEBUG` | unset | Debug logging for the manager |
 | `HRI_PASSWORD` | unset | Password for the web UI and API; unset or empty means no login |
 | `HRI_PASSWORD_FILE` | unset | File holding the password, for example a Docker secret; wins over `HRI_PASSWORD` |
+| `HRI_COOKIE_SECURE` | unset | `1` marks the session cookie `Secure` (behind a reverse proxy with TLS) |
 
 ### Files on the volume
 

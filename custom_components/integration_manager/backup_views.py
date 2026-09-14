@@ -39,11 +39,13 @@ class BackupsView(ManagerView):
         items, pending, parts, last = await self.hass.async_add_executor_job(
             lambda: (backupkit.list_backups(cfg), backupkit.pending(cfg), backupkit.pending_parts(cfg) if backupkit.pending(cfg) else None,
                      _last_restore(self.hass)))
-        boot, venvs = await self.hass.async_add_executor_job(
-            lambda: (backupkit.boot_version(cfg), self.updater._installed_venvs() if self.updater else []))  # noqa: SLF001
+        boot, venvs, ha_state = await self.hass.async_add_executor_job(
+            lambda: (backupkit.boot_version(cfg), self.updater._installed_venvs() if self.updater else [],  # noqa: SLF001
+                     self.updater._read() if self.updater else {}))  # noqa: SLF001
         return self.json({"backups": items, "pending_restore": pending, "keep": self.installer.settings.backup_keep,
                           "parts": list(backupkit.PARTS), "pending_parts": parts, "last_restore": last,
-                          "ha_current": HA_VERSION, "ha_boot": boot or HA_VERSION, "ha_installed": venvs})
+                          "ha_current": HA_VERSION, "ha_boot": boot or HA_VERSION, "ha_installed": venvs,
+                          "change": ha_state.get("change") if isinstance(ha_state, dict) else None})
 
 
 class BackupCreateView(ManagerView):
@@ -186,11 +188,24 @@ class BackupActionView(ManagerView):
                     # once the backup is known to be restorable and no other change is being prepared
                     from .views import _HA_CHANGE_LOCK
 
-                    if _HA_CHANGE_LOCK.locked():
-                        return self.json({"ok": False, "error": "a Home Assistant version change is being prepared: try again in a moment"})
-                    await self.hass.async_add_executor_job(backupkit.validate, path)
-                    await self.hass.async_add_executor_job(self.updater.cancel_config_change)
-                    self.updater.set_desired(HA_VERSION)
+                    if parts is not None and (not parts or any(p not in backupkit.PARTS for p in parts)):
+                        return self.json({"ok": False, "error": f"parts must be a non-empty subset of {', '.join(backupkit.PARTS)}"})
+                    if _HA_CHANGE_LOCK.locked() or self.installer.busy:
+                        return self.json({"ok": False, "error": "a Home Assistant version change or an install is running: try again in a moment"})
+                    async with _HA_CHANGE_LOCK:
+                        self.installer.busy = True
+                        try:
+                            await self.hass.async_add_executor_job(backupkit.validate, path)
+                            await self.hass.async_add_executor_job(self.updater.cancel_config_change)
+                            self.updater.set_desired(HA_VERSION)
+                            await self.hass.async_add_executor_job(backupkit.schedule_restore, cfg, name, parts)
+                            await self.hass.async_add_executor_job(ha_import.drop_rebuild, cfg)
+                        finally:
+                            self.installer.busy = False
+                    events.emit("restore", f"{name} scheduled for the next restart ({', '.join(parts) if parts else 'everything'}); "
+                                f"the scheduled switch to Home Assistant {boot} was cancelled", backup=name)
+                    return self.json({"ok": True, "parts": parts or list(backupkit.PARTS), "cancelled_switch": boot,
+                                      "note": "restore is applied by the entrypoint at the next process restart"})
                 elif self.updater is not None:
                     # a restore by hand would take the place of the restore or clean start a scheduled switch needs
                     change = (await self.hass.async_add_executor_job(self.updater._read)).get("change")  # noqa: SLF001
