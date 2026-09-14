@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>hass-remote-integration · devices</title>
+<!--css--></head><body><main>
+<h1>Devices <span id="n" class="mut"></span></h1>
+<div class="mut">refresh every 30 s · last: <span id="ts">…</span></div>
+
+<div class="card"><div class="row">
+ <input type="search" id="q" placeholder="search name, model, identifier, entity…">
+ <select id="integ"><option value="">all integrations</option></select>
+ <label class="mut"><input type="checkbox" id="tree" checked> show the via-device hierarchy</label>
+ <span id="models"></span>
+</div></div>
+
+<div class="card wrap">
+ <table><thead><tr>
+  <th data-k="name">device</th><th data-k="model">model</th><th data-k="identifier">identifier</th>
+  <th data-k="via">via</th><th data-k="entities">entities</th><th data-k="unavailable">unavailable</th><th data-k="discovery_id">discovery id</th>
+ </tr></thead><tbody id="tb"></tbody></table>
+</div>
+
+</main><!--js--></body></html>

@@ -1,0 +1,37 @@
+/* shared by every page; page css loads after this and overrides */
+:root{--bg:#0f1418;--card:#161d23;--fg:#e6edf3;--mut:#8b98a5;--ok:#3fb950;--warn:#d29922;--bad:#f85149;--acc:#58a6ff}
+body{margin:0;font:14px/1.5 system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+a{color:var(--acc)}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.mut{color:var(--mut)}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+main{max-width:1180px;margin:0 auto;padding:24px 16px}
+h1{font-size:20px;margin:0 0 4px}
+h2{font-size:15px;margin:0 0 10px;color:var(--mut);text-transform:uppercase;letter-spacing:.06em}
+.card{background:var(--card);border:1px solid #232c34;border-radius:10px;padding:16px;margin:14px 0}
+.wrap{overflow-x:auto}
+.tag{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;border:1px solid #2a3540;color:var(--mut)}
+.tag.on{border-color:var(--acc);color:var(--fg)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:5px 8px;text-align:left;border-bottom:1px solid #232c34;vertical-align:top}
+td.id{font-family:ui-monospace,monospace;font-size:12px;white-space:nowrap}
+tr.x td{background:#0d1117;padding:8px 12px 12px}
+pre{margin:0;white-space:pre-wrap;font:12px/1.45 ui-monospace,monospace;color:#c9d1d9}
+input,select{background:#0d1117;color:var(--fg);border:1px solid #30363d;border-radius:6px;padding:5px 9px;font:inherit}
+input[type=search]{min-width:260px}
+button{background:#21262d;color:var(--fg);border:1px solid #30363d;border-radius:6px;padding:5px 12px;cursor:pointer}
+button:hover{border-color:var(--acc)}button:disabled{opacity:.45;cursor:default}button.primary{background:#1f6feb;border-color:#1f6feb}
+.k{color:var(--mut);margin:6px 0 2px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media(max-width:800px){.grid{grid-template-columns:1fr}}
+.topbar{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:2px;padding:0 14px;height:46px;background:#0b0f13;border-bottom:1px solid #232c34;font:13px system-ui,sans-serif;overflow-x:auto;overflow-y:hidden;white-space:nowrap}
+.topbar #tb-chips{display:flex;gap:4px;flex-shrink:0;align-items:center}
+.topbar .brand{color:#e6edf3;font-weight:600;text-decoration:none;margin-right:14px;letter-spacing:.01em;white-space:nowrap}
+.topbar .brand b{color:#58a6ff}
+.topbar a.nav{color:#8b98a5;text-decoration:none;padding:6px 10px;border-radius:6px;white-space:nowrap}
+.topbar a.nav:hover{color:#e6edf3;background:#161d23}
+.topbar a.nav.active{color:#e6edf3;background:#1b232b;box-shadow:inset 0 -2px 0 #58a6ff}
+.topbar .spacer{flex:1}
+.topbar .chip{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;border:1px solid #2a3540;color:#8b98a5;margin-left:6px;white-space:nowrap;font-size:12px}
+.topbar .chip .dot{width:8px;height:8px;border-radius:50%;background:#8b98a5}
+.topbar .chip.ok .dot{background:#3fb950}.topbar .chip.warn .dot{background:#d29922}.topbar .chip.bad .dot{background:#f85149}
+.topbar .chip b{color:#e6edf3;font-weight:500}
+@media (max-width:1150px){.topbar .chip{display:none}}

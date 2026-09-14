@@ -1,0 +1,8 @@
+main{max-width:1100px;margin:0 auto;padding:24px 16px}
+table{width:100%;border-collapse:collapse}td,th{padding:6px 8px;text-align:left;border-bottom:1px solid #232c34;vertical-align:top}th{color:var(--mut);font-weight:500}
+input,select,textarea{background:#0d1117;color:var(--fg);border:1px solid #30363d;border-radius:6px;padding:6px 9px;font:inherit;width:100%;box-sizing:border-box}
+textarea{font:12px/1.4 ui-monospace,monospace;min-height:120px}
+label{display:block;color:var(--mut);font-size:12px;margin:10px 0 4px}
+.radio label{display:inline-flex;align-items:center;gap:6px;margin:4px 12px 4px 0;color:var(--fg);font-size:14px}
+.err{color:var(--bad);font-size:12px}
+pre{white-space:pre-wrap;font:12px/1.4 ui-monospace,monospace;color:#c9d1d9;margin:0}

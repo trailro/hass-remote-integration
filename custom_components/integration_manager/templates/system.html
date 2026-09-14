@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>hass-remote-integration · system</title>
+<!--css--></head><body><main>
+<h1>System</h1>
+<div style="color:var(--mut);margin-bottom:6px">The box itself: the Home Assistant version it runs, backups of the volume, settings imported from a Home Assistant backup, manager settings.<div id="flash" class="warn" style="min-height:1.2em"></div></div>
+
+<div class="card"><h2>Home Assistant (venv on the volume)</h2>
+ <table>
+  <tr><th>running version</th><td id="hacur">…</td></tr>
+  <tr><th>latest stable (PyPI)</th><td id="halatest">…</td></tr>
+  <tr><th>venvs on the volume</th><td id="havenvs">…</td></tr>
+  <tr><th>last error</th><td id="haerr" class="bad">—</td></tr>
+ </table>
+ <div class="row" style="margin-top:10px">
+  <button id="haupdate" class="primary" disabled>Update to …</button>
+  <select id="haver"></select><button id="hapick">Install selected version</button>
+  <button id="harollback" disabled>Roll back HA</button>
+  <button id="harefresh" title="PyPI is checked when this page loads and at most every 10 minutes; this forces a check now">Refresh</button>
+  <span id="hanote" class="warn"></span>
+ </div>
+ <div id="haplan" class="mut" style="margin-top:8px" hidden></div>
+ <div class="mut" style="margin-top:6px">Every version change takes a backup of the current configuration first, then restarts the process. A version that is not installed yet goes into a new venv on the volume (a few minutes, this page shows the progress); the previous venv is kept for rollback, and the container falls back to it if the install or the boot fails. The integration's requirements are reinstalled into the new venv automatically. Home Assistant migrates its configuration forward only, so a downgrade lets you restore <code>.storage</code> from a backup made on that version or an older one, or start clean and rebuild the integration's configuration. The integration version and the manager state stay as they are.</div>
+</div>
+
+<div class="card"><h2>Backup &amp; restore</h2>
+ <div class="mut" style="margin-bottom:8px">A backup is a zip of <code>.storage</code> (registries, config entries), <code>custom_components</code>, the manager's state/settings/versions/patches and the YAML files. One is taken automatically before every start that changes something (<code>pre-start-…</code>, <code>pre-update-…</code>), before a restore (<code>pre-restore</code>) and optionally daily. Restore is applied by the entrypoint at the next restart, for the parts you choose.</div>
+ <div class="row" style="margin-bottom:8px">
+  <input id="bklabel" placeholder="label (optional)"><button id="bkcreate" class="primary">Create backup now</button>
+  <input type="file" id="bkfile" accept=".zip"><button id="bkupload">Upload backup</button>
+  <label style="display:inline-flex;align-items:center;gap:6px;margin:0;font-size:13px;color:var(--mut)">restore <select id="bkparts" style="width:auto" title="what a Restore puts back; the rest of the volume is untouched"><option value="">everything</option><option value="storage">.storage only (registries, config entries)</option><option value="custom_components">custom_components only</option><option value="manager">manager only (state, settings, versions, patches)</option><option value="yaml">yaml files only</option><option value="storage,manager">.storage + manager</option></select></label>
+  <label style="display:inline-flex;align-items:center;gap:6px;margin:0;font-size:13px;color:var(--mut)">keep <select id="bkkeep" style="width:auto"><option value="5">5</option><option value="10">10</option><option value="20">20</option><option value="0">all</option></select> backups</label>
+  <label style="display:inline-flex;align-items:center;gap:6px;margin:0;font-size:13px;color:var(--mut)"><input type="checkbox" id="bkdaily"> daily backup at <input type="number" id="bkhour" min="0" max="23" style="width:56px">:00</label>
+  <span id="bkmsg" class="mut"></span>
+ </div>
+ <table id="bklist"><tr><th>backup</th><th>label</th><th>size</th><th>files</th><th></th></tr></table>
+ <div class="row" style="margin-top:6px"><span id="bkpending" class="warn"></span><button id="bkcancel" hidden>Cancel the scheduled restore</button></div>
+</div>
+
+<div class="card"><h2>Import settings from a Home Assistant backup</h2>
+ <div class="mut" style="margin-bottom:8px">Upload a Home Assistant backup (<code>.tar</code>, encrypted or not): its config entries are listed per integration; import one (editable data/options) or every installed one at once. Entity/device ids and names can be aligned from the backup and the integration's <code>.storage</code> files copied.</div>
+ <div class="row" style="margin-bottom:8px">
+  <input type="file" id="imfile" accept=".tar"><input type="password" id="impass" placeholder="backup encryption key (if protected)" style="min-width:260px">
+  <button id="imupload" class="primary">Upload &amp; inspect</button><button id="imclear">Clear</button><span id="immsg" class="mut"></span>
+ </div>
+ <div id="imsummary"></div>
+ <div id="imall" class="row" hidden style="margin:8px 0">
+  <button id="imapplyall" class="primary">Import all installed integrations</button>
+  <label class="mut"><input type="checkbox" id="imallalign" checked> align entity/device ids and names</label>
+  <label class="mut"><input type="checkbox" id="imallstorage" checked> copy .storage files</label>
+  <span id="imallresult" class="mut"></span>
+ </div>
+ <div id="imform" hidden>
+  <div class="row" style="margin:8px 0"><b id="imtitle"></b> <label class="mut"><input type="checkbox" id="imalign" checked> align entity/device ids and names from the backup</label> <label class="mut"><input type="checkbox" id="imstorage" checked> copy the integration's .storage files (its cache)</label></div>
+  <div class="row" style="align-items:flex-start"><div style="flex:1;min-width:280px"><div class="mut">data (JSON)</div><textarea id="imdata" rows="6" style="width:100%"></textarea></div>
+  <div style="flex:2;min-width:320px"><div class="mut">options (JSON) — edit before importing, e.g. a host, a port or a read-only switch</div><textarea id="imoptions" rows="14" style="width:100%"></textarea></div></div>
+  <div class="row" style="margin-top:8px"><button id="imapply" class="primary">Import into this instance</button><span id="imresult" class="mut"></span></div>
+ </div>
+</div>
+
+<div class="card"><h2>Settings</h2>
+ <div class="row" style="margin-bottom:6px"><label style="margin:0;display:inline-flex;gap:6px;align-items:center">check health <input type="number" id="smoke" min="0" max="86400" style="width:80px"> s after a start (0 = off)</label>
+  <label style="margin:0;display:inline-flex;gap:6px;align-items:center"><input type="checkbox" id="autorb"> full rollback automatically when it fails after a version switch</label>
+  <label style="margin:0;display:inline-flex;gap:6px;align-items:center"><input type="checkbox" id="relcheck"> weekly release check (badge only, nothing installs itself)</label>
+  <button id="relnow">Check releases now</button><span id="automsg" class="mut"></span></div>
+ <div class="mut" style="margin-bottom:8px">The smoke test uses the health verdict without the boot grace (its rules are on the <a href="/mqtt">MQTT</a> page). After a version switch a failure triggers Full rollback (previous version + the pre-update backup) and a restart; after a plain start it is only recorded.</div>
+ <div class="row" style="margin-bottom:6px"><span class="mut">GitHub token (private repos, higher rate limit) · <span id="ghstate">…</span></span><input id="ghtoken" type="password" placeholder="ghp_… / github_pat_… (needs repo read access)" autocomplete="off" style="min-width:300px"><button id="ghsave">Save token</button><button id="ghclear">Clear</button><span id="ghmsg" class="mut"></span></div>
+ <div class="row" style="margin-bottom:6px"><label style="margin:0;display:inline-flex;gap:6px;align-items:center">allowed host names <input id="allowedhosts" placeholder="e.g. hri.example.com (comma separated)" style="min-width:260px" title="the DNS-rebinding guard accepts IP addresses, localhost and .local/.lan/.home names; add custom DNS names here"></label><button id="allowedsave">Save</button></div>
+ <div class="mut">Stored in <code>integration_manager/settings.json</code> (mode 600); the token is never shown again. It is used for the release list, preflight and the download of every registry repo, so private repositories work like public ones.</div>
+</div>
+
+<div class="card"><h2>Process</h2>
+ <div class="row"><button id="restart" class="primary" disabled>Restart process</button><span id="restartnote" class="warn"></span>
+  <a href="api/diagnostics" download><button title="zip for bug reports: versions, manifest, packages, patches, health, statuses, memory snapshot, timeline, last 1000 log lines, log file tail; secrets scrubbed">Diagnostics zip</button></a>
+  <a href="api/diag/memory" target="_blank"><button title="RSS split, threads, fds, tasks, listeners, live objects by type">Memory snapshot</button></a>
+  <span id="last" class="mut"></span></div>
+</div>
+
+</main><!--js--></body></html>

@@ -1,0 +1,4 @@
+{
+  "_comment": "Integrations offered on the Install page. Exactly ONE integration lives in a container; installing another replaces it after a backup. Add your own in /config/integration_manager/registry.json, same shape: {\"<domain>\": {\"name\": \"Display name\", \"repo\": \"owner/repo\", \"patch_module\": \"pip module the patches target\", \"quiet_loggers\": [\"loggers started at WARNING\"], \"log_dir\": \"directory under /config with the integration's log files\"}}; only repo is required.",
+  "integrations": {}
+}

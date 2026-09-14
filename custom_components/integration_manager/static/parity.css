@@ -1,0 +1,6 @@
+table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:5px 8px;text-align:left;border-bottom:1px solid #232c34;vertical-align:top}th{color:var(--mut);font-weight:500}
+button:hover{border-color:var(--acc)}button:disabled{opacity:.45;cursor:default}button.primary{background:#1f6feb;border-color:#1f6feb}button.danger{border-color:var(--bad)}
+input{background:#0d1117;color:var(--fg);border:1px solid #30363d;border-radius:6px;padding:6px 9px;font:inherit}
+.kpi{display:inline-block;margin:0 14px 6px 0}.kpi b{font-size:18px}
+.id{font-family:ui-monospace,monospace;font-size:12px}
+.step{padding:8px 0;border-bottom:1px solid #232c34}.step:last-child{border:0}

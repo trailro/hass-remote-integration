@@ -1,0 +1,12 @@
+# Installed by entrypoint.py into each Home Assistant venv on the volume,
+# together with homeassistant and its package constraints. Not meant for a
+# local pip install.
+#
+# paho-mqtt: the MQTT client of the translator
+paho-mqtt==2.1.0
+# voluptuous-serialize: renders config-flow schemas (not a core dependency since HA 2026.9)
+voluptuous-serialize
+# regex: the Log files format is matched with a time limit (the stdlib re has none)
+regex
+# isal: aiohttp's zlib accelerator, otherwise aiohttp_fast_zlib warns at every boot
+isal

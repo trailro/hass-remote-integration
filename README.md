@@ -1,0 +1,633 @@
+# hass-remote-integration
+
+[![CI](https://github.com/trailro/hass-remote-integration/actions/workflows/ci.yml/badge.svg)](https://github.com/trailro/hass-remote-integration/actions/workflows/ci.yml)
+
+Run **one Home Assistant custom integration in its own small container**,
+outside your main Home Assistant, and bring everything it produces back to
+your main HA over **MQTT**: entities (with MQTT discovery), services and a
+health signal.
+
+Everything is managed from a web UI: install versions from GitHub, configure
+the integration, start and roll back, back up and restore, move settings over
+from an existing Home Assistant, and cut over when you are ready. No HACS, no
+HA frontend and no shell needed.
+
+> Nothing in the manager is specific to one integration: any custom
+> integration published as GitHub releases, or sitting in a local directory,
+> can be run this way.
+
+---
+
+## Why would I want this?
+
+Custom integrations that talk to hardware are often the fragile part of a Home
+Assistant install:
+
+- a Home Assistant upgrade breaks them, or they pin a library that conflicts
+  with something else;
+- an integration update migrates its config, and going back is painful;
+- a bug in one integration (a stuck event loop, a leaking serial port) slows
+  down or restarts the whole house.
+
+Running the integration in its own container decouples it:
+
+- **Independent versions.** The container pins its own Home Assistant Core and
+  its own library versions. Your main HA can upgrade freely: it only sees MQTT.
+- **Reversible updates.** Several versions of the integration live side by
+  side; every switch takes a backup first, is smoke-tested afterwards, and can
+  be rolled back automatically.
+- **Isolation.** A crash or a hang stays in its container.
+- **Safe migration.** Run it in *shadow mode* next to your main HA, compare
+  entity by entity, then switch over with one click (and undo with one click).
+
+It is **not** a replacement for Home Assistant: there is no frontend, no
+automations, no recorder. It runs exactly one integration and publishes it.
+
+---
+
+## How it works
+
+```
++--------------------------- container -----------------------------+
+|  entrypoint.py   installs Home Assistant Core into a venv on the  |
+|                  volume, applies scheduled restores, falls back   |
+|                  to the previous HA after repeated failed boots   |
+|                                                                   |
+|  run.py          headless Home Assistant Core: loader, registries,|
+|                  http on :8087, the manager, the integration      |
+|                                                                   |
+|  integration_manager  web UI + API: versions, config, patches,    |
+|                  MQTT translator + discovery, health, backups,    |
+|                  import, parity & cutover, diagnostics            |
++-------------------------------+-----------------------------------+
+                                | MQTT: hass_<domain>/...
+                                v
+                     +----------+----------+       +---------------------+
+                     |     MQTT broker     | <---> |  your main Home     |
+                     |    (e.g. mosquitto) |       |  Assistant (MQTT    |
+                     +---------------------+       |  integration)       |
+                                                   +---------------------+
+```
+
+- Home Assistant is **not baked into the image**. A fresh volume installs the
+  newest stable Home Assistant from PyPI into `/config/venv-<version>`. Later
+  versions are picked from the UI; the previous one is kept for rollback.
+- The container holds **one integration**, with as many of its versions as you
+  like in a version store. Want a second integration? Run a second container.
+- Everything the container publishes is named after the integration: MQTT base
+  topic `hass_<domain>`, discovery ids `hass_<domain>_...`. Several containers
+  share one broker and one main HA without clashing.
+
+---
+
+## Requirements
+
+- Docker with Compose.
+- An MQTT broker reachable from the container (mosquitto or any other).
+- Your main Home Assistant with the MQTT integration, if you want the entities
+  to appear there.
+- Access to the hardware your integration needs: a USB/serial device passed
+  into the container, or a network bridge (see [Hardware access](#hardware-access)).
+
+Footprint: roughly 170–210 MB of RAM with a typical integration running, and about
+800 MB of disk per installed Home Assistant version.
+
+---
+
+## Quick start
+
+```bash
+git clone https://github.com/trailro/hass-remote-integration.git
+cd hass-remote-integration
+```
+
+`main` can be ahead of the latest release. To run a released version, check
+out its tag from the [Releases](https://github.com/trailro/hass-remote-integration/releases)
+page, for example `git checkout v0.7.0`.
+
+Put your settings in a `.env` file next to `docker-compose.yml` (it is not
+committed):
+
+```bash
+TZ=Europe/Berlin          # your time zone
+HRI_PORT=8087             # port of the UI
+```
+
+If your MQTT broker runs in Docker, the container must reach it. Put what is
+specific to your machine in a `docker-compose.override.yml`, which Compose
+loads automatically. For a broker on an existing Docker network called
+`my-mqtt-network`:
+
+```yaml
+services:
+  hass-remote-integration:
+    networks:
+      - my-mqtt-network
+
+networks:
+  my-mqtt-network:
+    external: true
+```
+
+A broker elsewhere on your LAN needs nothing: use its IP address on the MQTT
+page. Then build and start it:
+
+```bash
+docker compose up -d --build
+```
+
+Open `http://<docker-host>:8087`. On the very first start the page shows the
+Home Assistant installation progress; it takes a few minutes.
+
+---
+
+## Your first integration, step by step
+
+The UI has one page per task:
+
+| Page | What you do there |
+|---|---|
+| **Overview** | See what runs and whether it is healthy, start/stop, restart, notifications, timeline of everything that happened |
+| **Integration** | Versions and GitHub releases of the integration, preflight, patches, YAML config, config flow, config entries |
+| **Install** | Install from the registry or any GitHub repo, the environment builder, dev mode |
+| **MQTT** | Broker connection, translator status, discovery, recent commands, health rules |
+| **Cutover** | Compare with your main HA, enable discovery, undo |
+| **Entities / Devices / Services** | Inspect, rename, disable, call services |
+| **Logs / Log files** | The integration's logs and the log files it writes |
+| **System** | Home Assistant version, backups and restore, import from a HA backup, settings, diagnostics |
+
+### 1. Install the integration
+
+On **Install**, pick an integration from the registry and click *Install latest
+stable*. To use an integration that is not in the registry, open *add a repo to
+the registry* and give its domain and GitHub `owner/repo` (the repository must
+publish releases that contain `custom_components/<domain>/`).
+
+Nothing runs yet: the version sits in the version store.
+
+For more control use the **environment builder** on the same page: choose the
+integration, any release, branch or commit, and a Home Assistant version, then
+*Check*. Check downloads the release into a scratch directory, resolves its
+Python requirements with `pip --dry-run`, evaluates patches and dependencies
+and the minimum HA version, and tells you whether anything blocks the
+combination, without touching the running environment. *Prepare* installs
+exactly the combination that passed.
+
+### 2. Configure it
+
+Choose whichever fits the integration, on the **Integration** page:
+
+- **Config flow**: runs the integration's own setup dialog, like HA's
+  frontend would (the integration must be started first, because the flow is
+  its code).
+- **YAML config**: for integrations configured in `configuration.yaml`, paste
+  what would go under `<domain>:`. It is validated on save and applied at boot.
+- **Import from your existing Home Assistant** (on **System**): upload a
+  standard HA backup (`.tar`, encrypted or not). The config entries of the
+  installed integration come over with their data *and* options, and entity
+  ids, names, icons and disabled flags are aligned, so entities keep the same
+  ids they had in your main HA.
+
+### 3. Start it
+
+Click **Start** on the **Overview** or **Integration** page. The version is
+deployed, its requirements installed, patches applied, its config entries
+enabled. A backup is taken first when something changes.
+
+Some starts need a process restart (for example switching to a different
+version of an integration that is already loaded, or applying YAML). The page
+says so; use *Restart process*.
+
+About five minutes after a start, a **smoke test** checks the health verdict.
+If it fails right after a version switch, the manager rolls back to the
+previous version and its backup automatically (configurable on **System**).
+
+### 4. Connect MQTT
+
+On **MQTT**, enter the broker host, port and credentials, tick *enabled*, save.
+The container publishes one retained JSON document per entity, the service
+catalog and a health document under `hass_<domain>/`.
+
+Leave **discovery off** for now if your main HA still runs the same
+integration: otherwise you would get every entity twice.
+
+### 5. Move over from your main Home Assistant
+
+The recommended path is **shadow mode**: run the container next to your main
+HA for a while, with MQTT enabled and discovery off, and compare.
+
+1. Make sure only one side talks to the hardware in a way that conflicts
+   (for example, only one side sends commands to the devices).
+2. On **Cutover**, give your main HA's URL and a long-lived access token
+   (optional; used only to compare). The page lists entities missing on either
+   side and differences in state, names and flags.
+3. When you are happy: **disable the integration in your main HA**, then click
+   *Enable discovery* on **Cutover**. Your main HA creates the entities from
+   MQTT; the page watches until all of them exist.
+4. Changed your mind? *Undo* removes every discovery config again, so your
+   main HA drops the entities.
+
+[docs/shadow-mode.md](docs/shadow-mode.md) describes a complete shadow-mode setup, including a
+serial device shared by both instances through a TCP bridge.
+
+---
+
+## Everyday operation
+
+### Updating the integration
+
+Install the new release (Install or Integration page), optionally run
+**Preflight** on it first, then *Switch to* it. The manager backs up, switches,
+restarts if needed, smoke-tests, and rolls back on its own if the new version
+is unhealthy. *Full rollback* on the Integration page brings back the previous
+version together with the config as it was before the update.
+
+### Updating Home Assistant inside the container
+
+On **System**, choose a version and install it. The process restarts, the new
+Home Assistant is installed into a new venv (the page shows progress), and the
+integration's requirements are reinstalled there. If the new version fails to
+boot three times in a row, the container falls back to the previous one.
+
+Every version change, up or down, takes a backup of the current configuration
+first. This is what makes it practical to try an integration on several Home
+Assistant versions.
+
+Home Assistant migrates its configuration forward only: a newer version
+rewrites `.storage` in its own format and never converts it back. A downgrade
+therefore asks what the older version starts with:
+
+- **Restore from a backup.** `.storage` comes back from the newest backup made
+  on the target version or an older one, which is the configuration in a
+  format that version understands. Changes made after that backup are lost.
+- **Start clean and rebuild the integration**, the default when there is no
+  such backup. The older version starts like a fresh install. After it boots,
+  the integration's config entries are created again with their data and
+  options, its own store files are copied, and entity ids, names, icons,
+  hidden and disabled flags and device names are applied again, all from the
+  backup taken just before the switch. Areas, labels, other entity settings
+  and the last known states are not carried over.
+- **Keep the current configuration.** This works when the older version can
+  read the newer storage formats; otherwise the boot fails and the container
+  falls back to the version you came from.
+
+The integration version and the manager state stay as they are in every case.
+
+### Backups
+
+Taken automatically before every start that changes something, before every
+Home Assistant version change, before a restore and before replacing the
+integration; optionally daily. On **System**
+you can create, download, upload, delete and restore them. A restore is
+applied at the next restart, can be partial (only `.storage`, only the manager
+state, …), and is rolled back if it fails halfway.
+
+### Health
+
+`hass_<domain>/health` carries a verdict: `ok`, `degraded` or `error`, with the
+reason, entity counts and when the integration last wrote a state. With
+discovery on, your main HA gets a connectivity sensor and a health sensor for
+the container. The thresholds are on the **MQTT** page; mark an integration
+that only writes on events as `event`, so silence is not reported as a fault.
+
+### Logs and log files
+
+**Logs** shows the process log: everything Home Assistant and the integration
+log, with filters and a live follow. Loggers listed in the registry's
+`quiet_loggers` start at WARNING; raise one at runtime while you investigate.
+
+**Log files** shows files the integration writes itself, such as traffic dumps
+or debug logs. It appears in the menu only when there are any. The files are
+found through the integration's config entries (any setting ending in `.log`),
+the registry's `log_dir`, and `*.log` files in the config root.
+
+By default every line is shown whole. The **Formatting** box at the bottom of
+the page splits lines into columns. A format is a JSON object:
+
+| Key | Required | Meaning |
+|---|---|---|
+| `pattern` | yes | Python regular expression matched at the start of each line. Each named group `(?P<name>...)` becomes a column, in order. Lines that do not match are shown whole. |
+| `hide` | no | Group names captured but not shown |
+| `dim` | no | Group names shown in a muted colour |
+| `color_by` | no | Group whose value picks the row colour |
+| `colors` | no | Map from a `color_by` value to `ok`, `warn`, `bad`, `accent` or `muted` |
+
+Inside JSON every backslash is written twice. For lines like
+`2026-01-01 12:00:00.123 WARNING (MainThread) [custom_components.demo] text`:
+
+```json
+{
+  "pattern": "^(?P<time>\\S+ \\S+) (?P<level>[A-Z]+) \\((?P<thread>[^)]*)\\) \\[(?P<logger>[^\\]]+)\\] (?P<message>.*)$",
+  "hide": ["thread"],
+  "dim": ["time", "logger"],
+  "color_by": "level",
+  "colors": {"WARNING": "warn", "ERROR": "bad", "CRITICAL": "bad", "DEBUG": "muted"}
+}
+```
+
+The format is checked on save: the pattern must compile and have at least one
+named group. It is stored in `integration_manager/settings.json`, so it
+survives image updates and is part of backups. The filter box always searches
+the whole line, hidden groups included. Matching has a time limit: when a
+pattern is too slow for the lines on screen, the remaining lines are shown
+whole and the page says so.
+
+### Replacing the integration
+
+Installing a different integration in a container **replaces** the current
+one: after a backup, its config entries, versions, patches, YAML and retained
+MQTT documents are removed. The UI asks before doing it. To run two
+integrations, run two containers:
+
+```bash
+HRI_NAME=hri-other HRI_PORT=8088 docker compose -p hri-other up -d
+```
+
+Each gets its own container name, port and volume.
+
+---
+
+## Hardware access
+
+The integration runs in a Linux container, so it needs the hardware to be
+visible there:
+
+- **USB/serial devices** on a Linux host: add the device to the service in
+  your `docker-compose.override.yml`, for example
+  `devices: ["/dev/serial/by-id/usb-...:/dev/ttyUSB0"]`.
+- **Hosts where USB passthrough is awkward** (macOS, some NAS systems): run a
+  small serial-to-TCP bridge on the host and point the integration at
+  `socket://host.docker.internal:<port>`. The compose file already maps
+  `host.docker.internal` to the host.
+- **Network devices** need nothing special, but note that the container does
+  not see mDNS/multicast from your LAN in bridge networking: configure devices
+  by IP address.
+
+---
+
+## Patches
+
+Sometimes an integration or one of its libraries needs a small fix before
+upstream ships it. Patches are applied after the requirements, every time the
+integration starts and at every boot:
+
+- `patches/<domain>/` in this repository ships with the image (empty here;
+  use it in your own image builds);
+- your own go to `integration_manager/patches/<domain>/` on the volume (upload
+  on the Integration page); a file of the same name overrides a bundled one.
+
+Two formats: a `*.py` module with `apply(ctx)` and `status(ctx)` (robust,
+because it can find code by pattern), or a unified diff `*.patch` (applied only
+when its context matches, never leaves broken Python behind). Two optional
+headers retire a patch on its own:
+
+```python
+# integration-version: 1.2.0, 1.2.1   only for these versions
+# applies-to: some-lib<2.0            only while this requirement matches
+```
+
+---
+
+## For integration authors: dev mode
+
+Test an integration from your working copy without publishing a release:
+
+```bash
+HRI_DEV_SRC=/path/to/your/checkout docker compose \
+  -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.dev.yml up -d
+```
+
+(With explicit `-f` files Compose no longer loads the override on its own:
+list it, or leave it out if you do not have one.)
+
+The directory is mounted read-only at `/dev-src`. The **Install** page lists
+every `manifest.json` it finds there; *Install as local* copies it into the
+version store as version `local`, which you start like any other. *Reinstall +
+restart* refreshes the running copy after you edit the code.
+
+`HRI_DEBUGPY=5678` (set by the dev overlay, bound to `127.0.0.1` only) makes
+the process listen for a debugger: attach VS Code to `localhost:5678`.
+Exceptions show up on the **Logs** page.
+
+---
+
+## MQTT reference
+
+```
+hass_<domain>/status                                online | offline (retained, last will)
+hass_<domain>/health                                retained JSON, every 60 s
+hass_<domain>/<integration>/<domain>/<object_id>    one retained document per entity
+hass_<domain>/services/<domain>                     retained service catalog
+hass_<domain>/cmd/<domain>/<object_id>/<field>      commands (used by discovery)
+hass_<domain>/call/<domain>/<service>               service call, JSON payload
+hass_<domain>/result/<domain>/<service>             call result, not retained
+<prefix>/device/hass_<domain>_<device>/config       HA device-based discovery
+```
+
+- **Entity document**: state, attributes, `last_changed`, `last_updated`,
+  `last_reported`, and the registry metadata (unique id, name, device class,
+  unit, icon, category, device).
+- **Discovery** (off by default): one retained config per device. Entities of
+  every domain that has an MQTT platform become native entities with working
+  commands; the rest (cameras, media players, weather, …) are mirrored as
+  read-only sensors with all attributes. Per-entity rules on the Entities page
+  or as JSON can exclude an entity or change its name, icon, category or
+  default enablement on the MQTT side only.
+- **Service calls**: publish a JSON object to `call/<domain>/<service>` (service
+  data plus optional `entity_id`, and an optional `_id`); the result comes back
+  on `result/...`. A repeated `_id` within five minutes is answered from memory
+  and never executed twice. `homeassistant`, `shell_command`, `python_script`
+  and `hassio` are never callable.
+- Before connecting, the container checks that no *foreign* retained data sits
+  under its base topic, and refuses to connect if there is (override with
+  `force_base_topic`).
+
+---
+
+## Security
+
+There is **no login**. This is meant for a trusted LAN, like many
+self-hosted appliances.
+
+Anyone who can reach the port controls the container. The UI installs code
+from any GitHub repository, accepts Python patches and runs service calls, so
+access to the port means running arbitrary code inside the container, with
+access to its volume, its secrets and every device or network it can reach.
+Treat the port like SSH access to that container.
+
+To make the UI reachable only from the Docker host, bind the port to localhost
+in your `docker-compose.override.yml` and use an SSH tunnel or a reverse proxy
+with authentication for remote access:
+
+```yaml
+services:
+  hass-remote-integration:
+    ports: !override
+      - "127.0.0.1:8087:8087"
+```
+
+What is in place:
+
+- A host-header guard against DNS rebinding: requests are served for IP
+  addresses, `localhost` and local names (`.local`, `.lan`, `.home`,
+  `.internal`, `.home.arpa`); add other names under *allowed host names* on
+  **System**.
+- State-changing requests need JSON or an explicit header, so a web page on
+  another origin cannot trigger them.
+- Secrets (MQTT password, GitHub token, parent HA token, backup key) are
+  write-only in the UI, stored in files readable only by the owner, and never
+  logged or included in the diagnostics zip. Backups do contain them.
+- Dangerous service domains are not callable, over MQTT or from the UI.
+
+**Do not expose the port to the internet.** Put it behind a reverse proxy with
+authentication if you need remote access.
+
+To report a security problem, see [SECURITY.md](SECURITY.md).
+
+---
+
+## Configuration reference
+
+### Environment variables
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `HRI_PORT` | `8087` | Port of the UI and API |
+| `HRI_NAME` | `hass-remote-integration` | Container and volume name |
+| `TZ` | `UTC` | Time zone |
+| `HA_VERSION_LATEST` | `1` | `0` installs the image's baseline HA on a fresh volume instead of the newest |
+| `HRI_DEV_SRC` | `./dev-src` | Dev mode: directory mounted at `/dev-src` |
+| `HRI_DEBUGPY` | unset | Dev mode: debugger port |
+| `HRI_CALL_TIMEOUT` | `60` | Seconds a service call or command may take before it is reported as a timeout |
+| `HRI_TRACEMALLOC` | unset | Diagnostics: allocation tracing frames (costs memory) |
+| `HRI_TRACE_IMPORT` | unset | Diagnostics: log who imports the given packages |
+| `HRI_DEBUG` | unset | Debug logging for the manager |
+
+### Files on the volume
+
+```
+/config/
+  venv-<ha version>/            one per installed Home Assistant (venv-current links the active one)
+  custom_components/<domain>/   the deployed integration
+  integration_manager/
+    state.json                  running integration, versions, pending actions
+    settings.json               settings, tokens, log-file format (mode 600)
+    mqtt.json                   broker configuration (mode 600)
+    mqtt_rules.json             per-entity MQTT rules
+    registry.json               your registry entries (see below)
+    versions/<domain>/<tag>/    version store
+    patches/<domain>/           your patches
+    yaml/<domain>.yaml          YAML configuration
+    events.jsonl                timeline
+    process.log                 process log (rotated)
+  backups/                      backups (zip)
+```
+
+A registry entry in `integration_manager/registry.json` has this shape; only
+`repo` is required:
+
+```json
+{"integrations": {"my_integration": {
+  "name": "My integration",
+  "repo": "owner/my_integration",
+  "patch_module": "my_lib",
+  "quiet_loggers": ["my_lib", "custom_components.my_integration"],
+  "log_dir": "my_integration_logs"
+}}}
+```
+
+| Key | Meaning |
+|---|---|
+| `name` | Display name on the Install page |
+| `repo` | GitHub `owner/repo` that publishes the releases |
+| `patch_module` | Python package whose site-packages the patches target |
+| `quiet_loggers` | Loggers started at WARNING (default `custom_components.<domain>`) |
+| `log_dir` | Directory under `/config` where the integration writes log files |
+
+### API
+
+Every page is backed by a JSON API on the same port, so everything can be
+scripted. The main entry points:
+
+| Area | Endpoints |
+|---|---|
+| Status | `GET /api/status`, `GET /api/summary`, `GET /api/mqtt/status`, `GET /api/events`, `GET /api/notifications`, `POST /api/notifications/dismiss_all` |
+| Integration | `POST /api/install`, `POST /api/run/{start,stop}`, `GET /api/releases`, `POST /api/releases/preflight`, `POST /api/installed/<domain>/{uninstall,rollback_full,remove_version}` |
+| Builder / dev | `POST /api/build/{check,prepare}`, `GET /api/dev`, `POST /api/dev/install` |
+| Configuration | `POST /api/flow/start`, `POST /api/flow/<id>`, `GET/POST /api/yaml/<domain>`, `GET /api/patches/<domain>`, `GET /api/entries` |
+| MQTT | `GET/POST /api/mqtt/config`, `POST /api/mqtt/{reconnect,republish}`, `GET /api/mqtt/discovery`, `GET /api/mqtt/commands` |
+| Entities | `GET /api/entities`, `GET /api/devices`, `GET /api/services`, `POST /api/services/call` |
+| System | `GET /api/ha`, `POST /api/ha/{update,rollback}`, `POST /api/restart`, `GET /api/backups`, `POST /api/backups/create`, `POST /api/backups/<name>/restore`, `POST /api/import/{upload,inspect,apply}` |
+| Cutover | `GET /api/parity`, `POST /api/cutover/{status,enable,undo}` |
+| Logs | `GET /api/logs`, `GET /api/log_files`, `GET /api/log_files/tail?file=&lines=&q=`, `GET/POST /api/settings` (`log_format`) |
+| Diagnostics | `GET /api/diagnostics` (zip, secrets removed), `GET /api/diag/memory` |
+
+---
+
+## Troubleshooting
+
+- **The page keeps showing the installation progress.** The first start
+  downloads Home Assistant; a slow connection can take several minutes. The
+  container log (`docker logs <name>`) shows pip's progress.
+- **"restart required" does not go away.** Click *Restart process* on the
+  Overview; some changes (a new version of a loaded integration, YAML) only take
+  effect at a restart.
+- **MQTT says the base topic is in use.** Something else left retained messages
+  under `hass_<domain>/`. Remove them, or tick `force_base_topic` if they are
+  yours from an earlier setup.
+- **Entities appear twice in my main HA.** Discovery is on while the main HA
+  still runs the same integration. Undo on **Cutover**, disable the
+  integration in the main HA, enable again.
+- **Health says degraded although everything works.** An integration that only
+  writes states on events looks silent; set its health mode to `event` on the
+  **MQTT** page.
+- **Something went wrong and I need help.** *Diagnostics zip* on **System**
+  collects versions, statuses, the timeline and recent logs, with secrets
+  removed.
+
+---
+
+## Development
+
+```bash
+docker build -t hass-remote-integration:local . && sh verify.sh recreate   # rebuild, boot check, memory
+sh verify.sh status
+sh verify.sh test      # validates discovery payloads against the installed HA's MQTT schemas
+```
+
+`verify.sh` reads `HRI_NAME`, `HRI_PORT`, `HRI_IMAGE`, `HRI_NETWORK` and `TZ`
+from the environment or from `.env`.
+
+CI runs on every push to `main` and every pull request: syntax checks, an
+image build, a boot on a fresh volume and the discovery schema test.
+
+Inside the container the Home Assistant venv is `/config/venv-current/bin/python`
+(the image's own `python3` does not have Home Assistant).
+
+A few things that shaped the code, useful if you read it:
+
+- Home Assistant's loader imports the `custom_components` namespace once, so
+  the manager's source ships under `/app/manager_src` and is copied to the
+  volume at boot.
+- `SETUP_PORT` must be set before anything imports `homeassistant`, or the
+  http server binds to 8123.
+- The boot skips `homeassistant.bootstrap` and the recorder/logbook preloads to
+  keep memory low; the rest is Home Assistant's own import graph.
+
+## Limitations
+
+- No authentication on the UI (trusted LAN only).
+- One integration per container; two versions of the same integration cannot
+  run at the same time.
+- No Home Assistant frontend: integration features that exist only as frontend
+  panels are not available.
+- Discovery of entities without a `unique_id` works, but they cannot be
+  renamed or disabled in the registry.
+- Cutover does not disable the integration in your main HA for you: do that
+  yourself before enabling discovery.
+
+## License
+
+[Apache License 2.0](LICENSE). Home Assistant and the integrations you run
+with this tool keep their own licenses; they are downloaded at runtime and not
+part of this repository.

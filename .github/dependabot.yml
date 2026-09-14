@@ -1,0 +1,22 @@
+# Monthly version updates. Every pull request runs CI, including a fresh
+# Home Assistant install, so a bump that conflicts with Home Assistant's
+# constraints or Python version fails there instead of on a user's volume.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: monthly

@@ -1,0 +1,15 @@
+# Dev mode overlay: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#   HRI_DEV_SRC  host directory with the integration(s) under development
+#                (the directory itself, <dir>/<domain>/ or <dir>/custom_components/<domain>/
+#                must hold a manifest.json); mounted read-only at /dev-src
+#   HRI_DEBUGPY  port on which the process waits for a debugger to attach (VS Code "attach",
+#                localhost:5678); debugpy is installed into the venv on first use.
+#                Never expose this port beyond localhost.
+services:
+  hass-remote-integration:
+    volumes:
+      - ${HRI_DEV_SRC:-./dev-src}:/dev-src:ro
+    environment:
+      HRI_DEBUGPY: "${HRI_DEBUGPY:-5678}"
+    ports:
+      - "127.0.0.1:${HRI_DEBUGPY:-5678}:${HRI_DEBUGPY:-5678}"

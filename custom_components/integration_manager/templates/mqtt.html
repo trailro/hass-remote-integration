@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>hass-remote-integration · MQTT</title>
+<!--css--></head><body><main>
+<h1>MQTT</h1>
+<div style="color:var(--mut);margin-bottom:6px">Every entity of the running integration goes to the broker as a retained JSON document under <code>hass_&lt;domain&gt;/…</code>, with HA discovery for the consuming Home Assistant once you turn it on; commands and service calls come back the same way.<div id="flash" class="warn" style="min-height:1.2em"></div></div>
+
+<div class="card"><h2>Entity translator</h2>
+ <table>
+  <tr><th>connection</th><td id="mqconn">…</td></tr>
+  <tr><th>broker</th><td id="mqbroker">…</td></tr>
+  <tr><th>published / cleared</th><td id="mqcount">…</td></tr>
+  <tr><th>last full publish</th><td id="mqfull">…</td></tr>
+  <tr><th>health</th><td id="mqhealth">…</td></tr>
+  <tr><th>rules</th><td id="mqrules">…</td></tr>
+  <tr><th>discovery HA</th><td id="mqdisc">…</td></tr>
+  <tr><th>commands received</th><td id="mqcmd">…</td></tr>
+  <tr><th>services / calls</th><td id="mqcall">…</td></tr>
+  <tr><th>recent commands</th><td><details><summary class="mut" style="cursor:pointer"><span id="mqhist">…</span></summary><table id="mqhistt" style="margin-top:6px"><tr><th>when</th><th>kind</th><th>what</th><th>data</th><th>state</th><th>ms</th></tr></table></details></td></tr>
+ </table>
+ <div class="row" style="margin-top:10px">
+  <button id="mqrepub">Republish everything</button>
+  <button id="mqreconn">Reconnect</button>
+ </div>
+</div>
+
+<div class="card"><h2>Connection</h2>
+ <form id="mqform" onsubmit="return false" style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+  <label>enabled <input id="mq_enabled" type="checkbox"></label>
+  <label>base_topic <input id="mq_base_topic" type="text"></label>
+  <label>host <input id="mq_host" type="text"></label>
+  <label>port <input id="mq_port" type="number"></label>
+  <label>username <input id="mq_username" type="text"></label>
+  <label>password <input id="mq_password" type="password" placeholder="(unchanged)"></label>
+  <label title="incremental pass: only documents whose content changed">republish_interval_s <input id="mq_republish_interval_s" type="number"></label>
+  <label title="everything is re-published no matter what, at most this often">full_republish_interval_min <input id="mq_full_republish_interval_min" type="number" min="5"></label>
+  <label>exclude_integrations <input id="mq_exclude_integrations" type="text" placeholder="a,b"></label>
+  <label title="turn on only once the integration is fully configured here: the consuming HA creates the entities at the first publication">discovery_enabled <input id="mq_discovery_enabled" type="checkbox"></label>
+  <label>discovery_prefix <input id="mq_discovery_prefix" type="text" placeholder="homeassistant"></label>
+  <label title="connect even if foreign retained data sits under our base topic">force_base_topic <input id="mq_force_base_topic" type="checkbox"></label>
+  <div class="row" style="grid-column:1/3"><button id="mqsave" class="primary">Save and reconnect</button></div>
+ </form>
+</div>
+
+<div class="card"><h2>Health rules</h2>
+ <div class="mut" style="margin-bottom:8px">The health verdict published on <code>hass_&lt;domain&gt;/health</code> (and used by the smoke test) comes from what this process sees of the running integration's entities. Defaults apply to every integration; a row overrides them for one. <b>periodic</b> integrations write states all the time (a quiet bus is a fault after <i>stale</i> seconds); <b>event</b> integrations only write on events, so silence is not a fault for them.</div>
+ <div class="row" style="margin-bottom:6px"><label style="margin:0;display:inline-flex;gap:6px;align-items:center">default stale <input type="number" id="hstale" min="60" max="86400" style="width:80px"> s</label>
+  <label style="margin:0;display:inline-flex;gap:6px;align-items:center">unavailable ≥ <input type="number" id="hunav" min="1" max="100" style="width:64px"> % = degraded</label><button id="hsave">Save defaults</button><span id="hmsg" class="mut"></span></div>
+ <table id="hrules"><tr><th>integration</th><th>mode</th><th>stale s</th><th>unavailable %</th><th></th></tr></table>
+</div>
+
+</main><!--js--></body></html>

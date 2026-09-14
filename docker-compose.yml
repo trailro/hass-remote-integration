@@ -1,0 +1,25 @@
+# One container per integration: give each its own name, port and volume
+# (HRI_NAME, HRI_PORT; put them in a .env file next to this one).
+# Local specifics such as the Docker network your MQTT broker is on or a USB
+# device belong in a docker-compose.override.yml (Compose loads it
+# automatically; see README).
+services:
+  hass-remote-integration:
+    build: .
+    image: hass-remote-integration:local
+    container_name: ${HRI_NAME:-hass-remote-integration}
+    restart: unless-stopped
+    ports:
+      - "${HRI_PORT:-8087}:${HRI_PORT:-8087}"
+    volumes:
+      - config:/config
+    environment:
+      TZ: "${TZ:-UTC}"
+      HRI_PORT: "${HRI_PORT:-8087}"
+      HRI_TRACEMALLOC: "${HRI_TRACEMALLOC:-}"   # e.g. 25: opt-in allocation tracing for /api/diag/memory
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # a serial-to-TCP bridge or a broker on the Docker host
+
+volumes:
+  config:
+    name: ${HRI_NAME:-hass-remote-integration}   # keys are not interpolated by Compose; the name is

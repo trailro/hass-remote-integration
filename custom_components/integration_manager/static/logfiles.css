@@ -1,0 +1,13 @@
+main{max-width:1280px;margin:0 auto;padding:24px 16px}
+.card{background:var(--card);border:1px solid #232c34;border-radius:10px;padding:14px 16px;margin:14px 0}
+input,select,button,textarea{background:#0d1117;color:var(--fg);border:1px solid #30363d;border-radius:6px;padding:5px 9px;font:inherit}
+button{background:#21262d;cursor:pointer}button:hover{border-color:var(--acc)}
+input[type=search]{min-width:240px}
+textarea{width:100%;box-sizing:border-box;font:12px/1.45 ui-monospace,monospace}
+table{width:100%;border-collapse:collapse;font:12px/1.4 ui-monospace,monospace}
+td,th{padding:2px 6px;border-bottom:1px solid #151b21;white-space:nowrap;text-align:left}th{color:var(--mut);font-weight:500;position:sticky;top:0;background:var(--card)}
+td:last-child{white-space:pre-wrap;word-break:break-all}
+.wrap{max-height:72vh;overflow:auto}
+.c-ok{color:var(--ok)}.c-warn{color:var(--warn)}.c-bad{color:var(--bad,#f85149)}.c-accent{color:var(--acc)}.c-muted{color:var(--mut)}
+.raw{color:var(--mut)}
+.rules p{margin:4px 0}.rules ul{margin:4px 0 8px 18px;padding:0}.rules li{margin:2px 0}

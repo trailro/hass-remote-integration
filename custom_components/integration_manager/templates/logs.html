@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>hass-remote-integration · logs</title>
+<!--css--></head><body><main>
+<h1>Logs <span id="n" class="mut"></span></h1>
+<div class="mut">on disk, survives restarts: <span id="path"></span> (<span id="cap"></span>) · <span id="ts">…</span></div>
+
+<div class="card"><div class="row">
+ <span id="groups"></span>
+ <select id="level"><option>DEBUG</option><option>INFO</option><option selected>WARNING</option><option>ERROR</option></select>
+ <input type="search" id="q" placeholder="search message or logger…">
+ <label class="mut"><input type="checkbox" id="follow" checked> follow live (3 s)</label>
+ <button id="clear">Clear screen</button>
+</div></div>
+
+<div class="card"><div id="out"></div></div>
+
+<div class="card"><h2 style="font-size:15px;margin:0 0 8px;color:var(--mut)">Level per logger (at runtime, until restart)</h2>
+ <div class="mut" style="margin-bottom:8px">The container starts the integration's chatty loggers (the registry's <code>quiet_loggers</code>, by default <code>custom_components.&lt;domain&gt;</code>) at WARNING so routine traffic does not flood the log; raise them to INFO or DEBUG temporarily while investigating.</div>
+ <table id="loggers"><tr><th>integration</th><th>logger</th><th>effective level</th><th>lines in buffer</th><th></th></tr></table>
+</div>
+
+</main><!--js--></body></html>

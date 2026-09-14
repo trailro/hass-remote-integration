@@ -1,0 +1,14 @@
+{
+  "domain": "integration_manager",
+  "name": "Remote Integration Manager",
+  "version": "0.7.0",
+  "documentation": "https://github.com/trailro/hass-remote-integration",
+  "dependencies": [
+    "http"
+  ],
+  "codeowners": [
+    "@trailro"
+  ],
+  "iot_class": "local_push",
+  "requirements": []
+}

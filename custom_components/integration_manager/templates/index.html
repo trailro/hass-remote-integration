@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>hass-remote-integration</title>
+<!--css--></head><body><main>
+<h1>Overview</h1>
+<div style="color:var(--mut);margin-bottom:6px">Home Assistant <span id="ha">…</span> · loaded components: <span id="comps">…</span><div id="flash" class="warn" style="min-height:1.2em"></div></div>
+
+<div class="card"><h2>Status</h2>
+ <table>
+  <tr><th>running</th><td id="ov-run">…</td></tr>
+  <tr><th>health</th><td id="ov-health">…</td></tr>
+  <tr><th>MQTT</th><td id="ov-mqtt">…</td></tr>
+  <tr><th>smoke test</th><td id="ov-smoke">…</td></tr>
+  <tr><th>last action</th><td id="ov-last" class="mut">…</td></tr>
+  <tr><th>last error</th><td id="ov-err" class="bad">—</td></tr>
+  <tr id="ov-pending-row" hidden><th>deferred start</th><td id="ov-pending" class="warn"></td></tr>
+ </table>
+ <div class="row" style="margin-top:10px"><button id="restart" class="primary" disabled>Restart process</button><span id="restartnote" class="warn"></span>
+  <span class="mut">· <a href="/install">install</a> a version, <a href="/config">configure</a> the integration, <a href="/mqtt">MQTT</a>, <a href="/system">HA version, backups, settings</a></span></div>
+</div>
+
+<div class="card"><h2>Integration <span class="tag">one per container</span></h2>
+ <div class="mut" style="margin-bottom:8px">This container holds one integration, with as many of its versions in the store as you like. <b>Start</b> deploys the chosen version (files to <code>custom_components</code>, requirements into the venv, patches applied, config entries enabled); switching versions keeps the config entries. Versions come from the <a href="/install">Install</a> page; installing a different integration there replaces this one (after a backup). Another integration = another container.</div>
+ <table id="inst"><tr><th>integration</th><th>versions</th><th>entries</th><th>state</th><th></th></tr></table>
+ <div id="instnote" class="warn" style="margin-top:6px"></div>
+</div>
+
+<div class="card"><h2>Notifications <span id="ntcount" class="tag"></span></h2>
+ <div class="mut" style="margin-bottom:6px">Home Assistant's persistent notifications: what the integration wants to tell you and cannot through an entity (discovery hints, faults, log problems). A headless HA has no front end to show them; new ones also land in the timeline.</div>
+ <table id="ntlist"><tr><th>when</th><th>title</th><th>message</th><th></th></tr></table>
+ <div class="row" style="margin-top:6px"><button id="ntall" hidden>Dismiss all</button><span id="ntmsg" class="mut"></span></div>
+</div>
+
+<div class="card"><h2>Timeline</h2>
+ <div class="mut" style="margin-bottom:6px">What happened to this instance: boots, restores, installs, starts, stops, switches, rollbacks, smoke tests, MQTT connections, health verdict changes, cutover, HA updates. The last 60 are shown (a kind filter narrows within them); the full log is in <code>integration_manager/events.jsonl</code> and in the diagnostics zip.</div>
+ <div class="row" style="margin-bottom:6px"><span id="evkinds"></span><button id="evrefresh">Refresh</button></div>
+ <table id="evlist"><tr><th>when</th><th>kind</th><th>what</th></tr></table>
+</div>
+
+</main><!--js--></body></html>

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>hass-remote-integration · parity</title>
+<!--css--></head><body><main>
+<h1>Parity &amp; cutover <span class="tag">consuming Home Assistant</span></h1>
+<div class="mut"><span id="flash" class="warn"></span></div>
+
+<div class="card"><h2>Parent Home Assistant</h2>
+ <div class="mut" style="margin-bottom:8px">The HA that consumes what this container publishes. Reached over its websocket API with a long-lived access token (Profile → Security → Long-lived access tokens); the token is stored write-only in <code>integration_manager/settings.json</code> (mode 600) and used only to read its entity/device registries and states, and to remove orphans of ours when you ask.</div>
+ <div class="row"><input id="purl" placeholder="http://homeassistant.local:8123" style="min-width:280px"><input id="ptoken" type="password" placeholder="long-lived access token (leave empty to keep)" style="min-width:320px" autocomplete="off"><button id="psave" class="primary">Save</button><button id="ptest">Test</button><span id="pmsg" class="mut"></span></div>
+</div>
+
+<div class="card"><h2>Parity</h2>
+ <div class="mut" style="margin-bottom:8px">Entities are matched by discovery <code>unique_id</code> (<code>&lt;prefix&gt;&lt;entity_id here&gt;</code>), which survives renames on the parent. <b>missing</b> = announced here, absent there · <b>orphans</b> = there under our prefix, no longer announced here · state mismatches compare the current state on both sides.</div>
+ <div class="row"><button id="pcheck" class="primary">Compare now</button><span id="psum" class="mut"></span></div>
+ <div id="kpis" style="margin-top:10px"></div>
+ <div class="row" style="margin-top:6px"><label class="mut"><input type="checkbox" id="onlydiff" checked> only differences</label><button id="porph" class="danger" hidden>Remove orphans from the parent</button></div>
+ <div class="wrap"><table id="pt"><thead><tr><th>here</th><th>on the parent</th><th>state here</th><th>state there</th><th>flags</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<div class="card"><h2>Assisted cutover</h2>
+ <div class="mut" style="margin-bottom:8px">The day you stop the integration on the parent and let this container feed it: preconditions → discovery on (full republish) → wait for the parent to create the entities → compare. <b>Undo</b> switches discovery off and clears every retained discovery config of this identity, so the parent removes the entities again; the retained state documents stay.</div>
+ <div class="step"><b>1. Preconditions</b> <span id="c1" class="mut">…</span></div>
+ <div class="step"><b>2. Discovery</b> <button id="cenable" class="primary">Enable discovery &amp; republish</button> <span id="c2" class="mut"></span></div>
+ <div class="step"><b>3. Wait &amp; compare</b> <button id="cwait">Watch the parent (3 min)</button> <span id="c3" class="mut"></span></div>
+ <div class="step"><b>4. Result</b> <span id="c4" class="mut">run step 3</span> · <button id="cundo" class="danger">Undo (discovery off, configs cleared)</button> <span id="c4b" class="mut"></span></div>
+</div>
+
+</main><!--js--></body></html>

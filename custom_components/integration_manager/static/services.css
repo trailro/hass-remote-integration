@@ -1,0 +1,15 @@
+h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:0;color:var(--fg)}
+.card{background:var(--card);border:1px solid #232c34;border-radius:10px;padding:14px 16px;margin:14px 0}
+.tag{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;border:1px solid #2a3540;color:var(--mut);margin-right:4px;cursor:pointer;user-select:none}
+th{color:var(--mut);font-weight:500;white-space:nowrap}
+tr.s{cursor:pointer}tr.s:hover td{background:#1b232b}
+.mut{color:var(--mut)}.ok{color:var(--ok)}.warn{color:var(--warn)}
+.fields{width:100%;font-size:12px}.fields td,.fields th{border-bottom:1px solid #1b232b;padding:3px 6px}
+.req{color:var(--warn)}
+.call{margin-top:8px;padding:8px 10px;border:1px solid #232c34;border-radius:8px;background:#0f1418}
+.call label{display:block;color:var(--mut);font-size:12px;margin:6px 0 2px}
+.call input,.call select,.call textarea{width:100%;box-sizing:border-box;font:inherit}
+.call textarea{font:12px/1.4 ui-monospace,monospace;background:#0d1117;color:var(--fg);border:1px solid #30363d;border-radius:6px;padding:5px 9px}
+button{background:#21262d;color:var(--fg);border:1px solid #30363d;border-radius:6px;padding:5px 12px;cursor:pointer}button.primary{background:#1f6feb;border-color:#1f6feb}button:disabled{opacity:.45}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:4px 12px}
+.bad{color:var(--bad)}

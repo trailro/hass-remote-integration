@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>hass-remote-integration · log files</title>
+<!--css--></head><body><main>
+<h1>Log files <span id="n" class="mut"></span></h1>
+<div class="mut">files the running integration writes under the config dir (found through its config entries, the registry's <code>log_dir</code> and <code>*.log</code> in the root); active = written in the last hour · showing <code id="path"></code> · <span id="ts">…</span></div>
+
+<div class="card"><div class="row">
+ <select id="file"></select>
+ <select id="lines"><option>50</option><option>200</option><option>1000</option><option>5000</option></select>
+ <input type="search" id="q" placeholder="filter: any text in the line…">
+ <label class="mut"><input type="checkbox" id="follow" checked> follow live (5 s)</label>
+ <span id="size" class="mut"></span>
+</div><div id="fmterr" class="c-bad"></div></div>
+
+<div class="card wrap"><table><thead><tr id="th"><th>line</th></tr></thead><tbody id="tb"></tbody></table></div>
+
+<div class="card"><h2>Formatting</h2>
+ <div class="mut rules">
+  <p>By default every line is shown whole. A format splits lines into columns. It is a JSON object with these keys:</p>
+  <ul>
+   <li><code>pattern</code> (required): a Python regular expression matched at the start of each line. Every named group <code>(?P&lt;name&gt;…)</code> becomes a column, in the order it appears. Lines that do not match are shown whole.</li>
+   <li><code>hide</code>: group names that are captured but not shown.</li>
+   <li><code>dim</code>: group names shown in a muted colour.</li>
+   <li><code>color_by</code> and <code>colors</code>: the value of the <code>color_by</code> group picks the row colour from <code>colors</code>. Colours: <code>ok</code>, <code>warn</code>, <code>bad</code>, <code>accent</code>, <code>muted</code>. Values that are not listed keep the default colour.</li>
+  </ul>
+  <p>Inside JSON every backslash is written twice, so <code>\S+</code> becomes <code>\\S+</code>. The format is checked on save, stored in <code>integration_manager/settings.json</code> and kept in backups. The filter always searches the whole line, hidden groups included. Leave the box empty and save to go back to whole lines. Matching has a time limit of 2 seconds per refresh: when a pattern is too slow for the lines on screen, the remaining lines are shown whole and the page says so.</p>
+ </div>
+ <textarea id="fmt" rows="12" spellcheck="false" placeholder="empty: every line is shown whole"></textarea>
+ <div class="row" style="margin-top:8px"><button id="fmtsave" class="primary">Save format</button><button id="fmtexample">Insert example</button><span id="fmtmsg" class="mut"></span></div>
+</div>
+
+</main><!--js--></body></html>

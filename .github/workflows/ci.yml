@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Syntax checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: Python
+        run: python -m compileall -q -f entrypoint.py run.py backupkit.py jsonio.py logbuffer.py test_components.py custom_components
+      - name: JSON
+        run: python -c "import json; [json.load(open(f)) for f in ('registry.json', 'custom_components/integration_manager/manifest.json')]"
+      - name: JavaScript
+        run: for f in custom_components/integration_manager/static/*.js; do node --check "$f"; done
+      - name: Shell
+        run: sh -n verify.sh
+      - name: Compose files
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml config -q
+
+  boot:
+    name: Build, boot and discovery schemas
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HRI_NAME: hri-ci
+      HRI_PORT: "8087"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - name: Build the image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: hass-remote-integration:local
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Boot on a fresh volume (installs Home Assistant)
+        run: sh verify.sh start
+      - name: Manager API is up without restarts
+        run: |
+          curl -fsS http://127.0.0.1:8087/api/status | python3 -c "import json, sys; s = json.load(sys.stdin); print('Home Assistant', s['ha_version'])"
+          test "$(docker inspect -f '{{.RestartCount}}' hri-ci)" = "0"
+      - name: Discovery payloads against the MQTT schemas
+        run: sh verify.sh test
+      - name: Container log
+        if: always()
+        run: docker logs hri-ci 2>&1 | tail -n 200

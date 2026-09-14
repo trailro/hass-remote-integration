@@ -1,0 +1,501 @@
+"""HTTP views for the manager UI (served by HA's own aiohttp on :8087).
+
+LAN-only admin surface: ``requires_auth = False`` deliberately, the
+same way the onboarding views do it.  Add a token later if needed.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from typing import Any
+
+import re
+
+from aiohttp import web
+
+import backupkit
+from homeassistant import data_entry_flow
+from homeassistant.const import __version__ as HA_VERSION
+from jsonio import ha_vkey
+from homeassistant.helpers.http import HomeAssistantView
+
+from .http_util import BadRequest, ManagerView, with_body, _json_object
+
+from . import events, ha_import, notifications
+from .flow_page import FLOW_HTML
+from .flows import FlowDriver
+from .ha_updater import HaUpdater
+from .installer import Installer
+from .mqtt_publisher import MqttPublisher
+from .mqtt_rules import FIELDS
+from .ui import load_template, render
+
+_HTML = load_template("index")
+_SYSTEM_HTML = load_template("system")
+_MQTT_HTML = load_template("mqtt")
+
+
+_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,100}$")
+
+
+class IndexView(ManagerView):
+    url = "/"
+
+    async def get(self, request: web.Request) -> web.Response:
+        return web.Response(text=render(_HTML, "/"), content_type="text/html")
+
+
+class SystemPageView(ManagerView):
+    url = "/system"
+
+    async def get(self, request: web.Request) -> web.Response:
+        return web.Response(text=render(_SYSTEM_HTML, "/system"), content_type="text/html")
+
+
+class MqttPageView(ManagerView):
+    url = "/mqtt"
+
+    async def get(self, request: web.Request) -> web.Response:
+        return web.Response(text=render(_MQTT_HTML, "/mqtt"), content_type="text/html")
+
+
+class StatusView(ManagerView):
+    url = "/api/status"
+
+    def __init__(self, installer: Installer) -> None:
+        self.installer = installer
+
+    async def get(self, request: web.Request) -> web.Response:
+        data = await self.installer.status()
+        data["components"] = sorted(self.installer.hass.config.components)
+        return self.json(data)
+
+
+class SummaryView(ManagerView):
+    """GET /api/summary: the few fields the top bar shows on every page
+    (no patch status, no store walk, no registry read)."""
+
+    url = "/api/summary"
+
+    def __init__(self, installer: Installer, publisher: MqttPublisher) -> None:
+        self.installer = installer
+        self.publisher = publisher
+
+    async def get(self, request: web.Request) -> web.Response:
+        d = self.installer.running
+        h = self.publisher._health_last or {}
+        return self.json({
+            "running": {"domain": d, "running_tag": self.installer.running_tag, "loaded": bool(d and d in self.installer.hass.config.components)} if d else None,
+            "restart_required": self.installer.state.restart_required,
+            "health": h.get("state") or ("stopped" if not d else None),
+            "mqtt": {"enabled": self.publisher.config.enabled, "connected": bool(self.publisher.stats.get("connected"))},
+            "notifications": notifications.count(self.installer.hass),
+        })
+
+
+class ReleasesView(ManagerView):
+    url = "/api/releases"
+
+    def __init__(self, installer: Installer) -> None:
+        self.installer = installer
+
+    async def get(self, request: web.Request) -> web.Response:
+        # only from the UI: a GET any web page can trigger must not burn the GitHub rate limit
+        force = request.query.get("refresh") == "1" and request.headers.get("X-Requested-With") == "fetch"
+        domain = request.query.get("domain") or None
+        with_notes = request.query.get("notes") == "1"
+        try:
+            rels = await self.installer.releases(domain=domain, force=force)
+            return self.json(rels if with_notes else [{k: v for k, v in r.items() if k != "notes"} for r in rels])
+        except Exception as err:  # noqa: BLE001 - GitHub errors surface in the UI
+            return self.json_message(f"{type(err).__name__}: {err}", status_code=502)
+
+
+class RegistryView(ManagerView):
+    url = "/api/registry"
+
+    def __init__(self, installer: Installer) -> None:
+        self.installer = installer
+
+    async def get(self, request: web.Request) -> web.Response:
+        return self.json(self.installer.registry())
+
+    @with_body
+    async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
+        repo = str(body.get("repo", "")).strip().strip("/")
+        if not _REPO_RE.match(repo) or ".." in repo:
+            return self.json({"ok": False, "error": "repo must be owner/name"})
+        try:
+            spec = self.installer.add_to_registry(str(body.get("domain", "")), repo, str(body.get("name") or "")[:80] or None)
+        except ValueError as err:
+            return self.json({"ok": False, "error": str(err)})
+        return self.json({"ok": True, "domain": str(body.get("domain", "")).strip().lower(), "spec": spec})
+
+
+class HaStatusView(ManagerView):
+    url = "/api/ha"
+
+    def __init__(self, updater: HaUpdater) -> None:
+        self.updater = updater
+
+    async def get(self, request: web.Request) -> web.Response:
+        return self.json(await self.updater.status(force=request.query.get("refresh") == "1" and request.headers.get("X-Requested-With") == "fetch"))
+
+
+_HA_CHANGE_LOCK = asyncio.Lock()
+
+
+def _manual_restore_pending(config_dir: str) -> bool:
+    return backupkit.pending(config_dir) and not backupkit.pending_for_version(config_dir)
+
+
+class HaActionView(ManagerView):
+    url = "/api/ha/{action}"
+
+    def __init__(self, updater: HaUpdater, installer: Installer) -> None:
+        self.updater = updater
+        self.installer = installer
+
+    async def post(self, request: web.Request, action: str) -> web.Response:
+        """Switch the Home Assistant version at the next restart.  A backup
+        of the current configuration is always taken first.  Home Assistant
+        migrates its storage forward only, so on a downgrade ``config`` says
+        what the older version starts with:
+
+        * ``restore``: ``.storage`` from the newest backup made on the target
+          version or an older one;
+        * ``rebuild``: an empty ``.storage``, then the running integration's
+          config entries, store files and registry customisations are
+          imported again from the backup taken now;
+        * ``keep`` (the only choice on an upgrade): the configuration as it is.
+
+        What a change prepares applies only when its version boots.  Asking
+        for the running version cancels a scheduled change.
+        """
+        if request.content_type != "application/json":
+            return self.json_message("Content-Type must be application/json", status_code=400)
+        if action not in ("update", "rollback"):
+            return self.json_message("unknown action", status_code=400)
+        if _HA_CHANGE_LOCK.locked():
+            return self.json({"ok": False, "error": "another Home Assistant version change is being prepared: try again in a moment"})
+        async with _HA_CHANGE_LOCK:
+            return await self._change(request, action)
+
+    async def _change(self, request: web.Request, action: str) -> web.Response:
+        hass = self.installer.hass
+        cfg = hass.config.config_dir
+        try:
+            body = await _json_object(request)
+            if action == "update":
+                target = str(body.get("version", "")).strip()
+                if target != HA_VERSION:
+                    await self.updater.validate(target)
+            else:
+                target = self.updater.previous_version()
+            if self.installer.busy:
+                raise ValueError("an install/start is running: try again in a moment")
+            if target == HA_VERSION:
+                desired = (await hass.async_add_executor_job(self.updater._read)).get("desired")
+                if not desired or desired == HA_VERSION:
+                    raise ValueError(f"Home Assistant {target} is already running")
+                dropped = await hass.async_add_executor_job(self.updater.cancel_config_change)
+                self.updater.set_desired(HA_VERSION)
+                events.emit("ha", f"scheduled switch to Home Assistant {desired} cancelled" + (f"; dropped: {', '.join(dropped)}" if dropped else ""),
+                            version=HA_VERSION)
+                return self.json({"ok": True, "desired": HA_VERSION, "cancelled": desired, "dropped": dropped})
+            mode = str(body.get("config") or "keep")
+            if mode not in ("keep", "restore", "rebuild"):
+                raise ValueError("config must be keep, restore or rebuild")
+            if mode != "keep" and ha_vkey(target) >= ha_vkey(HA_VERSION):
+                raise ValueError(f"config={mode} only applies to a downgrade")
+            if mode != "keep" and await hass.async_add_executor_job(_manual_restore_pending, cfg):
+                raise ValueError("a restore scheduled on System is waiting for the restart: cancel it first")
+            restore = None
+            if mode == "restore":
+                restore = await hass.async_add_executor_job(self.updater.config_backup_for, target)
+                if restore is None:
+                    raise ValueError(f"no backup made on Home Assistant {target} or older: choose rebuild or keep")
+            if mode == "rebuild":
+                pending_import = await hass.async_add_executor_job(ha_import.load_summary, cfg)
+                if pending_import and pending_import.get("type") != ha_import.REBUILD_TYPE:
+                    raise ValueError("an import from a Home Assistant backup is waiting on System: apply or clear it first")
+            self.installer.busy = True
+            try:
+                backup = await self.installer.async_backup(label=f"pre-ha-{target}")
+                rebuild = None
+                if restore is not None:
+                    await hass.async_add_executor_job(ha_import.drop_rebuild, cfg)
+                    await hass.async_add_executor_job(backupkit.schedule_restore, cfg, restore["name"], ["storage"], target)
+                else:
+                    await hass.async_add_executor_job(self.updater.cancel_config_change)  # an older change's preparations
+                    if mode == "rebuild":
+                        rebuild = await hass.async_add_executor_job(ha_import.stage_rebuild, cfg, backup["name"], self.installer.running, HA_VERSION, target)
+                state = self.updater.set_desired(target, change={"to": target, "mode": mode, "backup": backup["name"],
+                                                                 "at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+                await hass.async_add_executor_job(backupkit.prune, cfg, self.installer.settings.backup_keep,
+                                                  self.installer.protected_backups() | {backup["name"]})
+            finally:
+                self.installer.busy = False
+        except (ValueError, BadRequest) as err:
+            return self.json({"ok": False, "error": str(err)})
+        except OSError as err:  # a full disk while backing up, an unreadable backup
+            return self.json({"ok": False, "error": f"{type(err).__name__}: {err}"})
+        note = {"keep": "", "restore": f"; configuration restored from {restore['name'] if restore else ''}",
+                "rebuild": f"; clean start, {self.installer.running or 'no integration'} rebuilt after the boot"}[mode]
+        events.emit("ha", f"Home Assistant {target} wanted ({action}), backup {backup['name']}{note}; applied at the next restart",
+                    version=target, backup=backup["name"], config=mode)
+        return self.json({"ok": True, "desired": state.get("desired"), "backup": backup["name"], "config": mode,
+                          "restore": restore["name"] if restore else None, "rebuild": rebuild})
+
+
+class InstallView(ManagerView):
+    url = "/api/install"
+
+    def __init__(self, installer: Installer) -> None:
+        self.installer = installer
+
+    @with_body
+    async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
+        tag = str(body.get("tag", "")).strip()
+        domain = body.get("domain") or None
+        if not tag or not _TAG_RE.match(tag) or ".." in tag:
+            return self.json_message("invalid tag", status_code=400)
+        if domain is not None and not isinstance(domain, str):
+            return self.json_message("invalid domain", status_code=400)
+        return self.json(await self.installer.install(tag, domain=domain, replace=bool(body.get("replace"))))
+
+
+class RestartView(ManagerView):
+    url = "/api/restart"
+
+    def __init__(self, installer: Installer) -> None:
+        self.installer = installer
+
+    async def post(self, request: web.Request) -> web.Response:
+        if request.content_type != "application/json":
+            return self.json_message("Content-Type must be application/json", status_code=400)
+        if self.installer.busy:
+            return self.json({"ok": False, "error": "another action is running (install/start): wait for it"})
+        await self.installer.restart()
+        return self.json({"ok": True})
+
+
+# ----- config / options flows ---------------------------------------------
+
+
+class FlowPageView(ManagerView):
+    """The per-integration Config page.  ``/flow`` is kept as an alias."""
+
+    url = "/config"
+    extra_urls = ["/flow"]
+
+    async def get(self, request: web.Request) -> web.Response:
+        return web.Response(text=render(FLOW_HTML, "/config"), content_type="text/html")
+
+
+class FlowStartView(ManagerView):
+    url = "/api/flow/start"
+
+    def __init__(self, flows: FlowDriver, installer: Installer) -> None:
+        self.flows = flows
+        self.installer = installer
+
+    @with_body
+    async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
+        domain = str(body.get("domain", "")).strip()
+        if not re.fullmatch(r"[a-z0-9_]+", domain):
+            return self.json_message("domain required", status_code=400)
+        installer = self.installer
+        if domain in installer.state.installed and domain != installer.running:
+            # only the running version's code is deployed and importable: a
+            # flow always belongs to the version that runs
+            return self.json_message(f"{domain} is not running: start it first, the config flow is the running version's", status_code=409)
+        try:
+            return self.json(await self.flows.start(domain))
+        except Exception as err:  # noqa: BLE001 - surfaced to the UI
+            return self.json_message(f"{type(err).__name__}: {err}", status_code=500)
+
+
+class FlowProgressView(ManagerView):
+    url = "/api/flow/progress"
+
+    def __init__(self, flows: FlowDriver) -> None:
+        self.flows = flows
+
+    async def get(self, request: web.Request) -> web.Response:
+        return self.json(self.flows.in_progress())
+
+
+class FlowResourceView(ManagerView):
+    url = "/api/flow/{flow_id}"
+
+    def __init__(self, flows: FlowDriver) -> None:
+        self.flows = flows
+
+    @with_body
+    async def post(self, request: web.Request, body: dict[str, Any], flow_id: str) -> web.Response:
+        try:
+            return self.json(await self.flows.configure(flow_id, body.get("user_input")))
+        except Exception as err:  # noqa: BLE001
+            return self.json_message(f"{type(err).__name__}: {err}", status_code=500)
+
+    async def delete(self, request: web.Request, flow_id: str) -> web.Response:
+        try:
+            self.flows.abort(flow_id)
+        except data_entry_flow.UnknownFlow:
+            return self.json_message("unknown flow", status_code=404)
+        return self.json({"ok": True})
+
+
+class OptionsResourceView(ManagerView):
+    url = "/api/options/{flow_id}"
+
+    def __init__(self, flows: FlowDriver) -> None:
+        self.flows = flows
+
+    @with_body
+    async def post(self, request: web.Request, body: dict[str, Any], flow_id: str) -> web.Response:
+        try:
+            return self.json(
+                await self.flows.options_configure(flow_id, body.get("user_input"))
+            )
+        except Exception as err:  # noqa: BLE001
+            return self.json_message(f"{type(err).__name__}: {err}", status_code=500)
+
+    async def delete(self, request: web.Request, flow_id: str) -> web.Response:
+        try:
+            self.flows.options_abort(flow_id)
+        except data_entry_flow.UnknownFlow:
+            return self.json_message("unknown flow", status_code=404)
+        return self.json({"ok": True})
+
+
+class EntriesView(ManagerView):
+    url = "/api/entries"
+
+    def __init__(self, flows: FlowDriver) -> None:
+        self.flows = flows
+
+    async def get(self, request: web.Request) -> web.Response:
+        domain = request.query.get("domain") or None
+        return self.json(self.flows.entries(domain))
+
+
+class EntryActionView(ManagerView):
+    url = "/api/entries/{entry_id}/{action}"
+
+    def __init__(self, flows: FlowDriver) -> None:
+        self.flows = flows
+
+    async def post(self, request: web.Request, entry_id: str, action: str) -> web.Response:
+        if request.content_type != "application/json":
+            return self.json_message("Content-Type must be application/json", status_code=400)
+        try:
+            if action == "options":
+                return self.json(await self.flows.options_start(entry_id))
+            if action == "reload":
+                return self.json({"ok": await self.flows.reload_entry(entry_id)})
+            if action == "delete":
+                return self.json(await self.flows.remove_entry(entry_id))
+        except Exception as err:  # noqa: BLE001
+            return self.json_message(f"{type(err).__name__}: {err}", status_code=500)
+        return self.json_message("unknown action", status_code=400)
+
+
+# ----- MQTT publisher ----------------------------------------------
+
+
+class MqttConfigView(ManagerView):
+    url = "/api/mqtt/config"
+
+    def __init__(self, publisher: MqttPublisher) -> None:
+        self.publisher = publisher
+
+    async def get(self, request: web.Request) -> web.Response:
+        return self.json(self.publisher.public_config())
+
+    async def post(self, request: web.Request) -> web.Response:
+        try:
+            body = await _json_object(request)
+            cfg = await self.publisher.hass.async_add_executor_job(self.publisher.save, body)
+        except (BadRequest, ValueError) as err:
+            return self.json({"ok": False, "error": str(err)})
+        await self.publisher.async_reconnect()
+        return self.json({"ok": True, "config": self.publisher.public_config()})
+
+
+class MqttDiscoveryPreviewView(ManagerView):
+    """Dry run of the device-based discovery payloads (what the consuming
+    HA would receive), regardless of discovery_enabled."""
+
+    url = "/api/mqtt/discovery"
+
+    def __init__(self, publisher: MqttPublisher) -> None:
+        self.publisher = publisher
+
+    async def get(self, request: web.Request) -> web.Response:
+        return self.json(self.publisher.discovery_preview())
+
+
+class MqttRulesView(ManagerView):
+    """GET/POST /api/mqtt/rules: the whole rules object (see mqtt_rules.py)."""
+
+    url = "/api/mqtt/rules"
+
+    def __init__(self, publisher: MqttPublisher) -> None:
+        self.publisher = publisher
+
+    async def get(self, request: web.Request) -> web.Response:
+        return self.json({"rules": self.publisher.rules.rules, "fields": list(FIELDS)})
+
+    @with_body
+    async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
+        try:
+            self.publisher.rules.replace_all(body.get("rules") or {}, save=False)  # on the loop: readers live here
+            await self.publisher.hass.async_add_executor_job(self.publisher.rules.save)
+        except ValueError as err:
+            return self.json({"ok": False, "error": str(err)})
+        res = await self.publisher.async_apply_rules()
+        return self.json({"ok": True, "rules": self.publisher.rules.rules, **res})
+
+
+class MqttCommandsView(ManagerView):
+    """GET /api/mqtt/commands: the last 200 commands and service calls
+    received over MQTT with their outcome, duration and dedup verdict."""
+
+    url = "/api/mqtt/commands"
+
+    def __init__(self, publisher: MqttPublisher) -> None:
+        self.publisher = publisher
+
+    async def get(self, request: web.Request) -> web.Response:
+        return self.json({"commands": self.publisher.recent_commands(200), "dedup_window_s": 300})
+
+
+class MqttStatusView(ManagerView):
+    url = "/api/mqtt/status"
+
+    def __init__(self, publisher: MqttPublisher) -> None:
+        self.publisher = publisher
+
+    async def get(self, request: web.Request) -> web.Response:
+        return self.json(self.publisher.status())
+
+
+class MqttActionView(ManagerView):
+    url = "/api/mqtt/{action}"
+
+    def __init__(self, publisher: MqttPublisher) -> None:
+        self.publisher = publisher
+
+    async def post(self, request: web.Request, action: str) -> web.Response:
+        if request.content_type != "application/json":
+            return self.json_message("Content-Type must be application/json", status_code=400)
+        if action == "republish":
+            return self.json({"ok": True, "published": await self.publisher.async_republish_all()})
+        if action == "reconnect":
+            await self.publisher.async_reconnect()
+            return self.json({"ok": True, "status": self.publisher.status()})
+        return self.json_message("unknown action", status_code=400)

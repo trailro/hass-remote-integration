@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>hass-remote-integration · entities</title>
+<!--css--></head><body><main>
+<h1>Entities <span id="n" class="mut"></span></h1>
+<div class="mut">auto-refresh every 10 s ·
+ last: <span id="ts">…</span> · <span id="fresh">…</span></div>
+
+<div class="card">
+ <div class="row">
+  <input type="search" id="q" placeholder="search id, name, device, unique_id, state…">
+  <select id="integ"><option value="">all integrations</option></select>
+  <select id="stateFilter" title="state filter"><option value="">any state</option><option value="enabled">not disabled</option><option value="value">with a value</option><option value="unknown">unknown</option><option value="unavailable">unavailable</option><option value="nostate">no state (disabled)</option></select>
+  <label class="mut"><input type="checkbox" id="onlyDisc"> only mirrored as sensor</label>
+  <span id="domains"></span>
+ </div>
+</div>
+
+<div class="card wrap">
+ <table id="t"><thead><tr>
+  <th data-k="entity_id">entity_id</th><th data-k="name">name</th><th data-k="state">state</th>
+  <th data-k="device">device</th><th data-k="integration">integration</th>
+  <th data-k="last_updated" title="last value change on this HA (green &lt; 10 min, amber &lt; 1 h, red older)">updated</th><th data-k="last_reported" title="last time the integration wrote this state, value changed or not (green &lt; 10 min, amber &lt; 1 h, red older)">reported</th><th data-k="mqtt">MQTT</th>
+ </tr></thead><tbody id="tb"></tbody></table>
+</div>
+
+</main><!--js--></body></html>

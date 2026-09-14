@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>hass-remote-integration · config</title>
+<!--css--></head><body><main>
+<h1>Integration <span id="domtitle" class="tag">…</span></h1>
+<div class="mut"><span id="domnote">the integration of this container</span> <span id="runstate"></span> <span id="flash" class="warn"></span></div>
+
+<div class="card"><h2>Versions &amp; releases</h2>
+ <div class="mut" style="margin-bottom:8px">Installed = in the version store. Only one version can be deployed and running at a time; starting another version takes a backup first (<code>pre-update-…</code>) and keeps the config entries. Downgrading after the newer version migrated the config needs "Full rollback" (previous version + that backup).</div>
+ <table id="vers"><tr><th>installed version</th><th>integration version</th><th>installed at</th><th>state</th><th></th></tr></table>
+ <div class="row" style="margin:8px 0"><button id="rollbackfull" disabled>Full rollback (previous version + pre-update backup)</button><span id="vermsg" class="mut"></span></div>
+ <div class="row" style="margin-top:8px"><span class="mut">GitHub releases <span id="relchecked"></span></span><button id="relrefresh">Refresh releases</button></div>
+ <table id="rels" style="margin-top:4px"><tr><th>GitHub release</th><th>type</th><th>published</th><th></th></tr></table>
+ <div id="relprev" class="mut" style="margin-top:8px"></div>
+ <div id="preflight" style="margin-top:8px"></div>
+</div>
+
+</div>
+
+<div class="card"><h2>Patches</h2>
+ <div class="mut" style="margin-bottom:8px">Bundled patches (shipped in the image under <code>patches/&lt;domain&gt;/</code>) plus your uploads in <code>integration_manager/patches/&lt;domain&gt;/</code>, applied in name order after the requirements when the integration starts (and at every boot). <code>.py</code> = patch module with <code>apply(ctx)</code>/<code>status(ctx)</code>; <code>.patch</code> = unified diff (context-checked, idempotent). Headers: <code># integration-version: 1.2.0, 1.2.1</code> limits a patch to those versions (default: all), <code># applies-to: some-lib&lt;2.0</code> retires it once the requirement moves on. Status is shown for the running version; failures never block the integration.</div>
+ <div class="row" style="margin-bottom:8px"><input type="file" id="pfile" accept=".py,.patch" style="width:auto"><button id="pupload">Upload patch</button><button id="papply">Re-apply now</button><span id="pmsg" class="mut"></span></div>
+ <table id="plist"><tr><th>patch</th><th>scope</th><th>status</th><th>detail</th><th></th></tr></table>
+</div>
+
+<div class="card"><h2>YAML config</h2>
+ <div class="mut" style="margin-bottom:8px">For integrations configured (fully or partly) through <code>configuration.yaml</code>: write here what would sit under <code>&lt;domain&gt;:</code>. Stored in <code>integration_manager/yaml/&lt;domain&gt;.yaml</code>, included in backups, validated on save (<code>!secret</code> resolves against <code>secrets.yaml</code>). Applied at boot to the <b>running</b> integration only, so a change needs a restart. An integration that later grows a config flow imports this YAML into a config entry the standard way.</div>
+ <textarea id="yamltext" rows="8" placeholder="# e.g.
+host: 192.168.1.20
+scan_interval: 60" spellcheck="false"></textarea>
+ <div class="row" style="margin-top:8px"><button id="yamlsave" class="primary">Save YAML</button><span id="yamlmsg" class="mut"></span></div>
+</div>
+
+<div class="card"><h2>Config flow</h2>
+ <div id="flownote" class="mut" style="margin-bottom:8px"></div>
+ <div class="row"><button id="start" class="primary">Start config flow</button><button id="abort" disabled>Abort</button><span id="flowid" class="mut"></span></div>
+</div>
+<div class="card" id="stepcard" hidden><h2 id="steptitle">Step</h2>
+ <div id="desc" class="mut" style="white-space:pre-wrap;font-size:12px"></div>
+ <div id="form"></div>
+ <div class="row" style="margin-top:10px"><button id="submit" class="primary">Submit</button><span id="baseerr" class="err"></span></div>
+</div>
+
+<div class="card"><h2>Config entries</h2>
+ <table id="entries"><tr><th>integration</th><th>title</th><th>state</th><th>v</th><th></th></tr></table>
+</div>
+
+</main><!--js--></body></html>
