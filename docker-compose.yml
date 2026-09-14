@@ -21,6 +21,11 @@ services:
       HRI_TRACEMALLOC: "${HRI_TRACEMALLOC:-}"   # e.g. 25: opt-in allocation tracing for /api/diag/memory
       HRI_PASSWORD: "${HRI_PASSWORD:-}"         # optional: a password for the web UI and API (empty: no login)
       HRI_PASSWORD_FILE: "${HRI_PASSWORD_FILE:-}"  # optional: read the password from this file instead (e.g. a Docker secret)
+      HRI_COOKIE_SECURE: "${HRI_COOKIE_SECURE:-}"  # 1: mark the session cookie Secure (behind a reverse proxy with TLS)
+      HA_VERSION_LATEST: "${HA_VERSION_LATEST:-1}"  # 0: a fresh volume installs the image's baseline Home Assistant
+      HRI_CALL_TIMEOUT: "${HRI_CALL_TIMEOUT:-60}"   # seconds a service call over MQTT may take
+      HRI_DEBUG: "${HRI_DEBUG:-}"                   # 1: debug logging for the manager
+      HRI_TRACE_IMPORT: "${HRI_TRACE_IMPORT:-}"     # diagnostics: log who imports these packages
     extra_hosts:
       - "host.docker.internal:host-gateway"   # a serial-to-TCP bridge or a broker on the Docker host
 

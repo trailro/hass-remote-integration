@@ -91,7 +91,11 @@ class Auth:
     # ----- credentials -------------------------------------------------------
 
     def check_password(self, password: str) -> bool:
-        return hmac.compare_digest(hashlib.sha256(password.encode()).digest(), self._digest)
+        try:
+            candidate = hashlib.sha256(password.encode()).digest()
+        except UnicodeEncodeError:  # undecodable bytes in a header
+            return False
+        return hmac.compare_digest(candidate, self._digest)
 
     def new_session(self) -> str:
         return self._sign(max(int(time.time()), self.revoked_before) + SESSION_S)
@@ -105,7 +109,10 @@ class Auth:
             expires = int(value.split(".", 1)[0])
         except (ValueError, AttributeError):
             return False
-        return expires > time.time() and expires - SESSION_S >= self.revoked_before and hmac.compare_digest(self._sign(expires), value)
+        try:
+            return expires > time.time() and expires - SESSION_S >= self.revoked_before and hmac.compare_digest(self._sign(expires), value)
+        except TypeError:  # a non-ASCII cookie
+            return False
 
     def load_revoked(self) -> None:
         """Blocking."""

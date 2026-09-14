@@ -92,6 +92,9 @@ def inspect_backup(config_dir: str, password: str | None, domains: set[str]) -> 
         raise
 
 
+MAX_EXTRACT_BYTES = 2 * 1024**3  # what an import may unpack onto the volume (registries and the integration's stores)
+
+
 def _inspect(config_dir: str, tar_path: str, out_dir: str, password: str | None, domains: set[str]) -> dict[str, Any]:
     with tarfile.open(tar_path) as outer:
         names = outer.getnames()
@@ -108,13 +111,19 @@ def _inspect(config_dir: str, tar_path: str, out_dir: str, password: str | None,
         with tempfile.NamedTemporaryFile(dir=out_dir, suffix=".inner", delete=False) as tmp:
             shutil.copyfileobj(outer.extractfile(inner_name), tmp)
             inner_path = tmp.name
+    too_big = False
     try:
         try:
             with securetar.SecureTarFile(inner_path, gzip=compressed, password=(password or None) if meta.get("protected") else None) as tar:
+                total = 0
                 for member in tar:
                     rel = _strip(member.name)
                     if not member.isfile() or ".." in rel.split("/") or not _wanted(rel, domains):
                         continue
+                    total += member.size
+                    if total > MAX_EXTRACT_BYTES:
+                        too_big = True
+                        break
                     dest = os.path.join(out_dir, rel)
                     os.makedirs(os.path.dirname(dest), exist_ok=True)
                     src = tar.extractfile(member)
@@ -124,6 +133,8 @@ def _inspect(config_dir: str, tar_path: str, out_dir: str, password: str | None,
             raise ValueError(f"cannot read the backup contents (wrong encryption key?): {type(err).__name__}: {err}") from None
     finally:
         os.remove(inner_path)
+    if too_big:
+        raise ValueError(f"the configuration in this backup unpacks to more than {MAX_EXTRACT_BYTES // 1024**3} GB: not imported")
     summary = _summarize(out_dir, meta, domains)
     # every integration's credentials of the other instance: the summary kept
     # what the installed domain needs, the rest must not stay on this volume

@@ -62,6 +62,17 @@ def _python_fits(spec: str | None) -> bool:
     return True
 
 
+def fits_this_python(version: str) -> bool:
+    """False only when PyPI says ``version`` does not support this image's Python
+    (a base image bump); offline or unknown counts as fitting."""
+    try:
+        with urllib.request.urlopen(f"https://pypi.org/pypi/homeassistant/{version}/json", timeout=20) as resp:
+            spec = (json.load(resp).get("info") or {}).get("requires_python")
+    except Exception:  # noqa: BLE001
+        return True
+    return _python_fits(spec)
+
+
 def latest_stable() -> str | None:
     """Newest stable Home Assistant on PyPI that supports this image's
     Python and is not older than the image baseline; None when offline."""
@@ -115,13 +126,15 @@ def load_state() -> dict:
         return {"current": current, "desired": current, "last_error": "ha.json was corrupt and has been rebuilt", "_corrupt": True}
 
 
-def save_state(state: dict) -> None:
+def save_state(state: dict) -> bool:
     """Atomic: a torn ha.json would read as {} and silently reinstall the
     image default version (and prune the one that was running)."""
     try:
         write_json(HA_FILE, {k: v for k, v in state.items() if k != "_corrupt"})
+        return True
     except OSError as err:
         log(f"ha.json not written ({err}): booting anyway")
+        return False
 
 
 def venv_dir(version: str) -> str:
@@ -398,11 +411,13 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
     restored = False
     if backupkit.pending(CONFIG_DIR):
         # HA is not running here, so registries can be replaced safely.
-        state["last_restore"] = backupkit.apply_pending(CONFIG_DIR, log)
-        if isinstance(state["last_restore"], dict):
-            state["last_restore"]["for_version"] = for_version if own_restore else None
+        def record(result: dict) -> bool:
+            result["for_version"] = for_version if own_restore else None
+            state["last_restore"] = result
+            return save_state(state)  # before the schedule is removed: see backupkit.apply_pending
+
+        state["last_restore"] = backupkit.apply_pending(CONFIG_DIR, log, record=record)
         restored = True
-        save_state(state)  # a power loss from here on must not forget that the configuration was replaced
     change = state.get("change")
     recovery = state.get("recovery")
     # a fallback's recovery; a switch the user scheduled to this version is not one (and a leftover must not stop it)
@@ -493,6 +508,13 @@ def main() -> None:
     elif failures >= MAX_BOOT_FAILURES:
         log(f"{wanted} failed to boot {failures} times and there is nothing to fall back to; retrying")
 
+    if not venv_ok(wanted) and not fits_this_python(wanted):
+        other = latest_stable()
+        py = ".".join(str(x) for x in sys.version_info[:3])
+        if other and other != wanted:
+            log(f"Home Assistant {wanted} does not support Python {py} (a newer image?): installing {other} instead")
+            state["last_error"] = f"Home Assistant {wanted} does not support this image's Python {py}; {other} is installed instead"
+            state["desired"] = wanted = other
     if not venv_ok(wanted):
         srv = start_status_server()
         ok = install(wanted)

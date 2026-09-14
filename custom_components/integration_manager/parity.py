@@ -193,6 +193,9 @@ class ParityView(ManagerView):
         self.last: dict[str, Any] | None = None
 
     async def get(self, request: web.Request) -> web.Response:
+        if request.headers.get("X-Requested-With") != "fetch":
+            # it connects to the parent Home Assistant with the stored token: not something any web page may trigger
+            return self.json_message("X-Requested-With: fetch required", status_code=400)
         try:
             self.last = await compute_parity(self.hass, self.installer, self.publisher, light=request.query.get("light") == "1")
         except ValueError as err:

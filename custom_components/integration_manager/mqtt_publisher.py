@@ -339,8 +339,17 @@ class MqttPublisher:
             self._unsub.append(self.hass.bus.async_listen(ev, self._on_service_event))
         self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, self._on_stop)
         if self.config.enabled:
-            async with self._conn_lock:
+            # in the background: a broker that hangs, or the sweep of an identity that changed while
+            # disconnected, must not hold up the setup of this component (and with it the boot)
+            self.hass.async_create_background_task(self._async_first_connect(), "integration_manager MQTT connect")
+
+    async def _async_first_connect(self) -> None:
+        async with self._conn_lock:
+            try:
                 await self.hass.async_add_executor_job(self._connect)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.error("MQTT connect failed: %s", err)
+                self.stats["connect_error"] = f"{type(err).__name__}: {err}"
 
     async def async_reload_config(self) -> None:
         """Adopt settings that do not need a reconnect (discovery on/off)."""
@@ -493,14 +502,12 @@ class MqttPublisher:
         try:
             c.loop_start()
             infos = [c.publish(t, "", qos=1, retain=True) for t in topics]
-            unconfirmed = 0
-            for info in infos:
-                try:
-                    info.wait_for_publish(5)
-                except Exception:  # noqa: BLE001
-                    pass
-                if not info.is_published():
-                    unconfirmed += 1
+            # one budget for the whole sweep, not 5 s per topic: a broker that stops acknowledging
+            # would otherwise hold the reconnect lock (or an uninstall) for hours
+            deadline = time.monotonic() + min(120.0, 15.0 + 0.02 * len(infos))
+            while time.monotonic() < deadline and c.is_connected() and not all(i.is_published() for i in infos):
+                time.sleep(0.1)
+            unconfirmed = sum(1 for i in infos if not i.is_published())
             if unconfirmed:
                 raise RuntimeError(f"the broker did not confirm {unconfirmed} of {len(infos)} cleared topics")
         finally:
