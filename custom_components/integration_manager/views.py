@@ -92,6 +92,7 @@ class SummaryView(ManagerView):
             "health": h.get("state") or ("stopped" if not d else None),
             "mqtt": {"enabled": self.publisher.config.enabled, "connected": bool(self.publisher.stats.get("connected"))},
             "notifications": notifications.count(self.installer.hass),
+            "auth": bool(getattr(self.installer.hass.data.get("integration_manager_auth"), "enabled", False)),
         })
 
 

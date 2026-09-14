@@ -98,6 +98,11 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     install_host_guard(hass, installer)
 
+    # optional password (HRI_PASSWORD / HRI_PASSWORD_FILE): checked after the host guard
+    from .auth import LoginPageView, LoginView, LogoutView, async_setup_auth
+
+    auth = await async_setup_auth(hass)
+
     ha_updater = HaUpdater(hass)
 
     aligner = RegistryAligner(hass)
@@ -195,6 +200,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         SystemPageView(),
         MqttPageView(),
         StaticView(),
+        LoginPageView(auth),
+        LoginView(auth),
+        LogoutView(),
         StatusView(installer),
         RegistryView(installer),
         RunView(installer, publisher),

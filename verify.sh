@@ -4,7 +4,7 @@
 #   verify.sh recreate  remove the container and start it again on the current image
 #   verify.sh status    status API + memory (container must be running)
 #   verify.sh test      discovery components against HA's MQTT schemas (after any discovery change)
-# Reads HRI_NAME, HRI_PORT, HRI_IMAGE, HRI_NETWORK and TZ from the environment or a .env file.
+# Reads HRI_NAME, HRI_PORT, HRI_IMAGE, HRI_NETWORK, HRI_PASSWORD and TZ from the environment or a .env file.
 set -u
 cd "$(dirname "$0")"
 [ -f .env ] && . ./.env
@@ -12,17 +12,20 @@ NAME=${HRI_NAME:-hass-remote-integration}
 PORT=${HRI_PORT:-8087}
 IMAGE=${HRI_IMAGE:-hass-remote-integration:local}
 URL=http://127.0.0.1:$PORT/api/status
+api_get() {  # $1 timeout, $2 url; with a password set, the API wants it as a bearer token
+  if [ -n "${HRI_PASSWORD:-}" ]; then curl -s --max-time "$1" -H "Authorization: Bearer $HRI_PASSWORD" "$2"; else curl -s --max-time "$1" "$2"; fi
+}
 
 start() {
   docker run -d --name "$NAME" --restart unless-stopped \
     ${HRI_NETWORK:+--network "$HRI_NETWORK"} -p "$PORT:$PORT" \
     -v "$NAME:/config" \
-    -e TZ="${TZ:-UTC}" -e HRI_PORT="$PORT" \
+    -e TZ="${TZ:-UTC}" -e HRI_PORT="$PORT" ${HRI_PASSWORD:+-e "HRI_PASSWORD=$HRI_PASSWORD"} \
     --add-host host.docker.internal:host-gateway \
     "$IMAGE" | cut -c1-12 | sed 's/^/  id: /'
   echo "=== waiting for the manager API on $URL (a fresh volume installs Home Assistant first) ==="
   t0=$(date +%s)
-  until curl -s --max-time 2 "$URL" | python3 -c "import json,sys; sys.exit(0 if 'ha_version' in json.load(sys.stdin) else 1)" 2>/dev/null; do
+  until api_get 2 "$URL" | python3 -c "import json,sys; sys.exit(0 if 'ha_version' in json.load(sys.stdin) else 1)" 2>/dev/null; do
     if [ $(( $(date +%s)-t0 )) -ge 900 ]; then echo "  TIMEOUT"; break; fi
     if [ "$(docker inspect -f '{{.State.Restarting}}' "$NAME" 2>/dev/null)" = "true" ]; then
       echo "  RESTART LOOP detected, stopping"; docker stop "$NAME" >/dev/null; break
@@ -36,7 +39,7 @@ start() {
 
 status() {
   echo "=== status API ==="
-  curl -s --max-time 5 "$URL" | python3 -c "
+  api_get 5 "$URL" | python3 -c "
 import json,sys
 try: s=json.load(sys.stdin)
 except Exception: print('  (no JSON answer: still installing Home Assistant, or not running)'); sys.exit(0)

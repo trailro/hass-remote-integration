@@ -1,4 +1,7 @@
 // shared helpers (loaded synchronously at the top of <body>) + the top bar
+// with a password set, an expired session (or a changed password) answers 401: back to the login page
+const _hriFetch=window.fetch.bind(window);
+window.fetch=async(...a)=>{const r=await _hriFetch(...a); if(r.status===401&&location.pathname!=='/login') location.href='/login?next='+encodeURIComponent(location.pathname+location.search); return r;};
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 async function post(url,body){const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body||{})});return r.json();}
@@ -18,6 +21,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   +`<span class="chip ${m.enabled?(m.connected?'ok':'bad'):''}"><span class="dot"></span>MQTT <b>${m.enabled?(m.connected?'connected':'disconnected'):'off'}</b></span>`
   +(s.restart_required?'<span class="chip warn"><span class="dot"></span><b>restart required</b></span>':'')
   +(s.notifications?`<a class="chip warn" href="/" style="text-decoration:none" title="persistent notifications of the integration"><span class="dot"></span><b>${s.notifications}</b> notification${s.notifications>1?'s':''}</a>`:'');
+ if(s.auth){ el.insertAdjacentHTML('beforeend','<a class="chip" href="#" id="tb-logout" title="end this browser session" style="text-decoration:none">log out</a>'); document.getElementById('tb-logout').onclick=async e=>{e.preventDefault(); await post('/api/logout'); location.href='/login';}; }
 }catch(e){}})();
 (async()=>{try{
  // the log-files item is integration-specific: show it only when the running

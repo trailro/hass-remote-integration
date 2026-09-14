@@ -15,9 +15,14 @@ are credited in the release notes unless you prefer otherwise.
 
 ## What counts as a vulnerability
 
-The web UI and API have no login by design (see *Security* in the README):
-anyone who can reach the port can install code and run it in the container.
-That alone is not a vulnerability. These are:
+Without `HRI_PASSWORD` the web UI and API have no login (see *Security* in the
+README): anyone who can reach the port can install code and run it in the
+container. That alone is not a vulnerability, and neither is a password read
+from plain HTTP traffic. These are:
+
+- with a password set: any way to use the UI or the API without it, such as a
+  path the check misses, a forged or replayed session after the password
+  changed, or guessing faster than the lockout allows;
 
 - a way around the protections that do exist: the Host header guard against
   DNS rebinding, the JSON requirement for state-changing requests, the absence

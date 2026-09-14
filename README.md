@@ -111,6 +111,7 @@ committed):
 ```bash
 TZ=Europe/Berlin          # your time zone
 HRI_PORT=8087             # port of the UI
+# HRI_PASSWORD=...        # optional: require a password for the UI and API
 ```
 
 If your MQTT broker runs in Docker, the container must reach it. Put what is
@@ -446,10 +447,23 @@ hass_<domain>/result/<domain>/<service>             call result, not retained
 
 ## Security
 
-There is **no login**. This is meant for a trusted LAN, like many
-self-hosted appliances.
+By default there is **no login**, like many self-hosted appliances on a
+trusted LAN. Set `HRI_PASSWORD` (or `HRI_PASSWORD_FILE`, for example a Docker
+secret) to require a password:
 
-Anyone who can reach the port controls the container. The UI installs code
+- the browser gets a session cookie from the login page, valid for 30 days,
+  and **log out** in the top bar ends it;
+- scripts send the password as `Authorization: Bearer <password>`;
+- after 5 wrong attempts from one address, that address is refused for 15
+  minutes;
+- changing the password logs every browser out.
+
+Over plain HTTP the password and the session travel unencrypted, so on a
+network you do not trust put the UI behind a reverse proxy with TLS. The
+installation progress page of the very first start, served before Home
+Assistant runs, is not protected; it only shows the progress.
+
+Without a password, anyone who can reach the port controls the container. The UI installs code
 from any GitHub repository, accepts Python patches and runs service calls, so
 access to the port means running arbitrary code inside the container, with
 access to its volume, its secrets and every device or network it can reach.
@@ -502,6 +516,8 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | `HRI_TRACEMALLOC` | unset | Diagnostics: allocation tracing frames (costs memory) |
 | `HRI_TRACE_IMPORT` | unset | Diagnostics: log who imports the given packages |
 | `HRI_DEBUG` | unset | Debug logging for the manager |
+| `HRI_PASSWORD` | unset | Password for the web UI and API; unset or empty means no login |
+| `HRI_PASSWORD_FILE` | unset | File holding the password, for example a Docker secret; wins over `HRI_PASSWORD` |
 
 ### Files on the volume
 
@@ -512,6 +528,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
   integration_manager/
     state.json                  running integration, versions, pending actions
     settings.json               settings, tokens, log-file format (mode 600)
+    auth_key                    signs login sessions, only with a password set (mode 600)
     mqtt.json                   broker configuration (mode 600)
     mqtt_rules.json             per-entity MQTT rules
     registry.json               your registry entries (see below)
@@ -547,7 +564,7 @@ A registry entry in `integration_manager/registry.json` has this shape; only
 ### API
 
 Every page is backed by a JSON API on the same port, so everything can be
-scripted. The main entry points:
+scripted. With a password set, send it as `Authorization: Bearer <password>`. The main entry points:
 
 | Area | Endpoints |
 |---|---|
@@ -595,7 +612,7 @@ sh verify.sh status
 sh verify.sh test      # validates discovery payloads against the installed HA's MQTT schemas
 ```
 
-`verify.sh` reads `HRI_NAME`, `HRI_PORT`, `HRI_IMAGE`, `HRI_NETWORK` and `TZ`
+`verify.sh` reads `HRI_NAME`, `HRI_PORT`, `HRI_IMAGE`, `HRI_NETWORK`, `HRI_PASSWORD` and `TZ`
 from the environment or from `.env`.
 
 CI runs on every push to `main` and every pull request: syntax checks, an
@@ -616,7 +633,8 @@ A few things that shaped the code, useful if you read it:
 
 ## Limitations
 
-- No authentication on the UI (trusted LAN only).
+- The web UI password is optional and travels unencrypted over plain HTTP: use a
+  reverse proxy with TLS on networks you do not trust.
 - One integration per container; two versions of the same integration cannot
   run at the same time.
 - No Home Assistant frontend: integration features that exist only as frontend

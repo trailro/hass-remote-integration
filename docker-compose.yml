@@ -17,6 +17,8 @@ services:
       TZ: "${TZ:-UTC}"
       HRI_PORT: "${HRI_PORT:-8087}"
       HRI_TRACEMALLOC: "${HRI_TRACEMALLOC:-}"   # e.g. 25: opt-in allocation tracing for /api/diag/memory
+      HRI_PASSWORD: "${HRI_PASSWORD:-}"         # optional: a password for the web UI and API (empty: no login)
+      HRI_PASSWORD_FILE: "${HRI_PASSWORD_FILE:-}"  # optional: read the password from this file instead (e.g. a Docker secret)
     extra_hosts:
       - "host.docker.internal:host-gateway"   # a serial-to-TCP bridge or a broker on the Docker host
 

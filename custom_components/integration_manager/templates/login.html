@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>hass-remote-integration · log in</title>
+<link rel="stylesheet" href="/static/hri.css">
+<style>
+main{max-width:360px;margin:12vh auto;padding:0 16px}
+.brand{font-weight:600;font-size:18px;margin-bottom:6px}.brand b{color:var(--acc)}
+input,button{width:100%;box-sizing:border-box;background:#0d1117;color:var(--fg);border:1px solid #30363d;border-radius:6px;padding:8px 10px;font:inherit;margin-top:8px}
+button{background:#1f6feb;border-color:#1f6feb;cursor:pointer}
+</style></head><body><main>
+<div class="brand">hass<b>-remote-</b>integration</div>
+<div class="card">
+ <form id="f"><label class="mut" for="pw">Password</label>
+  <input type="password" id="pw" autocomplete="current-password" autofocus required>
+  <button type="submit">Log in</button>
+  <div id="err" class="bad" style="margin-top:8px"></div>
+ </form>
+</div>
+</main>
+<script>
+document.getElementById('f').onsubmit=async e=>{
+  e.preventDefault();
+  const err=document.getElementById('err'); err.textContent='';
+  let r;
+  try{ r=await fetch('/api/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({password:document.getElementById('pw').value})}); }
+  catch(x){ err.textContent='no answer from the server'; return; }
+  const d=await r.json().catch(()=>({}));
+  if(!d.ok){ err.textContent=d.error||('login failed ('+r.status+')'); return; }
+  const next=new URLSearchParams(location.search).get('next')||'/';
+  location.href=(next.startsWith('/')&&!next.startsWith('//')&&!next.startsWith('/\\'))?next:'/';  // only paths on this server
+};
+</script></body></html>
