@@ -26,6 +26,7 @@ DEFAULTS: dict[str, Any] = {
     "health": {},               # per integration: {"<domain>": {"stale_s": 900, "mode": "periodic"|"event", "unavailable_pct": 50}}
     "dev_source_dir": "/dev-src",  # bind-mounted directory to install an integration from (dev mode)
     "log_format": {},           # Log files page: {"pattern": regex with named groups, "hide", "dim", "color_by", "colors"}
+    "resource_history_h": 48,   # Overview resource history: hours kept, one sample a minute (1-120)
 }
 HEALTH_MODES = ("periodic", "event")  # event: the integration only writes states on events, so silence is not a fault
 
@@ -105,4 +106,5 @@ class Settings:
                 "health_stale_s": self.int_("health_stale_s", 60, 86400), "health_unavailable_pct": self.int_("health_unavailable_pct", 1, 100),
                 "health": self.data.get("health") if isinstance(self.data.get("health"), dict) else {},
                 "dev_source_dir": self.dev_source_dir,
+                "resource_history_h": self.int_("resource_history_h", 1, 120),
                 "log_format": self.data.get("log_format") if isinstance(self.data.get("log_format"), dict) else {}}

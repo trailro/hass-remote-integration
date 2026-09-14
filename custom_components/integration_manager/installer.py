@@ -49,7 +49,7 @@ from homeassistant.util import package as pkg_util
 import jsonio
 from jsonio import vkey, write_json
 
-from . import events, patches
+from . import change_report, events, patches
 from .settings import Settings
 
 _LOGGER = logging.getLogger(__name__)
@@ -86,6 +86,7 @@ class State:
     last_release_check: int = 0                  # epoch of the last weekly GitHub release check
     rollback_backup: str | None = None           # the backup a full rollback restores: protected until that restore succeeded
     release_updates: dict[str, str] = field(default_factory=dict)  # last release check: domain -> newest stable tag not in the store
+    pending_change: dict[str, Any] | None = None  # {domain, from_tag, to_tag, at, before}: compared once the new version runs
 
 
 def _gh_check(resp, what: str) -> None:
@@ -702,6 +703,10 @@ class Installer:
             switching = rec.get("running_tag") != tag
             backup = None
             effective = bool(changed["stopped"]) or switching or self.state.domain != domain
+            before = None
+            if switching and was_running and rec.get("running_tag") and domain in self.hass.config.components:
+                # what the consuming side sees now, compared once the new version runs (change_report.py)
+                before = change_report.snapshot(self.hass, domain)
             if effective:
                 # Snapshot of the state exactly before the start (registries,
                 # config entries, the deployed files): a few hundred KB, and
@@ -734,6 +739,9 @@ class Installer:
                     rec["pre_update_backup"] = backup
             rec["running_tag"] = tag
             self.state.domain = domain
+            if before and (before["entities"] or before["services"]):
+                self.state.pending_change = {"domain": domain, "from_tag": rec.get("previous_tag"), "to_tag": tag,
+                                             "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "before": before}
             patch_outcome = await self.hass.async_add_executor_job(self._apply_patches, domain)
             # New code for a module this process already imported only takes
             # effect after a restart (Python cannot reload an integration).
@@ -846,6 +854,9 @@ class Installer:
             self._smoke_pending = None
             self.state.pending_smoke = None
             self._save_state()
+            if isinstance(self.state.pending_change, dict):
+                # no smoke test to wait for: compare once the new version had a moment to set up
+                self.hass.loop.call_later(change_report.DELAY_S, lambda: self.hass.async_create_task(self.async_finish_change_report(domain, tag)))
             return
         self._smoke_pending = {"domain": domain, "tag": tag, "at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() + delay)),
                                  "auto_rollback": can_rollback and self.settings.bool_("auto_rollback")}
@@ -881,6 +892,10 @@ class Installer:
         except Exception as err:  # noqa: BLE001
             h = {"state": "error", "reason": f"health check failed: {err}"}
         ok = h.get("state") == "ok"
+        if ok:
+            await self.async_finish_change_report(domain, tag)
+        elif isinstance(self.state.pending_change, dict) and self.state.pending_change.get("domain") == domain:
+            self.state.pending_change = None  # an unhealthy version would report its missing entities as "removed"
         rec = {"domain": domain, "tag": tag, "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "state": h.get("state"), "reason": h.get("reason", ""),
                "action": "none"}
         events.emit("smoke", f"{domain} {tag}: {h.get('state')}" + (f" ({h.get('reason')})" if h.get("reason") else "")
@@ -905,6 +920,22 @@ class Installer:
             self.state.last_error = f"smoke test of {domain} {tag} failed: {h.get('state')}: {h.get('reason')}"
         self.state.last_smoke = rec
         self._save_state()
+
+    async def async_finish_change_report(self, domain: str, tag: str) -> None:
+        """Compare the snapshot taken before a version switch with what the
+        new version provides now (change_report.py)."""
+        pend = self.state.pending_change
+        if not isinstance(pend, dict) or pend.get("domain") != domain or pend.get("to_tag") != tag:
+            return
+        self.state.pending_change = None
+        self._save_state()
+        if self.state.domain != domain or self.running_tag != tag:
+            return  # rolled back or switched again in the meantime
+        report = change_report.build(pend, change_report.snapshot(self.hass, domain))
+        await self.hass.async_add_executor_job(change_report.store, self.state_dir, report)
+        events.emit("change", change_report.summary(report), domain=domain, from_tag=pend.get("from_tag"), to_tag=tag,
+                    breaking=report["breaking"])
+        change_report.notify(self.hass, report)
 
     # ----- release check ----------------------------------------------------
 

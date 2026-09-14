@@ -182,9 +182,12 @@ The UI has one page per task:
 ### 1. Install the integration
 
 On **Install**, pick an integration from the registry and click *Install latest
-stable*. To use an integration that is not in the registry, open *add a repo to
-the registry* and give its domain and GitHub `owner/repo` (the repository must
-publish releases that contain `custom_components/<domain>/`).
+stable*. To use one that is not in the registry, search for it under *Find an
+integration*: it searches the default list of HACS custom integrations by name,
+domain, repository, description and topics, and *Use* adds the hit to the
+registry and selects it in the environment builder. You can also open *add a
+repo to the registry* and give a domain and GitHub `owner/repo` yourself (the
+repository must publish releases that contain `custom_components/<domain>/`).
 
 Nothing runs yet: the version sits in the version store.
 
@@ -275,6 +278,14 @@ restarts if needed, smoke-tests, and rolls back on its own if the new version
 is unhealthy. *Full rollback* on the Integration page brings back the previous
 version together with the config as it was before the update.
 
+Once the new version has run (after the smoke test), *What changed between
+versions* on the Integration page compares its entities and services with those
+of the version before: entities added, removed or renamed, entities whose unit,
+device class, state class or category changed, and services or service fields
+added or removed. Removed, renamed or changed entities and removed services or
+fields are what break automations in your main HA, so they also raise a
+notification. The last ten reports are kept.
+
 ### Updating Home Assistant inside the container
 
 On **System**, choose a version and install it. The process restarts, the new
@@ -322,6 +333,13 @@ reason, entity counts and when the integration last wrote a state. With
 discovery on, your main HA gets a connectivity sensor and a health sensor for
 the container. The thresholds are on the **MQTT** page; mark an integration
 that only writes on events as `event`, so silence is not reported as a fault.
+
+The **Overview** keeps a resource history: memory, CPU, event-loop lag and
+volume usage, one sample a minute, for 48 hours by default and up to 120
+(*kept for … hours* on the same card). Memory that keeps growing for hours, or
+an event loop held for 500 ms or more in several minutes of the last hour,
+raises a notification: the usual signs of a leak or of blocking code in the
+integration.
 
 ### Logs and log files
 
@@ -601,6 +619,9 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
     yaml/<domain>.yaml          YAML configuration
     events.jsonl                timeline
     process.log                 process log (rotated)
+    change_reports.json         what the last version switches changed
+    resource_history.json       resource samples of the Overview
+    hacs_catalog.json           cached HACS list for the Install page search
   backups/                      backups (zip)
 ```
 
@@ -632,9 +653,9 @@ scripted. With a password set, send it as `Authorization: Bearer <password>`. Th
 
 | Area | Endpoints |
 |---|---|
-| Status | `GET /api/status`, `GET /api/summary`, `GET /api/manager`, `GET /api/mqtt/status`, `GET /api/events`, `GET /api/notifications`, `POST /api/notifications/dismiss_all` |
-| Integration | `POST /api/install`, `POST /api/run/{start,stop}`, `GET /api/releases`, `POST /api/releases/preflight`, `POST /api/installed/<domain>/{uninstall,rollback_full,remove_version}` |
-| Builder / dev | `POST /api/build/{check,prepare}`, `GET /api/dev`, `POST /api/dev/install` |
+| Status | `GET /api/status`, `GET /api/summary`, `GET /api/manager`, `GET /api/manager/history?hours=`, `GET /api/mqtt/status`, `GET /api/events`, `GET /api/notifications`, `POST /api/notifications/dismiss_all` |
+| Integration | `POST /api/install`, `GET /api/change_reports`, `POST /api/run/{start,stop}`, `GET /api/releases`, `POST /api/releases/preflight`, `POST /api/installed/<domain>/{uninstall,rollback_full,remove_version}` |
+| Builder / dev | `GET /api/catalog?q=`, `POST /api/build/{check,prepare}`, `GET /api/dev`, `POST /api/dev/install` |
 | Configuration | `POST /api/flow/start`, `POST /api/flow/<id>`, `GET/POST /api/yaml/<domain>`, `GET /api/patches/<domain>`, `GET /api/patch_editor/<domain>?name=`, `POST /api/patch_editor/<domain>/{check,save}`, `GET /api/entries` |
 | MQTT | `GET/POST /api/mqtt/config`, `POST /api/mqtt/{reconnect,republish}`, `GET /api/mqtt/discovery`, `GET /api/mqtt/commands` |
 | Entities | `GET /api/entities`, `GET /api/devices`, `GET /api/services`, `POST /api/services/call` |

@@ -20,7 +20,7 @@ _LOGGER = logging.getLogger(__name__)
 
 MAX_BYTES = 512_000
 KINDS = ("boot", "restore", "install", "start", "stop", "switch", "remove", "uninstall", "replace", "rollback", "smoke",
-         "restart", "error", "mqtt", "health", "cutover", "ha", "yaml", "dev", "build", "notify")
+         "restart", "error", "mqtt", "health", "cutover", "ha", "yaml", "dev", "build", "notify", "change")
 
 
 class Events:

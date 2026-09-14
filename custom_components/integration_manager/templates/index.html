@@ -21,6 +21,12 @@
   <span class="mut">· <a href="/install">install</a> a version, <a href="/config">configure</a> the integration, <a href="/mqtt">MQTT</a>, <a href="/system">HA version, backups, settings</a></span></div>
 </div>
 
+<div class="card"><h2>Resources</h2>
+ <div class="mut" style="margin-bottom:6px">One sample a minute, kept on the volume for <input type="number" id="reshours" min="1" max="120" style="width:64px"> hours (at most 120). Memory that keeps growing for hours, or an event loop held for 500 ms or more in several minutes of the last hour, raises a notification.</div>
+ <div class="row" style="margin-bottom:8px"><span class="mut">show the last</span><select id="resrange"><option value="1">hour</option><option value="6">6 hours</option><option value="24">24 hours</option><option value="48" selected>48 hours</option><option value="120">120 hours</option></select><span id="restrend" class="mut"></span><span id="resmsg" class="mut"></span></div>
+ <div class="spark-grid" id="sparks"></div>
+</div>
+
 <div class="card"><h2>Integration <span class="tag">one per container</span></h2>
  <div class="mut" style="margin-bottom:8px">This container holds one integration, with as many of its versions in the store as you like. <b>Start</b> deploys the chosen version (files to <code>custom_components</code>, requirements into the venv, patches applied, config entries enabled); switching versions keeps the config entries. Versions come from the <a href="/install">Install</a> page; installing a different integration there replaces this one (after a backup). Another integration = another container.</div>
  <table id="inst"><tr><th>integration</th><th>versions</th><th>entries</th><th>state</th><th></th></tr></table>
