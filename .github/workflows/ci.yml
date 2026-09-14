@@ -31,7 +31,7 @@ jobs:
       - name: Shell
         run: sh -n verify.sh
       - name: Compose files
-        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml config -q
+        run: docker compose -f docker-compose.yml -f docker-compose.build.yml -f docker-compose.dev.yml config -q
 
   boot:
     name: Build, boot and discovery schemas

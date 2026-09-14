@@ -3,10 +3,12 @@
 # Local specifics such as the Docker network your MQTT broker is on or a USB
 # device belong in a docker-compose.override.yml (Compose loads it
 # automatically; see README).
+# The image comes from GitHub Container Registry (amd64 and arm64); pin a
+# release with HRI_VERSION (e.g. 0.9.0), or build it from this checkout with
+# docker-compose.build.yml.
 services:
   hass-remote-integration:
-    build: .
-    image: hass-remote-integration:local
+    image: ghcr.io/trailro/hass-remote-integration:${HRI_VERSION:-latest}
     container_name: ${HRI_NAME:-hass-remote-integration}
     restart: unless-stopped
     ports:
