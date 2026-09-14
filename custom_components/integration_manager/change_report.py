@@ -35,17 +35,23 @@ DELAY_S = 120
 ENTITY_KEYS = ("unit_of_measurement", "device_class", "state_class", "entity_category")
 
 
+TARGET_KEYS = frozenset({"entity_id", "device_id", "area_id", "floor_id", "label_id", "metadata"})  # added by Home Assistant to entity services
+
+
 def _schema_keys(schema: Any, depth: int = 0) -> list[str]:
-    """Field names of a service schema (vol.Schema, or vol.All around one as cv builds entity service schemas)."""
-    if schema is None or depth > 4:
+    """The service's own field names: cv.make_entity_service_schema nests
+    Schema(All(Schema({fields}), check)), plain services use Schema({fields})."""
+    if schema is None or depth > 6:
         return []
+    keys: set[str] = set()
     inner = getattr(schema, "schema", None)
     if isinstance(inner, dict):
-        return sorted({str(getattr(k, "schema", k)) for k in inner})
-    keys: set[str] = set()
+        keys.update(str(getattr(k, "schema", k)) for k in inner)
+    elif inner is not None and inner is not schema:
+        keys.update(_schema_keys(inner, depth + 1))
     for validator in getattr(schema, "validators", None) or ():
         keys.update(_schema_keys(validator, depth + 1))
-    return sorted(keys)
+    return sorted(keys - TARGET_KEYS)
 
 
 def snapshot(hass: HomeAssistant, domain: str) -> dict[str, Any]:
