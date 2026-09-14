@@ -28,7 +28,9 @@ from .scheduler import Scheduler
 from .ui import StaticView
 from .diagnostics import DiagnosticsView
 from .memdiag import MemoryDiagView
-from .manager_device import ManagerDevice, ManagerStatusView
+from .manager_device import ManagerDevice, ManagerHistoryView, ManagerStatusView
+from .catalog import Catalog, CatalogView
+from .change_report import ChangeReportsView
 from .parity import CutoverView, ParityActionView, ParityPageView, ParityView
 from .views import (
     HaActionView,
@@ -187,6 +189,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         LogFileTailView(hass, installer),
         MemoryDiagView(hass),
         ManagerStatusView(manager_device),
+        ManagerHistoryView(manager_device),
+        CatalogView(Catalog(hass), installer),
+        ChangeReportsView(hass, installer),
         LogsPageView(),
         LogsApiView(hass),
         LoggersApiView(hass),

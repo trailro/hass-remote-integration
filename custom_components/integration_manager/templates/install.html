@@ -15,6 +15,12 @@
  </details>
 </div>
 
+<div class="card"><h2>Find an integration</h2>
+ <div class="mut" style="margin-bottom:8px">Searches the default list of HACS custom integrations by name, domain, repository, description and topics. <b>Use</b> adds one to the registry and selects it in the environment builder below, where <b>Check</b> shows what installing it would do; nothing is installed from here.</div>
+ <div class="row"><input id="catq" type="search" placeholder="e.g. heat pump, octopus energy, tuya" style="width:340px" autocomplete="off"><span id="catinfo" class="mut"></span></div>
+ <table id="catlist" style="margin-top:8px" hidden><tr><th>integration</th><th>repository</th><th>latest</th><th>updated</th><th></th></tr></table>
+</div>
+
 <div class="card"><h2>Environment builder</h2>
  <div class="mut" style="margin-bottom:8px">Pick an integration, a version and a Home Assistant version. <b>Check</b> unpacks the release, resolves its requirements with pip in dry-run mode, evaluates the patches, the dependencies and the minimum HA version, and validates the HA release, without touching the running environment. <b>Prepare</b> installs the version into the store and pins the HA version; <b>Prepare &amp; start</b> also starts it (a backup is taken first when something is running). A different HA version is installed by the entrypoint at the restart that follows, and the integration's requirements are reinstalled into that venv.</div>
  <div class="row" style="margin-bottom:6px"><b>1 · integration</b> <label>from the registry <select id="bdom" style="width:auto"></select></label><span class="mut">or a new one:</span>

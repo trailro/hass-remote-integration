@@ -28,6 +28,12 @@ discovery.MANAGER_ACTIONS):
   only, backup first, configuration kept), then a restart;
 * ``restart``, ``backup`` (at most every 10 min), ``check_updates`` (every 5 min).
 
+Every sample also goes to a resource history (one a minute, kept for
+``resource_history_h`` hours, 48 by default and at most 120, saved on the
+volume): ``GET /api/manager/history`` and the Overview.  Memory that keeps
+growing over hours, or an event loop held for 500 ms or more in several
+minutes of the last hour, raises a notification.
+
 The outcome goes to ``<base>/manager/result`` (not retained), the MQTT
 command history and the timeline.  ``GET /api/manager`` returns the
 document.
@@ -38,10 +44,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import shutil
 import threading
 import time
+from collections import deque
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -52,7 +60,7 @@ from homeassistant.const import __version__ as HA_VERSION
 from homeassistant.core import Event, HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
-from jsonio import ha_vkey, read_json, vkey
+from jsonio import ha_vkey, read_json, vkey, write_json
 
 from . import events, preflight
 from .discovery import MANAGER_ACTIONS
@@ -70,6 +78,15 @@ MANAGER_REPO = "trailro/hass-remote-integration"
 VERSION_CHECK_S = 12 * 3600
 MIN_INTERVAL_S = {"backup": 600, "check_updates": 300}  # a flood of presses must not rotate every backup away
 LAG_TICK_S = 1.0
+HISTORY_FILE = "resource_history.json"
+HISTORY_SAVE_S = 600
+HISTORY_POINTS = 360         # at most this many points per series in an answer
+LEAK_MIN_SPAN_H = 6          # memory growth is judged over at least this much history
+LEAK_MIN_MIB = 50
+LAG_ALERT_MS = 500
+LAG_ALERT_MINUTES = 5        # held this long in at least this many of the last 60 samples
+NOTIFY_MEMORY = "integration_manager_resources_memory"
+NOTIFY_LAG = "integration_manager_resources_lag"
 RESOURCE_KEYS = ("memory_mb", "cpu_pct", "loop_lag_ms", "loop_lag_max_ms", "threads", "open_files", "volume_used_pct", "volume_free_gb")
 
 
@@ -82,6 +99,40 @@ def _manifest_version() -> str:
 
 
 MANAGER_VERSION = _manifest_version()
+
+
+def _mean(rows: list[list[Any]], i: int) -> float | None:
+    vals = [r[i] for r in rows if r[i] is not None]
+    return round(sum(vals) / len(vals), 1) if vals else None
+
+
+def _worst(rows: list[list[Any]], i: int) -> float | None:
+    vals = [r[i] for r in rows if r[i] is not None]
+    return max(vals) if vals else None
+
+
+def memory_trend(rows: list[list[Any]]) -> dict[str, Any]:
+    """Least-squares slope of resident memory (MiB/h), the mean of the first
+    and of the last tenth of the window, and the share of half hours whose
+    mean is above the previous one (steady growth rises in most of them)."""
+    pts = [(r[0], r[1]) for r in rows if r[1] is not None]
+    if len(pts) < 30:
+        return {}
+    t0 = pts[0][0]
+    xs = [(t - t0) / 3600 for t, _ in pts]
+    ys = [m for _, m in pts]
+    n = len(pts)
+    mx, my = sum(xs) / n, sum(ys) / n
+    var = sum((x - mx) ** 2 for x in xs)
+    slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / var if var else 0.0
+    k = max(1, n // 10)
+    halves: dict[int, list[float]] = {}
+    for t, m in pts:
+        halves.setdefault(int((t - t0) // 1800), []).append(m)
+    means = [sum(v) / len(v) for _, v in sorted(halves.items())]
+    rising = sum(1 for a, b in zip(means, means[1:]) if b > a) / (len(means) - 1) if len(means) > 1 else 0.0
+    return {"span_h": round(xs[-1], 1), "memory_mib_per_h": round(slope, 2), "memory_start_mb": round(sum(ys[:k]) / k, 1),
+            "memory_end_mb": round(sum(ys[-k:]) / k, 1), "rising_share": round(rising, 2)}
 
 
 def _update(installed: str | None, latest: str | None, title: str, url: str | None, key, in_progress: bool = False) -> dict[str, Any]:
@@ -152,6 +203,10 @@ class ManagerDevice:
         self._action_lock = asyncio.Lock()
         self._running: str | None = None
         self._unsub: list[Any] = []
+        self._history: deque[list[Any]] = deque()  # [epoch s, memory, cpu, lag mean, lag max, volume used %]
+        self._history_loaded = False
+        self._history_saved = time.time()
+        self._alert_memory = self._alert_lag = False
 
     def start(self) -> None:
         self._lag.start()
@@ -161,6 +216,8 @@ class ManagerDevice:
         self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, self._on_stop)
 
     async def _on_stop(self, _event: Event) -> None:
+        if self._history:
+            await self._save_history(time.time())
         self._lag.stop()
         for unsub in self._unsub:
             unsub()
@@ -197,6 +254,79 @@ class ManagerDevice:
         lag_avg, lag_max = self._lag.take()
         data = await self.hass.async_add_executor_job(self._sample_blocking)
         self.resources = {**data, "loop_lag_ms": lag_avg, "loop_lag_max_ms": lag_max}
+        await self._record(time.time())
+
+    # ----- history -------------------------------------------------------------
+
+    def history_hours(self) -> int:
+        return self.installer.settings.int_("resource_history_h", 1, 120)
+
+    def _history_path(self) -> str:
+        return self.hass.config.path("integration_manager", HISTORY_FILE)
+
+    async def _record(self, now: float) -> None:
+        if not self._history_loaded:
+            self._history_loaded = True
+            saved = await self.hass.async_add_executor_job(read_json, self._history_path(), {})
+            for row in (saved.get("rows") if isinstance(saved, dict) else None) or []:
+                if isinstance(row, list) and len(row) == 6 and isinstance(row[0], (int, float)) and row[0] < now:
+                    self._history.append(row)
+        r = self.resources
+        self._history.append([int(now), r.get("memory_mb"), r.get("cpu_pct"), r.get("loop_lag_ms"), r.get("loop_lag_max_ms"), r.get("volume_used_pct")])
+        cutoff = now - self.history_hours() * 3600
+        while self._history and self._history[0][0] < cutoff:
+            self._history.popleft()
+        self._check_resources(now)
+        if now - self._history_saved >= HISTORY_SAVE_S:
+            await self._save_history(now)
+
+    async def _save_history(self, now: float) -> None:
+        self._history_saved = now
+        rows = list(self._history)
+        try:
+            await self.hass.async_add_executor_job(lambda: write_json(self._history_path(), {"rows": rows}, fsync=False))
+        except OSError as err:
+            _LOGGER.warning("resource history not saved: %s", err)
+
+    def history(self, hours: int) -> dict[str, Any]:
+        """The last ``hours`` (capped by the retention), averaged into at most
+        HISTORY_POINTS points; the loop lag keeps each bucket's worst."""
+        hours = min(max(1, hours), self.history_hours())
+        cutoff = time.time() - hours * 3600
+        rows = [r for r in self._history if r[0] >= cutoff]
+        size = max(1, math.ceil(len(rows) / HISTORY_POINTS))
+        points = []
+        for i in range(0, len(rows), size):
+            chunk = rows[i:i + size]
+            points.append([chunk[-1][0], _mean(chunk, 1), _mean(chunk, 2), _mean(chunk, 3), _worst(chunk, 4), chunk[-1][5]])
+        return {"retention_h": self.history_hours(), "hours": hours, "samples": len(rows), "sample_s": 60,
+                "fields": ["t", "memory_mb", "cpu_pct", "loop_lag_ms", "loop_lag_max_ms", "volume_used_pct"],
+                "rows": points, "trend": memory_trend(rows)}
+
+    def _check_resources(self, now: float) -> None:
+        from homeassistant.components import persistent_notification as pn
+
+        trend = memory_trend(list(self._history))
+        leak = bool(trend) and trend["span_h"] >= LEAK_MIN_SPAN_H and trend["memory_mib_per_h"] > 0 and trend["rising_share"] >= 0.75 \
+            and trend["memory_end_mb"] - trend["memory_start_mb"] >= max(LEAK_MIN_MIB, 0.25 * trend["memory_start_mb"])
+        if leak and not self._alert_memory:
+            pn.async_create(self.hass, f"Resident memory grew from {trend['memory_start_mb']:.0f} to {trend['memory_end_mb']:.0f} MiB over the last "
+                            f"{trend['span_h']:.0f} h ({trend['memory_mib_per_h']:+.1f} MiB/h), rising in most half hours. A leak in the integration "
+                            "or one of its libraries is likely: the Overview shows the history, /api/diag/memory what the process holds.",
+                            title="Memory keeps growing", notification_id=NOTIFY_MEMORY)
+        elif not leak and self._alert_memory:
+            pn.async_dismiss(self.hass, NOTIFY_MEMORY)
+        self._alert_memory = leak
+        recent = [r[4] for r in self._history if r[0] >= now - 3600 and r[4] is not None]
+        held = [v for v in recent if v >= LAG_ALERT_MS]
+        lag = len(held) >= LAG_ALERT_MINUTES
+        if lag and not self._alert_lag:
+            pn.async_create(self.hass, f"The event loop was held for {LAG_ALERT_MS} ms or longer in {len(held)} of the last {len(recent)} minutes "
+                            f"(worst {max(held):.0f} ms). Something runs blocking code on the loop, usually the integration or one of its "
+                            "libraries; the Logs page may show \"Detected blocking call\".", title="Event loop blocked", notification_id=NOTIFY_LAG)
+        elif not lag and self._alert_lag:
+            pn.async_dismiss(self.hass, NOTIFY_LAG)
+        self._alert_lag = lag
 
     def _sample_blocking(self) -> dict[str, Any]:
         now, cpu = time.monotonic(), time.process_time()
@@ -373,3 +503,17 @@ class ManagerStatusView(ManagerView):
 
     async def get(self, request: web.Request) -> web.Response:
         return self.json(self.device.document())
+
+
+class ManagerHistoryView(ManagerView):
+    url = "/api/manager/history"
+
+    def __init__(self, device: ManagerDevice) -> None:
+        self.device = device
+
+    async def get(self, request: web.Request) -> web.Response:
+        try:
+            hours = int(request.query.get("hours") or self.device.history_hours())
+        except ValueError:
+            hours = self.device.history_hours()
+        return self.json(self.device.history(hours))

@@ -353,7 +353,8 @@ class SettingsView(ManagerView):
             if keep < 0:
                 return self.json({"ok": False, "error": "backup_keep must be >= 0"})
             new["backup_keep"] = keep
-        for key, lo, hi in (("smoke_test_s", 0, 86400), ("backup_daily_hour", 0, 23), ("health_stale_s", 60, 86400), ("health_unavailable_pct", 1, 100)):
+        for key, lo, hi in (("smoke_test_s", 0, 86400), ("backup_daily_hour", 0, 23), ("health_stale_s", 60, 86400), ("health_unavailable_pct", 1, 100),
+                             ("resource_history_h", 1, 120)):
             if key in body:
                 try:
                     new[key] = min(hi, max(lo, int(body[key])))

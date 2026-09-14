@@ -65,6 +65,31 @@ async function prepare(start){
   $('#bmsg').innerHTML=(r.ok?`<span class="ok">done</span> · ${steps}`:`<span class="bad">${esc(r.error)}</span> · ${steps}`)+(r.restart_required?' · <b>restart required</b>':'');
   $('#brestart').hidden=!r.restart_required; CHECK=null; $('#bprepare').disabled=$('#bstart').disabled=true; if(OPT) options();
 }
+// ----- HACS catalog search -----
+let CATSEQ=0, CATTIMER=null;
+async function catSearch(){
+  const q=$('#catq').value.trim(), t=$('#catlist');
+  if(q.length<2){ t.hidden=true; $('#catinfo').textContent=''; return; }
+  const seq=++CATSEQ; $('#catinfo').textContent='searching…';
+  let r; try{ r=await (await fetch('api/catalog?q='+encodeURIComponent(q),{headers:{'X-Requested-With':'fetch'}})).json(); }catch(e){ r={error:String(e),results:[]}; }
+  if(seq!==CATSEQ) return;
+  t.querySelectorAll('tr:not(:first-child)').forEach(e=>e.remove());
+  const res=r.results||[];
+  for(const x of res){ const tr=document.createElement('tr');
+    const taken=x.in_registry&&x.registry_repo!==x.repo;
+    const state=x.installed&&!taken?'<span class="tag ok">in this container</span>':taken?`<span class="tag warn" title="the registry has ${esc(x.registry_repo)} for this domain">domain taken</span>`:x.in_registry?'<span class="tag">in registry</span>':'';
+    tr.innerHTML=`<td><b>${esc(x.name)}</b> <span class="mut">${esc(x.domain)}</span> ${state}<br><span class="mut" style="font-size:12px">${esc(x.description)}</span></td><td><a href="https://github.com/${esc(x.repo)}" target="_blank" rel="noopener">${esc(x.repo)}</a></td><td>${esc(x.last_version||'—')}</td><td class="mut" style="white-space:nowrap">${esc(x.last_updated||'')}</td><td><button data-cat="${esc(x.domain)}" data-repo="${esc(x.repo)}" data-name="${esc(x.name)}" ${taken?'disabled':''}>Use</button></td>`;
+    t.appendChild(tr); }
+  t.hidden=!res.length;
+  const size=r.catalog_size||0;
+  $('#catinfo').textContent=(r.error&&!size)?'catalog unavailable: '+r.message||r.error:`${r.total||0} match${r.total===1?'':'es'}${(r.total||0)>res.length?', first '+res.length+' shown':''} · ${size} integrations${r.fetched_at?' · list of '+r.fetched_at.slice(0,16).replace('T',' '):''}${r.error?' · refresh failed: '+r.error:''}`;
+  t.querySelectorAll('button[data-cat]').forEach(b=>b.onclick=async()=>{ const d=b.dataset.cat;
+    if(!(REG[d]&&REG[d].repo===b.dataset.repo)){ const added=await post('api/registry',{domain:d,repo:b.dataset.repo,name:b.dataset.name}); if(!added.ok){ log('ERROR: '+added.error); return; } }
+    SEL=d; await regLoad(); await options(); $('#bdomain').value=''; $('#bdom').value=d; domInfo(); releases(); invalidate();
+    $('#bdom').closest('.card').scrollIntoView({behavior:'smooth',block:'start'});
+    log(`${d} (${b.dataset.repo}) selected in the environment builder: choose a version and Check`); catSearch(); });
+}
+$('#catq').addEventListener('input',()=>{ clearTimeout(CATTIMER); CATTIMER=setTimeout(catSearch,300); });
 $('#bprepare').onclick=()=>prepare(false); $('#bstart').onclick=()=>prepare(true);
 $('#brestart').onclick=async()=>{ if(!confirm('Restart the process now?')) return; await post('api/restart'); $('#bmsg').textContent='restarting…'; setTimeout(()=>location.href='/',10000); };
 

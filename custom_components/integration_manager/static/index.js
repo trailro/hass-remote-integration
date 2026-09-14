@@ -61,7 +61,7 @@ $('#ntall').onclick=async()=>{ if(!confirm('Dismiss every notification?')) retur
 notifications().catch(()=>{}); setInterval(notifications,15000);
 // ----- timeline -----
 let EVK=new Set();
-const KIND_CLS={error:'bad',rollback:'bad',smoke:'warn',health:'warn',restore:'warn',boot:'ok',start:'ok',switch:'ok',cutover:'warn'};
+const KIND_CLS={error:'bad',rollback:'bad',smoke:'warn',health:'warn',restore:'warn',boot:'ok',start:'ok',switch:'ok',cutover:'warn',change:'warn'};
 async function timeline(){
   const r=await (await fetch('api/events?limit=60'+(EVK.size?'&kind='+[...EVK].join(','):''))).json();
   const counts={}; (r.kinds||[]).forEach(k=>counts[k]=0); (r.events||[]).forEach(e=>counts[e.kind]=(counts[e.kind]||0)+1);
@@ -81,5 +81,27 @@ async function resources(){
     .map(([k,label])=>`<a href="${esc(u[k].release_url||'#')}" target="_blank" rel="noopener" style="text-decoration:none"><span class="tag warn">${label} ${esc(u[k].latest_version)}</span></a>`).join(' ');
   $('#ov-res').innerHTML=`memory ${v(r.memory_mb,' MiB')} · CPU ${v(r.cpu_pct,' %')} · event loop lag ${v(r.loop_lag_ms,' ms')} (max ${v(r.loop_lag_max_ms,' ms')}) · ${v(r.threads,'')} threads · volume ${v(r.volume_used_pct,' % used')}, ${v(r.volume_free_gb,' GB free')}`+(r.memory_mb==null?' <span class="mut">(first sample within a minute of the start)</span>':'')+(ups?' · '+ups:'');
 }
+// ----- resource history -----
+function spark(label,unit,pts,color,digits){
+  const vals=pts.filter(p=>p[1]!=null);
+  if(vals.length<2) return `<div class="spark"><div class="lbl"><span>${label}</span><span>—</span></div><div class="mut" style="font-size:12px;height:64px">not enough samples yet</div></div>`;
+  const t0=vals[0][0], t1=vals[vals.length-1][0], vs=vals.map(p=>p[1]); let lo=Math.min(...vs), hi=Math.max(...vs); const span=hi-lo;
+  if(span===0){ hi+=1; lo=Math.max(0,lo-1); } else { lo-=span*0.05; hi+=span*0.05; }
+  const W=300, H=64, f=v=>Number(v).toFixed(digits);
+  const xy=vals.map(([t,v])=>`${((t-t0)/Math.max(1,t1-t0)*W).toFixed(1)},${(H-(v-lo)/(hi-lo)*H).toFixed(1)}`).join(' ');
+  const from=new Date(t0*1000).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+  return `<div class="spark"><div class="lbl"><span>${label}</span><span>min ${f(Math.min(...vs))} · max ${f(Math.max(...vs))} · now <span class="now">${f(vs[vs.length-1])}${unit}</span></span></div><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${label} since ${from}"><polyline fill="none" stroke="${color}" stroke-width="1.5" vector-effect="non-scaling-stroke" points="${xy}"/></svg><div class="lbl"><span>${from}</span><span>now</span></div></div>`;
+}
+async function resourceHistory(){
+  let r; try{ r=await (await fetch('api/manager/history?hours='+$('#resrange').value)).json(); }catch(e){ return; }
+  if(document.activeElement!==$('#reshours')) $('#reshours').value=r.retention_h;
+  const col=i=>(r.rows||[]).map(x=>[x[0],x[i]]);
+  $('#sparks').innerHTML=spark('Memory',' MiB',col(1),'#58a6ff',0)+spark('CPU',' %',col(2),'#3fb950',1)+spark('Event loop lag (worst)',' ms',col(4),'#d29922',0)+spark('Volume used',' %',col(5),'#8b98a5',1);
+  const tr=r.trend||{};
+  $('#restrend').textContent=`${r.samples} samples`+(r.hours<Number($('#resrange').value)?` (history is kept ${r.retention_h} h)`:'')+(tr.memory_mib_per_h!=null?` · memory ${tr.memory_mib_per_h>=0?'+':''}${tr.memory_mib_per_h} MiB/h over ${tr.span_h} h`:'');
+}
+$('#resrange').onchange=resourceHistory;
+$('#reshours').onchange=async()=>{ const v=parseInt($('#reshours').value,10); const res=await post('api/settings',{resource_history_h:v}); $('#resmsg').textContent=res.ok?'saved':'ERROR: '+(res.error||res.message); resourceHistory(); };
+resourceHistory().catch(()=>{}); setInterval(resourceHistory,60000);
 status().catch(e=>log('error: '+e)); mqttSummary().catch(()=>{}); resources().catch(()=>{});
 setInterval(status,15000); setInterval(mqttSummary,15000); setInterval(resources,30000);

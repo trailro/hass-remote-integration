@@ -6,7 +6,7 @@ async function load(){
   $('#domnote').innerHTML=DOM?'the integration of this container (several versions of it can be in the store, one runs)':'no integration installed yet: <a href="/install">Install</a> one';
   const x=(ST.installed||{})[DOM]; $('#domtitle').textContent=DOM||'no integration';
   $('#runstate').innerHTML=x?(x.running?`<span class="ok">running ${esc(x.running_tag||'')}</span>`:'<span class="mut">stopped</span>'):'';
-  renderVersions(x); loadReleases(); loadPatches(); loadYaml(); flowNote(x); entries();
+  renderVersions(x); loadReleases(); loadChanges(); loadPatches(); loadYaml(); flowNote(x); entries();
 }
 function renderVersions(x){
   const t=$('#vers'); t.querySelectorAll('tr:not(:first-child)').forEach(e=>e.remove()); if(!x) return;
@@ -44,6 +44,27 @@ async function runPreflight(tag){
   let r; try{ r=await post('api/releases/preflight',{domain:DOM,tag}); }catch(e){ box.innerHTML='<span class="bad">preflight failed: '+esc(e)+'</span>'; return; }
   if(!r.ok){ box.innerHTML='<span class="bad">preflight: '+esc(r.error)+'</span>'; return; }
   box.innerHTML=renderPreflight(r.report);
+}
+async function loadChanges(){
+  let r; try{ r=await (await fetch('api/change_reports')).json(); }catch(e){ return; }
+  const p=r.pending; $('#chgpending').textContent=p?`${p.domain} ${p.from_tag} → ${p.to_tag}: compared once the new version has run (after the smoke test)`:'';
+  const reps=(r.reports||[]).filter(x=>!DOM||x.domain===DOM);
+  $('#chglist').innerHTML=reps.length?reps.map((x,i)=>renderChange(x,i===0)).join(''):'<span class="mut">no version switch recorded yet</span>';
+}
+function renderChange(x,open){
+  const list=(items,f)=>`<ul style="margin:2px 0 6px 18px">${items.map(i=>`<li>${f(i)}</li>`).join('')}</ul>`;
+  const sec=(title,cls,items,f)=>items&&items.length?`<div class="${cls}" style="margin-top:4px">${title} (${items.length})</div>${list(items,f)}`:'';
+  const ent=e=>`<code>${esc(e.entity_id)}</code>${e.name?' '+esc(e.name):''}`;
+  const fields=f=>`<code>${esc(f.service)}</code>: ${f.fields.map(esc).join(', ')}`;
+  const body=sec('entities removed','bad',x.entities_removed,ent)
+    +sec('entities renamed','warn',x.entities_renamed,i=>`<code>${esc(i.from)}</code> → <code>${esc(i.to)}</code>`)
+    +sec('entities changed','warn',x.entities_changed,i=>`<code>${esc(i.entity_id)}</code>: ${Object.entries(i.changes).map(([k,v])=>`${esc(k)} ${esc(v[0]??'—')} → ${esc(v[1]??'—')}`).join(', ')}`)
+    +sec('services removed','bad',x.services_removed,s=>`<code>${esc(s)}</code>`)
+    +sec('service fields removed','warn',x.fields_removed,fields)
+    +sec('entities added','ok',x.entities_added,ent)
+    +sec('services added','ok',x.services_added,s=>`<code>${esc(s)}</code>`)
+    +sec('service fields added','ok',x.fields_added,fields);
+  return `<details ${open?'open':''} style="margin-bottom:8px"><summary style="cursor:pointer"><b>${esc(x.from_tag)} → ${esc(x.to_tag)}</b> <span class="mut">${esc((x.at||'').replace('T',' ').slice(0,16))}</span> ${x.breaking?'<span class="tag warn">may affect the consuming side</span>':'<span class="tag ok">nothing removed or changed</span>'} <span class="mut">${x.entities_before} → ${x.entities_after} entities, ${x.services_before} → ${x.services_after} services</span></summary>${body||'<div class="mut">no difference in entities or services</div>'}</details>`;
 }
 async function loadPatches(){
   const t=$('#plist'); t.querySelectorAll('tr:not(:first-child)').forEach(e=>e.remove()); if(!DOM) return;

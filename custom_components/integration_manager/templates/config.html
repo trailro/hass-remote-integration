@@ -18,6 +18,12 @@
 
 </div>
 
+<div class="card"><h2>What changed between versions</h2>
+ <div class="mut" style="margin-bottom:8px">When the running integration switches versions, its entities and services just before the switch are compared with what the new version provides once it runs (after the smoke test). Removed, renamed or changed entities and removed services or fields are what break automations on the consuming side; they also raise a notification.</div>
+ <div id="chgpending" class="warn"></div>
+ <div id="chglist"><span class="mut">…</span></div>
+</div>
+
 <div class="card"><h2>Patches</h2>
  <div class="mut" style="margin-bottom:8px">Bundled patches (shipped in the image under <code>patches/&lt;domain&gt;/</code>) plus your uploads in <code>integration_manager/patches/&lt;domain&gt;/</code>, applied in name order after the requirements when the integration starts (and at every boot). <code>.py</code> = patch module with <code>apply(ctx)</code>/<code>status(ctx)</code>; <code>.patch</code> = unified diff (context-checked, idempotent). Headers: <code># integration-version: 1.2.0, 1.2.1</code> limits a patch to those versions (default: all), <code># applies-to: some-lib&lt;2.0</code> retires it once the requirement moves on. Status is shown for the running version; failures never block the integration.</div>
  <div class="row" style="margin-bottom:8px"><input type="file" id="pfile" accept=".py,.patch" style="width:auto"><button id="pupload">Upload patch</button><button id="pnewpy">New .py patch</button><button id="pnewdiff">New .patch diff</button><button id="papply">Re-apply now</button><span id="pmsg" class="mut"></span></div>
