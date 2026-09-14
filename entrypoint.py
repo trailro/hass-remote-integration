@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import html
 import http.server
+import hashlib
 import json
 import os
 import re
@@ -201,12 +202,57 @@ def install(version: str) -> bool:
             )
         with open(os.path.join(d, ".ok"), "w", encoding="utf-8") as fh:
             fh.write(version)
+        _write_requirements_stamp(d)
         log(f"installed homeassistant=={version}")
         return True
     except Exception as err:  # noqa: BLE001
         log(f"install of {version} FAILED: {err}")
         shutil.rmtree(d, ignore_errors=True)
         return False
+
+
+def _requirements_stamp() -> str:
+    try:
+        with open(EXTRA_REQUIREMENTS, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _write_requirements_stamp(venv: str) -> None:
+    try:
+        with open(os.path.join(venv, ".hri-requirements"), "w", encoding="utf-8") as fh:
+            fh.write(_requirements_stamp())
+    except OSError:
+        pass
+
+
+def ensure_extra_requirements(version: str) -> None:
+    """A venv installed by an older image may lack what requirements.txt asks
+    for now (the manager imports those packages): install them into it once
+    per requirements.txt content.  A failure is logged, the boot goes on."""
+    d = venv_dir(version)
+    stamp = _requirements_stamp()
+    if not stamp or not venv_ok(version):
+        return
+    try:
+        with open(os.path.join(d, ".hri-requirements"), encoding="utf-8") as fh:
+            if fh.read().strip() == stamp:
+                return
+    except OSError:
+        pass
+    cmd = [os.path.join(d, "bin", "python"), "-m", "pip", "install", "--no-cache-dir", "-q", "-r", EXTRA_REQUIREMENTS]
+    constraints = os.path.join(d, "package_constraints.txt")
+    if os.path.isfile(constraints):
+        cmd += ["-c", constraints]
+    log(f"installing the manager's requirements into the venv of Home Assistant {version}")
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as fh:
+            subprocess.run(cmd, check=True, stdout=fh, stderr=subprocess.STDOUT, timeout=900)
+    except Exception as err:  # noqa: BLE001
+        log(f"requirements install FAILED ({err}); booting with the venv as it is")
+        return
+    _write_requirements_stamp(d)
 
 
 def prune(keep: set[str]) -> None:
@@ -287,10 +333,11 @@ def reset_storage_for_rebuild(wanted: str, restored: bool) -> bool:
 
 
 def restore_after_failed_change(state: dict, failed: str, fallback: str) -> None:
-    """The container falls back from ``failed`` to ``fallback``.  If a
-    version change had already rewritten .storage for ``failed`` (a restore
-    or a clean start), the configuration from before that change comes
-    back: the pre-change backup was made on ``fallback`` or older."""
+    """The container falls back from ``failed`` to ``fallback``.  If the
+    switch to ``failed`` got as far as booting it (with a restore, a clean
+    start, or just its own storage migrations in keep mode), the
+    configuration from before the switch comes back from its pre-change
+    backup, which ``fallback`` can read."""
     change = state.pop("change", None)
     if not isinstance(change, dict) or change.get("to") != failed or not change.get("applied") or not change.get("backup"):
         return
@@ -301,10 +348,12 @@ def restore_after_failed_change(state: dict, failed: str, fallback: str) -> None
         log(f"could not bring back the configuration from {change.get('backup')}: {err}")
 
 
-def apply_config_changes(state: dict, wanted: str) -> None:
+def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
     """After the install, before the boot: a restore or a clean start that
     belongs to a version change applies only when that version is the one
-    booting (a failed install or a fallback boots another one)."""
+    booting (a failed install or a fallback boots another one).  Returns the
+    version to boot: if a downgrade's restore or clean start did not happen,
+    the version the configuration still belongs to."""
     for_version = backupkit.pending_for_version(CONFIG_DIR)
     if backupkit.pending(CONFIG_DIR) and for_version and for_version != wanted:
         backupkit.cancel_restore(CONFIG_DIR)
@@ -316,11 +365,26 @@ def apply_config_changes(state: dict, wanted: str) -> None:
         restored = True
     reset = reset_storage_for_rebuild(wanted, restored)
     change = state.get("change")
-    if isinstance(change, dict):
-        if change.get("to") != wanted:
-            state.pop("change", None)  # that switch did not happen, nothing of it was applied
-        elif (change.get("mode") == "restore" and restored and (state.get("last_restore") or {}).get("ok")) or (change.get("mode") == "rebuild" and reset):
-            change["applied"] = True
+    if not isinstance(change, dict):
+        return wanted
+    if change.get("to") != wanted:
+        state.pop("change", None)  # that switch did not happen, nothing of it was applied
+        return wanted
+    mode = change.get("mode")
+    done = (mode == "restore" and restored and (state.get("last_restore") or {}).get("ok")) or (mode == "rebuild" and reset)
+    if mode in ("restore", "rebuild") and not done:
+        what = "configuration restore" if mode == "restore" else "clean start"
+        if current and current != wanted and venv_ok(current):
+            log(f"the {what} for Home Assistant {wanted} did not happen: staying on {current}, whose configuration this still is")
+            state["last_error"] = f"switch to Home Assistant {wanted} cancelled: its {what} failed (see the container log); still on {current}"
+            state["desired"] = current
+            state.pop("change", None)
+            return current
+        log(f"the {what} for Home Assistant {wanted} did not happen and there is no other version to stay on; booting {wanted}")
+    # booting the target can migrate .storage in any mode (keep included):
+    # from here on a crash loop must bring back the pre-change backup
+    change["applied"] = True
+    return wanted
 
 
 def main() -> None:
@@ -377,7 +441,8 @@ def main() -> None:
                 sys.exit(1)
             wanted = fallback
 
-    apply_config_changes(state, wanted)
+    ensure_extra_requirements(wanted)
+    wanted = apply_config_changes(state, wanted, current)
 
     if current and current != wanted and venv_ok(current) and failures < MAX_BOOT_FAILURES:
         # (a version that just crashed its way into a fallback is not a rollback target)

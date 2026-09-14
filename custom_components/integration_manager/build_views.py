@@ -21,6 +21,8 @@ import time
 from typing import Any
 
 from aiohttp import web
+from homeassistant.const import __version__ as HA_VERSION
+from jsonio import ha_vkey
 from homeassistant.core import HomeAssistant
 
 from . import events, preflight
@@ -208,6 +210,11 @@ class BuildPrepareView(ManagerView):
 
     @with_body
     async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
+        wanted_ha = str(body.get("ha") or "").strip()
+        if wanted_ha and wanted_ha != HA_VERSION and ha_vkey(wanted_ha) < ha_vkey(HA_VERSION):
+            # a downgrade must say what the older version starts with (restore, clean start, keep)
+            return self.json({"ok": False, "error": f"Home Assistant {wanted_ha} is older than the running {HA_VERSION}: switch Home Assistant "
+                                                    "down on the System page first (it asks what the older version starts with), then prepare here"})
         try:
             domain, ref, ha = await self._check._resolve(body)
         except ValueError as err:
@@ -232,12 +239,13 @@ class BuildPrepareView(ManagerView):
             events.emit("ha", f"scheduled Home Assistant {ha_state.get('desired')} cancelled: {ha} chosen in the environment builder", version=ha)
         if ha_changes:
             try:
-                st = await self.updater.async_set_desired(ha)
-                await self.installer.hass.async_add_executor_job(self.updater.cancel_config_change)  # an older change's preparations
-                steps.append({"step": "ha", "ok": True, "desired": st.get("desired")})
+                from .views import async_change_ha_version  # the same backup and change record as the System page
+
+                await self.updater.validate(ha)
+                st = await async_change_ha_version(self.installer, self.updater, ha, "keep", "environment builder")
+                steps.append({"step": "ha", "ok": True, "desired": st["desired"], "backup": st["backup"]})
                 restart_required = True
-                events.emit("ha", f"Home Assistant {ha} wanted (environment builder); installed at the next restart", version=ha)
-            except ValueError as err:
+            except (ValueError, OSError) as err:
                 steps.append({"step": "ha", "ok": False, "error": str(err)})
                 return self.json({"ok": False, "error": f"Home Assistant {ha}: {err}", "steps": steps})
         deferred = False

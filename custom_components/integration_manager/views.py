@@ -152,6 +152,61 @@ def _manual_restore_pending(config_dir: str) -> bool:
     return backupkit.pending(config_dir) and not backupkit.pending_for_version(config_dir)
 
 
+async def async_change_ha_version(installer: Installer, updater: HaUpdater, target: str, mode: str, source: str) -> dict[str, Any]:
+    """The one way to schedule a Home Assistant version change (System page,
+    environment builder): a backup first, then what the target starts with
+    (keep, restore, rebuild: see HaActionView.post), recorded in ha.json so
+    the entrypoint applies it only to that version and can fall back.
+    Raises ValueError; OSError passes through."""
+    hass = installer.hass
+    cfg = hass.config.config_dir
+    if _HA_CHANGE_LOCK.locked():
+        raise ValueError("another Home Assistant version change is being prepared: try again in a moment")
+    async with _HA_CHANGE_LOCK:
+        if mode not in ("keep", "restore", "rebuild"):
+            raise ValueError("config must be keep, restore or rebuild")
+        if target == HA_VERSION:
+            raise ValueError(f"Home Assistant {target} is already running")
+        if mode != "keep" and ha_vkey(target) >= ha_vkey(HA_VERSION):
+            raise ValueError(f"config={mode} only applies to a downgrade")
+        if installer.busy:
+            raise ValueError("an install/start is running: try again in a moment")
+        if mode != "keep" and await hass.async_add_executor_job(_manual_restore_pending, cfg):
+            raise ValueError("a restore scheduled on System is waiting for the restart: cancel it first")
+        restore = None
+        if mode == "restore":
+            restore = await hass.async_add_executor_job(updater.config_backup_for, target)
+            if restore is None:
+                raise ValueError(f"no backup made on Home Assistant {target} or older: choose rebuild or keep")
+        if mode == "rebuild":
+            pending_import = await hass.async_add_executor_job(ha_import.load_summary, cfg)
+            if pending_import and pending_import.get("type") != ha_import.REBUILD_TYPE:
+                raise ValueError("an import from a Home Assistant backup is waiting on System: apply or clear it first")
+        installer.busy = True
+        try:
+            backup = await installer.async_backup(label=f"pre-ha-{target}")
+            rebuild = None
+            if restore is not None:
+                await hass.async_add_executor_job(ha_import.drop_rebuild, cfg)
+                await hass.async_add_executor_job(backupkit.schedule_restore, cfg, restore["name"], ["storage"], target)
+            else:
+                await hass.async_add_executor_job(updater.cancel_config_change)  # an older change's preparations
+                if mode == "rebuild":
+                    rebuild = await hass.async_add_executor_job(ha_import.stage_rebuild, cfg, backup["name"], installer.running, HA_VERSION, target)
+            state = updater.set_desired(target, change={"to": target, "mode": mode, "backup": backup["name"],
+                                                        "at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+            await hass.async_add_executor_job(backupkit.prune, cfg, installer.settings.backup_keep,
+                                              installer.protected_backups() | {backup["name"]})
+        finally:
+            installer.busy = False
+    note = {"keep": "", "restore": f"; configuration restored from {restore['name'] if restore else ''}",
+            "rebuild": f"; clean start, {installer.running or 'no integration'} rebuilt after the boot"}[mode]
+    events.emit("ha", f"Home Assistant {target} wanted ({source}), backup {backup['name']}{note}; applied at the next restart",
+                version=target, backup=backup["name"], config=mode)
+    return {"desired": state.get("desired"), "backup": backup["name"], "config": mode,
+            "restore": restore["name"] if restore else None, "rebuild": rebuild}
+
+
 class HaActionView(ManagerView):
     url = "/api/ha/{action}"
 
@@ -179,14 +234,7 @@ class HaActionView(ManagerView):
             return self.json_message("Content-Type must be application/json", status_code=400)
         if action not in ("update", "rollback"):
             return self.json_message("unknown action", status_code=400)
-        if _HA_CHANGE_LOCK.locked():
-            return self.json({"ok": False, "error": "another Home Assistant version change is being prepared: try again in a moment"})
-        async with _HA_CHANGE_LOCK:
-            return await self._change(request, action)
-
-    async def _change(self, request: web.Request, action: str) -> web.Response:
         hass = self.installer.hass
-        cfg = hass.config.config_dir
         try:
             body = await _json_object(request)
             if action == "update":
@@ -195,60 +243,23 @@ class HaActionView(ManagerView):
                     await self.updater.validate(target)
             else:
                 target = self.updater.previous_version()
-            if self.installer.busy:
-                raise ValueError("an install/start is running: try again in a moment")
             if target == HA_VERSION:
                 desired = (await hass.async_add_executor_job(self.updater._read)).get("desired")
                 if not desired or desired == HA_VERSION:
                     raise ValueError(f"Home Assistant {target} is already running")
+                if self.installer.busy or _HA_CHANGE_LOCK.locked():
+                    raise ValueError("an install/start or a version change is running: try again in a moment")
                 dropped = await hass.async_add_executor_job(self.updater.cancel_config_change)
                 self.updater.set_desired(HA_VERSION)
                 events.emit("ha", f"scheduled switch to Home Assistant {desired} cancelled" + (f"; dropped: {', '.join(dropped)}" if dropped else ""),
                             version=HA_VERSION)
                 return self.json({"ok": True, "desired": HA_VERSION, "cancelled": desired, "dropped": dropped})
-            mode = str(body.get("config") or "keep")
-            if mode not in ("keep", "restore", "rebuild"):
-                raise ValueError("config must be keep, restore or rebuild")
-            if mode != "keep" and ha_vkey(target) >= ha_vkey(HA_VERSION):
-                raise ValueError(f"config={mode} only applies to a downgrade")
-            if mode != "keep" and await hass.async_add_executor_job(_manual_restore_pending, cfg):
-                raise ValueError("a restore scheduled on System is waiting for the restart: cancel it first")
-            restore = None
-            if mode == "restore":
-                restore = await hass.async_add_executor_job(self.updater.config_backup_for, target)
-                if restore is None:
-                    raise ValueError(f"no backup made on Home Assistant {target} or older: choose rebuild or keep")
-            if mode == "rebuild":
-                pending_import = await hass.async_add_executor_job(ha_import.load_summary, cfg)
-                if pending_import and pending_import.get("type") != ha_import.REBUILD_TYPE:
-                    raise ValueError("an import from a Home Assistant backup is waiting on System: apply or clear it first")
-            self.installer.busy = True
-            try:
-                backup = await self.installer.async_backup(label=f"pre-ha-{target}")
-                rebuild = None
-                if restore is not None:
-                    await hass.async_add_executor_job(ha_import.drop_rebuild, cfg)
-                    await hass.async_add_executor_job(backupkit.schedule_restore, cfg, restore["name"], ["storage"], target)
-                else:
-                    await hass.async_add_executor_job(self.updater.cancel_config_change)  # an older change's preparations
-                    if mode == "rebuild":
-                        rebuild = await hass.async_add_executor_job(ha_import.stage_rebuild, cfg, backup["name"], self.installer.running, HA_VERSION, target)
-                state = self.updater.set_desired(target, change={"to": target, "mode": mode, "backup": backup["name"],
-                                                                 "at": time.strftime("%Y-%m-%dT%H:%M:%S")})
-                await hass.async_add_executor_job(backupkit.prune, cfg, self.installer.settings.backup_keep,
-                                                  self.installer.protected_backups() | {backup["name"]})
-            finally:
-                self.installer.busy = False
+            result = await async_change_ha_version(self.installer, self.updater, target, str(body.get("config") or "keep"), action)
         except (ValueError, BadRequest) as err:
             return self.json({"ok": False, "error": str(err)})
         except OSError as err:  # a full disk while backing up, an unreadable backup
             return self.json({"ok": False, "error": f"{type(err).__name__}: {err}"})
-        note = {"keep": "", "restore": f"; configuration restored from {restore['name'] if restore else ''}",
-                "rebuild": f"; clean start, {self.installer.running or 'no integration'} rebuilt after the boot"}[mode]
-        events.emit("ha", f"Home Assistant {target} wanted ({action}), backup {backup['name']}{note}; applied at the next restart",
-                    version=target, backup=backup["name"], config=mode)
-        return self.json({"ok": True, "desired": state.get("desired"), "backup": backup["name"], "config": mode,
-                          "restore": restore["name"] if restore else None, "rebuild": rebuild})
+        return self.json({"ok": True, **result})
 
 
 class InstallView(ManagerView):

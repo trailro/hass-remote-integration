@@ -517,10 +517,19 @@ class RegistryAligner:
 
 
 def _unmask(given: Any, stored: Any) -> Any:
-    """The import form may come from the masked GET summary: every "***" whose
-    key exists in the backup's entry gets the stored value back."""
+    """The import form may come from the masked GET summary (diagnostics.scrub):
+    whatever still equals the masked form of the backup's value at the same
+    place (a "***" under a secret key, a secret inside a text, the same in
+    list items) gets the stored value back; edited values stay."""
+    from .diagnostics import scrub
+
     if isinstance(given, dict) and isinstance(stored, dict):
-        return {k: (stored[k] if v == "***" and k in stored else _unmask(v, stored.get(k))) for k, v in given.items()}
+        return {k: (stored[k] if k in stored and given[k] != stored[k] and given[k] == scrub({k: stored[k]})[k] else _unmask(v, stored.get(k)))
+                for k, v in given.items()}
+    if isinstance(given, list) and isinstance(stored, list) and len(given) == len(stored):
+        return [_unmask(g, s) for g, s in zip(given, stored)]
+    if isinstance(given, str) and isinstance(stored, str) and given != stored and given == scrub(stored):
+        return stored
     return given
 
 

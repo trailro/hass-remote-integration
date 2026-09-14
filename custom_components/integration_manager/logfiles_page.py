@@ -225,7 +225,10 @@ def _format_lines(fmt: dict[str, Any], raw_lines: list[str]) -> tuple[list[dict[
     the executor on every follow poll."""
     if not fmt:
         return [], [{"raw": raw, "cells": None, "color": None} for raw in raw_lines], None
-    rx = (_regex or re).compile(fmt["pattern"])
+    if _regex is None:  # the stdlib re cannot be stopped mid-match: no formatting rather than a hung server
+        return [], [{"raw": raw, "cells": None, "color": None} for raw in raw_lines], \
+            "formatting needs the regex package, missing from this Home Assistant venv: restart the container to install it"
+    rx = _regex.compile(fmt["pattern"])
     hide, dim = set(fmt.get("hide") or ()), set(fmt.get("dim") or ())
     shown = [g for g in sorted(rx.groupindex, key=rx.groupindex.get) if g not in hide]
     color_by, colors = fmt.get("color_by"), fmt.get("colors") or {}
@@ -239,7 +242,7 @@ def _format_lines(fmt: dict[str, Any], raw_lines: list[str]) -> tuple[list[dict[
             try:
                 if left <= 0:
                     raise TimeoutError
-                m = rx.match(raw, timeout=left) if _regex is not None else rx.match(raw)
+                m = rx.match(raw, timeout=left)
             except TimeoutError:
                 error = f"the format needed more than {MATCH_BUDGET_S:g} s for these lines, so the rest are shown whole: simplify the pattern"
         if not m:
