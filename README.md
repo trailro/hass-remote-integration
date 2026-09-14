@@ -1,6 +1,7 @@
 # hass-remote-integration
 
 [![CI](https://github.com/trailro/hass-remote-integration/actions/workflows/ci.yml/badge.svg)](https://github.com/trailro/hass-remote-integration/actions/workflows/ci.yml)
+[![Image](https://img.shields.io/badge/ghcr.io-hass--remote--integration-2496ED?logo=docker&logoColor=white)](https://github.com/trailro/hass-remote-integration/pkgs/container/hass-remote-integration)
 <a href="https://www.buymeacoffee.com/trailro"><img src="https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=%E2%98%95&slug=trailro&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff" alt="Buy me a coffee" height="36"></a>
 
 Run **one Home Assistant custom integration in its own small container**,
@@ -97,10 +98,16 @@ Footprint: roughly 170–210 MB of RAM with a typical integration running, and a
 
 ## Quick start
 
-The image is published on GitHub Container Registry for `amd64` and `arm64`
-(a Raspberry Pi with a 64-bit OS, Apple silicon, most NAS boxes), from 0.9.0 on.
-All you need is the compose file of the release you run, in a directory of its
-own:
+The image, [`ghcr.io/trailro/hass-remote-integration`](https://github.com/trailro/hass-remote-integration/pkgs/container/hass-remote-integration),
+is published on GitHub Container Registry for `amd64` and `arm64` (a Raspberry
+Pi with a 64-bit OS, Apple silicon, most NAS boxes), from 0.9.0 on:
+
+```bash
+docker pull ghcr.io/trailro/hass-remote-integration:latest
+```
+
+All you need to run it is the compose file of the release you use, in a
+directory of its own:
 
 ```bash
 mkdir hass-remote-integration && cd hass-remote-integration
