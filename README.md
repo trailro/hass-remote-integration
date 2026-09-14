@@ -445,6 +445,9 @@ hass_<domain>/services/<domain>                     retained service catalog
 hass_<domain>/cmd/<domain>/<object_id>/<field>      commands (used by discovery)
 hass_<domain>/call/<domain>/<service>               service call, JSON payload
 hass_<domain>/result/<domain>/<service>             call result, not retained
+hass_<domain>/manager                               retained JSON, every 60 s: updates, resources
+hass_<domain>/manager/cmd/<action>                  manager actions (with manager_commands)
+hass_<domain>/manager/result                        outcome of a manager action, not retained
 <prefix>/device/hass_<domain>_<device>/config       HA device-based discovery
 ```
 
@@ -462,6 +465,23 @@ hass_<domain>/result/<domain>/<service>             call result, not retained
   on `result/...`. A repeated `_id` within five minutes is answered from memory
   and never executed twice. `homeassistant`, `shell_command`, `python_script`
   and `hassio` are never callable.
+- **Manager device**: with discovery on, or with `manager_discovery` alone (for
+  example while running in shadow mode), the main Home Assistant gets a
+  `hass-remote-integration (hass_<domain>)` device. It shows whether the
+  integration is up and its health, has update entities for the integration,
+  for Home Assistant in the container and for hass-remote-integration itself,
+  and sensors for memory, CPU, event-loop lag (the worst delay of a
+  one-second timer in the last minute, which is how an integration that blocks
+  the loop shows up), volume usage and the patch status.
+- **Manager actions** (`manager_commands`, off by default): *Install* on the
+  integration and Home Assistant update entities, plus *Restart*, *Back up now*
+  and *Check for updates* buttons. Installing the integration runs the
+  preflight, then installs and starts the release the way the UI does (backup,
+  smoke test, automatic rollback) and restarts when the loaded code has to be
+  replaced; installing Home Assistant takes a backup, keeps the configuration
+  and restarts. Anyone who can publish under the base topic can use them, so
+  turn this on only on a broker with credentials. hass-remote-integration
+  itself is updated by pulling a new image.
 - Before connecting, the container checks that no *foreign* retained data sits
   under its base topic, and refuses to connect if there is (override with
   `force_base_topic`).
@@ -592,7 +612,7 @@ scripted. With a password set, send it as `Authorization: Bearer <password>`. Th
 
 | Area | Endpoints |
 |---|---|
-| Status | `GET /api/status`, `GET /api/summary`, `GET /api/mqtt/status`, `GET /api/events`, `GET /api/notifications`, `POST /api/notifications/dismiss_all` |
+| Status | `GET /api/status`, `GET /api/summary`, `GET /api/manager`, `GET /api/mqtt/status`, `GET /api/events`, `GET /api/notifications`, `POST /api/notifications/dismiss_all` |
 | Integration | `POST /api/install`, `POST /api/run/{start,stop}`, `GET /api/releases`, `POST /api/releases/preflight`, `POST /api/installed/<domain>/{uninstall,rollback_full,remove_version}` |
 | Builder / dev | `POST /api/build/{check,prepare}`, `GET /api/dev`, `POST /api/dev/install` |
 | Configuration | `POST /api/flow/start`, `POST /api/flow/<id>`, `GET/POST /api/yaml/<domain>`, `GET /api/patches/<domain>`, `GET /api/entries` |

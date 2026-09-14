@@ -85,6 +85,7 @@ class State:
     last_smoke: dict[str, Any] | None = None     # last smoke verdict (survives restarts and rollbacks)
     last_release_check: int = 0                  # epoch of the last weekly GitHub release check
     rollback_backup: str | None = None           # the backup a full rollback restores: protected until that restore succeeded
+    release_updates: dict[str, str] = field(default_factory=dict)  # last release check: domain -> newest stable tag not in the store
 
 
 def _gh_check(resp, what: str) -> None:
@@ -156,6 +157,7 @@ class Installer:
         self.busy = False
         os.makedirs(self.versions_dir, exist_ok=True)
         self.state = self._load_state()
+        self.updates = dict(self.state.release_updates or {})  # the badge and the update entity survive a restart
         self._migrate_version_dirs()
 
     # ----- registry --------------------------------------------------------
@@ -620,6 +622,10 @@ class Installer:
             self._save_state()
             events.emit("install", f"{domain} {tag} (version {manifest.get('version')}) into the version store", domain=domain, tag=tag)
             self._releases_cache.pop(domain, None)
+            if domain in self.updates and vkey(tag) >= vkey(self.updates[domain]):
+                self.updates.pop(domain)  # the newer release is in the store now
+                self.state.release_updates = dict(self.updates)
+                self._save_state()
             was_running = domain == self.state.domain and self._dom(domain).get("running_tag") == tag
             if was_running:  # reinstall of the running version: refresh the files in place
                 await self.hass.async_add_executor_job(self._deploy, domain, tag)
@@ -918,6 +924,8 @@ class Installer:
                 out[domain] = max(stable, key=vkey)
         self.updates = out
         self.updates_checked_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        self.state.release_updates = dict(out)
+        self._save_state()
         return out
 
     async def stop(self) -> dict[str, Any]:

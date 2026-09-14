@@ -8,6 +8,10 @@ Topic layout (retained JSON unless noted):
   <base>/cmd/<domain>/<object_id>/<field>        entity commands (subscribed)
   <base>/call/<domain>/<service>                 any service call, JSON payload (subscribed)
   <base>/result/<domain>/<service>               call outcome, NOT retained
+  <base>/health                                  health verdict of the running integration
+  <base>/manager                                 versions, updates, resources (manager_device.py)
+  <base>/manager/cmd/<action>                    manager actions, with manager_commands (subscribed)
+  <base>/manager/result                          action outcome, NOT retained
 
 The document carries the live state, all attributes, timestamps and the
 registry metadata (unique_id, names, device_class, unit, icon, category,
@@ -94,6 +98,11 @@ class MqttConfig:
     # (entities you are still renaming or deleting stay there as zombies).
     discovery_enabled: bool = False
     discovery_prefix: str = "homeassistant"
+    # The manager as a device on the consuming HA (health, updates, resources)
+    # even while entity discovery is off, e.g. in shadow mode; manager_commands
+    # lets that HA install updates, restart and back up through it.
+    manager_discovery: bool = False
+    manager_commands: bool = False
 
 
 def _notification_count(hass: HomeAssistant) -> int:
@@ -219,6 +228,8 @@ class MqttPublisher:
         # entity_id -> document topic last published (the registry entry is
         # already gone when the remove event fires, so recompute is wrong)
         self._topics: dict[str, str] = {}
+        self.manager = None  # ManagerDevice (manager_device.py), set by __init__
+        self._manager_clear_pending = False  # manager_discovery was turned off: remove the device from the consumer once
 
     # ----- identity --------------------------------------------------------
 
@@ -258,7 +269,7 @@ class MqttPublisher:
                 continue  # derived from the running integration, never stored from the UI
             if k == "password" and v == "":
                 continue  # blank in the UI means "keep"
-            if k in ("enabled", "discovery_enabled", "force_base_topic"):
+            if k in ("enabled", "discovery_enabled", "force_base_topic", "manager_discovery", "manager_commands"):
                 if not isinstance(v, bool):
                     raise ValueError(f"{k} must be true or false")
             elif k in ("port", "republish_interval_s", "qos", "full_republish_interval_min"):
@@ -339,6 +350,8 @@ class MqttPublisher:
         connected, everything we own under the old names is cleared first
         (a stop is not a move: the consumer keeps its entities)."""
         new = await self.hass.async_add_executor_job(self._load)
+        if self.config.manager_discovery and not new.manager_discovery:
+            self._manager_clear_pending = True
         # A stop (wanted identity None) is NOT a move: the consumer keeps its
         # entities, marked unavailable by the retained "offline"; clearing
         # would delete them there with every customisation.  Uninstall clears.
@@ -392,7 +405,7 @@ class MqttPublisher:
             return False
         if topic == f"{base_topic}/status":
             return payload in (b"online", b"offline")
-        if topic.startswith((f"{base_topic}/cmd/", f"{base_topic}/call/", f"{base_topic}/result/")):
+        if topic.startswith((f"{base_topic}/cmd/", f"{base_topic}/call/", f"{base_topic}/result/", f"{base_topic}/manager/cmd/")):
             return True  # a consumer that retained a command must not block our connect
         try:
             doc = json.loads(payload)
@@ -402,6 +415,8 @@ class MqttPublisher:
             return False
         if topic == f"{base_topic}/health":
             return "updated_at" in doc and "base_topic" in doc
+        if topic == f"{base_topic}/manager":
+            return "updated_at" in doc and "manager_version" in doc
         if topic.startswith(base_topic + "/"):
             return ("published_at" in doc and "integration" in doc) or "call_topic" in doc
         # exact origin of THIS identity: instance hass_a must not clear hass_a_b's configs
@@ -633,7 +648,7 @@ class MqttPublisher:
         client.publish(self._status_topic(), "online", qos=1, retain=True)
         # Commands from the consuming HA: <base>/cmd/<domain>/<object_id>/<field>
         # and generic service calls: <base>/call/<domain>/<service>
-        client.subscribe([(f"{self._cmd_base()}/#", 1), (f"{self._call_base()}/#", 1)])
+        client.subscribe([(f"{self._cmd_base()}/#", 1), (f"{self._call_base()}/#", 1), (f"{self._manager_cmd_base()}/+", 1)])
         _LOGGER.info("MQTT connected to %s:%s", self.config.host, self.config.port)
         events.emit("mqtt", f"connected to {self.config.host}:{self.config.port} as {self.base_topic}")
         # Runs in paho's thread: hop onto the HA loop for the full publish.  A
@@ -660,6 +675,9 @@ class MqttPublisher:
     def _call_base(self) -> str:
         return f"{self.base_topic}/call"
 
+    def _manager_cmd_base(self) -> str:
+        return f"{self.base_topic}/manager/cmd"
+
     def _on_message(self, client, userdata, msg) -> None:
         """Command or service call from the consuming HA (paho thread).
         Anything raised here would end paho's network loop, so nothing may."""
@@ -673,6 +691,10 @@ class MqttPublisher:
             # a command published with retain would run again at every
             # (re)subscription: physical effects must never replay
             _LOGGER.warning("MQTT: ignoring retained command on %s (commands must not be retained)", msg.topic)
+            return
+        manager_prefix = self._manager_cmd_base() + "/"
+        if msg.topic.startswith(manager_prefix):
+            self._on_manager_command(msg.topic[len(manager_prefix):], msg.payload.decode(errors="replace"))
             return
         call_prefix = self._call_base() + "/"
         if msg.topic.startswith(call_prefix):
@@ -735,6 +757,22 @@ class MqttPublisher:
                 self._finish(rec, "late-error" if late else "error", f"{type(err).__name__}: {err}")
 
         self.hass.loop.call_soon_threadsafe(lambda: self.hass.async_create_task(_call()))
+
+    def _on_manager_command(self, action: str, payload: str) -> None:
+        """<base>/manager/cmd/<action> (paho thread): see manager_device.py."""
+        rec = self._remember("manager", action[:40], payload)
+        expected = disc.MANAGER_ACTIONS.get(action)
+        if expected is None or payload.strip() != expected:
+            # an empty payload clearing a retained command reaches live subscribers too: never an action
+            self._finish(rec, "rejected", f"unknown action {action!r}" if expected is None else f"payload must be {expected!r}")
+            return
+        if not self.config.manager_commands:
+            self._finish(rec, "rejected", "manager_commands is off")
+            return
+        if self.manager is None:
+            self._finish(rec, "rejected", "the manager device is not set up")
+            return
+        self.hass.loop.call_soon_threadsafe(lambda: self.hass.async_create_task(self.manager.async_action(action, rec)))
 
     def _remember(self, kind: str, what: str, data: Any, call_id: Any = None) -> dict[str, Any]:
         rec = {"id": call_id, "kind": kind, "what": what, "data": (json.dumps(data, default=str) if not isinstance(data, str) else data)[:200],
@@ -1052,7 +1090,7 @@ class MqttPublisher:
     def discovery_preview(self) -> list[dict[str, Any]]:
         """What would be (or is) published as discovery, for the UI/API."""
         groups, counts = self._group_by_device()
-        hid, hblock, hcomps = self._health_discovery()
+        hid, hblock, hcomps = self._manager_discovery()
         groups[hid] = (hblock, hcomps)
         return [
             {"discovery_id": disc_id, "topic": self._discovery_topic(disc_id), "device": block,
@@ -1086,7 +1124,7 @@ class MqttPublisher:
         if not self.config.discovery_enabled:
             return  # e.g. a delayed republish that lands after an undo
         groups, counts = self._group_by_device()
-        hid, hblock, hcomps = self._health_discovery()
+        hid, hblock, hcomps = self._manager_discovery()
         groups[hid] = (hblock, hcomps)
         # via_device only towards devices that are announced too (the consumer
         # would create a nameless stub otherwise); parents before children
@@ -1228,6 +1266,9 @@ class MqttPublisher:
     def _health_topic(self) -> str:
         return f"{self.base_topic}/health"
 
+    def _manager_topic(self) -> str:
+        return f"{self.base_topic}/manager"
+
     def build_health(self, grace: bool = True) -> dict[str, Any]:
         """The retained health document: what the installer knows about the
         running integration plus what this process sees of its entities.
@@ -1296,30 +1337,40 @@ class MqttPublisher:
         return doc
 
     async def _on_health_timer(self, _now) -> None:
+        if self.manager is not None:
+            await self.manager.async_sample()
         self.publish_health()
+        self.publish_manager()
+        self._publish_manager_discovery()
 
-    def _health_discovery(self) -> tuple[str, dict[str, Any], dict[str, dict[str, Any]]]:
-        """A 'manager' device on the consuming HA with two entities fed by the
-        health document: a connectivity binary_sensor (on while the running
-        integration is ok/degraded) and a sensor with the state + every
-        health field as attributes.  Both go unavailable with the LWT."""
-        key = self.base_topic
-        health = self._health_topic()
-        integ = (self._health_last or {}).get("integration") or "none"
-        avail = [{"topic": self._status_topic()}]
-        common = {"availability": avail, "payload_available": "online", "payload_not_available": "offline",
-                  "json_attributes_topic": health, "entity_category": "diagnostic"}
-        block = {"identifiers": [f"{key}_manager"], "name": f"hass-remote-integration ({key})", "manufacturer": "hass-remote-integration",
-                 "model": f"integration manager, running {integ}", "sw_version": str((self._health_last or {}).get("version") or "")}
-        comps = {
-            f"binary_sensor.{key}_integration": {**common, "platform": "binary_sensor", "name": f"{integ} integration", "device_class": "connectivity",
-                                                  "unique_id": f"{self.prefix}health_online", "default_entity_id": f"binary_sensor.{key}_integration",
-                                                  "state_topic": health, "value_template": "{{ 'ON' if value_json.state in ['ok', 'degraded'] else 'OFF' }}"},
-            f"sensor.{key}_health": {**common, "platform": "sensor", "name": f"{integ} health", "icon": "mdi:heart-pulse",
-                                     "unique_id": f"{self.prefix}health_state", "default_entity_id": f"sensor.{key}_health",
-                                     "state_topic": health, "value_template": "{{ value_json.state }}"},
-        }
-        return f"{key}_manager", block, comps
+    def publish_manager(self) -> None:
+        if self.manager is not None and self._connected and not self._moving:
+            self._publish(self._manager_topic(), _dumps(self.manager.document()))
+
+    def publish_manager_result(self, result: dict[str, Any]) -> None:
+        c = self._client
+        if c is not None and self._connected:
+            c.publish(f"{self.base_topic}/manager/result", _dumps(result), qos=1, retain=False)
+
+    def _publish_manager_discovery(self) -> None:
+        """The manager device on its own while entity discovery is off (with
+        discovery on, _publish_discovery_all carries it)."""
+        if self.config.discovery_enabled or not self._connected or self._moving:
+            return
+        mid, block, comps = self._manager_discovery()
+        if self.config.manager_discovery:
+            self._manager_clear_pending = False
+            self._publish_device_discovery(mid, block, comps)
+        elif self._manager_clear_pending and self._publish(self._discovery_topic(mid), None, qos=1):
+            self._discovery_map.pop(mid, None)
+            self._blocks.pop(mid, None)
+            self._manager_clear_pending = False
+
+    def _manager_discovery(self) -> tuple[str, dict[str, Any], dict[str, dict[str, Any]]]:
+        return disc.manager_device(
+            self.base_topic, self.prefix,
+            {"status": self._status_topic(), "health": self._health_topic(), "manager": self._manager_topic(), "cmd": self._manager_cmd_base()},
+            (self._health_last or {}).get("integration"), self.manager.version if self.manager else "", self.config.manager_commands)
 
     # ----- service catalog ------------------------------------------------
 
@@ -1457,6 +1508,7 @@ class MqttPublisher:
         if self.config.discovery_enabled:
             self._publish_discovery_all()
         self.publish_health()
+        self._publish_manager_discovery()
 
     async def _async_services_refresh(self) -> None:
         if self._connected and not self._moving:
@@ -1495,6 +1547,8 @@ class MqttPublisher:
         self.stats["last_full_republish"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         if self.config.discovery_enabled:
             self._publish_discovery_all()
+        self._publish_manager_discovery()
+        self.publish_manager()
         await self._publish_services()
         _LOGGER.info(
             "MQTT full republish: %s entities, %s services, discovery: %s devices / %s components",
@@ -1523,6 +1577,9 @@ class MqttPublisher:
             ),
             "discovery_enabled": self.config.discovery_enabled,
             "discovery_prefix": self.config.discovery_prefix,
+            "manager_discovery": self.config.manager_discovery,
+            "manager_commands": self.config.manager_commands,
+            "manager_topic": self._manager_topic(),
             "cmd_base": self._cmd_base(),
             "call_base": self._call_base(),
             "health_topic": self._health_topic(),
