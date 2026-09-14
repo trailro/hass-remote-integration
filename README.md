@@ -111,7 +111,7 @@ directory of its own:
 
 ```bash
 mkdir hass-remote-integration && cd hass-remote-integration
-curl -fsSLO https://raw.githubusercontent.com/trailro/hass-remote-integration/v0.9.0/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/trailro/hass-remote-integration/v0.10.0/docker-compose.yml
 ```
 
 Put your settings in a `.env` file next to `docker-compose.yml`:
@@ -119,7 +119,7 @@ Put your settings in a `.env` file next to `docker-compose.yml`:
 ```bash
 TZ=Europe/Berlin          # your time zone
 HRI_PORT=8087             # port of the UI
-# HRI_VERSION=0.9.0       # optional: pin a release (default: latest)
+# HRI_VERSION=0.10.0      # optional: pin a release (default: latest)
 # HRI_PASSWORD=...        # optional: require a password for the UI and API
 ```
 
@@ -589,7 +589,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 |---|---|---|
 | `HRI_PORT` | `8087` | Port of the UI and API |
 | `HRI_NAME` | `hass-remote-integration` | Container and volume name |
-| `HRI_VERSION` | `latest` | Image tag Compose pulls, for example `0.9.0` |
+| `HRI_VERSION` | `latest` | Image tag Compose pulls, for example `0.10.0` |
 | `TZ` | `UTC` | Time zone |
 | `HA_VERSION_LATEST` | `1` | `0` installs the image's baseline HA on a fresh volume instead of the newest |
 | `HRI_DEV_SRC` | `./dev-src` | Dev mode: directory mounted at `/dev-src` |
