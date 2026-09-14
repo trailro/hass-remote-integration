@@ -3,11 +3,12 @@
 ``<base>/manager`` (retained JSON, refreshed with the health document every
 60 s) carries what the manager knows beyond the integration's health:
 
-* ``updates``: for the running integration (the newest stable GitHub release
-  not in the store yet, from the release check), for Home Assistant in this
-  container (PyPI) and for hass-remote-integration itself (its GitHub
-  releases), each in the JSON form Home Assistant's MQTT ``update`` platform
-  reads;
+* ``updates``: for the running integration (the newest of the release
+  check's result and the versions already in the store), for Home Assistant
+  in this container (PyPI) and for hass-remote-integration itself (its
+  GitHub releases), each in the JSON form Home Assistant's MQTT ``update``
+  platform reads; a failed check keeps what was known, a dev build
+  (``local``) never shows an update;
 * ``resources``: resident memory, CPU share of the process, event-loop lag
   (mean and worst delay of a 1 s timer since the previous sample: an
   integration that blocks the loop shows up here), threads, open files and
@@ -19,12 +20,13 @@ device with those as entities (discovery.manager_device).  With
 (never retained; each action accepts exactly one payload, see
 discovery.MANAGER_ACTIONS):
 
-* ``install_integration``: preflight, install and start the newest release
-  (a start takes a backup, runs the smoke test and rolls back on its own,
-  as from the UI), then a restart if the running code has to be replaced;
+* ``install_integration``: preflight, install (unless that version is in
+  the store already) and start the newest release (a start takes a backup,
+  runs the smoke test and rolls back on its own, and MQTT follows it, as
+  from the UI), then a restart if the running code has to be replaced;
 * ``install_home_assistant``: the newest stable Home Assistant (upgrades
   only, backup first, configuration kept), then a restart;
-* ``restart``, ``backup``, ``check_updates``.
+* ``restart``, ``backup`` (at most every 10 min), ``check_updates`` (every 5 min).
 
 The outcome goes to ``<base>/manager/result`` (not retained), the MQTT
 command history and the timeline.  ``GET /api/manager`` returns the
@@ -66,6 +68,7 @@ _LOGGER = logging.getLogger(__name__)
 
 MANAGER_REPO = "trailro/hass-remote-integration"
 VERSION_CHECK_S = 12 * 3600
+MIN_INTERVAL_S = {"backup": 600, "check_updates": 300}  # a flood of presses must not rotate every backup away
 LAG_TICK_S = 1.0
 RESOURCE_KEYS = ("memory_mb", "cpu_pct", "loop_lag_ms", "loop_lag_max_ms", "threads", "open_files", "volume_used_pct", "volume_free_gb")
 
@@ -85,7 +88,7 @@ def _update(installed: str | None, latest: str | None, title: str, url: str | No
     """One update entity's payload; {} (ignored by the consumer) when nothing is installed."""
     if not installed:
         return {}
-    newer = bool(latest) and key(latest) > key(installed)
+    newer = bool(latest) and installed != "local" and key(latest) > key(installed)  # a dev build is not "older"
     doc: dict[str, Any] = {"installed_version": installed, "latest_version": latest if newer else installed, "title": title, "in_progress": in_progress}
     if newer and url:
         doc["release_url"] = url
@@ -139,6 +142,9 @@ class ManagerDevice:
         self.publisher = publisher
         self.resources: dict[str, Any] = dict.fromkeys(RESOURCE_KEYS)
         self.manager_latest: str | None = None
+        self.manager_tag: str | None = None
+        self._ha_latest: str | None = None
+        self._last_run: dict[str, float] = {}
         self.last_action: dict[str, Any] | None = None
         self._ha_desired: str | None = None
         self._cpu_at: tuple[float, float] | None = None
@@ -178,7 +184,9 @@ class ManagerDevice:
                                    headers=self.installer.settings.github_headers(), timeout=aiohttp.ClientTimeout(total=20)) as resp:
                 if resp.status == 200:
                     tag = str((await resp.json()).get("tag_name") or "")
-                    self.manager_latest = tag[1:] if tag.startswith(("v", "V")) else tag or None
+                    if tag:
+                        self.manager_tag = tag
+                        self.manager_latest = tag[1:] if tag.startswith(("v", "V")) else tag
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("hass-remote-integration release check failed: %s", err)
         await self.updater.available(force=force)  # records its own error
@@ -216,14 +224,29 @@ class ManagerDevice:
 
     # ----- document ------------------------------------------------------------
 
+    def integration_latest(self) -> str | None:
+        """The newest stable version of the running integration known here:
+        the release check's result or a version already in the store (one
+        installed but not started, or rolled back from)."""
+        inst = self.installer
+        domain = inst.running
+        if not domain:
+            return None
+        known = [t for t in (inst.state.installed.get(domain) or {}).get("versions", {}) if t != inst.LOCAL_TAG]
+        if inst.updates.get(domain):
+            known.append(inst.updates[domain])
+        return max(known, key=vkey) if known else None
+
     def document(self) -> dict[str, Any]:
         inst = self.installer
         domain, tag = inst.running, inst.running_tag
         spec = inst.spec(domain) if domain else {}
         repo = spec.get("repo")
-        integ_latest = inst.updates.get(domain) if domain else None
+        integ_latest = self.integration_latest()
         ha_info = self.updater._cache[1] if self.updater._cache else {}  # noqa: SLF001 - what the last PyPI check found, no request here
-        ha_latest = ha_info.get("latest_stable")
+        if ha_info.get("latest_stable"):
+            self._ha_latest = ha_info["latest_stable"]  # a failed check (latest_stable None) keeps what was known
+        ha_latest = self._ha_latest
         return {
             "manager_version": self.version,
             "integration": domain,
@@ -234,9 +257,10 @@ class ManagerDevice:
                                        if repo and integ_latest else None, vkey, self._running == "install_integration"),
                 "home_assistant": _update(HA_VERSION, ha_latest, "Home Assistant (in the container)",
                                           f"https://github.com/home-assistant/core/releases/tag/{ha_latest}" if ha_latest else None, ha_vkey,
-                                          self._running == "install_home_assistant" or bool(self._ha_desired and self._ha_desired != HA_VERSION)),
+                                          self._running == "install_home_assistant"
+                                          or bool(self._ha_desired and ha_vkey(self._ha_desired) > ha_vkey(HA_VERSION))),
                 "manager": _update(self.version, self.manager_latest, "hass-remote-integration",
-                                   f"https://github.com/{MANAGER_REPO}/releases/tag/v{self.manager_latest}" if self.manager_latest else None, vkey),
+                                   f"https://github.com/{MANAGER_REPO}/releases/tag/{self.manager_tag}" if self.manager_tag else None, vkey),
             },
             "resources": self.resources,
             "patches": inst._patch_status(domain) or "none",  # noqa: SLF001
@@ -253,9 +277,12 @@ class ManagerDevice:
             res: dict[str, Any] = {"ok": False, "error": f"unknown action {action!r}"}
         elif self._action_lock.locked():
             res = {"ok": False, "error": f"{self._running} is still running"}
+        elif (wait := MIN_INTERVAL_S.get(action, 0) - (time.monotonic() - self._last_run.get(action, -1e9))) > 0:
+            res = {"ok": False, "error": f"{action} ran moments ago: try again in {int(wait) + 1} s"}
         else:
             async with self._action_lock:
                 self._running = action
+                self._last_run[action] = time.monotonic()
                 self.publisher.publish_manager()  # in_progress shows at once
                 try:
                     res = await getattr(self, f"_do_{action}")()
@@ -285,19 +312,24 @@ class ManagerDevice:
         domain = inst.running
         if not domain:
             raise ValueError("no integration is running")
-        tag = inst.updates.get(domain)
-        if not tag:
+        running = inst.running_tag
+        tag = self.integration_latest()
+        if running == inst.LOCAL_TAG:
+            raise ValueError(f"{domain} runs a dev build: install releases from the UI")
+        if not tag or (running and vkey(tag) <= vkey(running)):
             raise ValueError(f"no newer release of {domain} is known: check for updates first")
         async with preflight.LOCK:
             report = await preflight.run(self.hass, inst, domain, tag)
         if not report["ok"]:
             raise ValueError(f"preflight of {domain} {tag} blocked: {'; '.join(report['blockers'])}")
-        res = await inst.install(tag, domain=domain)
-        if not res.get("ok"):
-            raise ValueError(f"install of {domain} {tag} failed: {res.get('error')}")
+        if tag not in (inst.state.installed.get(domain) or {}).get("versions", {}):
+            res = await inst.install(tag, domain=domain)
+            if not res.get("ok"):
+                raise ValueError(f"install of {domain} {tag} failed: {res.get('error')}")
         res = await inst.start(domain, tag)
         if not res.get("ok"):
             raise ValueError(f"start of {domain} {tag} failed: {res.get('error')}")
+        await self.publisher.async_after_start(res)
         return {"ok": True, "note": f"{domain} {tag} started", "restart": bool(res.get("restart_required"))}
 
     async def _do_install_home_assistant(self) -> dict[str, Any]:

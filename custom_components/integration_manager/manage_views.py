@@ -52,12 +52,10 @@ class RunView(ManagerView):
         else:
             return self.json_message("unknown action", status_code=400)
         if res.get("ok"):
-            await self.publisher.async_reconnect()
-            if res.get("pre_update_backup") and action == "start":
-                # a version switch: documents of entities the new version no
-                # longer has would stay retained (discovery is NOT reset: the
-                # consumer would delete and recreate every entity)
-                res["stale_docs_cleared"] = await self.publisher.async_clear_stale_docs()
+            if action == "start":
+                await self.publisher.async_after_start(res)
+            else:
+                await self.publisher.async_reconnect()
             res["mqtt"] = {"connected": self.publisher.stats.get("connected"), "base_topic": self.publisher.base_topic,
                            "connect_error": self.publisher.stats.get("connect_error")}
         return self.json(res)
@@ -249,7 +247,11 @@ class PatchEditView(ManagerView):
         name, text = body.get("name"), body.get("text")
         if not _DOMAIN_RE.match(domain) or not isinstance(name, str) or not isinstance(text, str):
             return self.json({"ok": False, "error": "domain, name and text required"})
-        if len(text.encode("utf-8")) > MAX_PATCH:
+        try:
+            size = len(text.encode("utf-8"))
+        except UnicodeEncodeError:
+            return self.json({"ok": False, "error": "text is not valid UTF-8"})
+        if size > MAX_PATCH:
             return self.json({"ok": False, "error": "patch too large"})
         name = name.strip()
         cfg = self.hass.config.config_dir
@@ -263,6 +265,8 @@ class PatchEditView(ManagerView):
         if (err := patches.validate(name, text)):
             return self.json({"ok": False, "error": err})
         overrides = patches.is_bundled(cfg, domain, name)
+        if body.get("create") and os.path.isfile(os.path.join(patches.patch_dir(cfg, domain), name)):
+            return self.json({"ok": False, "error": f"a patch named {name} exists already: choose another name or edit that one"})
 
         def _write() -> None:
             d = patches.patch_dir(cfg, domain)
@@ -314,6 +318,11 @@ class PatchActionView(ManagerView):
             if patches.is_bundled(cfg, domain, name):
                 return self.json({"ok": False, "error": "bundled with the image: cannot be deleted (a user patch of the same name overrides it)"})
             os.remove(path)
+            if domain == self.installer.running:
+                rows = await self.hass.async_add_executor_job(self.installer._patch_rows, domain)
+                self.installer._notify_patches(domain, rows)
+            else:
+                self.installer.dismiss_patch_notification(domain)
             return self.json({"ok": True, "note": "the file is gone; code already patched stays patched until the version is redeployed"})
         return self.json_message("unknown action", status_code=400)
 

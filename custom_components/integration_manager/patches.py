@@ -30,6 +30,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import tempfile
 from dataclasses import dataclass
 from typing import Any
@@ -130,9 +131,14 @@ def _applies(text: str, running_tag: str | None = None) -> tuple[bool, str]:
 
 
 def _load_module(path: str):
-    spec = importlib.util.spec_from_file_location("user_patch_" + re.sub(r"\W", "_", os.path.basename(path)), path)
+    name = "user_patch_" + re.sub(r"\W", "_", os.path.basename(path))
+    spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    sys.modules[name] = mod  # dataclasses and typing resolve the module through sys.modules while it executes
+    try:
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    finally:
+        sys.modules.pop(name, None)
     return mod
 
 
@@ -294,8 +300,8 @@ def parse_unified(text: str) -> list[_FilePatch]:
                          old_n=int(m.group(2) or 1), new_n=int(m.group(4) or 1))
             cur.hunks.append(hunk)
             continue
-        if hunk is None:
-            continue
+        if hunk is None or hunk.complete:
+            continue  # between hunks or files (a blank line after the last hunk is not context)
         if line.startswith("+"):
             hunk.new_lines.append(line[1:])
         elif line.startswith("-"):

@@ -98,12 +98,13 @@ Footprint: roughly 170–210 MB of RAM with a typical integration running, and a
 ## Quick start
 
 The image is published on GitHub Container Registry for `amd64` and `arm64`
-(a Raspberry Pi with a 64-bit OS, Apple silicon, most NAS boxes). All you need
-is the compose file, in a directory of its own:
+(a Raspberry Pi with a 64-bit OS, Apple silicon, most NAS boxes), from 0.9.0 on.
+All you need is the compose file of the release you run, in a directory of its
+own:
 
 ```bash
 mkdir hass-remote-integration && cd hass-remote-integration
-curl -fsSLO https://raw.githubusercontent.com/trailro/hass-remote-integration/main/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/trailro/hass-remote-integration/v0.9.0/docker-compose.yml
 ```
 
 Put your settings in a `.env` file next to `docker-compose.yml`:
@@ -397,7 +398,7 @@ upstream ships it. Patches are applied after the requirements, every time the
 integration starts and at every boot:
 
 - `patches/<domain>/` in this repository ships with the image (empty here;
-  use it in your own image builds);
+  use it in your own image builds, with `docker-compose.build.yml`);
 - your own go to `integration_manager/patches/<domain>/` on the volume (upload
   on the Integration page); a file of the same name overrides a bundled one.
 
@@ -487,11 +488,11 @@ hass_<domain>/manager/result                        outcome of a manager action,
   the loop shows up), volume usage and the patch status.
 - **Manager actions** (`manager_commands`, off by default): *Install* on the
   integration and Home Assistant update entities, plus *Restart*, *Back up now*
-  and *Check for updates* buttons. Installing the integration runs the
+  (at most every 10 minutes) and *Check for updates* (every 5 minutes) buttons. Installing the integration runs the
   preflight, then installs and starts the release the way the UI does (backup,
   smoke test, automatic rollback) and restarts when the loaded code has to be
-  replaced; installing Home Assistant takes a backup, keeps the configuration
-  and restarts. Anyone who can publish under the base topic can use them, so
+  replaced; installing Home Assistant (upgrades only) takes a backup, keeps the
+  configuration and restarts. Anyone who can publish under the base topic can use them, so
   turn this on only on a broker with credentials. hass-remote-integration
   itself is updated by pulling a new image.
 - Before connecting, the container checks that no *foreign* retained data sits

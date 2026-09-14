@@ -28,6 +28,7 @@ from .scheduler import Scheduler
 from .ui import StaticView
 from .diagnostics import DiagnosticsView
 from .memdiag import MemoryDiagView
+from .manager_device import ManagerDevice, ManagerStatusView
 from .parity import CutoverView, ParityActionView, ParityPageView, ParityView
 from .views import (
     HaActionView,
@@ -138,8 +139,6 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     publisher = MqttPublisher(hass, key_provider=lambda: installer.instance_key, health_provider=installer.health,
                               rules_provider=installer.settings.health_for)
     installer.health_source = publisher.build_health
-    from .manager_device import ManagerDevice, ManagerStatusView
-
     manager_device = ManagerDevice(hass, installer, ha_updater, publisher)
     publisher.manager = manager_device
     manager_device.start()
