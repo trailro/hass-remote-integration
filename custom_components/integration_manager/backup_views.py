@@ -9,7 +9,9 @@ import tempfile
 from typing import Any
 
 from aiohttp import web
+from homeassistant.const import __version__ as HA_VERSION
 from homeassistant.core import HomeAssistant
+from jsonio import ha_vkey
 
 from . import events, ha_import
 from .http_util import ManagerView, with_body
@@ -27,17 +29,21 @@ def _name_ok(name: str) -> bool:
 class BackupsView(ManagerView):
     url = "/api/backups"
 
-    def __init__(self, hass: HomeAssistant, installer) -> None:
+    def __init__(self, hass: HomeAssistant, installer, updater=None) -> None:
         self.hass = hass
         self.installer = installer
+        self.updater = updater  # HaUpdater: installed venvs, versions a restore may switch to
 
     async def get(self, request: web.Request) -> web.Response:
         cfg = self.hass.config.config_dir
         items, pending, parts, last = await self.hass.async_add_executor_job(
             lambda: (backupkit.list_backups(cfg), backupkit.pending(cfg), backupkit.pending_parts(cfg) if backupkit.pending(cfg) else None,
                      _last_restore(self.hass)))
+        boot, venvs = await self.hass.async_add_executor_job(
+            lambda: (backupkit.boot_version(cfg), self.updater._installed_venvs() if self.updater else []))  # noqa: SLF001
         return self.json({"backups": items, "pending_restore": pending, "keep": self.installer.settings.backup_keep,
-                          "parts": list(backupkit.PARTS), "pending_parts": parts, "last_restore": last})
+                          "parts": list(backupkit.PARTS), "pending_parts": parts, "last_restore": last,
+                          "ha_current": HA_VERSION, "ha_boot": boot or HA_VERSION, "ha_installed": venvs})
 
 
 class BackupCreateView(ManagerView):
@@ -117,9 +123,10 @@ class BackupUploadView(ManagerView):
 class BackupActionView(ManagerView):
     url = "/api/backups/{name}/{action}"
 
-    def __init__(self, hass: HomeAssistant, installer) -> None:
+    def __init__(self, hass: HomeAssistant, installer, updater=None) -> None:
         self.hass = hass
         self.installer = installer
+        self.updater = updater  # HaUpdater: installed venvs, versions a restore may switch to
 
     async def get(self, request: web.Request, name: str, action: str) -> web.Response:
         if action != "download" or not _name_ok(name):
@@ -149,6 +156,47 @@ class BackupActionView(ManagerView):
                 parts = body.get("parts")
                 if parts is not None and not (isinstance(parts, list) and all(isinstance(x, str) for x in parts)):
                     return self.json({"ok": False, "error": "parts must be a list"})
+                # Home Assistant only migrates a configuration forward: a backup made on another version is
+                # restored on the version that boots ("keep", it migrates forward) or together with a switch
+                # to the version it was made on ("backup", the only way for a backup of a newer version)
+                choice = str(body.get("ha") or "keep")
+                if choice not in ("keep", "backup"):
+                    return self.json({"ok": False, "error": "ha must be keep or backup"})
+                made_on = (await self.hass.async_add_executor_job(backupkit.describe, cfg, name)).get("ha_version")
+                boot = await self.hass.async_add_executor_job(backupkit.boot_version, cfg) or HA_VERSION
+                touches_storage = parts is None or "storage" in parts
+                if choice == "keep" and made_on and touches_storage and ha_vkey(made_on) > ha_vkey(boot):
+                    return self.json({"ok": False, "needs_ha": made_on,
+                                      "error": f"backup was made on Home Assistant {made_on}, newer than {boot}: Home Assistant cannot read a newer "
+                                               f"configuration, restore it together with a switch to {made_on}"})
+                if choice == "backup" and made_on and made_on != boot:
+                    if self.updater is None:
+                        return self.json({"ok": False, "error": "Home Assistant version changes are not available here"})
+                    if made_on != HA_VERSION:
+                        from .views import async_change_ha_version
+
+                        await self.updater.validate(made_on)
+                        result = await async_change_ha_version(self.installer, self.updater, made_on, "restore", "restore",
+                                                               restore_backup=name, parts=parts)
+                        events.emit("restore", f"{name} scheduled with Home Assistant {made_on}, the version it was made on "
+                                    f"({', '.join(parts) if parts else 'everything'}); backup {result['backup']} first", backup=name, version=made_on)
+                        return self.json({"ok": True, "parts": parts or list(backupkit.PARTS), "ha": made_on, "pre_change_backup": result["backup"],
+                                          "note": f"Home Assistant {made_on} is installed if needed and the backup restored at the next restart"})
+                    # made on the running version while a switch to another one is scheduled: that switch goes,
+                    # once the backup is known to be restorable and no other change is being prepared
+                    from .views import _HA_CHANGE_LOCK
+
+                    if _HA_CHANGE_LOCK.locked():
+                        return self.json({"ok": False, "error": "a Home Assistant version change is being prepared: try again in a moment"})
+                    await self.hass.async_add_executor_job(backupkit.validate, path)
+                    await self.hass.async_add_executor_job(self.updater.cancel_config_change)
+                    self.updater.set_desired(HA_VERSION)
+                elif self.updater is not None:
+                    # a restore by hand would take the place of the restore or clean start a scheduled switch needs
+                    change = (await self.hass.async_add_executor_job(self.updater._read)).get("change")  # noqa: SLF001
+                    if isinstance(change, dict) and change.get("mode") in ("restore", "rebuild") and change.get("to") != HA_VERSION:
+                        return self.json({"ok": False, "error": f"a switch to Home Assistant {change.get('to')} with a {'configuration restore' if change.get('mode') == 'restore' else 'clean start'} "
+                                                                "is scheduled: cancel it on System (choose the running version) before restoring a backup"})
                 await self.hass.async_add_executor_job(backupkit.schedule_restore, cfg, name, parts)
                 await self.hass.async_add_executor_job(ha_import.drop_rebuild, cfg)  # the restore replaces a scheduled clean start
                 events.emit("restore", f"{name} scheduled for the next restart ({', '.join(parts) if parts else 'everything'})", backup=name)
@@ -156,6 +204,8 @@ class BackupActionView(ManagerView):
                                   "note": "restore is applied by the entrypoint at the next process restart"})
         except ValueError as err:
             return self.json({"ok": False, "error": str(err)})
+        except OSError as err:  # a full disk while backing up, an unreadable backup
+            return self.json({"ok": False, "error": f"{type(err).__name__}: {err}"})
         return self.json_message("unknown action", status_code=400)
 
 

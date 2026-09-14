@@ -1,10 +1,15 @@
-let groups=[], gOn=new Set(), lastId=0, shown=0;
+let groups=[], gOn=new Set(), lastId=0, shown=0, gen=0, following=false;
 function prefixes(){ return groups.filter(g=>gOn.has(g.name)).flatMap(g=>g.loggers); }
 function line(r){ return `<span class="l ${esc(r.level)}"><span class="ts">${esc(r.ts.slice(11))}</span> ${esc(r.level.padEnd(7))} <span class="lg">${esc(r.logger)}</span> ${esc(r.message)}${r.exc?`<span class="exc">${esc(r.exc)}</span>`:''}</span>`; }
 async function fetchLogs(reset){
+ // a reset (new filter) invalidates every answer still on its way; follow polls never overlap
+ if(reset) gen++; else if(following) return;
+ const mine=gen; if(!reset) following=true;
  const p=new URLSearchParams({level:$('#level').value,q:$('#q').value,limit:reset?500:200,since_id:reset?0:lastId});
  prefixes().forEach(x=>p.append('prefix',x));
- const r=await (await fetch('/api/logs?'+p)).json();
+ let r; try{ r=await (await fetch('/api/logs?'+p)).json(); } finally { if(!reset) following=false; }
+ if(mine!==gen) return;
+ if(reset) lastId=0;
  $('#cap').textContent=r.capacity; $('#path').textContent=r.path||''; $('#ts').textContent=new Date().toLocaleTimeString();
  const out=$('#out'); if(reset){out.innerHTML='';shown=0;}
  const atBottom=out.scrollTop+out.clientHeight>=out.scrollHeight-20;

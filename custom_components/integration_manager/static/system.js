@@ -97,24 +97,50 @@ $('#imapply').onclick=async()=>{ if(!IMSEL) return; let data,options; try{data=J
   $('#imresult').textContent=r.ok?`ok: entry ${r.entry_id.slice(0,8)} state ${r.state}; storage copied: ${r.copied_storage.join(', ')||'none'}${r.alignment?`; aligned ${r.alignment.entities} entities / ${r.alignment.devices} devices (${r.alignment.pending_entities} pending)`:''}; extracted backup removed`:'ERROR: '+r.error; if(r.ok){IMS=null;IMSEL=null;imRender();} sysStatus(); };
 imLoad().catch(e=>log('import: '+e));
 const fmtB=b=>b>1048576?(b/1048576).toFixed(1)+' MB':(b/1024).toFixed(0)+' KB';
+let BK={};
+async function doRestore(n,parts,ha){
+  const r=await post(`api/backups/${encodeURIComponent(n)}/restore`,{parts,ha}); if(!r.ok){$('#bkmsg').textContent='ERROR: '+r.error;return;}
+  const rr=await post('api/restart'); if(!rr.ok){$('#bkmsg').textContent='restore scheduled, but the restart was refused: '+rr.error;return;}
+  log(r.ha?`restore with Home Assistant ${r.ha} scheduled (backup ${r.pre_change_backup} taken first); restarting…`:'restore scheduled; restarting…');
+  setTimeout(()=>location.reload(),r.ha?20000:10000);
+}
+// a backup made on another Home Assistant version: Home Assistant only migrates a configuration forward
+function restorePlan(n,parts,made,boot){
+  const box=$('#bkrestore'), newer=vcmp(made,boot)>0, installed=(BK.ha_installed||[]).includes(made);
+  const what=parts?parts.join(' + '):'everything';
+  const venv=installed?'its venv is still on the volume':'it is downloaded and installed at the restart (a few minutes)';
+  const opt=(value,checked,title,note)=>`<label style="display:flex;gap:8px;align-items:flex-start;margin:6px 0;cursor:pointer"><input type="radio" name="bkha" value="${value}" ${checked?'checked':''} style="margin-top:3px"><span><b>${title}</b><br><span class="mut">${note}</span></span></label>`;
+  box.innerHTML=`<div style="font-weight:600;margin-bottom:6px">Restore ${esc(n)} (${esc(what)})</div>
+   <div style="margin-bottom:6px">This backup was made on Home Assistant <b>${esc(made)}</b>; this container ${boot===BK.ha_current?'runs':'boots next with'} <b>${esc(boot)}</b>. Home Assistant migrates a configuration forward, never back.</div>
+   ${newer?`<div class="warn">Home Assistant ${esc(boot)} cannot read a configuration made on ${esc(made)}, so the restore switches Home Assistant to ${esc(made)}: ${venv}. A backup of the current configuration is taken first and brought back if ${esc(made)} does not start.</div><input type="radio" name="bkha" value="backup" checked hidden>`
+   :opt('keep',true,`Keep Home Assistant ${esc(boot)} (default)`,`The restored configuration is migrated forward when Home Assistant starts; nothing to download.`)
+    +opt('backup',false,`Go back to Home Assistant ${esc(made)}`,`Exactly the state of the backup: ${venv}. A backup of the current configuration is taken first and brought back if ${esc(made)} does not start.`)}
+   <div class="row" style="margin-top:8px"><button id="bkrgo" class="primary">Restore and restart</button><button id="bkrcancel">Cancel</button></div>`;
+  box.hidden=false; box.scrollIntoView({behavior:'smooth',block:'center'});
+  $('#bkrcancel').onclick=()=>{box.hidden=true;box.innerHTML='';};
+  $('#bkrgo').onclick=()=>{const choice=(box.querySelector('input[name="bkha"]:checked')||{}).value||'keep'; box.hidden=true; box.innerHTML=''; doRestore(n,parts,choice);};
+}
 async function backups(){
-  const r=await (await fetch('api/backups')).json();
+  const r=await (await fetch('api/backups')).json(); BK=r;
   if(document.activeElement!==$('#bkkeep')) $('#bkkeep').value=String(r.keep??5);
   const t=$('#bklist'); t.querySelectorAll('tr:not(:first-child)').forEach(e=>e.remove());
   for(const b of r.backups){
     const tr=document.createElement('tr');
-    tr.innerHTML=`<td>${esc(b.name)}</td><td>${esc(b.label||'')}</td><td>${fmtB(b.bytes)}</td><td>${esc(b.files??'—')}</td>
+    tr.innerHTML=`<td>${esc(b.name)}</td><td>${esc(b.label||'')}</td><td class="mut">${esc(b.ha_version||'—')}</td><td>${fmtB(b.bytes)}</td><td>${esc(b.files??'—')}</td>
       <td><a href="api/backups/${encodeURIComponent(b.name)}/download" download>download</a> <button data-a="restore" data-n="${esc(b.name)}">Restore</button> <button data-a="delete" data-n="${esc(b.name)}">Delete</button></td>`;
     t.appendChild(tr);
   }
   t.querySelectorAll('button').forEach(b=>b.onclick=async()=>{
     const n=b.dataset.n, a=b.dataset.a;
     if(a==='delete'){ if(!confirm(`Delete backup ${n}?`)) return; const r=await post(`api/backups/${encodeURIComponent(n)}/delete`); $('#bkmsg').textContent=r.ok?'deleted':'ERROR: '+r.error; return backups(); }
-    if(a==='restore'){ const pv=$('#bkparts').value; const parts=pv?pv.split(','):null; if(!confirm(`Restore ${n}${parts?' ('+parts.join(' + ')+' only)':''}?
+    if(a==='restore'){ const pv=$('#bkparts').value; const parts=pv?pv.split(','):null;
+      const bk=(BK.backups||[]).find(x=>x.name===n)||{}, boot=BK.ha_boot||BK.ha_current;
+      // the Home Assistant version only matters when .storage comes back
+      if(bk.ha_version&&boot&&vcmp(bk.ha_version,boot)!==0&&(!parts||parts.includes('storage'))) return restorePlan(n,parts,bk.ha_version,boot);
+      if(!confirm(`Restore ${n}${parts?' ('+parts.join(' + ')+' only)':''}?
 
 The process restarts now; the entrypoint replaces ${parts?parts.join(', '):'.storage, custom_components and integration_manager'} from the backup (a pre-restore backup is taken first) and boots HA again.`)) return;
-      const r=await post(`api/backups/${encodeURIComponent(n)}/restore`,{parts}); if(!r.ok){$('#bkmsg').textContent='ERROR: '+r.error;return;}
-      const rr=await post('api/restart'); if(!rr.ok){$('#bkmsg').textContent='restore scheduled, but the restart was refused: '+rr.error;return;} log('restore scheduled; restarting…'); setTimeout(()=>location.reload(),10000); }
+      doRestore(n,parts,'keep'); }
   });
   $('#bkcancel').hidden=!r.pending_restore;
   const lr=r.last_restore; $('#bkpending').textContent=r.pending_restore?`a restore is scheduled for the next restart (${(r.pending_parts||[]).join(', ')})`:(lr?`last restore ${lr.at}: ${lr.ok?'ok, '+lr.files+' files (pre-restore copy '+lr.pre_restore+')':'FAILED: '+lr.error}`:'');

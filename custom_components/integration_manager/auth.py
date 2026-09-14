@@ -7,7 +7,9 @@ scripts.  Unset or empty: no login, as before.
 
 The session cookie carries its expiry and an HMAC over it and a tag of the
 password, keyed with a random key kept on the volume: changing the password
-logs every browser out, and the key never leaves the container.  Failed
+logs every browser out, and the key never leaves the container.  Logging
+out ends every session (a stateless cookie cannot be revoked alone): a
+timestamp on the volume invalidates every cookie issued before it.  Failed
 attempts are slowed down; after MAX_FAILURES within FAILURE_WINDOW_S from one
 address that address is refused until the window passes.
 """
@@ -77,8 +79,10 @@ def _load_key(path: str) -> bytes:
 
 
 class Auth:
-    def __init__(self, password: str, key: bytes = b"") -> None:
+    def __init__(self, password: str, key: bytes = b"", revoked_path: str | None = None) -> None:
         self.enabled = bool(password)
+        self.revoked_path = revoked_path
+        self.revoked_before = 0  # epoch: sessions issued before it are invalid (logout)
         self._digest = hashlib.sha256(password.encode()).digest()
         self._tag = hashlib.sha256(b"session:" + password.encode()).hexdigest()[:16]
         self._key = key
@@ -90,7 +94,7 @@ class Auth:
         return hmac.compare_digest(hashlib.sha256(password.encode()).digest(), self._digest)
 
     def new_session(self) -> str:
-        return self._sign(int(time.time()) + SESSION_S)
+        return self._sign(max(int(time.time()), self.revoked_before) + SESSION_S)
 
     def _sign(self, expires: int) -> str:
         mac = hmac.new(self._key, f"{expires}.{self._tag}".encode(), hashlib.sha256).hexdigest()
@@ -101,7 +105,23 @@ class Auth:
             expires = int(value.split(".", 1)[0])
         except (ValueError, AttributeError):
             return False
-        return expires > time.time() and hmac.compare_digest(self._sign(expires), value)
+        return expires > time.time() and expires - SESSION_S >= self.revoked_before and hmac.compare_digest(self._sign(expires), value)
+
+    def load_revoked(self) -> None:
+        """Blocking."""
+        try:
+            with open(self.revoked_path or "", encoding="utf-8") as fh:
+                self.revoked_before = int(fh.read().strip() or 0)
+        except (OSError, ValueError):
+            self.revoked_before = 0
+
+    def revoke_all(self) -> None:
+        """Blocking: every session issued until now ends."""
+        self.revoked_before = int(time.time()) + 1
+        if self.revoked_path:
+            with open(self.revoked_path + ".tmp", "w", encoding="utf-8") as fh:
+                fh.write(str(self.revoked_before))
+            os.replace(self.revoked_path + ".tmp", self.revoked_path)
 
     # ----- brute-force brake -------------------------------------------------
 
@@ -140,7 +160,8 @@ async def async_setup_auth(hass: HomeAssistant) -> Auth:
         hass.data[DATA_KEY] = auth
         return auth
     key = await hass.async_add_executor_job(_load_key, hass.config.path("integration_manager", "auth_key"))
-    auth = Auth(password, key)
+    auth = Auth(password, key, hass.config.path("integration_manager", "auth_revoked"))
+    await hass.async_add_executor_job(auth.load_revoked)
     hass.data[DATA_KEY] = auth
 
     @web.middleware
@@ -212,8 +233,13 @@ class LoginView(ManagerView):
 class LogoutView(ManagerView):
     url = "/api/logout"
 
+    def __init__(self, auth: Auth | None = None) -> None:
+        self.auth = auth
+
     @with_body
     async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
+        if self.auth is not None and self.auth.enabled:
+            await request.app["hass"].async_add_executor_job(self.auth.revoke_all)
         response = self.json({"ok": True})
         response.del_cookie(COOKIE, path="/")
         return response

@@ -206,17 +206,29 @@ async def _boot() -> int:
 
 
 def _mark_boot_ok() -> None:
-    """Tell entrypoint.py this venv boots (it counts consecutive failures)."""
+    """Tell entrypoint.py this venv boots (it counts consecutive failures).
+    Runs in an executor thread while the UI may already schedule a version
+    change: only the records of THIS version go, and the file is read again
+    right before the write so the window for a lost update stays tiny."""
     path = os.path.join(CONFIG_DIR, "integration_manager", "ha.json")
+
+    def settle(state: dict) -> dict:
+        state["boot_failures"] = 0
+        state.pop("fallback_from", None)
+        change, recovery = state.get("change"), state.get("recovery")
+        if not isinstance(change, dict) or change.get("to") == HA_VERSION:
+            state.pop("change", None)  # a version change is done once its version booted
+        if not isinstance(recovery, dict) or recovery.get("for") == HA_VERSION:
+            state.pop("recovery", None)  # and the recovery that brought this version back is done
+        return state
+
+    if not isinstance(read_json(path), dict):
+        return
     state = read_json(path)
     if not isinstance(state, dict):
         return
-    state["boot_failures"] = 0
-    state.pop("fallback_from", None)
-    state.pop("change", None)  # a version change is done once its version booted
-    state.pop("recovery", None)  # and a pending recovery is moot: this version boots
     try:
-        write_json(path, state)
+        write_json(path, settle(state))
     except OSError:
         pass
 

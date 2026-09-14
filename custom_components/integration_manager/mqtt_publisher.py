@@ -71,6 +71,7 @@ _LOGGER = logging.getLogger(__name__)
 HEALTH_INTERVAL_S = 60
 REPUBLISH_BATCH = 200          # documents per batch before yielding to the event loop
 REPUBLISH_BATCH_PAUSE_S = 0.02
+HEALTH_GRACE_S = 900  # after a (re)start, at most this long before unavailable / silent entities count
 HEALTH_STALE_S = 900  # no state written by the integration's entities (last_reported, value changed or not) for this long = degraded
 
 CONFIG_FILE = "integration_manager/mqtt.json"
@@ -372,10 +373,17 @@ class MqttPublisher:
         self._last_wanted = self.wanted_base_topic
         # integrations newly excluded: their retained documents must go too
         newly_excluded = set(new.exclude_integrations) - set(self.config.exclude_integrations)
-        if newly_excluded and self._connected and not moved:
+        if newly_excluded and not moved:
             for eid, topic in list(self._topics.items()):
-                if (self._integration_of(eid) or "unregistered") in newly_excluded:
+                if (self._integration_of(eid) or "unregistered") not in newly_excluded:
+                    continue
+                if self._connected:
                     self._clear(eid)
+                else:
+                    # cleared at the next connect: _publish_state never touches an excluded entity again
+                    self._topics.pop(eid, None)
+                    self._last_hash.pop(topic, None)
+                    self._pending_clears.add(topic)
         for t in ("_registry_timer", "_services_timer"):
             h = getattr(self, t, None)
             if h is not None:
@@ -702,6 +710,10 @@ class MqttPublisher:
             # (re)subscription: physical effects must never replay
             _LOGGER.warning("MQTT: ignoring retained command on %s (commands must not be retained)", msg.topic)
             return
+        if not msg.payload:
+            # clearing a retained command reaches live subscribers as an empty payload, and this
+            # process clears retained cmd/call topics itself when its identity moves: never a command
+            return
         manager_prefix = self._manager_cmd_base() + "/"
         if msg.topic.startswith(manager_prefix):
             self._on_manager_command(msg.topic[len(manager_prefix):], msg.payload.decode(errors="replace"))
@@ -799,14 +811,14 @@ class MqttPublisher:
         if result is not None:
             rec["result"] = result
 
-    def _seen_call(self, call_id: Any) -> dict[str, Any] | None:
+    def _seen_call(self, key: str | None) -> dict[str, Any] | None:
         """The canonical record of a call with this id inside the dedup window."""
-        if call_id in (None, ""):
+        if key is None:
             return None
         now = time.time()
         for k in [k for k, r in self._calls.items() if now - r["received"] >= DEDUP_WINDOW_S]:
             del self._calls[k]  # expired
-        return self._calls.get(str(call_id))
+        return self._calls.get(key)
 
     def recent_commands(self, limit: int = 30) -> list[dict[str, Any]]:
         iso = lambda t: time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t)) if t else None
@@ -838,7 +850,9 @@ class MqttPublisher:
             self._finish(self._remember("call", f"{domain}.{service}", payload), "rejected", f"bad payload: {err}")
             return
         call_id = data.pop("_id", None)
-        prior = self._seen_call(call_id)
+        # an _id is unique per service for the consumer (a counter that restarts, one per automation)
+        call_key = f"{domain}.{service}:{call_id}" if call_id not in (None, "") else None
+        prior = self._seen_call(call_key)
         if prior is not None:
             # A retry of the same _id (the consumer did not see the result in
             # time): answer from history, never run the service twice.
@@ -853,7 +867,7 @@ class MqttPublisher:
             return
         rec = self._remember("call", f"{domain}.{service}", data, call_id)
         if call_id not in (None, ""):
-            self._calls[str(call_id)] = rec  # the canonical record: duplicates never replace it
+            self._calls[call_key] = rec  # the canonical record: duplicates never replace it
         self.stats["calls"] += 1
         self.stats["last_call"] = f"{domain}.{service} {json.dumps(data)[:120]}"
 
@@ -1325,7 +1339,7 @@ class MqttPublisher:
             })
             rules = self._rules_provider(domain)
             base["rules"] = rules
-            booting = grace and now - self._started_at < rules["stale_s"]  # grace: entities fill in after the first traffic
+            booting = grace and now - self._started_at < min(rules["stale_s"], HEALTH_GRACE_S)  # grace: entities fill in after the first traffic
             if base.get("state") == "ok" and not booting:
                 if states and unavailable * 100 >= len(states) * rules["unavailable_pct"]:
                     base["state"], base["reason"] = "degraded", f"{unavailable} of {len(states)} entities unavailable"

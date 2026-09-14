@@ -28,6 +28,7 @@ _LOGGER = logging.getLogger(__name__)
 
 DATA_URL = "https://data-v2.hacs.xyz/integration/data.json"
 CACHE_S = 12 * 3600
+RETRY_S = 120
 MAX_RESULTS = 40
 
 
@@ -56,6 +57,8 @@ class Catalog:
                 self.error = f"{type(err).__name__}: {err}"
                 _LOGGER.warning("HACS catalog not refreshed: %s", self.error)
                 rows = self._rows if self._rows is not None else await self.hass.async_add_executor_job(self._load_cached)
+                self._rows, self._at = rows, time.monotonic() - CACHE_S + RETRY_S  # try again soon, not in 12 hours
+                return rows
             self._rows, self._at = rows, time.monotonic()
             return rows
 

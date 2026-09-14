@@ -64,7 +64,7 @@ def snapshot(hass: HomeAssistant, domain: str) -> dict[str, Any]:
         state = hass.states.get(entry.entity_id)
         if state is None or state.attributes.get("restored"):
             continue  # disabled, or a registry entry the running code no longer provides
-        entities[f"uid:{entry.unique_id}"] = {
+        entities[f"uid:{entry.domain}:{entry.unique_id}"] = {  # unique ids are unique per domain, not per platform
             "entity_id": entry.entity_id,
             "name": entry.name or entry.original_name or state.attributes.get("friendly_name"),
             "unit_of_measurement": state.attributes.get("unit_of_measurement"),

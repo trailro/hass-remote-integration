@@ -112,14 +112,17 @@ async def compute_parity(hass: HomeAssistant, installer: Installer, publisher: M
         if not isinstance(uid, str) or not uid.startswith(prefix):
             return False
         rest = uid[len(prefix):]
-        return bool(re.fullmatch(r"[a-z_]+\.[a-z0-9_]+", rest)) or rest in ("health_online", "health_state")
+        return bool(re.fullmatch(r"[a-z_]+\.[a-z0-9_]+", rest)) or rest in ("health_online", "health_state") or rest.startswith("manager_")
 
     parent_by_uid = {e["unique_id"]: e for e in p_entities if e.get("platform") == "mqtt" and _ours_uid(e.get("unique_id"))}
     p_state = {s["entity_id"]: s for s in p_states}
     p_dev = {d["id"]: d for d in p_devices}
 
     ours: dict[str, dict[str, Any]] = {}
+    announces_manager = publisher.config.discovery_enabled or publisher.config.manager_discovery
     for dev in publisher.discovery_preview():
+        if dev["discovery_id"] == f"{publisher.base_topic}_manager" and not announces_manager:
+            continue  # the manager device is not announced: it cannot be missing on the consumer
         for eid, comp in dev["components"].items():
             ours[comp["unique_id"]] = {"entity_id": eid, "name": comp.get("name"), "platform": comp.get("platform"),
                                        "announced_entity_id": comp.get("default_entity_id") or eid,
