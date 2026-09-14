@@ -332,20 +332,29 @@ def reset_storage_for_rebuild(wanted: str, restored: bool) -> bool:
     return True
 
 
-def restore_after_failed_change(state: dict, failed: str, fallback: str) -> None:
-    """The container falls back from ``failed`` to ``fallback``.  If the
-    switch to ``failed`` got as far as booting it (with a restore, a clean
-    start, or just its own storage migrations in keep mode), the
-    configuration from before the switch comes back from its pre-change
-    backup, which ``fallback`` can read."""
+def restore_after_failed_change(state: dict, failed: str, fallback: str) -> bool:
+    """The container wants to fall back from ``failed`` to ``fallback``.  If
+    the switch to ``failed`` got as far as booting it (a restore, a clean
+    start, or its own storage migrations in keep mode), the configuration
+    from before the switch must come back from its pre-change backup first.
+    That need is kept in ``state["recovery"]`` until a restore succeeded.
+    False: the restore could not even be scheduled, so falling back would
+    boot ``fallback`` on storage it may not read."""
     change = state.pop("change", None)
-    if not isinstance(change, dict) or change.get("to") != failed or not change.get("applied") or not change.get("backup"):
-        return
+    recovery = state.get("recovery")
+    if isinstance(change, dict) and change.get("to") == failed and change.get("applied") and change.get("backup"):
+        recovery = {"backup": change["backup"], "from": failed}
+    elif not (isinstance(recovery, dict) and recovery.get("from") == failed and recovery.get("backup")):
+        return True  # nothing of a switch reached the storage: a plain fallback
+    recovery = {**recovery, "for": fallback}
+    state["recovery"] = recovery
     try:
-        backupkit.schedule_restore(CONFIG_DIR, str(change["backup"]), ["storage"], for_version=fallback)
-        log(f"the configuration from before the switch to {failed} comes back from {change['backup']}")
+        backupkit.schedule_restore(CONFIG_DIR, str(recovery["backup"]), ["storage"], for_version=fallback)
     except Exception as err:  # noqa: BLE001
-        log(f"could not bring back the configuration from {change.get('backup')}: {err}")
+        log(f"could not schedule the configuration from {recovery['backup']} for {fallback}: {err}")
+        return False
+    log(f"the configuration from before the switch to {failed} comes back from {recovery['backup']}")
+    return True
 
 
 def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
@@ -364,6 +373,20 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
         state["last_restore"] = backupkit.apply_pending(CONFIG_DIR, log)
         restored = True
     reset = reset_storage_for_rebuild(wanted, restored)
+    recovery = state.get("recovery")
+    if isinstance(recovery, dict) and recovery.get("for") == wanted:
+        if restored and (state.get("last_restore") or {}).get("ok"):
+            state.pop("recovery", None)
+        else:
+            back = recovery.get("from")
+            if back and back != wanted and venv_ok(back):
+                log(f"restoring the configuration for the fallback to {wanted} failed: staying on {back}, whose storage this is; retried at the next fallback")
+                state["last_error"] = (f"fallback to Home Assistant {wanted} stopped: the configuration from before the switch to {back} "
+                                       f"could not be restored (see the container log); still on {back}")
+                state["desired"] = back
+                return back
+            log(f"restoring the configuration for the fallback to {wanted} failed and {back} is not installed; booting {wanted}")
+            state.pop("recovery", None)
     change = state.get("change")
     if not isinstance(change, dict):
         return wanted
@@ -408,6 +431,8 @@ def main() -> None:
     failures = int(state.get("boot_failures") or 0)
     previous = state.get("previous")
     fallback_from = state.get("fallback_from")
+    recovery = state.get("recovery") if isinstance(state.get("recovery"), dict) else {}
+    fallback_to = previous or recovery.get("for")  # a stopped fallback keeps its target for the retry
     if failures >= MAX_BOOT_FAILURES and fallback_from and fallback_from != wanted:
         # We already fell back once and the previous version fails too:
         # the problem is not the HA version (port clash, broken manager,
@@ -415,12 +440,16 @@ def main() -> None:
         log(f"{wanted} fails to boot as well as {fallback_from}: not a Home Assistant version problem; retrying")
         state["last_error"] = f"both {fallback_from} and {wanted} crash at boot: not a HA version problem (see container log)"
         save_state(state)
-    elif failures >= MAX_BOOT_FAILURES and previous and previous != wanted and venv_ok(previous):
-        log(f"{wanted} failed to boot {failures} times; falling back to {previous}")
-        restore_after_failed_change(state, wanted, previous)
-        state["last_error"] = f"{wanted} crashed at boot {failures} times; rolled back to {previous} (see container log)"
-        state["fallback_from"] = wanted
-        state["desired"] = wanted = previous
+    elif failures >= MAX_BOOT_FAILURES and fallback_to and fallback_to != wanted and venv_ok(fallback_to):
+        if restore_after_failed_change(state, wanted, fallback_to):
+            log(f"{wanted} failed to boot {failures} times; falling back to {fallback_to}")
+            state["last_error"] = f"{wanted} crashed at boot {failures} times; rolled back to {fallback_to} (see container log)"
+            state["fallback_from"] = wanted
+            state["desired"] = wanted = fallback_to
+        else:
+            log(f"{wanted} failed to boot {failures} times, but its configuration cannot be brought back for {fallback_to}: staying on {wanted}")
+            state["last_error"] = (f"{wanted} crashed at boot {failures} times; no fallback to {fallback_to}, because the configuration "
+                                   "from before the switch could not be restored (see container log)")
         state["boot_failures"] = 0
         save_state(state)
     elif failures >= MAX_BOOT_FAILURES:
@@ -457,7 +486,7 @@ def main() -> None:
     state["boot_failures"] = int(state.get("boot_failures") or 0) + 1  # run.py zeroes it when ready
     save_state(state)
     if not state.get("_corrupt"):
-        prune({wanted, state.get("previous") or wanted})
+        prune({wanted, state.get("previous") or wanted} | ({state["recovery"]["for"]} if isinstance(state.get("recovery"), dict) and state["recovery"].get("for") else set()))
 
     # Stable path for humans and scripts (docker exec ... /config/venv-current/bin/python)
     link = os.path.join(CONFIG_DIR, "venv-current")

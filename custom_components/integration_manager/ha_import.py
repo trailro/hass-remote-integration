@@ -516,6 +516,22 @@ class RegistryAligner:
 # ----- apply ------------------------------------------------------------------
 
 
+def _forget_cached_stores(hass: HomeAssistant, names: list[str]) -> None:
+    """HA's store manager lists .storage once at startup and answers "no such
+    file" for anything missing then: a store copied in afterwards (an import,
+    the rebuild after a clean start) would load as empty.  Invalidate those
+    keys so the integration reads the copied files."""
+    try:
+        from homeassistant.helpers.storage import get_internal_store_manager
+
+        manager = get_internal_store_manager(hass)
+    except Exception as err:  # noqa: BLE001 - internal HA API: without it the old behaviour stays
+        _LOGGER.warning("store cache not invalidated after copying %s: %s", names, err)
+        return
+    for name in names:
+        manager.async_invalidate(name)
+
+
 def _unmask(given: Any, stored: Any) -> Any:
     """The import form may come from the masked GET summary (diagnostics.scrub):
     whatever still equals the masked form of the backup's value at the same
@@ -565,7 +581,12 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
         data = _unmask(data, src.get("data") or {})
     if options is not None:
         options = _unmask(options, src.get("options") or {})
+    # the original id: integrations name store files and other state after it
+    # (<domain>.<entry_id>); only an id already taken here gets a new one
+    original_id = src.get("entry_id")
+    keep_id = bool(original_id) and hass.config_entries.async_get_entry(original_id) is None
     entry = ConfigEntry(
+        entry_id=original_id if keep_id else None,
         domain=domain,
         title=src.get("title") or domain,
         data=data if data is not None else (src.get("data") or {}),
@@ -589,13 +610,15 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
     def _copy() -> None:
         for f in dom.get("storage_files", []):
             s = os.path.join(out_dir, ".storage", f)
-            d = os.path.join(cfg, ".storage", f)
+            # a store named after the old id follows the entry to its new one
+            name = f.replace(original_id, entry.entry_id) if original_id and not keep_id else f
+            d = os.path.join(cfg, ".storage", name)
             if os.path.isfile(s):
                 if os.path.isfile(d):  # keep what was here: a failed import must put it back
-                    moved.append(f)
+                    moved.append(name)
                     os.replace(d, d + ".pre-import")
                 shutil.copyfile(s, d)
-                copied.append(f)
+                copied.append(name)
 
     def _undo() -> None:
         aligner.drop_keys(domain, list(merged["entities"]), list(merged["devices"]))
@@ -619,6 +642,7 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
     try:
         if copy_storage:
             await hass.async_add_executor_job(_copy)
+            _forget_cached_stores(hass, copied)
         if align:
             merged = await hass.async_add_executor_job(_build_map, out_dir, domain, entry_id)
             aligner.merge_map(merged)

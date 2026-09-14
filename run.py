@@ -214,6 +214,7 @@ def _mark_boot_ok() -> None:
     state["boot_failures"] = 0
     state.pop("fallback_from", None)
     state.pop("change", None)  # a version change is done once its version booted
+    state.pop("recovery", None)  # and a pending recovery is moot: this version boots
     try:
         write_json(path, state)
     except OSError:
