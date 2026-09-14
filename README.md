@@ -106,12 +106,12 @@ Pi with a 64-bit OS, Apple silicon, most NAS boxes), from 0.9.0 on:
 docker pull ghcr.io/trailro/hass-remote-integration:latest
 ```
 
-All you need to run it is the compose file of the release you use, in a
+All you need to run it is the compose file of the latest release, in a
 directory of its own:
 
 ```bash
 mkdir hass-remote-integration && cd hass-remote-integration
-curl -fsSLO https://raw.githubusercontent.com/trailro/hass-remote-integration/v0.10.0/docker-compose.yml
+curl -fsSLO https://github.com/trailro/hass-remote-integration/releases/latest/download/docker-compose.yml
 ```
 
 Put your settings in a `.env` file next to `docker-compose.yml`:
@@ -152,12 +152,9 @@ loading it on its own once files are listed with `-f`):
 
 ```bash
 git clone https://github.com/trailro/hass-remote-integration.git && cd hass-remote-integration
+git checkout "$(git describe --tags --abbrev=0)"   # the latest release; main can be ahead of it
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
-
-`main` can be ahead of the latest release: `git checkout` a tag from the
-[Releases](https://github.com/trailro/hass-remote-integration/releases) page to
-build a released version.
 
 Open `http://<docker-host>:8087`. On the very first start the page shows the
 Home Assistant installation progress; it takes a few minutes.
