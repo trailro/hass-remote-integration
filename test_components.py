@@ -12,6 +12,7 @@ receives the device payload.  Exit code 1 on any rejection.
 
 import asyncio
 import importlib
+import json
 import sys
 import tempfile
 
@@ -92,9 +93,38 @@ async def main() -> int:
         except Exception as err:  # noqa: BLE001
             failures += 1
             print(f"  FAIL {entity_id:24s} {platform}: {err}")
-    await hass.async_stop()
     print(f"{len(CASES) - failures}/{len(CASES)} components valid")
-    return 1 if failures else 0
+
+    # the manager device, with its actions, and its templates against a manager document
+    from homeassistant.components.mqtt.update import MQTT_JSON_UPDATE_SCHEMA
+    from homeassistant.helpers.template import Template
+
+    topics = {"status": "hass_test/status", "health": "hass_test/health", "manager": "hass_test/manager", "cmd": "hass_test/manager/cmd"}
+    mid, block, comps = disc.manager_device("hass_test", "hass_test_", topics, "demo", "0.0.0", True)
+    update = {"installed_version": "1.0.0", "latest_version": "1.1.0", "title": "x", "in_progress": False, "release_url": "https://github.com/o/r/releases/tag/1.1.0"}
+    doc = json.dumps({"manager_version": "0.0.0", "updates": {"integration": update, "home_assistant": update, "manager": update},
+                      "resources": {"memory_mb": 300.5, "cpu_pct": 1.2, "loop_lag_ms": 0.4, "loop_lag_max_ms": 3.0, "threads": 20,
+                                    "open_files": 40, "volume_used_pct": 41.0, "volume_free_gb": 12.5},
+                      "patches": "applied", "updated_at": "2026-01-01T00:00:00+0000"})
+    bad = 0
+    for entity_id, comp in comps.items():
+        payload = {k: v for k, v in comp.items() if k != "platform"}
+        payload.update({"device": block, "origin": disc.ORIGIN, "payload_available": "online", "payload_not_available": "offline"})
+        try:
+            schema_for(comp["platform"])(payload)
+            if comp.get("state_topic") == topics["manager"]:
+                out = Template(comp["value_template"], hass).async_render_with_possible_json_value(doc)
+                if comp["platform"] == "update":
+                    MQTT_JSON_UPDATE_SCHEMA(json.loads(out))
+                elif out in ("", "None"):
+                    raise ValueError(f"template rendered {out!r}")
+            print(f"  ok   {entity_id}")
+        except Exception as err:  # noqa: BLE001
+            bad += 1
+            print(f"  FAIL {entity_id}: {err}")
+    print(f"{len(comps) - bad}/{len(comps)} manager components valid")
+    await hass.async_stop()
+    return 1 if failures or bad else 0
 
 
 sys.exit(asyncio.run(main()))

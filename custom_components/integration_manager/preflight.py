@@ -31,6 +31,7 @@ from . import patches
 from .installer import _req_name
 
 _LOGGER = logging.getLogger(__name__)
+LOCK = asyncio.Lock()  # one pip resolution at a time (UI, builder, MQTT update)
 
 PIP_TIMEOUT_S = 300
 RAW = "https://raw.githubusercontent.com/{repo}/{ref}/{path}"

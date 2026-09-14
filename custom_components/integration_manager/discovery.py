@@ -571,6 +571,71 @@ def device_block(hass: HomeAssistant, device_id: str | None, integration: str, p
     )
 
 
+# Manager actions on <base>/manager/cmd/<action> and the one payload each
+# accepts: what the consuming HA sends from the update entity or the button.
+# Anything else (an empty payload that clears a retained command, a typo) is refused.
+MANAGER_ACTIONS = {"install_integration": "install", "install_home_assistant": "install", "restart": "restart",
+                   "backup": "backup", "check_updates": "check"}
+
+
+def manager_device(key: str, prefix: str, topics: dict[str, str], integration: str | None, version: str,
+                   commands: bool) -> tuple[str, dict[str, Any], dict[str, dict[str, Any]]]:
+    """The manager as a device on the consuming HA: (discovery_id, device,
+    components).  ``key`` is the base topic (hass_<domain>); ``topics`` holds
+    its ``status``, ``health`` and ``manager`` topics and the manager
+    command base ``cmd``.  Connectivity and health come from the health
+    document; the update entities and resource sensors from the manager
+    document (manager_device.py); the install actions and the buttons only
+    with ``commands``.  Everything goes unavailable with the LWT."""
+    integ = integration or "none"
+    common = {"availability": [{"topic": topics["status"]}], "payload_available": "online", "payload_not_available": "offline"}
+    health, mgr, cmd = topics["health"], topics["manager"], topics["cmd"]
+    comps: dict[str, dict[str, Any]] = {
+        f"binary_sensor.{key}_integration": {**common, "platform": "binary_sensor", "name": f"{integ} integration", "device_class": "connectivity",
+                                              "entity_category": "diagnostic", "json_attributes_topic": health,
+                                              "unique_id": f"{prefix}health_online", "default_entity_id": f"binary_sensor.{key}_integration",
+                                              "state_topic": health, "value_template": _tpl("'ON' if value_json.state in ['ok', 'degraded'] else 'OFF'")},
+        f"sensor.{key}_health": {**common, "platform": "sensor", "name": f"{integ} health", "icon": "mdi:heart-pulse",
+                                 "entity_category": "diagnostic", "json_attributes_topic": health,
+                                 "unique_id": f"{prefix}health_state", "default_entity_id": f"sensor.{key}_health",
+                                 "state_topic": health, "value_template": _tpl("value_json.state")},
+    }
+
+    def add(platform: str, suffix: str, name: str, extra: dict[str, Any], category: str | None = "diagnostic") -> None:
+        entity_id = f"{platform}.{key}_{suffix}"
+        comps[entity_id] = {**common, "platform": platform, "name": name, "unique_id": f"{prefix}manager_{suffix}",
+                            "default_entity_id": entity_id, **({"entity_category": category} if category else {}), **extra}
+
+    updates = [("home_assistant", "Home Assistant update"), ("manager", "hass-remote-integration update")]
+    if integration:
+        updates.insert(0, ("integration", f"{integ} update"))
+    for part, name in updates:
+        extra: dict[str, Any] = {"state_topic": mgr, "value_template": _tpl(f"value_json.updates.{part} | to_json")}
+        if commands and part != "manager":  # the manager itself is updated by pulling a new image
+            extra.update({"command_topic": f"{cmd}/install_{part}", "payload_install": MANAGER_ACTIONS[f"install_{part}"]})
+        add("update", f"{part}_update", name, extra, category=None)
+    measure = {"state_topic": mgr, "state_class": "measurement"}
+    add("sensor", "memory", "Memory", {**measure, "value_template": _tpl("value_json.resources.memory_mb"), "device_class": "data_size",
+                                       "unit_of_measurement": "MiB", "suggested_display_precision": 0})
+    add("sensor", "cpu", "CPU", {**measure, "value_template": _tpl("value_json.resources.cpu_pct"), "unit_of_measurement": "%",
+                                 "icon": "mdi:cpu-64-bit", "suggested_display_precision": 1})
+    add("sensor", "loop_lag", "Event loop lag", {**measure, "value_template": _tpl("value_json.resources.loop_lag_max_ms"),
+                                                 "device_class": "duration", "unit_of_measurement": "ms", "suggested_display_precision": 0})
+    add("sensor", "volume_used", "Volume used", {**measure, "value_template": _tpl("value_json.resources.volume_used_pct"),
+                                                 "unit_of_measurement": "%", "icon": "mdi:harddisk", "suggested_display_precision": 0})
+    add("sensor", "patches", "Patches", {"state_topic": mgr, "value_template": _tpl("value_json.patches"), "icon": "mdi:bandage"})
+    if commands:
+        add("button", "restart", "Restart", {"command_topic": f"{cmd}/restart", "payload_press": MANAGER_ACTIONS["restart"], "device_class": "restart"},
+            category="config")
+        add("button", "backup", "Back up now", {"command_topic": f"{cmd}/backup", "payload_press": MANAGER_ACTIONS["backup"], "icon": "mdi:content-save"},
+            category="config")
+        add("button", "check_updates", "Check for updates", {"command_topic": f"{cmd}/check_updates", "payload_press": MANAGER_ACTIONS["check_updates"],
+                                                             "icon": "mdi:update"}, category="config")
+    block = {"identifiers": [f"{key}_manager"], "name": f"hass-remote-integration ({key})", "manufacturer": "hass-remote-integration",
+             "model": f"integration manager, running {integ}", "sw_version": version}
+    return f"{key}_manager", block, comps
+
+
 def _json_or_text(payload: str) -> Any:
     try:
         return json.loads(payload)

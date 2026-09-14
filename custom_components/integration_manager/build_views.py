@@ -56,7 +56,7 @@ class PreflightView(ManagerView):
     def __init__(self, hass: HomeAssistant, installer: Installer) -> None:
         self.hass = hass
         self.installer = installer
-        self._lock = asyncio.Lock()  # one pip resolution at a time
+        self._lock = preflight.LOCK  # one pip resolution at a time
 
     @with_body
     async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:

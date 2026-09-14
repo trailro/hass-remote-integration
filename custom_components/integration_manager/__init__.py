@@ -138,6 +138,11 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     publisher = MqttPublisher(hass, key_provider=lambda: installer.instance_key, health_provider=installer.health,
                               rules_provider=installer.settings.health_for)
     installer.health_source = publisher.build_health
+    from .manager_device import ManagerDevice, ManagerStatusView
+
+    manager_device = ManagerDevice(hass, installer, ha_updater, publisher)
+    publisher.manager = manager_device
+    manager_device.start()
     installer.on_domain_removed = publisher.async_clear_identity
     await publisher.async_start()
 
@@ -182,6 +187,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         LogFilesView(hass, installer),
         LogFileTailView(hass, installer),
         MemoryDiagView(hass),
+        ManagerStatusView(manager_device),
         LogsPageView(),
         LogsApiView(hass),
         LoggersApiView(hass),
