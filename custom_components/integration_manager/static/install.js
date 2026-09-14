@@ -82,7 +82,7 @@ async function catSearch(){
     t.appendChild(tr); }
   t.hidden=!res.length;
   const size=r.catalog_size||0;
-  $('#catinfo').textContent=(r.error&&!size)?'catalog unavailable: '+r.message||r.error:`${r.total||0} match${r.total===1?'':'es'}${(r.total||0)>res.length?', first '+res.length+' shown':''} · ${size} integrations${r.fetched_at?' · list of '+r.fetched_at.slice(0,16).replace('T',' '):''}${r.error?' · refresh failed: '+r.error:''}`;
+  $('#catinfo').textContent=(r.error&&!size)?'catalog unavailable: '+(r.error||r.message):`${r.total||0} match${r.total===1?'':'es'}${(r.total||0)>res.length?', first '+res.length+' shown':''} · ${size} integrations${r.fetched_at?' · list of '+r.fetched_at.slice(0,16).replace('T',' '):''}${r.error?' · refresh failed: '+r.error:''}`;
   t.querySelectorAll('button[data-cat]').forEach(b=>b.onclick=async()=>{ const d=b.dataset.cat;
     if(!(REG[d]&&REG[d].repo===b.dataset.repo)){ const added=await post('api/registry',{domain:d,repo:b.dataset.repo,name:b.dataset.name}); if(!added.ok){ log('ERROR: '+added.error); return; } }
     SEL=d; await regLoad(); await options(); $('#bdomain').value=''; $('#bdom').value=d; domInfo(); releases(); invalidate();

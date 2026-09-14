@@ -150,7 +150,7 @@ def describe(config_dir: str, name: str) -> dict:
         pass
     return {"name": name, "bytes": os.path.getsize(path), "mtime": os.path.getmtime(path),
             "created": info.get("created"), "label": info.get("label", ""), "files": info.get("files"),
-            "ha_version": info.get("ha_version")}
+            "ha_version": info.get("ha_version") if isinstance(info.get("ha_version"), str) else None}
 
 
 def list_backups(config_dir: str) -> list[dict]:
@@ -214,6 +214,10 @@ def validate(path: str) -> dict:
             if "backup-info.json" in names and zf.getinfo("backup-info.json").file_size > INFO_MAX:
                 raise ValueError("backup-info.json is implausibly large")
             info = json.loads(zf.read("backup-info.json")) if "backup-info.json" in names else {}
+            if not isinstance(info, dict):
+                info = {}
+            if not isinstance(info.get("ha_version"), str):
+                info.pop("ha_version", None)  # an edited or foreign backup-info.json must not break version checks
             return {"files": len(names), **info}
     except zipfile.BadZipFile as err:
         raise ValueError(f"not a zip file: {err}") from None
@@ -246,7 +250,8 @@ def schedule_restore(config_dir: str, name: str, parts: list[str] | None = None,
     # ``for_version``: a restore that belongs to a Home Assistant version change,
     # applied only when that version boots (entrypoint.apply_config_changes)
     boot = for_version or boot_version(config_dir)
-    if info.get("ha_version") and boot and ha_vkey(info["ha_version"]) > ha_vkey(boot):
+    # only .storage has a version: the other parts restore on any Home Assistant
+    if (parts is None or "storage" in parts) and info.get("ha_version") and boot and ha_vkey(info["ha_version"]) > ha_vkey(boot):
         raise ValueError(f"backup was made on Home Assistant {info['ha_version']}, newer than {boot} that boots next: update HA first")
     with _PENDING_LOCK:
         zip_name = f"restore-pending-{int(time.time() * 1000)}.zip"
@@ -255,7 +260,8 @@ def schedule_restore(config_dir: str, name: str, parts: list[str] | None = None,
             shutil.copyfile(src, dst + ".tmp")
             os.replace(dst + ".tmp", dst)
             # the meta file is the commit point: archive AND parts change together
-            write_json(os.path.join(config_dir, PENDING_META), {"name": name, "parts": parts or list(PARTS), "zip": zip_name, "for_version": for_version})
+            write_json(os.path.join(config_dir, PENDING_META), {"name": name, "parts": parts or list(PARTS), "zip": zip_name, "for_version": for_version,
+                                                               "ha_version": info.get("ha_version")})
         except BaseException:
             for leftover in (dst + ".tmp", dst):
                 try:
@@ -311,6 +317,12 @@ def cancel_restore(config_dir: str) -> bool:
 def pending_for_version(config_dir: str) -> str | None:
     """The Home Assistant version a scheduled restore belongs to (None: scheduled by hand)."""
     return (_pending_meta(config_dir) or {}).get("for_version")
+
+
+def pending_ha_version(config_dir: str) -> str | None:
+    """The Home Assistant version the scheduled backup was made on."""
+    made_on = (_pending_meta(config_dir) or {}).get("ha_version")
+    return made_on if isinstance(made_on, str) else None
 
 
 def pending_parts(config_dir: str) -> list[str]:

@@ -87,8 +87,11 @@ _status = {"phase": "starting", "version": None, "started": time.time()}
 def log(msg: str) -> None:
     line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} [entrypoint] {msg}"
     print(line, flush=True)
-    with open(LOG_FILE, "a", encoding="utf-8") as fh:
-        fh.write(line + "\n")
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass  # a full disk must not stop the boot: the UI is where space gets freed
 
 
 def load_state() -> dict:
@@ -115,7 +118,10 @@ def load_state() -> dict:
 def save_state(state: dict) -> None:
     """Atomic: a torn ha.json would read as {} and silently reinstall the
     image default version (and prune the one that was running)."""
-    write_json(HA_FILE, {k: v for k, v in state.items() if k != "_corrupt"})
+    try:
+        write_json(HA_FILE, {k: v for k, v in state.items() if k != "_corrupt"})
+    except OSError as err:
+        log(f"ha.json not written ({err}): booting anyway")
 
 
 def venv_dir(version: str) -> str:
@@ -343,13 +349,14 @@ def restore_after_failed_change(state: dict, failed: str, fallback: str) -> bool
     change = state.pop("change", None)
     recovery = state.get("recovery")
     if isinstance(change, dict) and change.get("to") == failed and change.get("applied") and change.get("backup"):
-        recovery = {"backup": change["backup"], "from": failed}
+        # bring back what the switch replaced: .storage, or every part a restore with the switch put in place
+        recovery = {"backup": change["backup"], "from": failed, "parts": change.get("parts") or ["storage"]}
     elif not (isinstance(recovery, dict) and recovery.get("from") == failed and recovery.get("backup")):
         return True  # nothing of a switch reached the storage: a plain fallback
     recovery = {**recovery, "for": fallback}
     state["recovery"] = recovery
     try:
-        backupkit.schedule_restore(CONFIG_DIR, str(recovery["backup"]), ["storage"], for_version=fallback)
+        backupkit.schedule_restore(CONFIG_DIR, str(recovery["backup"]), recovery.get("parts") or ["storage"], for_version=fallback)
     except Exception as err:  # noqa: BLE001
         log(f"could not schedule the configuration from {recovery['backup']} for {fallback}: {err}")
         return False
@@ -363,10 +370,21 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
     booting (a failed install or a fallback boots another one).  Returns the
     version to boot: if a downgrade's restore or clean start did not happen,
     the version the configuration still belongs to."""
+    from jsonio import ha_vkey
+
     for_version = backupkit.pending_for_version(CONFIG_DIR)
     if backupkit.pending(CONFIG_DIR) and for_version and for_version != wanted:
         backupkit.cancel_restore(CONFIG_DIR)
         log(f"restore scheduled for Home Assistant {for_version} dropped: {wanted} boots instead")
+    made_on = backupkit.pending_ha_version(CONFIG_DIR)
+    restore_parts = backupkit.pending_parts(CONFIG_DIR)
+    if backupkit.pending(CONFIG_DIR) and made_on and "storage" in restore_parts and ha_vkey(made_on) > ha_vkey(wanted):
+        # checked when it was scheduled, against the version wanted then; a cancelled switch or a failed
+        # install boots another one, which cannot read a configuration made on a newer version
+        backupkit.cancel_restore(CONFIG_DIR)
+        log(f"restore of a backup made on Home Assistant {made_on} dropped: {wanted} boots and cannot read it")
+        state["last_error"] = f"the scheduled restore (a backup made on Home Assistant {made_on}) was dropped: {wanted} boots, which cannot read it"
+    own_restore = backupkit.pending(CONFIG_DIR) and for_version == wanted
     restored = False
     if backupkit.pending(CONFIG_DIR):
         # HA is not running here, so registries can be replaced safely.
@@ -394,7 +412,9 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
         state.pop("change", None)  # that switch did not happen, nothing of it was applied
         return wanted
     mode = change.get("mode")
-    done = (mode == "restore" and restored and (state.get("last_restore") or {}).get("ok")) or (mode == "rebuild" and reset)
+    # the change's own restore, with .storage: a restore scheduled by hand does not make a downgrade readable
+    done = (mode == "restore" and restored and own_restore and "storage" in restore_parts and (state.get("last_restore") or {}).get("ok")) \
+        or (mode == "rebuild" and reset)
     if mode in ("restore", "rebuild") and not done:
         what = "configuration restore" if mode == "restore" else "clean start"
         if current and current != wanted and venv_ok(current):

@@ -348,7 +348,7 @@ class SettingsView(ManagerView):
         if "backup_keep" in body:
             try:
                 keep = int(body["backup_keep"])
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 return self.json({"ok": False, "error": "backup_keep must be an integer (0 = keep all)"})
             if keep < 0:
                 return self.json({"ok": False, "error": "backup_keep must be >= 0"})
@@ -358,7 +358,7 @@ class SettingsView(ManagerView):
             if key in body:
                 try:
                     new[key] = min(hi, max(lo, int(body[key])))
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     return self.json({"ok": False, "error": f"{key} must be an integer"})
         for key in ("auto_rollback", "release_check", "backup_daily"):
             if key in body:
@@ -379,7 +379,7 @@ class SettingsView(ManagerView):
                         r["stale_s"] = min(86400, max(60, int(rules["stale_s"])))
                     if rules.get("unavailable_pct") not in (None, ""):
                         r["unavailable_pct"] = min(100, max(1, int(rules["unavailable_pct"])))
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     return self.json({"ok": False, "error": f"health.{dom}: stale_s / unavailable_pct must be integers"})
                 if rules.get("mode"):
                     if rules["mode"] not in HEALTH_MODES:

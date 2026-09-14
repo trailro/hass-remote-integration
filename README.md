@@ -323,6 +323,18 @@ you can create, download, upload, delete and restore them. A restore is
 applied at the next restart, can be partial (only `.storage`, only the manager
 state, …), and is rolled back if it fails halfway.
 
+Every backup records the Home Assistant version it was made on (the *HA* column),
+and Home Assistant only migrates a configuration forward. Restoring a backup
+made on an older version asks what to do: keep the running Home Assistant (the
+default: the configuration is migrated forward when it starts) or go back to the
+version the backup was made on, for exactly the state of the backup. A backup
+made on a newer version can only be restored together with a switch to that
+version. The version only matters when `.storage` is restored: a partial restore
+without it never changes Home Assistant. A switch installs the version at the restart if its venv is no longer
+on the volume (only the current and the previous one are kept), takes a backup
+of the current configuration first, and brings it back if that version does
+not start.
+
 ### Health
 
 `hass_<domain>/health` carries a verdict: `ok`, `degraded` or `error`, with the
@@ -530,7 +542,7 @@ trusted LAN. Set `HRI_PASSWORD` (or `HRI_PASSWORD_FILE`, for example a Docker
 secret) to require a password:
 
 - the browser gets a session cookie from the login page, valid for 30 days,
-  and **log out** in the top bar ends it;
+  and **log out** in the top bar ends every session of the UI, in all browsers;
 - scripts send the password as `Authorization: Bearer <password>`;
 - after 5 wrong attempts from one address, that address is refused for 15
   minutes;
@@ -540,6 +552,13 @@ Over plain HTTP the password and the session travel unencrypted, so on a
 network you do not trust put the UI behind a reverse proxy with TLS. The
 installation progress page of the very first start, served before Home
 Assistant runs, is not protected; it only shows the progress.
+
+Behind a reverse proxy, note that Home Assistant's HTTP server in the container
+is not set up for proxies: it answers `400 Bad Request` to any request that
+carries an `X-Forwarded-For` header, so configure the proxy not to send one.
+Every request then comes from the proxy's address, which means five wrong
+passwords from anywhere lock everyone behind that proxy out for 15 minutes; an
+SSH tunnel or a VPN avoids both.
 
 Without a password, anyone who can reach the port controls the container. The UI installs code
 from any GitHub repository, accepts Python patches and runs service calls, so

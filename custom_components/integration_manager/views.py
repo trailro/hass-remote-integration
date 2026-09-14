@@ -152,12 +152,15 @@ def _manual_restore_pending(config_dir: str) -> bool:
     return backupkit.pending(config_dir) and not backupkit.pending_for_version(config_dir)
 
 
-async def async_change_ha_version(installer: Installer, updater: HaUpdater, target: str, mode: str, source: str) -> dict[str, Any]:
+async def async_change_ha_version(installer: Installer, updater: HaUpdater, target: str, mode: str, source: str,
+                                  restore_backup: str | None = None, parts: list[str] | None = None) -> dict[str, Any]:
     """The one way to schedule a Home Assistant version change (System page,
-    environment builder): a backup first, then what the target starts with
-    (keep, restore, rebuild: see HaActionView.post), recorded in ha.json so
-    the entrypoint applies it only to that version and can fall back.
-    Raises ValueError; OSError passes through."""
+    environment builder, a restore with its backup's version): a backup
+    first, then what the target starts with (keep, restore, rebuild: see
+    HaActionView.post), recorded in ha.json so the entrypoint applies it only
+    to that version and can fall back.  ``restore_backup`` restores exactly
+    that backup (``parts`` of it, everything by default) when ``target``
+    boots, in either direction.  Raises ValueError; OSError passes through."""
     hass = installer.hass
     cfg = hass.config.config_dir
     if _HA_CHANGE_LOCK.locked():
@@ -167,34 +170,44 @@ async def async_change_ha_version(installer: Installer, updater: HaUpdater, targ
             raise ValueError("config must be keep, restore or rebuild")
         if target == HA_VERSION:
             raise ValueError(f"Home Assistant {target} is already running")
-        if mode != "keep" and ha_vkey(target) >= ha_vkey(HA_VERSION):
+        if restore_backup is not None and mode != "restore":
+            raise ValueError("a chosen backup is restored with config=restore")
+        if mode != "keep" and restore_backup is None and ha_vkey(target) >= ha_vkey(HA_VERSION):
             raise ValueError(f"config={mode} only applies to a downgrade")
+        if restore_backup is not None and parts is not None and "storage" not in parts and ha_vkey(target) < ha_vkey(HA_VERSION):
+            raise ValueError(f"going back to Home Assistant {target} needs the backup's .storage (a newer configuration is unreadable there): "
+                             "restore everything, or a selection with .storage")
         if installer.busy:
             raise ValueError("an install/start is running: try again in a moment")
-        if mode != "keep" and await hass.async_add_executor_job(_manual_restore_pending, cfg):
-            raise ValueError("a restore scheduled on System is waiting for the restart: cancel it first")
-        restore = None
-        if mode == "restore":
-            restore = await hass.async_add_executor_job(updater.config_backup_for, target)
-            if restore is None:
-                raise ValueError(f"no backup made on Home Assistant {target} or older: choose rebuild or keep")
-        if mode == "rebuild":
-            pending_import = await hass.async_add_executor_job(ha_import.load_summary, cfg)
-            if pending_import and pending_import.get("type") != ha_import.REBUILD_TYPE:
-                raise ValueError("an import from a Home Assistant backup is waiting on System: apply or clear it first")
-        installer.busy = True
+        installer.busy = True  # right away: nothing may start an install while this change is prepared
         try:
+            if mode != "keep" and await hass.async_add_executor_job(_manual_restore_pending, cfg):
+                raise ValueError("a restore scheduled on System is waiting for the restart: cancel it first")
+            restore = None
+            if mode == "restore" and restore_backup is not None:
+                restore = await hass.async_add_executor_job(backupkit.describe, cfg, restore_backup)
+            elif mode == "restore":
+                restore = await hass.async_add_executor_job(updater.config_backup_for, target)
+                if restore is None:
+                    raise ValueError(f"no backup made on Home Assistant {target} or older: choose rebuild or keep")
+            if mode == "rebuild":
+                pending_import = await hass.async_add_executor_job(ha_import.load_summary, cfg)
+                if pending_import and pending_import.get("type") != ha_import.REBUILD_TYPE:
+                    raise ValueError("an import from a Home Assistant backup is waiting on System: apply or clear it first")
+            restore_parts = (parts or list(backupkit.PARTS)) if restore_backup is not None else ["storage"]
             backup = await installer.async_backup(label=f"pre-ha-{target}")
             rebuild = None
             if restore is not None:
+                # scheduled (and validated) before anything of an older change is dropped
+                await hass.async_add_executor_job(backupkit.schedule_restore, cfg, restore["name"], restore_parts, target)
                 await hass.async_add_executor_job(ha_import.drop_rebuild, cfg)
-                await hass.async_add_executor_job(backupkit.schedule_restore, cfg, restore["name"], ["storage"], target)
             else:
                 await hass.async_add_executor_job(updater.cancel_config_change)  # an older change's preparations
                 if mode == "rebuild":
                     rebuild = await hass.async_add_executor_job(ha_import.stage_rebuild, cfg, backup["name"], installer.running, HA_VERSION, target)
             state = updater.set_desired(target, change={"to": target, "mode": mode, "backup": backup["name"],
-                                                        "at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+                                                        "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                                        **({"parts": restore_parts} if restore is not None else {})})
             await hass.async_add_executor_job(backupkit.prune, cfg, installer.settings.backup_keep,
                                               installer.protected_backups() | {backup["name"]})
         finally:

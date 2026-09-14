@@ -27,7 +27,8 @@ document.getElementById('f').onsubmit=async e=>{
   catch(x){ err.textContent='no answer from the server'; return; }
   const d=await r.json().catch(()=>({}));
   if(!d.ok){ err.textContent=d.error||('login failed ('+r.status+')'); return; }
-  const next=new URLSearchParams(location.search).get('next')||'/';
-  location.href=(next.startsWith('/')&&!next.startsWith('//')&&!next.startsWith('/\\'))?next:'/';  // only paths on this server
+  let dest='/';
+  try{ const u=new URL(new URLSearchParams(location.search).get('next')||'/',location.origin); if(u.origin===location.origin) dest=u.pathname+u.search+u.hash; }catch(e){}
+  location.href=dest;  // only this server: the URL parser, not a prefix check, decides (tabs and backslashes are normalized away)
 };
 </script></body></html>

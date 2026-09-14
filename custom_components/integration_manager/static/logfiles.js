@@ -8,8 +8,8 @@ async function loadFiles(){
  sel.innerHTML=files.map(f=>`<option value="${esc(f.name)}" ${f.name===cur?'selected':''}>${esc(f.name)} (${(f.bytes/1024).toFixed(0)} KB${f.active?', active':''}${f.source?', '+esc(f.source):''})</option>`).join('');
  if(!files.length) sel.innerHTML='<option value="">(the running integration writes no log file)</option>';
 }
-let LOADING=false;
-async function load(){ if(LOADING) return; LOADING=true; try{ await loadNow(); } finally { LOADING=false; } }  // no overlapping polls
+let LOADING=false, AGAIN=false;
+async function load(){ if(LOADING){ AGAIN=true; return; } LOADING=true; try{ do{ AGAIN=false; await loadNow(); }while(AGAIN); } finally { LOADING=false; } }  // no overlapping polls; a change made meanwhile loads right after
 async function loadNow(){
  const p=new URLSearchParams({file:$('#file').value,lines:$('#lines').value,q:$('#q').value});
  const r=await (await fetch('/api/log_files/tail?'+p)).json();

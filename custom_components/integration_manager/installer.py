@@ -380,6 +380,9 @@ class Installer:
         change = ha_state.get("change") if isinstance(ha_state, dict) else None
         if isinstance(change, dict) and change.get("backup"):
             out.add(str(change["backup"]))
+        recovery = ha_state.get("recovery") if isinstance(ha_state, dict) else None
+        if isinstance(recovery, dict) and recovery.get("backup"):
+            out.add(str(recovery["backup"]))  # a failed switch comes back from it, retried at every fallback
         plan = jsonio.read_json(os.path.join(self.state_dir, "rebuild-pending.json"), {}) or {}
         if isinstance(plan, dict) and plan.get("backup"):
             out.add(str(plan["backup"]))
@@ -1214,6 +1217,8 @@ class Installer:
         import backupkit
 
         await self.async_flush_stores()
+        if not os.path.isfile(self.state_file):
+            self._save_state()  # a fresh volume has none yet, and a backup without it cannot be restored
         return await self.hass.async_add_executor_job(backupkit.create, self.config_dir, label)
 
     async def restart(self) -> None:

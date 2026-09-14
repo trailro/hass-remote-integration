@@ -34,7 +34,8 @@
   <label style="display:inline-flex;align-items:center;gap:6px;margin:0;font-size:13px;color:var(--mut)"><input type="checkbox" id="bkdaily"> daily backup at <input type="number" id="bkhour" min="0" max="23" style="width:56px">:00</label>
   <span id="bkmsg" class="mut"></span>
  </div>
- <table id="bklist"><tr><th>backup</th><th>label</th><th>size</th><th>files</th><th></th></tr></table>
+ <table id="bklist"><tr><th>backup</th><th>label</th><th title="the Home Assistant version the backup was made on">HA</th><th>size</th><th>files</th><th></th></tr></table>
+ <div id="bkrestore" hidden style="margin-top:10px;border:1px solid var(--warn);border-radius:8px;padding:10px 12px"></div>
  <div class="row" style="margin-top:6px"><span id="bkpending" class="warn"></span><button id="bkcancel" hidden>Cancel the scheduled restore</button></div>
 </div>
 

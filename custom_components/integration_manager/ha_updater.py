@@ -41,6 +41,20 @@ class HaUpdater:
         except (OSError, ValueError):
             return {}
 
+    def _read_for_update(self) -> dict[str, Any]:
+        """Like _read, but an unreadable file is not empty: writing over it would drop current and
+        previous, and the entrypoint would then prune the venv a rollback needs."""
+        try:
+            with open(self.file, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as err:
+            raise ValueError(f"ha.json is unreadable ({err}): restart the container, the entrypoint rebuilds it from the volume") from None
+        if not isinstance(data, dict):
+            raise ValueError("ha.json is unreadable: restart the container, the entrypoint rebuilds it from the volume")
+        return data
+
     def _write(self, data: dict[str, Any]) -> None:
         write_json(self.file, data, fsync=False)  # called on the loop; the replace stays atomic
 
@@ -160,7 +174,7 @@ class HaUpdater:
         version = version.strip()
         if not _STABLE.match(version) and not re.match(r"^\d{4}\.\d{1,2}\.\d+(b\d+)?$", version):
             raise ValueError(f"not a Home Assistant version: {version!r}")
-        state = self._read()
+        state = self._read_for_update()
         state["desired"] = version
         state["last_error"] = ""
         if change:
