@@ -229,7 +229,7 @@ class MqttPublisher:
         # already gone when the remove event fires, so recompute is wrong)
         self._topics: dict[str, str] = {}
         self.manager = None  # ManagerDevice (manager_device.py), set by __init__
-        self._manager_clear_pending = False  # manager_discovery was turned off: remove the device from the consumer once
+        self._manager_absent_sent = False  # this connection already told the consumer there is no manager device
 
     # ----- identity --------------------------------------------------------
 
@@ -350,8 +350,6 @@ class MqttPublisher:
         connected, everything we own under the old names is cleared first
         (a stop is not a move: the consumer keeps its entities)."""
         new = await self.hass.async_add_executor_job(self._load)
-        if self.config.manager_discovery and not new.manager_discovery:
-            self._manager_clear_pending = True
         # A stop (wanted identity None) is NOT a move: the consumer keeps its
         # entities, marked unavailable by the retained "offline"; clearing
         # would delete them there with every customisation.  Uninstall clears.
@@ -658,6 +656,7 @@ class MqttPublisher:
         # on the loop, which is the only place that reads it, right before.
         def _resume() -> None:
             self._last_hash.clear()
+            self._manager_absent_sent = False
             self.hass.async_create_task(self.async_republish_all())
 
         self.hass.loop.call_soon_threadsafe(_resume)
@@ -1207,7 +1206,10 @@ class MqttPublisher:
         base, prefix = self.base_topic, self.config.discovery_prefix
         try:
             found = self._retained_scan("undisc", [(f"{prefix}/device/+/config", 1)])
-            ours = [t for t, p in found.items() if self._is_ours(t, p, base)]
+            # the manager device stays while manager_discovery wants it: removing it would drop the
+            # consumer's customisations of those entities only to announce them again a minute later
+            keep = {self._discovery_topic(f"{base}_manager")} if self.config.manager_discovery else set()
+            ours = [t for t, p in found.items() if self._is_ours(t, p, base) and t not in keep]
             self._clear_topics("undisc", ours)
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning("discovery cleanup failed: %s", err)
@@ -1240,6 +1242,15 @@ class MqttPublisher:
     def _forget_hashes(self, topic_prefix: str) -> None:
         for t in [t for t in list(self._last_hash) if t.startswith(topic_prefix)]:
             del self._last_hash[t]
+
+    async def async_after_start(self, res: dict[str, Any]) -> None:
+        """After a successful start (UI or MQTT action): the identity follows
+        the running integration; a version switch clears the retained
+        documents of entities the new version no longer has (discovery is NOT
+        reset: the consumer would delete and recreate every entity)."""
+        await self.async_reconnect()
+        if res.get("pre_update_backup"):
+            res["stale_docs_cleared"] = await self.async_clear_stale_docs()
 
     async def async_clear_stale_docs(self) -> int:
         if not self._connected:
@@ -1359,12 +1370,13 @@ class MqttPublisher:
             return
         mid, block, comps = self._manager_discovery()
         if self.config.manager_discovery:
-            self._manager_clear_pending = False
             self._publish_device_discovery(mid, block, comps)
-        elif self._manager_clear_pending and self._publish(self._discovery_topic(mid), None, qos=1):
+        elif not self._manager_absent_sent and self._publish(self._discovery_topic(mid), None, qos=1):
+            # once per connection, no memory needed: turned off while disconnected
+            # or across a restart still removes a device announced earlier
             self._discovery_map.pop(mid, None)
             self._blocks.pop(mid, None)
-            self._manager_clear_pending = False
+            self._manager_absent_sent = True
 
     def _manager_discovery(self) -> tuple[str, dict[str, Any], dict[str, dict[str, Any]]]:
         return disc.manager_device(

@@ -917,6 +917,8 @@ class Installer:
                 rels = await self.releases(domain, force=force)
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("release check %s: %s", domain, err)
+                if domain in self.updates:
+                    out[domain] = self.updates[domain]  # a failed check keeps what was known
                 continue
             stable = [r["tag"] for r in rels if not r.get("prerelease")]
             have = list(rec.get("versions") or {})
@@ -934,6 +936,7 @@ class Installer:
             return {"ok": False, "error": "nothing is running"}
         if self.busy:
             return {"ok": False, "error": "another action is running"}
+        self.dismiss_patch_notification(domain)
         self.busy = True
         try:
             try:
@@ -1038,6 +1041,7 @@ class Installer:
         """Everything of one integration: stop it, drop its config entries,
         its deployed files, every version in the store, its user patches,
         its YAML, and its retained MQTT documents (identity hass_<domain>)."""
+        self.dismiss_patch_notification(domain)
         ps = self.state.pending_start
         if isinstance(ps, dict) and ps.get("domain") == domain:
             self.state.pending_start = None  # nothing of this integration may start at the next boot
@@ -1255,6 +1259,7 @@ class Installer:
                 self.state.restart_required = True  # installed after the code was already imported
         # patches BEFORE the entries are enabled: enabling imports the code
         user_patches = await self.hass.async_add_executor_job(self._patch_rows, domain)
+        self._notify_patches(domain, user_patches)  # notifications live in memory: a boot raises it again
         pending = any(p["status"] == "pending" for p in user_patches)  # absent/not applicable/failed: nothing to do at boot
         patch_state = "pending" if pending else "applied"
         patched_now = ""
@@ -1510,10 +1515,15 @@ class Installer:
         from homeassistant.components import persistent_notification as pn
 
         nid = f"integration_manager_patches_{domain}"
-        bad = [r for r in results if str(r["status"]) not in ("applied", "already applied", "skipped")]
+        bad = [r for r in results if str(r["status"]).strip().lower() not in ("applied", "already applied", "skipped", "pending")]
         if not bad:
             pn.dismiss(self.hass, nid)
             return
         lines = "\n".join(f"- {r['name']}: {r['status']}" for r in bad)
-        pn.create(self.hass, f"{lines}\n\nThe integration runs without them. On the Integration page, *Edit* a patch and *Check* it "
+        pn.create(self.hass, f"{lines}\n\nThe integration runs without them. On the Integration page, Edit a patch and Check it "
                   "against the running code to see what changed.", title=f"Patches of {domain} no longer fit", notification_id=nid)
+
+    def dismiss_patch_notification(self, domain: str) -> None:
+        from homeassistant.components import persistent_notification as pn
+
+        pn.dismiss(self.hass, f"integration_manager_patches_{domain}")

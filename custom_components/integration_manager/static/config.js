@@ -102,11 +102,12 @@ def apply(ctx):
 -    return None
 +    return 0
 `};
-function pedShow(name,text,bundled,isNew){ $('#ped').hidden=false; $('#pedname').value=name; $('#pedname').disabled=!isNew; $('#pedtext').value=text;
+function pedShow(name,text,bundled,isNew){ PED_NEW=isNew; $('#ped').hidden=false; $('#pedname').value=name; $('#pedname').disabled=!isNew; $('#pedtext').value=text;
   $('#pednote').textContent=bundled?'bundled with the image: Save stores your copy under the same name, which takes its place':isNew?'the extension decides the format: .py module or .patch diff':'';
   $('#pedreport').innerHTML=''; $('#pedmsg').textContent=''; $('#ped').scrollIntoView({behavior:'smooth',block:'nearest'}); }
-async function pedEdit(name){ const r=await (await fetch(`api/patch_editor/${encodeURIComponent(DOM)}?name=${encodeURIComponent(name)}`,{headers:{'X-Requested-With':'fetch'}})).json();
-  if(!r.ok){ $('#pmsg').textContent='ERROR: '+r.error; return; } pedShow(r.name,r.text,r.bundled,false); }
+let PED_NEW=false;
+async function pedEdit(name){ let r; try{ r=await (await fetch(`api/patch_editor/${encodeURIComponent(DOM)}?name=${encodeURIComponent(name)}`,{headers:{'X-Requested-With':'fetch'}})).json(); }catch(e){ r={error:String(e)}; }
+  if(!r.ok){ $('#pmsg').textContent='ERROR: '+(r.error||r.message); return; } pedShow(r.name,r.text,r.bundled,false); }
 $('#pnewpy').onclick=()=>{ if(DOM) pedShow('my_fix.py',PATCH_TEMPLATES.py,false,true); };
 $('#pnewdiff').onclick=()=>{ if(DOM) pedShow('my_fix.patch',PATCH_TEMPLATES.patch,false,true); };
 $('#pedclose').onclick=()=>{ $('#ped').hidden=true; };
@@ -123,12 +124,12 @@ function renderPatchCheck(r){
   return h;
 }
 $('#pedcheck').onclick=async()=>{ if(!DOM) return; $('#pedreport').innerHTML='<span class="mut">checking…</span>';
-  const r=await post(`api/patch_editor/${encodeURIComponent(DOM)}/check`,{name:$('#pedname').value.trim(),text:$('#pedtext').value});
-  $('#pedreport').innerHTML=r.ok?renderPatchCheck(r):`<span class="bad">${esc(r.error)}</span>`; };
+  let r; try{ r=await post(`api/patch_editor/${encodeURIComponent(DOM)}/check`,{name:$('#pedname').value.trim(),text:$('#pedtext').value}); }catch(e){ r={error:String(e)}; }
+  $('#pedreport').innerHTML=r.ok?renderPatchCheck(r):`<span class="bad">${esc(r.error||r.message)}</span>`; };
 $('#pedsave').onclick=async()=>{ if(!DOM) return; const name=$('#pedname').value.trim();
-  const r=await post(`api/patch_editor/${encodeURIComponent(DOM)}/save`,{name,text:$('#pedtext').value});
-  $('#pedmsg').textContent=r.ok?`saved ${r.name}${r.overrides_bundled?' (overrides the bundled file)':''}; ${ST.running&&ST.running.domain===DOM?'Re-apply now applies it':'applied when the integration starts'}`:'ERROR: '+r.error;
-  if(r.ok){ $('#pedname').disabled=true; loadPatches(); } };
+  let r; try{ r=await post(`api/patch_editor/${encodeURIComponent(DOM)}/save`,{name,text:$('#pedtext').value,create:PED_NEW}); }catch(e){ r={error:String(e)}; }
+  $('#pedmsg').textContent=r.ok?`saved ${r.name}${r.overrides_bundled?' (overrides the bundled file)':''}; ${ST.running&&ST.running.domain===DOM?'Re-apply now applies it':'applied when the integration starts'}`:'ERROR: '+(r.error||r.message);
+  if(r.ok){ PED_NEW=false; $('#pedname').disabled=true; loadPatches(); } };
 $('#papply').onclick=async()=>{const r=await post(`api/patches/${encodeURIComponent(DOM)}/_all/apply`); $('#pmsg').textContent=r.ok?r.result:'ERROR: '+r.error; loadPatches();};
 async function loadYaml(){ if(!DOM){$('#yamltext').value='';return;} const r=await (await fetch(`api/yaml/${encodeURIComponent(DOM)}`)).json(); if(!r.ok) return; $('#yamltext').value=r.text||''; $('#yamlmsg').textContent=r.text?(r.applied_at_boot?'applied at boot (running integration)':'stored; applied when this integration runs'):''; }
 $('#yamlsave').onclick=async()=>{ const r=await post(`api/yaml/${encodeURIComponent(DOM)}`,{text:$('#yamltext').value}); $('#yamlmsg').textContent=r.ok?(r.removed?'YAML removed':`saved, ${r.keys} top-level key(s)`)+(r.restart_required?' — restart required to apply':''):'ERROR: '+r.error; };
