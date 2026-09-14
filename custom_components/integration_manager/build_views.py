@@ -32,7 +32,7 @@ from .installer import Installer
 from .ui import load_template, render
 
 _DOMAIN_RE = re.compile(r"^[a-z0-9_]{1,64}$")
-_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,100}$")
+_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+@-]{0,100}$")
 _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _HA_RE = re.compile(r"^\d{4}\.\d{1,2}\.\d+(b\d+)?$")
 

@@ -152,6 +152,7 @@ class Installer:
         self.on_domain_removed = None  # set by __init__: async (base_topic) -> clears the old MQTT identity
         self._smoke_pending: dict[str, Any] | None = None
         self._smoke_handle = None
+        self._smoke_waiting: dict[tuple[str, str], float] = {}  # (domain, tag) -> when the smoke test first had to wait
         self.updates: dict[str, str] = {}  # domain -> newest stable tag not yet in the store
         self.updates_checked_at: str | None = None
         self._loaded_tags: dict[str, str] = {}  # domain -> tag whose code this process imported
@@ -199,7 +200,7 @@ class Installer:
         directory: no repo, so no releases/updates, everything else works."""
         domain = domain.strip().lower()
         repo = repo.strip().strip("/")
-        if not domain.replace("_", "").isalnum() or (repo.count("/") != 1 and not (local and not repo)):
+        if not re.fullmatch(r"[a-z0-9_]{1,64}", domain) or (repo.count("/") != 1 and not (local and not repo)):
             raise ValueError("domain must be a HA domain (a_b), repo must be owner/name")
         builtin = self._builtin_registry().get(domain)
         if builtin and builtin.get("repo") != repo:
@@ -881,11 +882,19 @@ class Installer:
         """The change report once the new version had a moment to set up and
         nothing else runs (the smoke test's own conditions)."""
 
+        started = time.monotonic()
+
         async def _run() -> None:
             if self.state.domain != domain or self.running_tag != tag:
                 return
             setting_up = any(e.state.value == "setup_in_progress" for e in self._entries_of(domain) if not e.disabled_by)
             if self.busy or not self.hass.is_running or setting_up:
+                if time.monotonic() - started > self.SETUP_WAIT_S + change_report.DELAY_S:
+                    change = self.state.pending_change
+                    if isinstance(change, dict) and change.get("domain") == domain:
+                        self.state.pending_change = None  # never ready: comparing with a half set-up version would lie
+                        self._save_state()
+                    return
                 self.hass.loop.call_later(60, lambda: self.hass.async_create_task(_run()))
                 return
             await self.async_finish_change_report(domain, tag)
@@ -906,18 +915,24 @@ class Installer:
                 self._save_state()
             return
         still_setting_up = any(e.state.value == "setup_in_progress" for e in self._entries_of(domain) if not e.disabled_by)
-        if self.busy or not self.hass.is_running or still_setting_up:
+        waited = time.monotonic() - self._smoke_waiting.setdefault((domain, tag), time.monotonic())
+        hung = still_setting_up and not self.busy and self.hass.is_running and waited > max(self.SETUP_WAIT_S, self.settings.int_("smoke_test_s", 0, 86400))
+        if (self.busy or not self.hass.is_running or still_setting_up) and not hung:
             # an install/start in progress, or (at boot) HA not started / the entry
             # still setting up: judging now would be a false failure -> rollback
             self._smoke_handle = self.hass.loop.call_later(
                 60, lambda: self.hass.async_create_task(self._smoke_check(domain, tag, can_rollback)))
             return
+        self._smoke_waiting.pop((domain, tag), None)
         self._smoke_pending = None
         self.state.pending_smoke = None  # the verdict is recorded below, whatever it is
         try:
             h = self.health_source(grace=False) if self.health_source else self.health()
         except Exception as err:  # noqa: BLE001
             h = {"state": "error", "reason": f"health check failed: {err}"}
+        if hung:
+            # Home Assistant puts no timeout on an entry's setup: a version that never finishes it is broken
+            h = {**h, "state": "error", "reason": f"config entry still setting up after {int(waited)} s"}
         ok = h.get("state") == "ok"
         if ok:
             await self.async_finish_change_report(domain, tag)
@@ -1156,6 +1171,7 @@ class Installer:
         if not res.get("ok"):
             return res
         self.state.pending_change = None  # a rollback is not a version change to report
+        self.busy = True  # straight after start() released it: nothing may start before the restore is scheduled
         try:
             # not the manager part: start() already wrote a consistent state.json
             # (and it holds this rollback's verdict/last_error); .storage brings
@@ -1165,6 +1181,8 @@ class Installer:
             self._cancel_smoke()  # its failure would roll back to the bad version, and again
             self._save_state()
             return {"ok": False, "error": f"files rolled back, but the backup could not be scheduled: {err}"}
+        finally:
+            self.busy = False
         self._cancel_smoke()
         self.state.restart_required = True
         self.state.last_action = f"full rollback of {domain} to {prev_tag}: restoring {backup} at restart"
@@ -1242,6 +1260,17 @@ class Installer:
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("store %s could not be flushed before the backup: %s", getattr(store, "key", "?"), err)
         return flushed
+
+    async def async_backup_exclusive(self, label: str = "") -> dict[str, Any]:
+        """A backup on its own (UI, daily, MQTT): busy while it runs, so no
+        deploy replaces the files it is zipping.  Raises ValueError when busy."""
+        if self.busy:
+            raise ValueError("an install/start is running: try again in a moment")
+        self.busy = True
+        try:
+            return await self.async_backup(label)
+        finally:
+            self.busy = False
 
     async def async_backup(self, label: str = "") -> dict[str, Any]:
         """A backup that contains what HA knows now, not what it last wrote."""
@@ -1425,6 +1454,7 @@ class Installer:
     # ----- dev mode: install from a directory --------------------------------
 
     LOCAL_TAG = "local"
+    SETUP_WAIT_S = 900  # a config entry still setting up after this long is judged, not waited for any more
 
     def dev_candidates(self) -> dict[str, Any]:
         """Blocking: what the dev source directory offers: every

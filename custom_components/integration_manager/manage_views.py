@@ -19,7 +19,7 @@ from .mqtt_publisher import MqttPublisher
 from .http_util import ManagerView, with_body
 
 _DOMAIN_RE = re.compile(r"^[a-z0-9_]{1,64}$")
-_TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,100}$")
+_TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+@-]{0,100}$")
 MAX_PATCH = 2 * 1024 * 1024
 
 

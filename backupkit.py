@@ -37,11 +37,14 @@ PENDING_GLOB = "restore-pending*.zip"
 _PENDING_LOCK = threading.Lock()  # schedule, cancel and apply never interleave (two schedules would drop each other's archive)
 PARTS = ("storage", "custom_components", "manager", "yaml")  # selectable restore parts
 MARKER = "integration_manager/state.json"  # every backup must carry it
+MAX_UNCOMPRESSED = 4 * 1024**3  # an archive that unpacks to more would fill the volume during a restore
+SECRET_FILES = (f"{STATE_DIR}/settings.json", f"{STATE_DIR}/mqtt.json")  # mode 600 again after a restore
 
 # relative to the config dir; directories are recursed
 INCLUDE_DIRS = (".storage", "custom_components", STATE_DIR)
 INCLUDE_ROOT_GLOBS = ("*.yaml", "*.yml")
 EXCLUDE_GLOBS = (
+    f"{STATE_DIR}/auth_key", f"{STATE_DIR}/auth_key.tmp", f"{STATE_DIR}/auth_revoked", f"{STATE_DIR}/auth_revoked.tmp",  # a restore must not revive logged-out sessions
     "venv-*", "venv-current", "backups", "backups/*", "*.log",
     "*.log.*", "__pycache__", "*/__pycache__", "*/__pycache__/*", "*.pyc", "deps", "deps/*", "tts", "tts/*",
     f"{STATE_DIR}/restore-pending*.zip", f"{STATE_DIR}/restore-pending.json", f"{STATE_DIR}/pre-restore-*", f"{STATE_DIR}/ha-install.log",
@@ -78,16 +81,24 @@ def iter_files(config_dir: str):
 
 def create(config_dir: str, label: str = "") -> dict:
     """Write <config>/backups/<timestamp>[-label].zip and return its record."""
+    import tempfile
+
     bdir = os.path.join(config_dir, BACKUP_DIR)
     os.makedirs(bdir, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     safe = re.sub(r"\.{2,}", ".", "".join(ch for ch in label if ch.isalnum() or ch in "-_."))[:48]
     name = f"{stamp}{'-' + safe if safe else ''}.zip"
     n = 2
-    while os.path.exists(os.path.join(bdir, name)):  # two backups with one label in the same second must not overwrite each other
-        name = f"{stamp}{'-' + safe if safe else ''}-{n}.zip"
-        n += 1
-    tmp = os.path.join(bdir, name + ".tmp")
+    while True:  # the name is reserved atomically: two backups with one label in the same second never share it
+        try:
+            os.close(os.open(os.path.join(bdir, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
+            break
+        except FileExistsError:
+            name = f"{stamp}{'-' + safe if safe else ''}-{n}.zip"
+            n += 1
+    final = os.path.join(bdir, name)
+    fd, tmp = tempfile.mkstemp(dir=bdir, prefix=f".{name}.", suffix=".tmp")
+    os.close(fd)
     count = 0
     try:
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -99,13 +110,13 @@ def create(config_dir: str, label: str = "") -> dict:
                 count += 1
                 info = {"created": stamp, "label": label, "files": count, "tool": "hass-remote-integration", "ha_version": ha_version(config_dir)}
             zf.writestr("backup-info.json", json.dumps(info))
-        final = os.path.join(bdir, name)
         os.replace(tmp, final)
     except BaseException:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
+        for leftover in (tmp, final):
+            try:
+                os.remove(leftover)
+            except OSError:
+                pass
         raise
     return {"name": name, "bytes": os.path.getsize(final), "mtime": os.path.getmtime(final), "created": stamp, "label": label,
             "files": count, "ha_version": info["ha_version"]}
@@ -213,6 +224,8 @@ def validate(path: str) -> dict:
                 raise ValueError(f"corrupt member in archive: {bad}")
             if "backup-info.json" in names and zf.getinfo("backup-info.json").file_size > INFO_MAX:
                 raise ValueError("backup-info.json is implausibly large")
+            if sum(i.file_size for i in zf.infolist()) > MAX_UNCOMPRESSED:
+                raise ValueError(f"the archive unpacks to more than {MAX_UNCOMPRESSED // 1024**3} GB: not a backup of this tool")
             info = json.loads(zf.read("backup-info.json")) if "backup-info.json" in names else {}
             if not isinstance(info, dict):
                 info = {}
@@ -320,8 +333,17 @@ def pending_for_version(config_dir: str) -> str | None:
 
 
 def pending_ha_version(config_dir: str) -> str | None:
-    """The Home Assistant version the scheduled backup was made on."""
-    made_on = (_pending_meta(config_dir) or {}).get("ha_version")
+    """The Home Assistant version the scheduled backup was made on (a restore
+    scheduled by an older manager did not record it: read from the archive)."""
+    meta = _pending_meta(config_dir) or {}
+    made_on = meta.get("ha_version")
+    if "ha_version" not in meta and (path := pending_archive(config_dir)):
+        try:
+            with zipfile.ZipFile(path) as zf:
+                if "backup-info.json" in zf.namelist() and zf.getinfo("backup-info.json").file_size <= INFO_MAX:
+                    made_on = json.loads(zf.read("backup-info.json")).get("ha_version")
+        except (OSError, zipfile.BadZipFile, ValueError, AttributeError):
+            made_on = None
     return made_on if isinstance(made_on, str) else None
 
 
@@ -371,7 +393,7 @@ def _names(zf: zipfile.ZipFile) -> list[str]:
     return [n for n in zf.namelist() if n != "backup-info.json" and n != f"{STATE_DIR}/ha.json"]
 
 
-def apply_pending(config_dir: str, log=print) -> dict | None:
+def apply_pending(config_dir: str, log=print, record=None) -> dict | None:
     """Called by entrypoint.py with HA stopped.  Order: validate (CRC) ->
     pre-restore backup -> extract into a staging dir -> wipe + move into
     place.  If anything fails after the wipe, the pre-restore backup is
@@ -415,6 +437,9 @@ def apply_pending(config_dir: str, log=print) -> dict | None:
                             os.replace(os.path.join(root, f), os.path.join(target_root, f))
                 else:
                     os.replace(s_path, d_path)
+        for rel in SECRET_FILES:
+            if os.path.isfile(os.path.join(config_dir, rel)):
+                os.chmod(os.path.join(config_dir, rel), 0o600)
         result.update(ok=True, files=count, pre_restore=pre["name"])
         log(f"restore: applied {count} files")
     except Exception as err:  # noqa: BLE001
@@ -436,9 +461,20 @@ def apply_pending(config_dir: str, log=print) -> dict | None:
                 log(result["error"])
     finally:
         shutil.rmtree(staging, ignore_errors=True)
-        try:
-            os.remove(os.path.join(config_dir, PENDING_META))
-        except OSError:
-            pass
-        _drop_stale_pending(config_dir)
+        # the outcome is recorded (ha.json) BEFORE the schedule goes: a power loss or a full disk in
+        # between must not leave a replaced configuration that nothing knows about; not recorded =
+        # the restore stays scheduled and is applied again at the next boot
+        recorded = True
+        if record is not None:
+            try:
+                recorded = record(result) is not False
+            except Exception as err:  # noqa: BLE001
+                log(f"restore: outcome not recorded ({err})")
+                recorded = False
+        if recorded:
+            try:
+                os.remove(os.path.join(config_dir, PENDING_META))
+            except OSError:
+                pass
+        _drop_stale_pending(config_dir, keep=None if recorded else os.path.basename(src))  # not recorded: its archive stays with the schedule
     return result

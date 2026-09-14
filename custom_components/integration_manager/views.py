@@ -37,7 +37,7 @@ _MQTT_HTML = load_template("mqtt")
 
 
 _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-_TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,100}$")
+_TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+@-]{0,100}$")
 
 
 class IndexView(ManagerView):
@@ -287,9 +287,9 @@ class InstallView(ManagerView):
         tag = str(body.get("tag", "")).strip()
         domain = body.get("domain") or None
         if not tag or not _TAG_RE.match(tag) or ".." in tag:
-            return self.json_message("invalid tag", status_code=400)
+            return self.json({"ok": False, "error": f"invalid tag {tag[:80]!r}"})
         if domain is not None and not isinstance(domain, str):
-            return self.json_message("invalid domain", status_code=400)
+            return self.json({"ok": False, "error": "invalid domain"})
         res = await self.installer.install(tag, domain=domain, replace=bool(body.get("replace")))
         if res.get("ok") and res.get("replaced") and self.publisher is not None:
             await self.publisher.async_reconnect()  # the MQTT identity follows the new integration

@@ -56,7 +56,7 @@ class Scheduler:
             try:
                 import backupkit
 
-                rec = await self.installer.async_backup("daily")
+                rec = await self.installer.async_backup_exclusive("daily")
                 pruned = await self.hass.async_add_executor_job(
                     backupkit.prune, self.installer.config_dir, st.backup_keep, self.installer.protected_backups())
                 _LOGGER.info("daily backup %s (%s bytes), pruned %s", rec["name"], rec["bytes"], pruned or "nothing")

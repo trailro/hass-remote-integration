@@ -488,6 +488,7 @@ Exceptions show up on the **Logs** page.
 hass_<domain>/status                                online | offline (retained, last will)
 hass_<domain>/health                                retained JSON, every 60 s
 hass_<domain>/<integration>/<domain>/<object_id>    one retained document per entity
+hass_<domain>/<integration>/event_stream/<object_id>  events of event entities, not retained
 hass_<domain>/services/<domain>                     retained service catalog
 hass_<domain>/cmd/<domain>/<object_id>/<field>      commands (used by discovery)
 hass_<domain>/call/<domain>/<service>               service call, JSON payload
@@ -510,8 +511,9 @@ hass_<domain>/manager/result                        outcome of a manager action,
 - **Service calls**: publish a JSON object to `call/<domain>/<service>` (service
   data plus optional `entity_id`, and an optional `_id`); the result comes back
   on `result/...`. A repeated `_id` within five minutes is answered from memory
-  and never executed twice. `homeassistant`, `shell_command`, `python_script`
-  and `hassio` are never callable.
+  and never executed twice. `homeassistant`, `shell_command`, `python_script`,
+  `hassio` and `integration_manager` are never callable. A call needs a JSON
+  object, `{}` when it has no data: an empty payload is rejected.
 - **Manager device**: with discovery on, or with `manager_discovery` alone (for
   example while running in shadow mode), the main Home Assistant gets a
   `hass-remote-integration (hass_<domain>)` device. It shows whether the
@@ -583,13 +585,16 @@ What is in place:
 
 - A host-header guard against DNS rebinding: requests are served for IP
   addresses, `localhost` and local names (`.local`, `.lan`, `.home`,
-  `.internal`, `.home.arpa`); add other names under *allowed host names* on
+  `.internal`, `.localdomain`, `.home.arpa`); add other names under *allowed host names* on
   **System**.
 - State-changing requests need JSON or an explicit header, so a web page on
   another origin cannot trigger them.
-- Secrets (MQTT password, GitHub token, parent HA token, backup key) are
-  write-only in the UI, stored in files readable only by the owner, and never
-  logged or included in the diagnostics zip. Backups do contain them.
+- Secrets (MQTT password, GitHub token, parent HA token) are write-only in the
+  UI, stored in files readable only by the owner, and never logged or included
+  in the diagnostics zip. Backups contain them; the login key and the logout
+  record stay out of backups, so a restore never revives a logged-out session.
+  The key of an encrypted Home Assistant backup you import is only used for
+  that request.
 - Dangerous service domains are not callable, over MQTT or from the UI.
 
 **Do not expose the port to the internet.** Put it behind a reverse proxy with
@@ -630,6 +635,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
     state.json                  running integration, versions, pending actions
     settings.json               settings, tokens, log-file format (mode 600)
     auth_key                    signs login sessions, only with a password set (mode 600)
+    auth_revoked                time of the last logout: sessions from before it are invalid
     mqtt.json                   broker configuration (mode 600)
     mqtt_rules.json             per-entity MQTT rules
     registry.json               your registry entries (see below)
@@ -637,7 +643,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
     patches/<domain>/           your patches
     yaml/<domain>.yaml          YAML configuration
     events.jsonl                timeline
-    process.log                 process log (rotated)
+    process.log                 process log (rotated to process.log.1 and .2)
     change_reports.json         what the last version switches changed
     resource_history.json       resource samples of the Overview
     hacs_catalog.json           cached HACS list for the Install page search
@@ -668,7 +674,10 @@ A registry entry in `integration_manager/registry.json` has this shape; only
 ### API
 
 Every page is backed by a JSON API on the same port, so everything can be
-scripted. With a password set, send it as `Authorization: Bearer <password>`. The main entry points:
+scripted. With a password set, send it as `Authorization: Bearer <password>`. POST
+bodies are JSON (`Content-Type: application/json`), and requests that reach out
+to the internet or another server (`/api/catalog`, `/api/patch_editor`,
+`/api/parity`, `?refresh=1`) also need `X-Requested-With: fetch`. The main entry points:
 
 | Area | Endpoints |
 |---|---|

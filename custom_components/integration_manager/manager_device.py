@@ -437,6 +437,10 @@ class ManagerDevice:
                     + (("ok" + (f", {res['note']}" if res.get("note") else "") + ("; restarting" if restart else "")) if res.get("ok") else f"failed: {res.get('error')}"),
                     action=action)
         if restart:
+            for _ in range(600):  # an install or start clicked meanwhile finishes first (at most 5 min)
+                if not self.installer.busy:
+                    break
+                await asyncio.sleep(0.5)
             await self.installer.restart()
         return res
 
@@ -484,7 +488,7 @@ class ManagerDevice:
 
         if self.installer.busy:
             raise ValueError("an install/start is running")
-        rec = await self.installer.async_backup("mqtt")
+        rec = await self.installer.async_backup_exclusive("mqtt")
         await self.hass.async_add_executor_job(backupkit.prune, self.installer.config_dir, self.installer.settings.backup_keep,
                                                self.installer.protected_backups() | {rec["name"]})
         return {"ok": True, "note": f"backup {rec['name']}"}
