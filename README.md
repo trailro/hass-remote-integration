@@ -103,7 +103,7 @@ cd hass-remote-integration
 
 `main` can be ahead of the latest release. To run a released version, check
 out its tag from the [Releases](https://github.com/trailro/hass-remote-integration/releases)
-page, for example `git checkout v0.7.0`.
+page, for example `git checkout v0.8.0`.
 
 Put your settings in a `.env` file next to `docker-compose.yml` (it is not
 committed):
