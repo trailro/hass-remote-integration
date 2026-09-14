@@ -116,12 +116,14 @@ class Auth:
             self.revoked_before = 0
 
     def revoke_all(self) -> None:
-        """Blocking: every session issued until now ends."""
-        self.revoked_before = int(time.time()) + 1
+        """Blocking: every session issued until now ends.  Written first: a
+        revocation that did not reach the disk would come undone at a restart."""
+        revoked = int(time.time()) + 1
         if self.revoked_path:
             with open(self.revoked_path + ".tmp", "w", encoding="utf-8") as fh:
-                fh.write(str(self.revoked_before))
+                fh.write(str(revoked))
             os.replace(self.revoked_path + ".tmp", self.revoked_path)
+        self.revoked_before = revoked
 
     # ----- brute-force brake -------------------------------------------------
 
@@ -226,7 +228,7 @@ class LoginView(ManagerView):
         self.auth.succeeded(client)
         response = self.json({"ok": True})
         response.set_cookie(COOKIE, self.auth.new_session(), max_age=SESSION_S, path="/", httponly=True, samesite="Strict",
-                            secure=request.secure)
+                            secure=request.secure or os.environ.get("HRI_COOKIE_SECURE", "") == "1")  # behind a TLS proxy the request looks plain
         return response
 
 
@@ -239,7 +241,10 @@ class LogoutView(ManagerView):
     @with_body
     async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
         if self.auth is not None and self.auth.enabled:
-            await request.app["hass"].async_add_executor_job(self.auth.revoke_all)
+            try:
+                await request.app["hass"].async_add_executor_job(self.auth.revoke_all)
+            except OSError as err:
+                return self.json({"ok": False, "error": f"logout could not be recorded on the volume: {err}"}, status_code=500)
         response = self.json({"ok": True})
         response.del_cookie(COOKIE, path="/")
         return response

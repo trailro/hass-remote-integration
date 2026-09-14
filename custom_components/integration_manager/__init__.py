@@ -235,7 +235,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         HaActionView(ha_updater, installer),
         ReleasesView(installer),
         SummaryView(installer, publisher),
-        InstallView(installer),
+        InstallView(installer, publisher),
         RestartView(installer),
         FlowPageView(),
         FlowStartView(flows, installer),
@@ -250,11 +250,11 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         notifications.NotificationsDismissAllView(hass),
         preflight_view,
         DevView(hass, installer),
-        DevInstallView(hass, installer),
+        DevInstallView(hass, installer, publisher),
         BuildPageView(),
         BuildOptionsView(installer, ha_updater),
         build_check,
-        BuildPrepareView(hass, installer, ha_updater, build_check),
+        BuildPrepareView(hass, installer, ha_updater, build_check, publisher),
     ):
         hass.http.register_view(view)
 

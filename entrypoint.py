@@ -338,6 +338,16 @@ def reset_storage_for_rebuild(wanted: str, restored: bool) -> bool:
     return True
 
 
+def _rebuild_stage(wanted: str) -> str | None:
+    """Stage of the clean start planned for ``wanted`` ("import": .storage was already emptied for it)."""
+    try:
+        with open(REBUILD_FILE, encoding="utf-8") as fh:
+            plan = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return plan.get("stage") if isinstance(plan, dict) and plan.get("to") == wanted else None
+
+
 def restore_after_failed_change(state: dict, failed: str, fallback: str) -> bool:
     """The container wants to fall back from ``failed`` to ``fallback``.  If
     the switch to ``failed`` got as far as booting it (a restore, a clean
@@ -389,10 +399,14 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
     if backupkit.pending(CONFIG_DIR):
         # HA is not running here, so registries can be replaced safely.
         state["last_restore"] = backupkit.apply_pending(CONFIG_DIR, log)
+        if isinstance(state["last_restore"], dict):
+            state["last_restore"]["for_version"] = for_version if own_restore else None
         restored = True
-    reset = reset_storage_for_rebuild(wanted, restored)
+        save_state(state)  # a power loss from here on must not forget that the configuration was replaced
+    change = state.get("change")
     recovery = state.get("recovery")
-    if isinstance(recovery, dict) and recovery.get("for") == wanted:
+    # a fallback's recovery; a switch the user scheduled to this version is not one (and a leftover must not stop it)
+    if isinstance(recovery, dict) and recovery.get("for") == wanted and not (isinstance(change, dict) and change.get("to") == wanted):
         if restored and (state.get("last_restore") or {}).get("ok"):
             state.pop("recovery", None)
         else:
@@ -405,16 +419,20 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
                 return back
             log(f"restoring the configuration for the fallback to {wanted} failed and {back} is not installed; booting {wanted}")
             state.pop("recovery", None)
-    change = state.get("change")
+    reset = reset_storage_for_rebuild(wanted, restored)
     if not isinstance(change, dict):
         return wanted
     if change.get("to") != wanted:
         state.pop("change", None)  # that switch did not happen, nothing of it was applied
         return wanted
     mode = change.get("mode")
-    # the change's own restore, with .storage: a restore scheduled by hand does not make a downgrade readable
-    done = (mode == "restore" and restored and own_restore and "storage" in restore_parts and (state.get("last_restore") or {}).get("ok")) \
-        or (mode == "rebuild" and reset)
+    # the change's own restore, with .storage (a restore scheduled by hand does not make a downgrade readable),
+    # also when it was applied at a boot a power loss interrupted before ha.json recorded the change as applied
+    last = state.get("last_restore") if isinstance(state.get("last_restore"), dict) else {}
+    own_now = restored and own_restore and "storage" in restore_parts and last.get("ok")
+    own_before = (not restored and last.get("ok") and last.get("for_version") == wanted and "storage" in (last.get("parts") or [])
+                  and str(last.get("at") or "") >= str(change.get("at") or ""))
+    done = (mode == "restore" and bool(own_now or own_before)) or (mode == "rebuild" and (reset or _rebuild_stage(wanted) == "import"))
     if mode in ("restore", "rebuild") and not done:
         what = "configuration restore" if mode == "restore" else "clean start"
         if current and current != wanted and venv_ok(current):

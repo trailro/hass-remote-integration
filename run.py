@@ -218,8 +218,8 @@ def _mark_boot_ok() -> None:
         change, recovery = state.get("change"), state.get("recovery")
         if not isinstance(change, dict) or change.get("to") == HA_VERSION:
             state.pop("change", None)  # a version change is done once its version booted
-        if not isinstance(recovery, dict) or recovery.get("for") == HA_VERSION:
-            state.pop("recovery", None)  # and the recovery that brought this version back is done
+        if not isinstance(recovery, dict) or HA_VERSION in (recovery.get("for"), recovery.get("from")):
+            state.pop("recovery", None)  # done: the version it went back to boots, or the one it went away from boots after all
         return state
 
     if not isinstance(read_json(path), dict):

@@ -174,9 +174,9 @@ async def async_change_ha_version(installer: Installer, updater: HaUpdater, targ
             raise ValueError("a chosen backup is restored with config=restore")
         if mode != "keep" and restore_backup is None and ha_vkey(target) >= ha_vkey(HA_VERSION):
             raise ValueError(f"config={mode} only applies to a downgrade")
-        if restore_backup is not None and parts is not None and "storage" not in parts and ha_vkey(target) < ha_vkey(HA_VERSION):
-            raise ValueError(f"going back to Home Assistant {target} needs the backup's .storage (a newer configuration is unreadable there): "
-                             "restore everything, or a selection with .storage")
+        if restore_backup is not None and parts is not None and (not parts or "storage" not in parts):
+            # the switch is done only when .storage came back with it (entrypoint.apply_config_changes)
+            raise ValueError(f"switching to Home Assistant {target} with a backup needs its .storage: restore everything, or a selection with .storage")
         if installer.busy:
             raise ValueError("an install/start is running: try again in a moment")
         installer.busy = True  # right away: nothing may start an install while this change is prepared
@@ -278,8 +278,9 @@ class HaActionView(ManagerView):
 class InstallView(ManagerView):
     url = "/api/install"
 
-    def __init__(self, installer: Installer) -> None:
+    def __init__(self, installer: Installer, publisher: MqttPublisher | None = None) -> None:
         self.installer = installer
+        self.publisher = publisher
 
     @with_body
     async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
@@ -289,7 +290,10 @@ class InstallView(ManagerView):
             return self.json_message("invalid tag", status_code=400)
         if domain is not None and not isinstance(domain, str):
             return self.json_message("invalid domain", status_code=400)
-        return self.json(await self.installer.install(tag, domain=domain, replace=bool(body.get("replace"))))
+        res = await self.installer.install(tag, domain=domain, replace=bool(body.get("replace")))
+        if res.get("ok") and res.get("replaced") and self.publisher is not None:
+            await self.publisher.async_reconnect()  # the MQTT identity follows the new integration
+        return self.json(res)
 
 
 class RestartView(ManagerView):

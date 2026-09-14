@@ -745,11 +745,16 @@ class Installer:
             if before and (before["entities"] or before["services"]):
                 self.state.pending_change = {"domain": domain, "from_tag": rec.get("previous_tag"), "to_tag": tag,
                                              "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "before": before}
+            elif switching and isinstance(self.state.pending_change, dict) and self.state.pending_change.get("domain") == domain:
+                self.state.pending_change = None  # an older switch's comparison no longer describes what runs
             patch_outcome = await self.hass.async_add_executor_job(self._apply_patches, domain)
             # New code for a module this process already imported only takes
             # effect after a restart (Python cannot reload an integration).
             loaded = self._loaded_tags.get(domain)
-            needs_restart = domain in self.hass.config.components and loaded is not None and loaded != tag
+            # a module Python already imported (set up, or only its config flow) keeps its old code: files
+            # deployed over it (a same-named local or branch build, another tag) only count after a restart
+            imported = domain in self.hass.config.components or f"custom_components.{domain}" in sys.modules
+            needs_restart = imported and (deployed or (loaded is not None and loaded != tag))
             if not needs_restart and not await self._loadable(domain):
                 # HA scanned custom_components at boot; a domain deployed since is
                 # invisible to its loader until a restart
@@ -790,7 +795,12 @@ class Installer:
                     await self._enable_entries(prev_domain)
                 except Exception:  # noqa: BLE001
                     _LOGGER.exception("could not re-enable %s after the failed start", prev_domain)
-            self._save_state()
+            if rec.get("running_tag") == tag and self.state.domain == domain:
+                self.state.restart_required = True  # recorded as running: the next boot's reconcile sets up files, patches and entries
+            try:
+                self._save_state()
+            except OSError:
+                _LOGGER.error("state.json not written after the failed start of %s %s", domain, tag)
             return {"ok": False, "error": self.state.last_error}
         finally:
             self.busy = False
@@ -858,8 +868,7 @@ class Installer:
             self.state.pending_smoke = None
             self._save_state()
             if isinstance(self.state.pending_change, dict):
-                # no smoke test to wait for: compare once the new version had a moment to set up
-                self.hass.loop.call_later(change_report.DELAY_S, lambda: self.hass.async_create_task(self.async_finish_change_report(domain, tag)))
+                self._finish_change_later(domain, tag)  # no smoke test to wait for
             return
         self._smoke_pending = {"domain": domain, "tag": tag, "at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() + delay)),
                                  "auto_rollback": can_rollback and self.settings.bool_("auto_rollback")}
@@ -867,6 +876,21 @@ class Installer:
         self._save_state()
         self._smoke_handle = self.hass.loop.call_later(
             delay, lambda: self.hass.async_create_task(self._smoke_check(domain, tag, can_rollback)))
+
+    def _finish_change_later(self, domain: str, tag: str) -> None:
+        """The change report once the new version had a moment to set up and
+        nothing else runs (the smoke test's own conditions)."""
+
+        async def _run() -> None:
+            if self.state.domain != domain or self.running_tag != tag:
+                return
+            setting_up = any(e.state.value == "setup_in_progress" for e in self._entries_of(domain) if not e.disabled_by)
+            if self.busy or not self.hass.is_running or setting_up:
+                self.hass.loop.call_later(60, lambda: self.hass.async_create_task(_run()))
+                return
+            await self.async_finish_change_report(domain, tag)
+
+        self.hass.loop.call_later(change_report.DELAY_S, lambda: self.hass.async_create_task(_run()))
 
     async def _smoke_check(self, domain: str, tag: str, can_rollback: bool) -> None:
         """Health verdict without the boot grace, `smoke_test_s` after a
@@ -971,6 +995,8 @@ class Installer:
         if self.busy:
             return {"ok": False, "error": "another action is running"}
         self.dismiss_patch_notification(domain)
+        if isinstance(self.state.pending_change, dict) and self.state.pending_change.get("domain") == domain:
+            self.state.pending_change = None  # nothing runs to compare with
         self.busy = True
         try:
             try:
@@ -1076,6 +1102,8 @@ class Installer:
         its deployed files, every version in the store, its user patches,
         its YAML, and its retained MQTT documents (identity hass_<domain>)."""
         self.dismiss_patch_notification(domain)
+        if isinstance(self.state.pending_change, dict) and self.state.pending_change.get("domain") == domain:
+            self.state.pending_change = None
         ps = self.state.pending_start
         if isinstance(ps, dict) and ps.get("domain") == domain:
             self.state.pending_start = None  # nothing of this integration may start at the next boot
@@ -1127,12 +1155,15 @@ class Installer:
         res = await self.start(domain, prev_tag)
         if not res.get("ok"):
             return res
+        self.state.pending_change = None  # a rollback is not a version change to report
         try:
             # not the manager part: start() already wrote a consistent state.json
             # (and it holds this rollback's verdict/last_error); .storage brings
             # back the un-migrated config entry, custom_components the old files
             await self.hass.async_add_executor_job(backupkit.schedule_restore, self.config_dir, backup, ["storage", "custom_components"])
         except (ValueError, OSError) as err:
+            self._cancel_smoke()  # its failure would roll back to the bad version, and again
+            self._save_state()
             return {"ok": False, "error": f"files rolled back, but the backup could not be scheduled: {err}"}
         self._cancel_smoke()
         self.state.restart_required = True
@@ -1268,7 +1299,16 @@ class Installer:
 
     async def async_reconcile(self) -> None:
         """Boot self-heal for the RUNNING integration: deployed files match
-        the running tag, requirements present in this venv, patches applied."""
+        the running tag, requirements present in this venv, patches applied.
+        Busy throughout: a start or an MQTT action from the UI, which already
+        listens, must not interleave with it."""
+        self.busy = True
+        try:
+            await self._reconcile()
+        finally:
+            self.busy = False
+
+    async def _reconcile(self) -> None:
         domain = self.state.domain
         rec = self.state.installed.get(domain or "", {})
         tag = rec.get("running_tag")
@@ -1284,11 +1324,7 @@ class Installer:
         missing = [r for r in reqs if not pkg_util.is_installed(r)]
         pip_failed: list[str] = []
         if missing:
-            self.busy = True
-            try:
-                pip_failed = await self.hass.async_add_executor_job(self._install_requirements, reqs + missing)
-            finally:
-                self.busy = False
+            pip_failed = await self.hass.async_add_executor_job(self._install_requirements, reqs + missing)
             if pip_failed:
                 _LOGGER.error("reconcile %s: pip failed for %s", domain, pip_failed)
             elif domain in self.hass.config.components:
@@ -1300,15 +1336,12 @@ class Installer:
         patch_state = "pending" if pending else "applied"
         patched_now = ""
         if deployed or pending:
-            self.busy = True
-            try:
-                patched_now = await self.hass.async_add_executor_job(self._apply_patches, domain)
-            finally:
-                self.busy = False
+            patched_now = await self.hass.async_add_executor_job(self._apply_patches, domain)
             if domain in self.hass.config.components:
                 self.state.restart_required = True  # patched after the code was imported
         # a start that ended in restart_required could not enable the entries
         # in the old process (see start()); this process can
+        self._loaded_tags[domain] = tag  # before the entries import the code
         enabled = await self._enable_entries(domain)
         if enabled:
             _LOGGER.info("reconcile %s: enabled config entries %s", domain, enabled)
@@ -1323,26 +1356,25 @@ class Installer:
             else:
                 self.state.pending_smoke = None
                 self._save_state()
+        change = self.state.pending_change
+        if not pend and isinstance(change, dict) and change.get("domain") == domain and change.get("to_tag") == tag \
+                and self.settings.int_("smoke_test_s", 0, 86400) <= 0:
+            self._finish_change_later(domain, tag)  # the smoke test is off: the report's intent survived the restart
         if patched_now:
             pending, patch_state = False, "applied"
-        self._loaded_tags[domain] = tag
         if not deployed and not missing and not pending:
             if not pip_failed:
                 self.state.restart_required = False  # this boot IS the restart that was required
                 self._save_state()
             return
         _LOGGER.info("reconcile %s %s: deployed=%s missing=%s patch=%s user_patches_pending=%s", domain, tag, deployed, missing, patch_state, pending)
-        self.busy = True
-        try:
-            failed = pip_failed or (await self.hass.async_add_executor_job(self._install_requirements, reqs) if deployed else [])
-            outcome = patched_now or await self.hass.async_add_executor_job(self._apply_patches, domain)
-            self.state.last_action = f"reconciled {domain} {tag}; patches: {outcome}" + (f"; pip failed: {', '.join(failed)}" if failed else "")
-            self.state.last_error = "" if not failed else "reconcile: pip failed"
-            if not failed and not (missing and domain in self.hass.config.components):
-                self.state.restart_required = False
-            self._save_state()
-        finally:
-            self.busy = False
+        failed = pip_failed or (await self.hass.async_add_executor_job(self._install_requirements, reqs) if deployed else [])
+        outcome = patched_now or await self.hass.async_add_executor_job(self._apply_patches, domain)
+        self.state.last_action = f"reconciled {domain} {tag}; patches: {outcome}" + (f"; pip failed: {', '.join(failed)}" if failed else "")
+        self.state.last_error = "" if not failed else "reconcile: pip failed"
+        if not failed and not (missing and domain in self.hass.config.components):
+            self.state.restart_required = False
+        self._save_state()
 
     # ----- blocking helpers (executor) ------------------------------------
 

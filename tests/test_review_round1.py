@@ -20,15 +20,30 @@ def message(topic, payload=b"", retain=False):
     return SimpleNamespace(topic=topic, payload=payload, retain=retain)
 
 
+def ready(pub, topics):
+    pub._topics = topics
+    pub._moving = False
+    pub._client = None
+    pub.stats = {"commands": 0}
+    return pub
+
+
 class EmptyPayloadTest(unittest.TestCase):
-    def test_empty_command_and_call_are_ignored(self):
-        pub = publisher()
-        pub._topics = {"switch.boiler": f"{BASE}/demo/switch/boiler"}
+    def test_empty_payload_never_runs_a_command_and_says_so(self):
+        pub = ready(publisher(), {"switch.boiler": f"{BASE}/demo/switch/boiler"})
         for topic in (f"{BASE}/cmd/switch/boiler/state", f"{BASE}/call/script/turn_on", f"{BASE}/manager/cmd/restart"):
             pub._handle_message(message(topic))
-        self.assertEqual(pub.history, [])
+        self.assertEqual([r["state"] for r in pub.history], ["ignored", "rejected", "rejected"])
         self.assertEqual(pub.hass.loop.calls, [])
         self.assertEqual(pub.hass.tasks, [])
+
+    def test_empty_text_value_is_a_command_unless_the_identity_moves(self):
+        pub = ready(publisher(), {"text.note": f"{BASE}/demo/text/note"})
+        pub._handle_message(message(f"{BASE}/cmd/text/note/value"))
+        self.assertEqual(len(pub.hass.loop.calls), 1)
+        pub._moving = True
+        pub._handle_message(message(f"{BASE}/cmd/text/note/value"))
+        self.assertEqual(len(pub.hass.loop.calls), 1)
 
 
 class CallDedupTest(unittest.TestCase):
