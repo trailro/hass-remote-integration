@@ -96,21 +96,21 @@ Footprint: roughly 170–210 MB of RAM with a typical integration running, and a
 
 ## Quick start
 
+The image is published on GitHub Container Registry for `amd64` and `arm64`
+(a Raspberry Pi with a 64-bit OS, Apple silicon, most NAS boxes). All you need
+is the compose file, in a directory of its own:
+
 ```bash
-git clone https://github.com/trailro/hass-remote-integration.git
-cd hass-remote-integration
+mkdir hass-remote-integration && cd hass-remote-integration
+curl -fsSLO https://raw.githubusercontent.com/trailro/hass-remote-integration/main/docker-compose.yml
 ```
 
-`main` can be ahead of the latest release. To run a released version, check
-out its tag from the [Releases](https://github.com/trailro/hass-remote-integration/releases)
-page, for example `git checkout v0.8.0`.
-
-Put your settings in a `.env` file next to `docker-compose.yml` (it is not
-committed):
+Put your settings in a `.env` file next to `docker-compose.yml`:
 
 ```bash
 TZ=Europe/Berlin          # your time zone
 HRI_PORT=8087             # port of the UI
+# HRI_VERSION=0.9.0       # optional: pin a release (default: latest)
 # HRI_PASSWORD=...        # optional: require a password for the UI and API
 ```
 
@@ -131,11 +131,24 @@ networks:
 ```
 
 A broker elsewhere on your LAN needs nothing: use its IP address on the MQTT
-page. Then build and start it:
+page. Then start it:
 
 ```bash
-docker compose up -d --build
+docker compose up -d
 ```
+
+To build the image yourself instead, clone the repository and add the build
+overlay (and your override file, if you have one, because Compose stops
+loading it on its own once files are listed with `-f`):
+
+```bash
+git clone https://github.com/trailro/hass-remote-integration.git && cd hass-remote-integration
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+```
+
+`main` can be ahead of the latest release: `git checkout` a tag from the
+[Releases](https://github.com/trailro/hass-remote-integration/releases) page to
+build a released version.
 
 Open `http://<docker-host>:8087`. On the very first start the page shows the
 Home Assistant installation progress; it takes a few minutes.
@@ -234,6 +247,16 @@ serial device shared by both instances through a TCP bridge.
 ---
 
 ## Everyday operation
+
+### Updating hass-remote-integration
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+Everything lives on the volume (Home Assistant, the integration, its
+configuration, backups), so replacing the container keeps it; the new manager
+is copied onto the volume at boot. With `HRI_VERSION` pinned, change it first.
 
 ### Updating the integration
 
@@ -508,6 +531,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 |---|---|---|
 | `HRI_PORT` | `8087` | Port of the UI and API |
 | `HRI_NAME` | `hass-remote-integration` | Container and volume name |
+| `HRI_VERSION` | `latest` | Image tag Compose pulls, for example `0.9.0` |
 | `TZ` | `UTC` | Time zone |
 | `HA_VERSION_LATEST` | `1` | `0` installs the image's baseline HA on a fresh volume instead of the newest |
 | `HRI_DEV_SRC` | `./dev-src` | Dev mode: directory mounted at `/dev-src` |
@@ -616,7 +640,10 @@ sh verify.sh test      # validates discovery payloads against the installed HA's
 from the environment or from `.env`.
 
 CI runs on every push to `main` and every pull request: syntax checks, an
-image build, a boot on a fresh volume and the discovery schema test.
+image build, a boot on a fresh volume and the discovery schema test. Publishing
+a release builds the `amd64` and `arm64` image and pushes it to
+`ghcr.io/trailro/hass-remote-integration` (`<version>`, `<major>.<minor>` and,
+for a stable release, `latest`).
 
 Inside the container the Home Assistant venv is `/config/venv-current/bin/python`
 (the image's own `python3` does not have Home Assistant).

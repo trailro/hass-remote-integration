@@ -1,0 +1,7 @@
+# Build the image from this checkout instead of pulling the published one:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+# (with -f, Compose no longer loads docker-compose.override.yml on its own: add it too)
+services:
+  hass-remote-integration:
+    build: .
+    image: hass-remote-integration:local
