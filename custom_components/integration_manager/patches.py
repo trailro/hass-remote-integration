@@ -130,6 +130,11 @@ def _applies(text: str, running_tag: str | None = None) -> tuple[bool, str]:
     return True, ""
 
 
+def _read_text(path: str) -> str:
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        return fh.read()
+
+
 def _load_module(path: str):
     name = "user_patch_" + re.sub(r"\W", "_", os.path.basename(path))
     spec = importlib.util.spec_from_file_location(name, path)
@@ -150,7 +155,7 @@ def _run(config_dir: str, domain: str, site_packages: str, component_dir: str, r
         path = patch_path(config_dir, domain, name)
         bundled = is_bundled(config_dir, domain, name)
         try:
-            text = open(path, encoding="utf-8", errors="replace").read()
+            text = _read_text(path)
             scope = version_scope(text)
             applies, why = _applies(text, running_tag)
             if not applies:
@@ -351,7 +356,7 @@ def _diff_status(text: str, ctx: PatchContext) -> str:
         target = _resolve(fp.path, ctx)
         if target is None:
             return f"absent ({fp.path} not found)"
-        lines = open(target, encoding="utf-8").read().split("\n")
+        lines = _read_text(target).split("\n")
         for h in fp.hunks:
             if _find(lines, h.new_lines, h.old_start - 1) >= 0:
                 states.append("applied")
@@ -374,7 +379,7 @@ def _diff_apply(text: str, ctx: PatchContext) -> str:
         return "already applied" if st == "applied" else st
     for fp in parse_unified(text):
         target = _resolve(fp.path, ctx)
-        lines = open(target, encoding="utf-8").read().split("\n")
+        lines = _read_text(target).split("\n")
         for h in fp.hunks:
             if _find(lines, h.new_lines, h.old_start - 1) >= 0:
                 continue

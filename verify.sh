@@ -4,6 +4,7 @@
 #   verify.sh recreate  remove the container and start it again on the current image
 #   verify.sh status    status API + memory (container must be running)
 #   verify.sh test      discovery components against HA's MQTT schemas (after any discovery change)
+#   verify.sh unit      unit tests (tests/) in the container's HA venv, against the repo's copy of the code
 # Reads HRI_NAME, HRI_PORT, HRI_IMAGE, HRI_NETWORK, HRI_PASSWORD and TZ from the environment or a .env file.
 set -u
 cd "$(dirname "$0")"
@@ -64,10 +65,20 @@ test() {
   docker exec -i "$NAME" /config/venv-current/bin/python - < test_components.py
 }
 
+unit() {
+  echo "=== unit tests (tests/ in the container's HA venv) ==="
+  dir=/tmp/hri-tests
+  docker exec "$NAME" sh -c "rm -rf $dir && mkdir -p $dir/custom_components" || return 1
+  for f in tests jsonio.py backupkit.py logbuffer.py; do docker cp -q "$f" "$NAME:$dir/" || return 1; done
+  docker cp -q custom_components/integration_manager "$NAME:$dir/custom_components/" || return 1
+  docker exec -w "$dir" -e PYTHONPATH="$dir" -e PYTHONDONTWRITEBYTECODE=1 "$NAME" /config/venv-current/bin/python -m unittest discover -s tests -t .
+}
+
 case "${1:-}" in
   start) start; status ;;
   recreate) recreate; status ;;
   status) status ;;
   test) test ;;
-  *) echo "usage: $0 start|recreate|status|test"; exit 2 ;;
+  unit) unit ;;
+  *) echo "usage: $0 start|recreate|status|test|unit"; exit 2 ;;
 esac

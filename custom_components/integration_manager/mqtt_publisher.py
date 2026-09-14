@@ -43,15 +43,19 @@ from typing import Any
 
 import paho.mqtt.client as mqtt
 
+from homeassistant.config_entries import SIGNAL_CONFIG_ENTRY_CHANGED
 from homeassistant.const import (
+    EVENT_COMPONENT_LOADED,
+    EVENT_HOMEASSISTANT_STARTED,
     EVENT_HOMEASSISTANT_STOP,
     EVENT_SERVICE_REGISTERED,
     EVENT_SERVICE_REMOVED,
     EVENT_STATE_CHANGED,
 )
-from homeassistant.core import Event, HomeAssistant, State, SupportsResponse, callback
+from homeassistant.core import CoreState, Event, HomeAssistant, State, SupportsResponse, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import DATA_ENTITY_PLATFORM, async_get_platforms
 from homeassistant.const import __version__ as ha_version_str
 from homeassistant.helpers.event import async_track_time_interval
@@ -230,6 +234,8 @@ class MqttPublisher:
         self._topics: dict[str, str] = {}
         self.manager = None  # ManagerDevice (manager_device.py), set by __init__
         self._manager_absent_sent = False  # this connection already told the consumer there is no manager device
+        self._health_soon_handle: asyncio.TimerHandle | None = None
+        self._health_announced: str | None = None  # the verdict last published (and put in the timeline)
 
     # ----- identity --------------------------------------------------------
 
@@ -320,6 +326,11 @@ class MqttPublisher:
         )
         self._arm_republish_timer()
         self._unsub.append(async_track_time_interval(self.hass, self._on_health_timer, timedelta(seconds=HEALTH_INTERVAL_S)))
+        # the verdict follows the integration at once (its entry loading at boot, a
+        # failed setup, a reload), not only at the next timer tick a minute later
+        self._unsub.append(async_dispatcher_connect(self.hass, SIGNAL_CONFIG_ENTRY_CHANGED, self._on_entry_changed))
+        self._unsub.append(self.hass.bus.async_listen(EVENT_COMPONENT_LOADED, self._on_component_loaded))
+        self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, self._on_started)
         # Integrations register their services after we connect (the
         # integration loads later in the boot); refresh the catalog, debounced.
         for ev in (EVENT_SERVICE_REGISTERED, EVENT_SERVICE_REMOVED):
@@ -1336,16 +1347,43 @@ class MqttPublisher:
 
     def publish_health(self) -> dict[str, Any]:
         doc = self.build_health()
-        prev = self._health_last.get("state") if self._health_last else None
+        self._health_last = doc
+        self.stats["health_state"] = doc.get("state")
+        if self.hass.state is not CoreState.running:
+            # booting: the integration is still being set up, and its "error" would flip the consumer's
+            # connectivity and the timeline for a moment; the retained verdict of the last run stays
+            # until Home Assistant has started (then _on_started publishes at once)
+            return doc
+        prev = self._health_announced
         if prev is not None and doc.get("state") != prev:
             events.emit("health", f"{prev} → {doc.get('state')}" + (f": {doc.get('reason')}" if doc.get("reason") else ""),
                         integration=doc.get("integration"))
-        self._health_last = doc
-        self.stats["health_state"] = doc.get("state")
+        self._health_announced = doc.get("state")
         if self._connected:
             self._publish(self._health_topic(), _dumps(doc))
             self.stats["health_published"] = doc["updated_at"]
         return doc
+
+    @callback
+    def _on_started(self, _event: Event) -> None:
+        self._health_soon()
+
+    @callback
+    def _on_entry_changed(self, _change: Any, entry: Any) -> None:
+        if entry.domain != "integration_manager":
+            self._health_soon()
+
+    @callback
+    def _on_component_loaded(self, event: Event) -> None:
+        if event.data.get("component") not in ("integration_manager", "persistent_notification"):
+            self._health_soon()
+
+    @callback
+    def _health_soon(self) -> None:
+        """A burst of entry state changes (not_loaded -> setup_in_progress -> loaded) gives one publication."""
+        if self._health_soon_handle is not None:
+            self._health_soon_handle.cancel()
+        self._health_soon_handle = self.hass.loop.call_later(2, self.publish_health)
 
     async def _on_health_timer(self, _now) -> None:
         if self.manager is not None:
@@ -1358,10 +1396,18 @@ class MqttPublisher:
         if self.manager is not None and self._connected and not self._moving:
             self._publish(self._manager_topic(), _dumps(self.manager.document()))
 
-    def publish_manager_result(self, result: dict[str, Any]) -> None:
+    async def async_publish_manager_result(self, result: dict[str, Any]) -> None:
+        """The outcome of a manager action, delivered to the broker before
+        whatever comes next (a reconnect, a restart) can drop it."""
         c = self._client
-        if c is not None and self._connected:
-            c.publish(f"{self.base_topic}/manager/result", _dumps(result), qos=1, retain=False)
+        if c is None or not self._connected:
+            return
+        info = c.publish(f"{self.base_topic}/manager/result", _dumps(result), qos=1, retain=False)
+        doc = c.publish(self._manager_topic(), _dumps(self.manager.document()), qos=1, retain=True) if self.manager else None
+        try:
+            await self.hass.async_add_executor_job(lambda: [i.wait_for_publish(3) for i in (info, doc) if i is not None])
+        except (RuntimeError, ValueError) as err:  # the connection dropped in between: the action itself still completes
+            _LOGGER.warning("MQTT: the result of a manager action may not have reached the broker: %s", err)
 
     def _publish_manager_discovery(self) -> None:
         """The manager device on its own while entity discovery is off (with

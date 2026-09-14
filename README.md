@@ -674,13 +674,15 @@ scripted. With a password set, send it as `Authorization: Bearer <password>`. Th
 docker build -t hass-remote-integration:local . && sh verify.sh recreate   # rebuild, boot check, memory
 sh verify.sh status
 sh verify.sh test      # validates discovery payloads against the installed HA's MQTT schemas
+sh verify.sh unit      # unit tests (tests/, stdlib unittest) in the container's HA venv
 ```
 
 `verify.sh` reads `HRI_NAME`, `HRI_PORT`, `HRI_IMAGE`, `HRI_NETWORK`, `HRI_PASSWORD` and `TZ`
 from the environment or from `.env`.
 
-CI runs on every push to `main` and every pull request: syntax checks, an
-image build, a boot on a fresh volume and the discovery schema test. Publishing
+CI runs on every push to `main` and every pull request: syntax checks, then,
+natively on both `amd64` and `arm64`, an image build, a boot on a fresh volume,
+the discovery schema test and the unit tests. Publishing
 a release builds the `amd64` and `arm64` image and pushes it to
 `ghcr.io/trailro/hass-remote-integration` (`<version>`, `<major>.<minor>` and,
 for a stable release, `latest`).

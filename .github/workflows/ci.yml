@@ -23,7 +23,7 @@ jobs:
         with:
           python-version: "3.14"
       - name: Python
-        run: python -m compileall -q -f entrypoint.py run.py backupkit.py jsonio.py logbuffer.py test_components.py custom_components
+        run: python -m compileall -q -f entrypoint.py run.py backupkit.py jsonio.py logbuffer.py test_components.py tests custom_components
       - name: JSON
         run: python -c "import json; [json.load(open(f)) for f in ('registry.json', 'custom_components/integration_manager/manifest.json')]"
       - name: JavaScript
@@ -34,9 +34,19 @@ jobs:
         run: docker compose -f docker-compose.yml -f docker-compose.build.yml -f docker-compose.dev.yml config -q
 
   boot:
-    name: Build, boot and discovery schemas
+    name: ${{ matrix.name }}
     needs: checks
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            name: Build, boot and discovery schemas
+            runner: ubuntu-latest
+          - arch: arm64
+            name: Boot on arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     env:
       HRI_NAME: hri-ci
@@ -50,8 +60,8 @@ jobs:
           context: .
           load: true
           tags: hass-remote-integration:local
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=ci-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=ci-${{ matrix.arch }}
       - name: Boot on a fresh volume (installs Home Assistant)
         run: sh verify.sh start
       - name: Manager API is up without restarts
@@ -60,6 +70,8 @@ jobs:
           test "$(docker inspect -f '{{.RestartCount}}' hri-ci)" = "0"
       - name: Discovery payloads against the MQTT schemas
         run: sh verify.sh test
+      - name: Unit tests
+        run: sh verify.sh unit
       - name: Container log
         if: always()
         run: docker logs hri-ci 2>&1 | tail -n 200
