@@ -23,11 +23,14 @@ upstream ships the fix.  Failures never block the integration.
 
 from __future__ import annotations
 
+import difflib
 import importlib.metadata as md
 import importlib.util
 import logging
 import os
 import re
+import shutil
+import tempfile
 from dataclasses import dataclass
 from typing import Any
 
@@ -54,6 +57,22 @@ def patch_dir(config_dir: str, domain: str) -> str:
 
 def valid_name(name: str) -> bool:
     return bool(_NAME_RE.match(name)) and ".." not in name
+
+
+def validate(name: str, text: str) -> str | None:
+    """Why ``text`` cannot be stored as patch ``name``, or None."""
+    if not valid_name(name):
+        return "file must be <name>.py or <name>.patch"
+    if name.endswith(".py"):
+        try:
+            compile(text, name, "exec")
+        except SyntaxError as err:
+            return f"not valid Python: {err}"
+        if "def apply(" not in text or "def status(" not in text:
+            return "a .py patch must define apply(ctx) and status(ctx)"
+    elif not parse_unified(text):
+        return "no hunks found: not a unified diff"
+    return None
 
 
 def bundled_dir(domain: str) -> str:
@@ -150,6 +169,84 @@ def status(config_dir: str, domain: str, site_packages: str, component_dir: str,
 
 def apply_all(config_dir: str, domain: str, site_packages: str, component_dir: str, running_tag: str | None = None) -> list[dict[str, Any]]:
     return _run(config_dir, domain, site_packages, component_dir, running_tag, apply=True)
+
+
+def check(config_dir: str, domain: str, site_packages: str, component_dir: str, running_tag: str | None, name: str, text: str) -> dict[str, Any]:
+    """Dry run of a patch that may not be saved yet, against the deployed
+    code; nothing is written.  A ``.patch`` reports every hunk (applied,
+    pending, not applicable) and, for a hunk whose context is gone, the
+    closest lines in the file and how they differ from what the hunk
+    expects.  A ``.py`` module is loaded from a temporary copy and its
+    ``status(ctx)`` is reported."""
+    if (err := validate(name, text)):
+        return {"ok": False, "error": err}
+    ctx = PatchContext(config_dir, domain, site_packages, component_dir)
+    applies, why = _applies(text, running_tag)
+    out: dict[str, Any] = {"ok": True, "name": name, "scope": version_scope(text), "applies": applies, "detail": why,
+                           "against": f"{domain} {running_tag}" if running_tag else f"the deployed files of {domain}"}
+    try:
+        if name.endswith(".patch"):
+            out["files"] = _hunk_report(text, ctx)
+            status_ = _diff_status(text, ctx)
+        else:
+            tmp = tempfile.mkdtemp(prefix="hri-patch-check-")
+            try:
+                path = os.path.join(tmp, name)
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                status_ = str(_load_module(path).status(ctx))
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+    except Exception as err:  # noqa: BLE001 - the user's module or an unreadable target
+        status_ = f"error: {type(err).__name__}: {err}"
+    out["status"] = status_ if applies else "skipped"
+    out["status_if_applied"] = status_
+    return out
+
+
+def _display_path(target: str, ctx: PatchContext) -> str:
+    for root, label in ((ctx.component_dir, f"custom_components/{ctx.domain}"), (ctx.site_packages, "site-packages")):
+        if target.startswith(root.rstrip(os.sep) + os.sep):
+            return f"{label}/{os.path.relpath(target, root)}"
+    return target
+
+
+def _closest(lines: list[str], needle: list[str], hint: int) -> int:
+    """Start of the window of ``lines`` that shares the most lines, position
+    by position, with ``needle`` (the nearest to ``hint`` on a tie)."""
+    n, best, best_score = len(needle), 0, -1
+    for i in range(0, max(1, len(lines) - n + 1)):
+        score = sum(1 for k in range(min(n, len(lines) - i)) if lines[i + k] == needle[k])
+        if score > best_score or (score == best_score and abs(i - hint) < abs(best - hint)):
+            best, best_score = i, score
+    return best
+
+
+def _hunk_report(text: str, ctx: PatchContext) -> list[dict[str, Any]]:
+    files = []
+    for fp in parse_unified(text):
+        target = _resolve(fp.path, ctx)
+        row: dict[str, Any] = {"path": fp.path, "target": _display_path(target, ctx) if target else None, "hunks": []}
+        files.append(row)
+        if target is None:
+            continue
+        with open(target, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().split("\n")
+        for h in fp.hunks:
+            hint = h.old_start - 1
+            hr: dict[str, Any] = {"header": f"@@ -{h.old_start},{h.old_n} @@", "state": "not applicable", "line": None}
+            if (at := _find(lines, h.new_lines, hint)) >= 0:
+                hr.update(state="applied", line=at + 1)
+            elif (at := _find(lines, h.old_lines, hint)) >= 0:
+                hr.update(state="pending", line=at + 1)
+            elif h.old_lines:
+                at = _closest(lines, h.old_lines, hint)
+                found = lines[at:at + len(h.old_lines)]
+                hr["line"] = at + 1
+                hr["found_diff"] = [d for d in difflib.unified_diff(h.old_lines, found, lineterm="", n=len(h.old_lines))
+                                    if not d.startswith(("---", "+++", "@@"))]
+            row["hunks"].append(hr)
+    return files
 
 
 # ----- unified diff support ---------------------------------------------------

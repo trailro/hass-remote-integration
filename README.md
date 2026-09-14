@@ -410,6 +410,17 @@ headers retire a patch on its own:
 # applies-to: some-lib<2.0            only while this requirement matches
 ```
 
+The Integration page has an editor: *New .py patch* and *New .patch diff* start
+from a template, *Edit* opens an existing patch (a bundled one is saved as your
+copy under the same name). *Check* changes nothing: for a diff it shows where
+each hunk lands, or, when its context is gone, the closest lines in the file
+next to what the hunk expects; a module runs its `status(ctx)`.
+
+When a patch stops fitting the code it targets (upstream changed it, a file is
+gone, the module fails), the integration still starts without it and a
+notification on the Overview says which patch and why. It goes away once every
+patch applies again.
+
 ---
 
 ## For integration authors: dev mode
@@ -615,7 +626,7 @@ scripted. With a password set, send it as `Authorization: Bearer <password>`. Th
 | Status | `GET /api/status`, `GET /api/summary`, `GET /api/manager`, `GET /api/mqtt/status`, `GET /api/events`, `GET /api/notifications`, `POST /api/notifications/dismiss_all` |
 | Integration | `POST /api/install`, `POST /api/run/{start,stop}`, `GET /api/releases`, `POST /api/releases/preflight`, `POST /api/installed/<domain>/{uninstall,rollback_full,remove_version}` |
 | Builder / dev | `POST /api/build/{check,prepare}`, `GET /api/dev`, `POST /api/dev/install` |
-| Configuration | `POST /api/flow/start`, `POST /api/flow/<id>`, `GET/POST /api/yaml/<domain>`, `GET /api/patches/<domain>`, `GET /api/entries` |
+| Configuration | `POST /api/flow/start`, `POST /api/flow/<id>`, `GET/POST /api/yaml/<domain>`, `GET /api/patches/<domain>`, `GET /api/patch_editor/<domain>?name=`, `POST /api/patch_editor/<domain>/{check,save}`, `GET /api/entries` |
 | MQTT | `GET/POST /api/mqtt/config`, `POST /api/mqtt/{reconnect,republish}`, `GET /api/mqtt/discovery`, `GET /api/mqtt/commands` |
 | Entities | `GET /api/entities`, `GET /api/devices`, `GET /api/services`, `POST /api/services/call` |
 | System | `GET /api/ha`, `POST /api/ha/{update,rollback}`, `POST /api/restart`, `GET /api/backups`, `POST /api/backups/create`, `POST /api/backups/<name>/restore`, `POST /api/import/{upload,inspect,apply}` |

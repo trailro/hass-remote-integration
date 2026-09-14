@@ -6,3 +6,5 @@ label{display:block;color:var(--mut);font-size:12px;margin:10px 0 4px}
 .radio label{display:inline-flex;align-items:center;gap:6px;margin:4px 12px 4px 0;color:var(--fg);font-size:14px}
 .err{color:var(--bad);font-size:12px}
 pre{white-space:pre-wrap;font:12px/1.4 ui-monospace,monospace;color:#c9d1d9;margin:0}
+.pdiff{background:#0d1117;border:1px solid #232c34;border-radius:6px;padding:6px 8px;margin:4px 0 0 12px}
+.pdiff .add{color:var(--ok)}.pdiff .del{color:var(--bad)}
