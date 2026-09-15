@@ -70,8 +70,11 @@ def _pip_dry_run(python: str, requirements: list[str], constraints: str | None) 
     rows = []
     for item in report.get("install", []):
         meta = item.get("metadata", {})
+        url = str((item.get("download_info") or {}).get("url") or "")
         rows.append({"name": meta.get("name"), "version": meta.get("version"),
-                     "requested": bool(item.get("requested")), "requires_python": meta.get("requires_python")})
+                     "requested": bool(item.get("requested")), "requires_python": meta.get("requires_python"),
+                     # no wheel for this Python / architecture: pip and uv build it at install time
+                     "source_only": bool(url) and not url.split("?", 1)[0].endswith(".whl")})
     return {"ok": True, "install": rows, "stderr": ""}
 
 
@@ -91,6 +94,97 @@ def _patch_after_update(text: str, new_versions: dict[str, str]) -> str:
     if not ver:
         return "unknown"
     return "applies" if (not r.specifier or r.specifier.contains(ver, prereleases=True)) else "skipped"
+
+
+def _build_from_source(python: str, rows: list[dict[str, Any]], constraints: str | None) -> list[dict[str, Any]]:
+    """Blocking: build every package pip would take from a source archive, the way the install will.
+    The image has no compiler: a pure-Python package builds, one with C code does not."""
+    import tempfile
+
+    out = []
+    for row in rows:
+        if not row.get("source_only") or not row.get("name"):
+            continue
+        with tempfile.TemporaryDirectory(prefix="hri-build-") as tmp:
+            cmd = [python, "-m", "pip", "wheel", "--no-deps", "--quiet", "-w", tmp, f"{row['name']}=={row['version']}"]
+            if constraints and os.path.isfile(constraints):
+                cmd += ["-c", constraints]
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=PIP_TIMEOUT_S, cwd="/tmp")
+                ok, err = proc.returncode == 0, ""
+                if not ok:
+                    lines = [ln for ln in proc.stderr.strip().splitlines() if ln.strip()]
+                    err = next((ln.strip() for ln in reversed(lines) if "error" in ln.lower()), lines[-1].strip() if lines else "build failed")
+            except subprocess.TimeoutExpired:
+                ok, err = False, f"not built within {PIP_TIMEOUT_S}s"
+        out.append({"name": row["name"], "version": row["version"], "built": ok, "error": err[:300]})
+    return out
+
+
+# modules the standard library dropped (PEP 594 in 3.13, distutils/imp/asyncore in 3.12, ...)
+_REMOVED_STDLIB = frozenset({
+    "aifc", "asynchat", "asyncore", "audioop", "cgi", "cgitb", "chunk", "crypt", "distutils", "imghdr", "imp", "lib2to3",
+    "mailcap", "msilib", "nis", "nntplib", "ossaudiodev", "pipes", "smtpd", "sndhdr", "spwd", "sunau", "telnetlib", "tkinter.tix",
+    "uu", "xdrlib",
+})
+
+
+def _catches_import_error(handler: Any) -> bool:
+    import ast
+
+    names = []
+    if handler.type is None:
+        return True
+    for node in (handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]):
+        if isinstance(node, ast.Name):
+            names.append(node.id)
+    return any(n in ("ImportError", "ModuleNotFoundError", "Exception", "BaseException") for n in names)
+
+
+def _code_checks(component_dir: str) -> tuple[list[str], list[str]]:
+    """Blocking: (syntax errors, imports of removed standard modules) of the integration's code, with this
+    interpreter (the image's Python).  Nothing is imported or run."""
+    import ast
+    import importlib.util
+
+    errors: list[str] = []
+    removed: list[str] = []
+    for root, dirs, files in os.walk(component_dir):
+        dirs[:] = sorted(d for d in dirs if d != "__pycache__")
+        for name in sorted(files):
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(root, name)
+            rel = os.path.relpath(path, component_dir)
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    source = fh.read()
+                tree = ast.parse(source, filename=rel)
+                compile(source, rel, "exec", dont_inherit=True)  # what ast accepts but the compiler refuses
+            except SyntaxError as err:
+                errors.append(f"{rel}:{err.lineno}: {err.msg}")
+                continue
+            except (OSError, UnicodeDecodeError, ValueError) as err:
+                errors.append(f"{rel}: {err}")
+                continue
+            guarded: set[int] = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Try) and any(_catches_import_error(h) for h in node.handlers):
+                    for stmt in node.body:
+                        guarded.update(id(n) for n in ast.walk(stmt))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    modules = [a.name for a in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                    modules = [node.module]
+                else:
+                    continue
+                for module in modules:
+                    top = module.split(".")[0]
+                    hit = module if module in _REMOVED_STDLIB else top if top in _REMOVED_STDLIB else None
+                    if hit and id(node) not in guarded and importlib.util.find_spec(top) is None:
+                        removed.append(f"{rel}:{node.lineno} imports {hit}")
+    return errors, removed
 
 
 def _config_flow_version(component_dir: str) -> int | None:
@@ -167,6 +261,14 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
         pip = await hass.async_add_executor_job(_pip_dry_run, sys.executable, all_reqs, installer.constraints)
         if not pip["ok"]:
             blockers.append("requirements cannot be resolved: " + (pip["stderr"].splitlines()[-1] if pip["stderr"] else "pip failed"))
+        py = ".".join(str(x) for x in sys.version_info[:3])
+        import platform
+
+        source_builds = await hass.async_add_executor_job(_build_from_source, sys.executable, pip["install"], installer.constraints) if pip["ok"] else []
+        for b in source_builds:
+            if not b["built"]:
+                blockers.append(f"{b['name']} {b['version']} has no wheel for Python {py} on {platform.machine()} and cannot be built here "
+                                f"(the image has no compiler): {b['error']}")
         new_versions = {str(r["name"]).lower().replace("_", "-"): str(r["version"]) for r in pip["install"] if r.get("name")}
         for name, ver in installed_now.items():
             key = name.lower().replace("_", "-")
@@ -199,6 +301,15 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
             elif st == "not applicable" and after != "skipped":
                 warnings.append(f"patch {row['name']} does not fit the new code (its context changed); it will be reported, not applied")
 
+        # 5b. the integration's own code on this Python
+        code_errors, removed_imports = await hass.async_add_executor_job(_code_checks, scratch)
+        if code_errors:
+            blockers.append(f"the integration's code does not compile on Python {py}: " + "; ".join(code_errors[:3])
+                            + (f" (+{len(code_errors) - 3} more)" if len(code_errors) > 3 else ""))
+        if removed_imports:
+            warnings.append(f"the integration imports modules Python {py} no longer has ({'; '.join(removed_imports[:3])}): "
+                            "it fails when loaded, unless one of its requirements provides them")
+
         # 6. configuration surface
         yaml_present = os.path.isfile(installer.yaml_path(domain))
         old = installer.installed_manifest(domain) or {}
@@ -228,6 +339,7 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
             "versions": {"running": old.get("version"), "running_tag": (installer.state.installed.get(domain) or {}).get("running_tag"),
                          "new": manifest.get("version"), "min_ha": min_ha},
             "requirements": req_rows, "also_installed": extra, "pip_ok": pip["ok"], "pip_error": pip["stderr"],
+            "source_builds": source_builds, "python": py, "code_errors": code_errors, "removed_imports": removed_imports,
             "dependencies": dep_rows, "patches": patch_rows, "config": cfg,
             "duration_s": round(time.monotonic() - t0, 1),
         }
