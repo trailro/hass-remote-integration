@@ -11,7 +11,7 @@ from typing import Any
 from aiohttp import web
 from homeassistant.const import __version__ as HA_VERSION
 from homeassistant.core import HomeAssistant
-from jsonio import ha_vkey
+from jsonio import fsync_dir, ha_vkey
 
 from . import events, ha_import
 from .http_util import ManagerView, with_body
@@ -104,6 +104,8 @@ class BackupUploadView(ManagerView):
                 if size > MAX_UPLOAD:
                     return self.json({"ok": False, "error": "file too large"})
                 await self.hass.async_add_executor_job(fh.write, chunk)
+            await self.hass.async_add_executor_job(fh.flush)
+            await self.hass.async_add_executor_job(os.fsync, fh.fileno())  # a torn upload after a power loss is a torn restore source
             await self.hass.async_add_executor_job(fh.close)
             try:
                 info = await self.hass.async_add_executor_job(backupkit.validate, tmp)
@@ -115,6 +117,7 @@ class BackupUploadView(ManagerView):
                 await self.hass.async_add_executor_job(os.remove, os.path.join(bdir, name))
                 return self.json({"ok": False, "error": "bad file name"})
             await self.hass.async_add_executor_job(os.replace, tmp, os.path.join(bdir, name))
+            await self.hass.async_add_executor_job(fsync_dir, bdir)
             ok = True
         finally:
             await self.hass.async_add_executor_job(fh.close)

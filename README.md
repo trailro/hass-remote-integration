@@ -446,11 +446,21 @@ removes root `*.yaml` / `*.yml` files that are not in the backup, so a file
 created after it (a `secrets.yaml`, for example) does not survive the restore.
 A restore that fails (a full disk, a file that cannot be written) puts the
 previous configuration back and is not retried: the schedule is dropped and
-the outcome is `failed`. A restore cut off halfway (`docker stop`, a power
-loss, Ctrl-C) stays scheduled, and the next boot applies it again from the
-same pre-restore backup. If even putting the configuration back fails, the
-restore stays scheduled and the pre-restore backup named in the error is kept
-from pruning and cannot be deleted. Backups, restored files and
+the outcome is `failed` (if even the outcome cannot be written, the next boot
+records it and still does not try again). A restore whose pre-restore backup
+cannot be recorded in the schedule does not start. A restore cut off halfway
+(`docker stop`, a power loss, Ctrl-C) stays scheduled, and the next boot
+applies it again from the same pre-restore backup, or puts that backup back
+if it fails again. If even putting the configuration back fails, Home
+Assistant is not started on the half-restored configuration: the manager port
+shows a status page naming the pre-restore backup, the restore is retried
+every 5 minutes until it applies or is put back, and that backup is kept from
+pruning and cannot be deleted. Deleting `integration_manager/restore-pending.json`
+ends the wait and starts Home Assistant on the configuration as it is. A
+restore replaces symbolic links inside the trees it restores with real files
+and directories instead of writing through them, and does not start when
+`.storage`, `custom_components` or `integration_manager` itself is a symbolic
+link. Backups, restored files and
 uploads are created readable by the container user only (umask 077).
 Automatic pruning keeps the newest backups by the date they were made (never
 later than the file's own date), never removes the backup it runs after, and
@@ -466,7 +476,8 @@ made on an older version asks what to do: keep the running Home Assistant (the
 default: the configuration is migrated forward when it starts) or go back to the
 version the backup was made on, for exactly the state of the backup. A backup
 made on a newer version can only be restored together with a switch to that
-version. A backup that does not record its version is only restored with
+version. A backup that does not record its version (or records something that
+is not a version number, such as `unknown`) is only restored with
 `.storage` after a confirmation ("restore anyway", `"force": true` in the API
 body), since it may come from a newer version. The version only matters when `.storage` is restored: a partial restore
 without it never changes Home Assistant. A switch installs the version at the restart if its venv is no longer
@@ -808,7 +819,8 @@ What is in place:
   The environment builder downloads exactly the commit its Check verified.
 - An imported Home Assistant backup must be the uncompressed `.tar` Home
   Assistant writes. Its configuration archive may be at most 2 GB, its
-  `backup.json` at most 1 MB, and what it unpacks at most 2 GB. Config entries
+  `backup.json` at most 1 MB, and what it unpacks at most 2 GB; neither the
+  backup nor its configuration archive may hold more than 100000 files. Config entries
   with an invalid id are skipped.
 - Dangerous service domains are not callable, over MQTT or from the UI.
 
