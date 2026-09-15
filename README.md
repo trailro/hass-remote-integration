@@ -229,8 +229,9 @@ deployed, its requirements installed, patches applied, and the config entries
 the manager disabled (on a stop or a switch) are enabled again; an entry you
 disabled yourself stays disabled. A backup is taken first when something
 changes. Starting a version other than the deployed one runs its preflight
-first (see [Updating the integration](#updating-the-integration)); blockers
-ask whether to start anyway.
+first (not for a dev build or an integration without a GitHub repository; see
+[Updating the integration](#updating-the-integration)); blockers ask whether
+to start anyway.
 
 Some starts need a process restart (for example switching to a different
 version of an integration that is already loaded, or applying YAML). The page
@@ -682,8 +683,9 @@ hass_<domain>/manager/result                        outcome of a manager action,
   replaced; installing Home Assistant (upgrades only) takes a backup, keeps the
   configuration and restarts. The limits of *Back up now* and *Check for
   updates* survive a restart. A restart asked for over MQTT, on its own or
-  after an install, is skipped while an install or start is still running, and
-  the result says so. Anyone who can publish under the base topic can use
+  after an install, waits up to five minutes for a running install, start,
+  backup or other action to finish; if it is still running then, the restart
+  is skipped and the result says so. Anyone who can publish under the base topic can use
   them, so turn this on only on a broker with credentials.
   hass-remote-integration itself is updated by pulling a new image.
 - **Stop, uninstall, restore**: the identity (`hass_<domain>`) belongs to the
@@ -823,7 +825,9 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
     mqtt_identity.json          base topic and discovery prefix retained data was last published under
     mqtt_undiscover.json        a discovery cleanup the broker has not confirmed yet
     ha.json                     Home Assistant version, version changes, boot failures, last restore
+    restore-pending.json        a restore scheduled for the next restart (with its zip)
     rebuild-pending.json        a clean-start rebuild still to run after a Home Assistant downgrade
+    import-map.json             entity and device ids an import aligns at boot
     latest_versions.json        last known releases (update entities, the banner)
     manager_actions.json        when each MQTT manager action last ran
     registry.json               your registry entries (see below)
@@ -837,6 +841,14 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
     hacs_catalog.json           cached HACS list for the Install page search
   backups/                      backups (zip)
 ```
+
+Settings, the MQTT configuration and the MQTT rules are written in the order
+they were saved, and every pending save is written before a restart, a stop or
+a backup. Edit these files by hand only while the container is stopped:
+`settings.json` and `mqtt_rules.json` are read when the process starts and
+overwritten by the next save from the UI, and a hand edit of `mqtt.json` is
+picked up by *Reconnect* but lost after a second save from the MQTT page.
+`registry.json` is read again whenever it changes.
 
 A registry entry in `integration_manager/registry.json` has this shape; only
 `repo` is required:
@@ -864,10 +876,12 @@ A registry entry in `integration_manager/registry.json` has this shape; only
 Every page is backed by a JSON API on the same port, so everything can be
 scripted. With a password set, send it as `Authorization: Bearer <password>`. POST
 bodies are JSON (`Content-Type: application/json`). Requests that reach out to
-the internet or another server, or that return logs, patches or diagnostics,
-also need `X-Requested-With: fetch`: `/api/catalog`, `/api/patch_editor`,
-`/api/patches/<domain>/upload`, `/api/parity`, `/api/releases/preview`,
-`/api/diagnostics`, `/api/log_files/tail` and `?refresh=1`. The main entry
+the internet or another server, upload files, or return patches, log file
+tails or diagnostics also need `X-Requested-With: fetch`: `/api/catalog`,
+`/api/patch_editor`, `/api/patches/<domain>/upload`, `/api/backups/upload`,
+`/api/import/upload`, `/api/parity`, `/api/releases/preview`,
+`/api/diagnostics`, `/api/diag/memory?refs=` and `/api/log_files/tail`.
+`?refresh=1` on `/api/releases` and `/api/ha` is ignored without it. The main entry
 points:
 
 | Area | Endpoints |
@@ -901,9 +915,11 @@ when `.storage` is restored.
 - **"restart required" does not go away.** Click *Restart process* on the
   Overview; some changes (a new version of a loaded integration, YAML) only take
   effect at a restart.
-- **Restart process does nothing.** A restart is refused while an install or
-  a start is running; the page shows the error. Wait for it to finish and
-  restart again.
+- **Restart process does nothing.** A restart is refused while the manager is
+  busy: an install, start, stop or uninstall, a backup, a patch being applied,
+  a Home Assistant version change, the self-check right after boot, or a
+  restart already under way. The page shows the error. Wait for it to finish
+  and restart again.
 - **MQTT says the base topic is in use.** Something else left retained messages
   under `hass_<domain>/`. Remove them, or tick `force_base_topic` if they are
   yours from an earlier setup.
