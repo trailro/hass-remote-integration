@@ -25,6 +25,7 @@ import re
 import shutil
 import tarfile
 import tempfile
+import threading
 import time
 import zipfile
 from types import MappingProxyType
@@ -96,6 +97,23 @@ def inspect_backup(config_dir: str, password: str | None, domains: set[str]) -> 
 MAX_EXTRACT_BYTES = 2 * 1024**3  # what an import may unpack onto the volume (registries and the integration's stores)
 MAX_INNER_BYTES = 2 * 1024**3  # the inner homeassistant.tar(.gz) copied out of the upload: never more than an upload may be
 MAX_META_BYTES = 1024**2  # backup.json is a few KB
+MAX_MEMBERS = 100_000  # a configuration has a few thousand files; every header read costs memory, empty members cost no bytes
+
+
+class TooManyMembers(ValueError):
+    pass
+
+
+def _members(tar: tarfile.TarFile):
+    """The members one by one: iterating a TarFile keeps every header read in tar.members (a crafted
+    archive of empty members exhausts memory long before any size limit), getnames() reads them all."""
+    count = 0
+    while (member := tar.next()) is not None:
+        tar.members.clear()
+        count += 1
+        if count > MAX_MEMBERS:
+            raise TooManyMembers(f"the backup holds more than {MAX_MEMBERS} files: not a Home Assistant backup this import reads")
+        yield member
 ENTRY_ID_RE = re.compile(r"[A-Za-z0-9]+")  # as ImportApplyView: an entry id is matched against and substituted into store file names
 
 
@@ -105,32 +123,36 @@ def _inspect(config_dir: str, tar_path: str, out_dir: str, password: str | None,
     except tarfile.ReadError as err:
         raise ValueError(f"not a Home Assistant backup (an uncompressed .tar is expected): {err}") from None
     with outer:
-        names = outer.getnames()
-        meta_name = next((n for n in names if _strip(n) == "backup.json"), None)
-        if meta_name is None:
+        found: dict[str, tarfile.TarInfo] = {}  # the last member of each name, as getmember() picked it
+        for member in _members(outer):
+            rel = _strip(member.name)
+            if rel in ("backup.json", "homeassistant.tar", "homeassistant.tar.gz"):
+                found[rel] = member
+        meta_member = found.get("backup.json")
+        if meta_member is None:
             raise ValueError("not a Home Assistant backup (no backup.json)")
-        if outer.getmember(meta_name).size > MAX_META_BYTES:
+        if meta_member.size > MAX_META_BYTES:
             raise ValueError("not a Home Assistant backup (backup.json is implausibly large)")
-        meta = json.load(outer.extractfile(meta_name))
+        meta = json.load(outer.extractfile(meta_member))
         if not isinstance(meta, dict):
             raise ValueError("not a Home Assistant backup (backup.json is not a JSON object)")
         compressed = bool(meta.get("compressed", True))
-        inner_name = next((n for n in names if _strip(n) == f"homeassistant.tar{'.gz' if compressed else ''}"), None)
-        if inner_name is None:
+        inner_member = found.get(f"homeassistant.tar{'.gz' if compressed else ''}")
+        if inner_member is None:
             raise ValueError("backup has no homeassistant.tar.gz (add-on only / partial without HA config?)")
         if meta.get("protected") and not password:
             raise ValueError("this backup is encrypted: enter the backup encryption key (emergency kit)")
-        if outer.getmember(inner_name).size > MAX_INNER_BYTES:
+        if inner_member.size > MAX_INNER_BYTES:
             raise ValueError(f"the Home Assistant configuration archive in this backup is larger than {MAX_INNER_BYTES // 1024**3} GB: not imported")
         with tempfile.NamedTemporaryFile(dir=out_dir, suffix=".inner", delete=False) as tmp:
-            shutil.copyfileobj(outer.extractfile(inner_name), tmp)
+            shutil.copyfileobj(outer.extractfile(inner_member), tmp)
             inner_path = tmp.name
     too_big = False
     try:
         try:
             with securetar.SecureTarFile(inner_path, gzip=compressed, password=(password or None) if meta.get("protected") else None) as tar:
                 total = 0
-                for member in tar:
+                for member in _members(tar):
                     rel = _strip(member.name)
                     if not member.isfile() or ".." in rel.split("/") or not _wanted(rel, domains):
                         continue
@@ -143,6 +165,8 @@ def _inspect(config_dir: str, tar_path: str, out_dir: str, password: str | None,
                     src = tar.extractfile(member)
                     with open(dest, "wb") as fh:
                         shutil.copyfileobj(src, fh)
+        except TooManyMembers:
+            raise
         except Exception as err:  # noqa: BLE001 - wrong key / corrupt archive
             raise ValueError(f"cannot read the backup contents (wrong encryption key?): {type(err).__name__}: {err}") from None
     finally:
@@ -294,6 +318,7 @@ class RegistryAligner:
         self._pending: set[str] = set()
         self._save_handle = None
         self._stopped = False  # past the final write: a save is written at once, no timer that may never fire
+        self._write_lock = threading.Lock()  # executor threads: the sequence check and the write are one step
 
     def _load(self) -> dict[str, dict[str, Any]]:
         try:
@@ -372,20 +397,21 @@ class RegistryAligner:
             await self.hass.async_add_executor_job(self._write, *self._snapshot())
 
     def _write(self, snapshot: str | None, seq: int | None = None) -> None:
-        if seq is not None and seq < getattr(self, "_written_seq", 0):
-            return  # a newer snapshot already landed
-        if seq is not None:
-            self._written_seq = seq
-        if snapshot is None:
-            try:
-                os.remove(self.path)
-            except OSError:
-                pass
-            return
-        tmp = f"{self.path}.{os.getpid()}.{id(snapshot)}.tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(snapshot)
-        os.replace(tmp, self.path)
+        with self._write_lock:
+            if seq is not None and seq < getattr(self, "_written_seq", 0):
+                return  # a newer snapshot already landed
+            if seq is not None:
+                self._written_seq = seq
+            if snapshot is None:
+                try:
+                    os.remove(self.path)
+                except OSError:
+                    pass
+                return
+            tmp = f"{self.path}.{os.getpid()}.{id(snapshot)}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(snapshot)
+            os.replace(tmp, self.path)
 
     def drop_domain(self, domain: str) -> None:
         self.maps.pop(domain, None)

@@ -206,12 +206,13 @@ class _StatusHandler(http.server.BaseHTTPRequestHandler):
             tail = ""
         if password_configured():
             tail = "(the install log is shown after login, on the System page)"  # no login exists yet: show only the phase
+        heading = _status.get("title") or f"Installing Home Assistant {_status['version']} …"
         body = (
             "<!doctype html><meta charset=utf-8><meta http-equiv=refresh content=5>"
-            "<title>hass-remote-integration · installing HA</title>"
+            f"<title>hass-remote-integration · {html.escape(heading)}</title>"
             "<body style='font:14px system-ui;background:#0f1418;color:#e6edf3;padding:24px'>"
-            f"<h2>Installing Home Assistant {_status['version']} …</h2>"
-            f"<p>phase: <b>{_status['phase']}</b> · {int(time.time() - _status['started'])} s so far · this page refreshes itself</p>"
+            f"<h2>{html.escape(heading)}</h2>"
+            f"<p>phase: <b>{html.escape(str(_status['phase']))}</b> · {int(time.time() - _status['started'])} s so far · this page refreshes itself</p>"
             f"<pre style='font:12px ui-monospace;color:#8b98a5;white-space:pre-wrap'>{html.escape(tail)}</pre>"
         ).encode()
         self.send_response(200)
@@ -485,6 +486,39 @@ def restore_after_failed_change(state: dict, failed: str, fallback: str) -> bool
     return True
 
 
+RESTORE_RETRY_S = 300
+
+
+def hold_after_failed_rollback(result: dict | None, apply) -> dict | None:
+    """A restore whose rollback failed left the configuration half wiped: Home Assistant is not started on
+    it (it would write fresh stores, which the retry then wipes again).  The status page explains it on the
+    manager port and the restore is retried every RESTORE_RETRY_S until it applies or is put back.  Deleting
+    integration_manager/restore-pending.json by hand ends the wait and boots the configuration as it is."""
+    srv = None
+    try:
+        while isinstance(result, dict) and result.get("recovery_source") and not result.get("ok"):
+            if not backupkit.pending(CONFIG_DIR):
+                log("the restore schedule was removed: starting Home Assistant on the configuration as it is")
+                break
+            source = result["recovery_source"]
+            _status.update(title="Home Assistant is not started: a restore failed and could not be put back", version=None, started=time.time(),
+                           phase=f"the configuration from before the restore is in backup {source}; retrying every {RESTORE_RETRY_S} s")
+            if srv is None:
+                srv = start_status_server()
+            log(f"Home Assistant NOT started: the configuration is half restored and the way back is backup {source}. "
+                f"Free space or fix the error above; the restore is retried every {RESTORE_RETRY_S} s. "
+                f"To start anyway on the configuration as it is, delete {backupkit.PENDING_META} on the volume")
+            time.sleep(RESTORE_RETRY_S)
+            if not backupkit.pending(CONFIG_DIR):
+                continue
+            result = apply()
+    finally:
+        if srv:
+            srv.shutdown()
+            srv.server_close()
+    return result
+
+
 def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
     """After the install, before the boot: a restore or a clean start that
     belongs to a version change applies only when that version is the one
@@ -525,7 +559,10 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
         owner = current
         if state.get("fallback_from") and current and wanted:
             owner = max(current, wanted, key=backupkit.ha_vkey)
-        state["last_restore"] = backupkit.apply_pending(CONFIG_DIR, log, record=record, storage_version=owner)
+        def apply() -> dict | None:
+            return backupkit.apply_pending(CONFIG_DIR, log, record=record, storage_version=owner)
+
+        state["last_restore"] = hold_after_failed_rollback(apply(), apply)
         restored = True
     change = state.get("change")
     recovery = state.get("recovery")
@@ -573,24 +610,27 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
 
 
 def merge_applied_restore(state: dict) -> None:
-    """A restore applied at an earlier boot whose outcome could not be written (a full disk)."""
-    marker = os.path.join(CONFIG_DIR, backupkit.APPLIED_META)
-    if not os.path.isfile(marker):
-        return
-    try:
-        with open(marker, encoding="utf-8") as fh:
-            meta = json.load(fh)
-        at = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(os.path.getmtime(marker)))
-    except (OSError, ValueError):
-        meta, at = {}, time.strftime("%Y-%m-%dT%H:%M:%S")
-    meta = meta if isinstance(meta, dict) else {}
-    state["last_restore"] = {"at": at, "ok": True, "parts": meta.get("parts"), "error": "", "pre_restore": meta.get("pre_restore"),
-                             "for_version": meta.get("for_version"), "note": "applied at an earlier boot; recorded late (the volume was full)"}
-    if save_state(state):
+    """A restore applied, or failed and put back, at an earlier boot whose outcome could not be written (a full disk)."""
+    for rel, ok in ((backupkit.APPLIED_META, True), (backupkit.FAILED_META, False)):
+        marker = os.path.join(CONFIG_DIR, rel)
+        if not os.path.isfile(marker):
+            continue
         try:
-            os.remove(marker)
-        except OSError:
-            pass
+            with open(marker, encoding="utf-8") as fh:
+                meta = json.load(fh)
+            at = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(os.path.getmtime(marker)))
+        except (OSError, ValueError):
+            meta, at = {}, time.strftime("%Y-%m-%dT%H:%M:%S")
+        meta = meta if isinstance(meta, dict) else {}
+        state["last_restore"] = {"at": at, "ok": ok, "parts": meta.get("parts"), "backup": meta.get("name"),
+                                 "error": "" if ok else "failed at an earlier boot and the previous configuration was put back (the error is in the container log)",
+                                 "pre_restore": meta.get("pre_restore"), "for_version": meta.get("for_version"),
+                                 "note": f"{'applied' if ok else 'failed'} at an earlier boot; recorded late (the volume was full)"}
+        if save_state(state):
+            try:
+                os.remove(marker)
+            except OSError:
+                pass
 
 
 def restrict_umask() -> int:
