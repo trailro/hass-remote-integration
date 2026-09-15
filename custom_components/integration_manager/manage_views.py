@@ -11,7 +11,7 @@ import re
 from aiohttp import web
 from homeassistant.core import HomeAssistant
 
-from . import events, patches
+from . import events, patches, preflight
 from .installer import Installer
 from .logfiles_page import clean_log_format
 from .settings import DEFAULTS, HEALTH_MODES
@@ -28,8 +28,10 @@ def _tag_ok(tag: str) -> bool:
 
 
 class RunView(ManagerView):
-    """POST /api/run/start {domain, tag?} | POST /api/run/stop: the ONE
-    running integration.  The MQTT publisher follows the identity."""
+    """POST /api/run/start {domain, tag?, force?} | POST /api/run/stop: the ONE
+    running integration.  The MQTT publisher follows the identity.  A start of
+    another version runs its preflight first (or reuses a recent one): blockers
+    refuse the start with ``needs_force`` and the report, unless ``force``."""
 
     url = "/api/run/{action}"
 
@@ -44,7 +46,16 @@ class RunView(ManagerView):
             tag = body.get("tag")
             if not _DOMAIN_RE.match(domain) or (tag is not None and not (isinstance(tag, str) and _tag_ok(tag))):
                 return self.json({"ok": False, "error": "domain (and optional tag) required"})
+            force = body.get("force") is True
+            gate = None if force else await preflight.gate(self.installer.hass, self.installer, domain, tag)
+            if gate and gate["blocked"]:
+                return self.json({"ok": False, "needs_force": True, "preflight": gate["report"],
+                                  "error": f"preflight of {domain} {tag}: " + "; ".join(gate["report"].get("blockers") or [])})
             res = await self.installer.start(domain, tag)
+            if gate and gate.get("skipped") and not gate["skipped"].startswith(("same version", "dev build")):
+                res["preflight_note"] = gate["skipped"]
+            if force and res.get("ok"):
+                events.emit("start", f"{domain} {res.get('tag')} started with preflight blockers overridden", domain=domain, tag=res.get("tag"))
         elif action == "stop":
             res = await self.installer.stop()
         elif action == "cancel_pending_start":

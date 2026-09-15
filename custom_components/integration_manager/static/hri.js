@@ -25,6 +25,18 @@ function releaseBanner(mu){
  document.querySelector('#hri-banner .x').onclick=()=>{try{localStorage.setItem('hri-banner-dismissed',top);}catch(e){} document.getElementById('hri-banner').remove();};
 }
 
+// start or switch the integration: the server runs the preflight first; blockers ask before starting anyway
+async function startIntegration(body){
+ let r=await post('api/run/start',body);
+ if(!r.ok&&r.needs_force){
+  const b=(r.preflight&&r.preflight.blockers)||[];
+  if(!confirm(`Preflight of ${body.domain} ${body.tag} found ${b.length} blocker${b.length===1?'':'s'}:\n\n- ${b.join('\n- ')}\n\nStart it anyway? A backup is taken first, and the smoke test rolls it back if it is unhealthy.`))
+   return {ok:false,cancelled:true,error:'not started (preflight blockers)'};
+  r=await post('api/run/start',{...body,force:true});
+ }
+ return r;
+}
+
 // top bar chips + the integration-specific log-files item
 document.addEventListener('DOMContentLoaded',()=>{
 (async()=>{try{

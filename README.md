@@ -297,8 +297,15 @@ expires or you log out once more.
 
 ### Updating the integration
 
-Install the new release (Install or Integration page), optionally run
-**Preflight** on it first, then *Switch to* it. The manager backs up, switches,
+Install the new release (Install or Integration page), then *Switch to* it.
+The switch runs the **Preflight** of that release first, or reuses one run in
+the last 30 minutes. Blockers stop the switch and are listed with a choice to
+start anyway; warnings do not stop it. An update started from your main HA
+over MQTT refuses on blockers, since nobody is there to confirm, and says why
+in its result. Through the API, `POST /api/run/start` answers
+`needs_force` with the report, and `force: true` starts anyway. Starting the
+version that is already deployed, a dev build, a rollback and a restore skip
+the preflight. The manager backs up, switches,
 restarts if needed, smoke-tests, and rolls back on its own if the new version
 is unhealthy. *Full rollback* on the Integration page brings back the previous
 version together with the config as it was before the update; its restart is
