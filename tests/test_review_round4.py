@@ -127,9 +127,6 @@ class ServiceSectionsTest(unittest.TestCase):
         self.assertEqual(_flat_fields({"fields": {"a": None}}, {}), {"a": {"name": None, "description": None}})
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class HistoryOutOfBackupsTest(unittest.TestCase):
     def test_timeline_history_and_reports_not_backed_up_nor_restored(self):
@@ -156,3 +153,7 @@ class HistoryOutOfBackupsTest(unittest.TestCase):
 class LatestVersionsOutOfBackupsTest(unittest.TestCase):
     def test_latest_versions_not_restored(self):
         self.assertTrue(backupkit._excluded("integration_manager/latest_versions.json"))
+
+
+if __name__ == "__main__":
+    unittest.main()

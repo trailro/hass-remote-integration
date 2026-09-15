@@ -411,7 +411,8 @@ class RegistryAligner:
                         dev = dreg.async_get_child_device_by_identifier(ident, entry.entry_id)
                         if dev:
                             break
-                if dev is not None and (not want.get("name_by_user") or dev.name_by_user == want["name_by_user"]):
+                if dev is not None and (not want.get("name_by_user") or dev.name_by_user == want["name_by_user"]) \
+                        and (want.get("disabled_by") != "user" or dev.disabled_by == dr.DeviceEntryDisabler.USER):
                     m["devices"].pop(key, None)
                     dropped += 1
         if dropped:
@@ -732,7 +733,9 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
     if cleanup:
         await hass.async_add_executor_job(clear, cfg)
     await hass.async_add_executor_job(_commit)
-    result: dict[str, Any] = {"entry_id": entry.entry_id, "state": entry.state.value, "copied_storage": copied, "cleaned_up": cleanup}
+    result: dict[str, Any] = {"entry_id": entry.entry_id, "state": entry.state.value, "copied_storage": copied, "cleaned_up": cleanup,
+                              # disabled only because its integration does not run: resumed when it starts (a disabled source entry stays so)
+                              "suspended": entry.disabled_by is not None and not src.get("disabled_by")}
     if entry.state is not ConfigEntryState.LOADED and not entry.disabled_by:
         result["note"] = f"imported; not loaded yet ({entry.reason or entry.state.value}): Home Assistant retries it or asks for a new login"
     if align:

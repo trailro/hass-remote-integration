@@ -434,13 +434,19 @@ def build_component(
             )
 
     elif domain == "alarm_control_panel":
+        code_format = attrs.get("code_format")
         comp.update(
-            {"value_template": _STATE_TPL, "command_topic": f"{cmd}/command", "code_arm_required": False,
-             "code_disarm_required": False, "code_trigger_required": False,
+            # the code typed on the consuming side travels with the action; the source panel checks it
+            {"value_template": _STATE_TPL, "command_topic": f"{cmd}/command",
+             "command_template": '{"action": "{{ action }}", "code": {{ code | to_json }}}',
+             "code_arm_required": bool(code_format) and bool(attrs.get("code_arm_required", True)),
+             "code_disarm_required": bool(code_format), "code_trigger_required": bool(code_format),
              "payload_arm_home": "ARM_HOME", "payload_arm_away": "ARM_AWAY", "payload_arm_night": "ARM_NIGHT",
              "payload_arm_vacation": "ARM_VACATION", "payload_arm_custom_bypass": "ARM_CUSTOM_BYPASS",
              "payload_disarm": "DISARM", "payload_trigger": "TRIGGER"}
         )
+        if code_format:
+            comp["code"] = "REMOTE_CODE" if str(code_format).lower() == "number" else "REMOTE_CODE_TEXT"
 
     elif domain == "update":
         comp.update(
@@ -736,12 +742,20 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
             "mode": lambda: ("humidifier", "set_mode", {**t, "mode": p}),
         })
     if domain == "alarm_control_panel" and field == "command":
+        action, code = p, None
+        if p.strip().startswith("{"):  # {"action": ..., "code": ...} from the command template; a bare action still works
+            try:
+                body = json.loads(p)
+            except ValueError:
+                body = {}
+            if isinstance(body, dict):
+                action, code = str(body.get("action") or ""), body.get("code")
         svc = {
             "ARM_HOME": "alarm_arm_home", "ARM_AWAY": "alarm_arm_away", "ARM_NIGHT": "alarm_arm_night",
             "ARM_VACATION": "alarm_arm_vacation", "ARM_CUSTOM_BYPASS": "alarm_arm_custom_bypass",
             "DISARM": "alarm_disarm", "TRIGGER": "alarm_trigger",
-        }[p.upper()]
-        return "alarm_control_panel", svc, t
+        }[action.strip().upper()]
+        return "alarm_control_panel", svc, ({**t, "code": str(code)} if code not in (None, "") else t)
     if domain == "update" and field == "install":
         return "update", "install", t
     if domain == "vacuum":

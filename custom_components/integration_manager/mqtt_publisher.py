@@ -248,6 +248,7 @@ class MqttPublisher:
         self._manager_absent_sent = False  # this connection already told the consumer there is no manager device
         self._resync_excluded = False  # integrations were excluded while disconnected: sweep the broker at the next connect
         self._undiscover_due = False  # discovery was turned off: remove the announced entities at the next full republish
+        self._last_event: dict[str, str] = {}  # event entity -> the occurrence (state = its time) last emitted or seen
         self._save_lock = threading.Lock()  # two saves (the MQTT form, a cutover) must not overwrite each other
         # once per process, after HA started: what this process never published (so the in-memory discovery
         # map cannot compute removal forms for it) but is still retained, e.g. entities a restore took away
@@ -355,6 +356,7 @@ class MqttPublisher:
     # ----- lifecycle -------------------------------------------------------
 
     async def async_start(self) -> None:
+        self._undiscover_due = await self.hass.async_add_executor_job(os.path.isfile, self._undiscover_file())
         self._unsub.append(self.hass.bus.async_listen(EVENT_STATE_CHANGED, self._on_state))
         self._unsub.append(
             self.hass.bus.async_listen(er.EVENT_ENTITY_REGISTRY_UPDATED, self._on_registry)
@@ -386,7 +388,29 @@ class MqttPublisher:
 
     async def async_reload_config(self) -> None:
         """Adopt settings that do not need a reconnect (discovery on/off)."""
-        self.config = await self.hass.async_add_executor_job(self._load)
+        new = await self.hass.async_add_executor_job(self._load)
+        if self.config.discovery_enabled and not new.discovery_enabled:
+            self._set_undiscover_due(True)  # e.g. Undo on Cutover: its own cleanup clears this once the broker confirmed
+        self.config = new
+
+    def _undiscover_file(self) -> str:
+        return self.hass.config.path("integration_manager", "mqtt_undiscover.json")
+
+    def _set_undiscover_due(self, due: bool) -> None:
+        """Kept on disk: a restart before the broker confirmed the cleanup must not forget it."""
+        self._undiscover_due = due
+        path = self._undiscover_file()
+        try:
+            if due:
+                write_json(path, {"base": self.base_topic, "prefix": self.config.discovery_prefix}, fsync=False)
+            elif os.path.isfile(path):
+                os.remove(path)
+        except OSError as err:
+            _LOGGER.warning("MQTT: the pending discovery cleanup could not be recorded: %s", err)
+
+    def undiscover_done(self) -> None:
+        """The retained discovery configs were cleared (Cutover Undo)."""
+        self._set_undiscover_due(False)
 
     def _arm_republish_timer(self) -> None:
         if self._republish_unsub is not None:
@@ -455,7 +479,7 @@ class MqttPublisher:
         if self.config.discovery_enabled and not new.discovery_enabled:
             # off means off: without this the consumer keeps every entity, and whatever changes here
             # meanwhile (a disabled or deleted entity) stays there as a zombie; like Undo on Cutover
-            self._undiscover_due = True
+            self._set_undiscover_due(True)
         if self._connected and self.wanted_base_topic is None and not moved:
             # a stop: the retained verdict must not keep saying "ok" for an integration that no longer runs
             self._publish(self._health_topic(), _dumps(self.build_health()), qos=1)
@@ -1728,7 +1752,15 @@ class MqttPublisher:
             # An event entity's state is the time of its last event: only a
             # changed state is a new event (restore at startup, availability
             # flaps and attribute-only writes must not replay it).
-            is_event = new.domain == "event" and old is not None and old.state != new.state
+            is_event = False
+            if new.domain == "event" and new.state not in ("unavailable", "unknown"):
+                # the state is the time of the last occurrence: only a time not seen before is a new one
+                # (an availability flap restores the same time: unavailable -> T must not replay T)
+                last = self._last_event.get(new.entity_id)
+                if last is None and old is not None and old.state not in ("unavailable", "unknown"):
+                    last = old.state
+                is_event = old is not None and last is not None and new.state != last
+                self._last_event[new.entity_id] = new.state
             self._publish_state(new, is_event=is_event)
         elif old is not None:
             self._clear(old.entity_id)
@@ -1866,7 +1898,7 @@ class MqttPublisher:
         if self._undiscover_due and not self.config.discovery_enabled:
             try:
                 n = await self.hass.async_add_executor_job(self._clear_discovery_retained)
-                self._undiscover_due = False
+                self._set_undiscover_due(False)
                 keep = f"{self.base_topic}_manager"
                 for did in [d for d in self._discovery_map if d != keep]:
                     self._discovery_map.pop(did, None)

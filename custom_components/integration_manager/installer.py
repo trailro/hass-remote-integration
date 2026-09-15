@@ -89,6 +89,7 @@ class State:
     release_updates: dict[str, str] = field(default_factory=dict)  # last release check: domain -> newest stable tag not in the store
     pending_change: dict[str, Any] | None = None  # {domain, from_tag, to_tag, at, before}: compared once the new version runs
     ha_error_reported: str | None = None           # the Home Assistant version-change error already announced
+    suspended_entries: list[str] | None = None     # entry ids the manager disabled (stop, switch, flow or import for another integration); None = not recorded yet
     smoke_announced: str | None = None             # "at" of the failed smoke verdict already raised as a notification
     last_restore_reported: str | None = None      # "at" of the restore outcome already put on the timeline
 
@@ -1172,6 +1173,7 @@ class Installer:
             if entry.disabled_by is None:
                 try:
                     ok = await self.hass.config_entries.async_set_disabled_by(entry.entry_id, ConfigEntryDisabler.USER)
+                    self.mark_suspended(entry.entry_id)  # disabled by the manager: resumed at the next start
                 except HomeAssistantError as err:  # OperationNotAllowed: an entry in migration_error or failed_unload
                     self.state.restart_required = True
                     raise RuntimeError(f"config entry '{entry.title}' of {domain} could not be disabled ({err}): restart the process") from None
@@ -1186,12 +1188,30 @@ class Installer:
                 raise RuntimeError(f"config entry '{entry.title}' of {domain} is still loaded after a failed unload: restart the process")
         return out
 
+    def _suspended(self) -> list[str]:
+        """Entries the manager disabled and resumes.  A volume from before this was recorded: every disabled
+        entry of an installed integration counts once (what was resumed until then), precise from here on."""
+        if self.state.suspended_entries is None:
+            self.state.suspended_entries = [e.entry_id for d in self.state.installed for e in self._entries_of(d) if e.disabled_by is not None]
+        return self.state.suspended_entries
+
+    def mark_suspended(self, entry_id: str) -> None:
+        suspended = self._suspended()
+        if entry_id not in suspended:
+            suspended.append(entry_id)
+            self._save_state()
+
     async def _enable_entries(self, domain: str) -> list[str]:
+        """Resume what the manager disabled; an entry the user disabled (or imported disabled) stays disabled."""
         out = []
+        suspended = self._suspended()
         for entry in self._entries_of(domain):
-            if entry.disabled_by is not None:
+            if entry.disabled_by is not None and entry.entry_id in suspended:
                 await self.hass.config_entries.async_set_disabled_by(entry.entry_id, None)
                 out.append(entry.entry_id)
+        if out:
+            self.state.suspended_entries = [i for i in suspended if i not in out]
+            self._save_state()
         return out
 
     async def uninstall(self, domain: str) -> dict[str, Any]:
@@ -1358,18 +1378,30 @@ class Installer:
                 pass
         stores += list(_DELAYED_STORES)  # the integration's own stores with a delayed save pending
         flushed = 0
+        failed: list[str] = []
         seen: set[int] = set()
+        unique = []
         for store in stores:
             if store is None or id(store) in seen:
                 continue
             seen.add(id(store))
-            if store is None or getattr(store, "_data", None) is None:
+            unique.append(store)
+            if getattr(store, "_data", None) is None:
                 continue
             try:
                 await store._async_handle_write_data()  # noqa: SLF001 - what EVENT_HOMEASSISTANT_FINAL_WRITE triggers
                 flushed += 1
             except Exception as err:  # noqa: BLE001
-                _LOGGER.warning("store %s could not be flushed before the backup: %s", getattr(store, "key", "?"), err)
+                failed.append(f"{getattr(store, 'key', '?')}: {err}")
+        for store in unique:
+            # a save HA had already started holds this lock (its data was taken, the file not yet written):
+            # zipping now would archive the file from before that save
+            lock = getattr(store, "_write_lock", None)
+            if lock is not None:
+                async with lock:
+                    pass
+        if failed:
+            raise OSError(f"stores could not be written before the backup: {'; '.join(failed[:3])}")
         return flushed
 
     @property
@@ -1591,8 +1623,12 @@ class Installer:
         manifest = self._unpack(blob, domain, staging)
         manifest = {**manifest, "_hri_min_ha": self._hacs_min_ha(blob)}  # not written anywhere: the version record keeps it
         final = self._version_dir(domain, tag)
-        shutil.rmtree(final, ignore_errors=True)
+        aside = os.path.join(os.path.dirname(final), ".old-" + os.path.basename(final))  # never a tag: tags do not start with a dot
+        shutil.rmtree(aside, ignore_errors=True)
+        if os.path.isdir(final):
+            os.replace(final, aside)
         os.replace(staging, final)
+        shutil.rmtree(aside, ignore_errors=True)
         return manifest
 
     # ----- dev mode: install from a directory --------------------------------

@@ -46,8 +46,12 @@ class ImportUploadView(ManagerView):
         self.hass = hass
 
     async def post(self, request: web.Request) -> web.Response:
-        if _IMPORT_LOCK.locked():  # an import reads the extracted files: replacing or clearing them would import half
-            return self.json({"ok": False, "error": "an import is running: wait for it to finish"})
+        if _IMPORT_LOCK.locked():
+            return self.json({"ok": False, "error": "an import or upload is running: wait for it to finish"})
+        async with _IMPORT_LOCK:  # held for the whole upload: an apply starting meanwhile would read files this replaces
+            return await self._post(request)
+
+    async def _post(self, request: web.Request) -> web.Response:
         if request.headers.get("X-Requested-With") != "fetch":
             return self.json_message("X-Requested-With: fetch required", status_code=400)
         if _rebuild_staged(self.hass.config.config_dir):
@@ -100,8 +104,12 @@ class ImportInspectView(ManagerView):
 
     @with_body
     async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
-        if _IMPORT_LOCK.locked():  # an import reads the extracted files: replacing or clearing them would import half
-            return self.json({"ok": False, "error": "an import is running: wait for it to finish"})
+        if _IMPORT_LOCK.locked():
+            return self.json({"ok": False, "error": "an import or upload is running: wait for it to finish"})
+        async with _IMPORT_LOCK:  # the extraction this writes must not change under an apply
+            return await self._post(request, body)
+
+    async def _post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
         cfg = self.hass.config.config_dir
         if os.path.isfile(os.path.join(cfg, ha_import.REBUILD_FILE)):
             return self.json({"ok": False, "error": "a Home Assistant downgrade with a clean start is scheduled: restart first"})
@@ -145,6 +153,8 @@ class ImportApplyView(ManagerView):
             result = await _locked(ha_import.apply(self.hass, self.aligner, domain, entry_id, data, options,
                                            bool(body.get("align", True)), bool(body.get("copy_storage", False)),
                                            running=(domain == running), installed=(domain in installed)))
+            if result.get("suspended") and self.installer:
+                self.installer.mark_suspended(result["entry_id"])
         except ValueError as err:
             return self.json({"ok": False, "error": str(err)})
         except Exception as err:  # noqa: BLE001
@@ -160,11 +170,12 @@ class ImportClearView(ManagerView):
 
     @with_body
     async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
-        if _IMPORT_LOCK.locked():  # an import reads the extracted files: replacing or clearing them would import half
-            return self.json({"ok": False, "error": "an import is running: wait for it to finish"})
         if _rebuild_staged(self.hass.config.config_dir):
             return self.json({"ok": False, "error": _REBUILD_MSG})
-        await self.hass.async_add_executor_job(ha_import.clear, self.hass.config.config_dir)
+        if _IMPORT_LOCK.locked():
+            return self.json({"ok": False, "error": "an import or upload is running: wait for it to finish"})
+        async with _IMPORT_LOCK:
+            await self.hass.async_add_executor_job(ha_import.clear, self.hass.config.config_dir)
         return self.json({"ok": True})
 
 
@@ -189,6 +200,9 @@ class ImportApplyAllView(ManagerView):
         try:
             result = await _locked(ha_import.apply_all(self.hass, self.aligner, domains, bool(body.get("align", True)), bool(body.get("copy_storage", True)),
                                                self.installer.running, set(self.installer.state.installed)))
+            for row in result.get("imported", []):
+                if row.get("suspended"):
+                    self.installer.mark_suspended(row["entry_id"])
         except ValueError as err:
             return self.json({"ok": False, "error": str(err)})
         except Exception as err:  # noqa: BLE001
