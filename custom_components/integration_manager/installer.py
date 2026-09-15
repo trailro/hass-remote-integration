@@ -89,7 +89,6 @@ class State:
     release_updates: dict[str, str] = field(default_factory=dict)  # last release check: domain -> newest stable tag not in the store
     pending_change: dict[str, Any] | None = None  # {domain, from_tag, to_tag, at, before}: compared once the new version runs
     last_restore_reported: str | None = None      # "at" of the restore outcome already put on the timeline
-    latest_versions: dict[str, str] = field(default_factory=dict)  # manager / manager_tag / home_assistant: last known, so update entities do not flap after a restart
 
 
 def _gh_check(resp, what: str) -> None:
@@ -160,6 +159,7 @@ class Installer:
         self.updates_checked_at: str | None = None
         self._loaded_tags: dict[str, str] = {}  # domain -> tag whose code this process imported
         self._code_hash: dict[str, str] = {}  # domain -> content of that code (patched), kept across an uninstall
+        self._restart_before_uninstall: dict[str, bool] = {}  # domain -> restart_required before its uninstall asked for one
         self.busy = False
         self._backup_lock = asyncio.Lock()  # backups on their own queue up instead of refusing each other
         os.makedirs(self.versions_dir, exist_ok=True)
@@ -768,6 +768,9 @@ class Installer:
                 # HA scanned custom_components at boot; a domain deployed since is
                 # invisible to its loader until a restart
                 needs_restart = True
+            if same_code and domain in self._restart_before_uninstall:
+                # the code the uninstall wanted gone by a restart runs again, unchanged
+                self.state.restart_required = self._restart_before_uninstall.pop(domain)
             if not needs_restart:
                 changed["enabled"] = await self._enable_entries(domain)
                 self._loaded_tags[domain] = tag
@@ -1143,6 +1146,7 @@ class Installer:
             await self._disable_entries(domain)
             self.state.domain = None
         if self._stays_loaded_until_restart(domain):
+            self._restart_before_uninstall.setdefault(domain, self.state.restart_required)
             self.state.restart_required = True  # its code keeps running until then
         for entry in list(self._entries_of(domain)):
             await self.hass.config_entries.async_remove(entry.entry_id)

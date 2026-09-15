@@ -1660,18 +1660,22 @@ class MqttPublisher:
         action = event.data.get("action")
         entity_id = event.data.get("entity_id", "")
         if action == "remove":
-            self._clear(entity_id)
             if self.config.discovery_enabled:
                 self._remove_component(entity_id)
+            self._clear(entity_id)
             return
         if action == "update" and "disabled_by" in (event.data.get("changes") or {}) and self._connected:
             entry = er.async_get(self.hass).async_get(entity_id)
+            if entry is not None and entry.disabled_by is er.RegistryEntryDisabler.CONFIG_ENTRY:
+                # a Stop (or a disabled config entry): the entity keeps existing on the
+                # consumer, unavailable, with its customisations; nothing is removed
+                return
             if entry is not None and entry.disabled:
                 # the consumer would keep the last value forever (empty payloads are
                 # ignored by its templates): remove the entity there instead
-                self._clear(entity_id)
                 if self.config.discovery_enabled:
-                    self._remove_component(entity_id)
+                    self._remove_component(entity_id)  # removal first: an empty document before it logs "Erroneous JSON" there
+                self._clear(entity_id)
                 return
         if action in ("create", "update") and self._connected:
             old_id = (event.data.get("changes") or {}).get("entity_id") or event.data.get("old_entity_id")

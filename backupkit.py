@@ -53,6 +53,7 @@ EXCLUDE_GLOBS = (
     ".storage/*.log", ".storage/core.uuid",
     # the record of what happened (timeline, resource history, change reports) must survive a restore
     f"{STATE_DIR}/events.jsonl*", f"{STATE_DIR}/resource_history.json*", f"{STATE_DIR}/change_reports.json*",
+    f"{STATE_DIR}/latest_versions.json*",  # a restore must not bring back older "latest" versions
 )
 KEEP_DEFAULT = 5
 INFO_MAX = 64 * 1024  # backup-info.json is a few hundred bytes; a huge one is a zip bomb

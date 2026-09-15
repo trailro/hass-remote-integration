@@ -79,6 +79,7 @@ VERSION_CHECK_S = 12 * 3600
 MIN_INTERVAL_S = {"backup": 600, "check_updates": 300}  # a flood of presses must not rotate every backup away
 LAG_TICK_S = 1.0
 HISTORY_FILE = "resource_history.json"
+LATEST_FILE = "latest_versions.json"  # last known releases: update entities do not flap after a restart or a restore
 HISTORY_SAVE_S = 600
 HISTORY_POINTS = 360         # at most this many points per series in an answer
 LEAK_MIN_SPAN_H = 6          # memory growth is judged over at least this much history
@@ -192,8 +193,11 @@ class ManagerDevice:
         self.updater = updater
         self.publisher = publisher
         self.resources: dict[str, Any] = dict.fromkeys(RESOURCE_KEYS)
-        known = getattr(installer.state, "latest_versions", None)
+        config_dir = getattr(installer, "config_dir", None)
+        self._latest_file = os.path.join(config_dir, "integration_manager", LATEST_FILE) if config_dir else None
+        known = read_json(self._latest_file, {}) if self._latest_file else {}
         known = known if isinstance(known, dict) else {}
+        self._latest_saved = dict(known)
         self.manager_latest: str | None = known.get("manager")
         self.manager_tag: str | None = known.get("manager_tag")
         self._ha_latest: str | None = known.get("home_assistant")
@@ -228,11 +232,9 @@ class ManagerDevice:
     def _remember_latest(self) -> None:
         known = {"manager": self.manager_latest, "manager_tag": self.manager_tag, "home_assistant": self._ha_latest}
         known = {k: v for k, v in known.items() if v}
-        if known != getattr(self.installer.state, "latest_versions", None):
-            self.installer.state.latest_versions = known
-            save = getattr(self.installer, "_save_state", None)
-            if callable(save):
-                save()
+        if known != self._latest_saved and self._latest_file:
+            self._latest_saved = known
+            self.hass.async_add_executor_job(write_json, self._latest_file, known)
 
     async def _first_sample(self, _now: Any) -> None:
         await self.async_sample()

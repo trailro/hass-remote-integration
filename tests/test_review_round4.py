@@ -151,3 +151,8 @@ class HistoryOutOfBackupsTest(unittest.TestCase):
             zf.writestr("integration_manager/state.json", "{}")
         with zipfile.ZipFile(old) as zf:
             self.assertEqual(backupkit._names(zf), ["integration_manager/state.json"])
+
+
+class LatestVersionsOutOfBackupsTest(unittest.TestCase):
+    def test_latest_versions_not_restored(self):
+        self.assertTrue(backupkit._excluded("integration_manager/latest_versions.json"))
