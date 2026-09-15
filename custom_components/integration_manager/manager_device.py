@@ -76,6 +76,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 MANAGER_REPO = "trailro/hass-remote-integration"
+MAX_RELEASES = 20  # newer releases remembered for the banner
 VERSION_CHECK_S = 12 * 3600
 MIN_INTERVAL_S = {"backup": 600, "check_updates": 300}  # a flood of presses must not rotate every backup away
 LAG_TICK_S = 1.0
@@ -135,6 +136,28 @@ def memory_trend(rows: list[list[Any]]) -> dict[str, Any]:
     rising = sum(1 for a, b in zip(means, means[1:]) if b > a) / (len(means) - 1) if len(means) > 1 else 0.0
     return {"span_h": round(xs[-1], 1), "memory_mib_per_h": round(slope, 2), "memory_start_mb": round(sum(ys[:k]) / k, 1),
             "memory_end_mb": round(sum(ys[-k:]) / k, 1), "rising_share": round(rising, 2)}
+
+
+def _stable_releases(payload: Any) -> list[dict[str, str]]:
+    """GitHub's release list as [{tag, version, name, url, published_at}], newest first:
+    published releases with a plain version tag only (no drafts, pre-releases, betas)."""
+    rows = []
+    for rel in payload if isinstance(payload, list) else []:
+        tag = str((rel or {}).get("tag_name") or "") if isinstance(rel, dict) else ""
+        if not tag or rel.get("draft") or rel.get("prerelease") or not is_stable_tag(tag):
+            continue
+        rows.append({"tag": tag, "version": tag[1:] if tag[:1] in "vV" else tag, "name": str(rel.get("name") or tag)[:80],
+                     "url": str(rel.get("html_url") or f"https://github.com/{MANAGER_REPO}/releases/tag/{tag}"),
+                     "published_at": str(rel.get("published_at") or "")})
+    rows.sort(key=lambda r: vkey(r["version"]), reverse=True)
+    return rows[:MAX_RELEASES]
+
+
+def _newer_releases(releases: Any, installed: str | None) -> list[dict[str, str]]:
+    """The releases newer than the running version, newest first; none for a build without a version."""
+    if not installed or not isinstance(releases, list):
+        return []
+    return [r for r in releases if isinstance(r, dict) and r.get("version") and vkey(r["version"]) > vkey(installed)]
 
 
 def _update(installed: str | None, latest: str | None, title: str, url: str | None, key, in_progress: bool = False) -> dict[str, Any]:
@@ -201,6 +224,7 @@ class ManagerDevice:
         self._latest_saved = dict(known)
         self.manager_latest: str | None = known.get("manager")
         self.manager_tag: str | None = known.get("manager_tag")
+        self.manager_releases: list[dict[str, str]] = known.get("manager_releases") if isinstance(known.get("manager_releases"), list) else []
         self._ha_latest: str | None = known.get("home_assistant")
         self._last_run: dict[str, float] = {}
         self.last_action: dict[str, Any] | None = None
@@ -231,7 +255,8 @@ class ManagerDevice:
         self._unsub.clear()
 
     def _remember_latest(self) -> None:
-        known = {"manager": self.manager_latest, "manager_tag": self.manager_tag, "home_assistant": self._ha_latest}
+        known = {"manager": self.manager_latest, "manager_tag": self.manager_tag, "home_assistant": self._ha_latest,
+                 "manager_releases": self.manager_releases}
         known = {k: v for k, v in known.items() if v}
         if known != self._latest_saved and self._latest_file:
             self._latest_saved = known
@@ -251,17 +276,21 @@ class ManagerDevice:
         Home Assistant; a failed check keeps what was known."""
         try:
             session = async_get_clientsession(self.hass)
-            async with session.get(f"https://api.github.com/repos/{MANAGER_REPO}/releases/latest",
+            async with session.get(f"https://api.github.com/repos/{MANAGER_REPO}/releases", params={"per_page": "30"},
                                    headers=self.installer.settings.github_headers(), timeout=aiohttp.ClientTimeout(total=20)) as resp:
                 if resp.status == 200:
-                    tag = str((await resp.json()).get("tag_name") or "")
-                    if tag:
-                        self.manager_tag = tag
-                        self.manager_latest = tag[1:] if tag.startswith(("v", "V")) else tag
+                    releases = _stable_releases(await resp.json())
+                    if releases:
+                        self.manager_tag, self.manager_latest = releases[0]["tag"], releases[0]["version"]
+                        self.manager_releases = releases
                         self._remember_latest()
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("hass-remote-integration release check failed: %s", err)
         await self.updater.available(force=force)  # records its own error
+
+    def newer_manager_releases(self) -> list[dict[str, str]]:
+        """Releases newer than this container's manager, from the last check (no request here)."""
+        return _newer_releases(self.manager_releases, self.version)
 
     # ----- resources -----------------------------------------------------------
 

@@ -32,6 +32,14 @@ button:hover{border-color:var(--acc)}button:disabled{opacity:.45;cursor:default}
 .topbar a.nav:hover{color:#e6edf3;background:#161d23}
 .topbar a.nav.active{color:#e6edf3;background:#1b232b;box-shadow:inset 0 -2px 0 #58a6ff}
 .topbar .spacer{flex:1}
+.hri-banner{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;padding:8px 14px;background:#10243a;border-bottom:1px solid #1f4a73;color:#cfe3f7;font:13px system-ui,sans-serif}
+.hri-banner b{color:#fff}
+.hri-banner .notes{display:flex;flex-wrap:wrap;gap:4px;align-items:center;color:#8fb3d6}
+.hri-banner .notes a{color:#79c0ff;text-decoration:none;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;padding:1px 6px;border:1px solid #1f4a73;border-radius:6px}
+.hri-banner .notes a:hover{border-color:#58a6ff;color:#fff}
+.hri-banner a.how{color:#79c0ff}
+.hri-banner .x{margin-left:auto;background:none;border:0;color:#8fb3d6;font-size:18px;line-height:1;cursor:pointer;padding:0 4px}
+.hri-banner .x:hover{color:#fff}
 .topbar .chip{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;border:1px solid #2a3540;color:#8b98a5;margin-left:6px;white-space:nowrap;font-size:12px}
 .topbar .chip .dot{width:8px;height:8px;border-radius:50%;background:#8b98a5}
 .topbar .chip.ok .dot{background:#3fb950}.topbar .chip.warn .dot{background:#d29922}.topbar .chip.bad .dot{background:#f85149}

@@ -284,7 +284,10 @@ gives the container 120 s to stop (`stop_grace_period`) and runs an init
 process; with plain `docker run`, add `--init --stop-timeout 120`.
 
 The top bar shows the version that runs and the commit its image was built
-from (`v0.13.0 · 1a2b3c4`), linking to that release.
+from (`v0.13.0 · 1a2b3c4`), linking to that release. When GitHub has newer
+releases than the one running (checked with the other update checks), a banner
+under the top bar says so and links the release notes of each newer release,
+newest first. Hiding it lasts until a newer release is published.
 
 With a password set, 0.11.0 changes the session cookie format: log in once
 after updating. Going back to an image older than 0.11.0 is possible (the

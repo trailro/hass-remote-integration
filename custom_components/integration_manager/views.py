@@ -97,6 +97,9 @@ class SummaryView(ManagerView):
             "notifications": notifications.count(self.installer.hass),
             "auth": bool(getattr(self.installer.hass.data.get("integration_manager_auth"), "enabled", False)),
             "manager": version_info(),
+            # releases newer than this container (the banner under the top bar), from the manager's last GitHub check
+            "manager_update": {"installed": version_info()["version"],
+                               "releases": manager.newer_manager_releases() if (manager := getattr(self.publisher, "manager", None)) else []},
         })
 
 
