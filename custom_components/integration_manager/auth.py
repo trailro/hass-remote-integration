@@ -82,7 +82,10 @@ class Auth:
     def __init__(self, password: str, key: bytes = b"", revoked_path: str | None = None) -> None:
         self.enabled = bool(password)
         self.revoked_path = revoked_path
-        self.revoked_before = 0  # epoch: sessions issued before it are invalid (logout)
+        # session generation, raised by every logout and signed into each cookie: only cookies of the
+        # current generation are valid.  Stored as a number that only grows and is never below the time
+        # of the logout, so an older image reading the same file still treats it as "revoked before".
+        self.generation = 0
         self._digest = hashlib.sha256(password.encode()).digest()
         self._tag = hashlib.sha256(b"session:" + password.encode()).hexdigest()[:16]
         self._key = key
@@ -98,19 +101,20 @@ class Auth:
         return hmac.compare_digest(candidate, self._digest)
 
     def new_session(self) -> str:
-        return self._sign(max(int(time.time()), self.revoked_before) + SESSION_S)
+        return self._sign(int(time.time()) + SESSION_S, self.generation)
 
-    def _sign(self, expires: int) -> str:
-        mac = hmac.new(self._key, f"{expires}.{self._tag}".encode(), hashlib.sha256).hexdigest()
-        return f"{expires}.{mac}"
+    def _sign(self, expires: int, generation: int) -> str:
+        mac = hmac.new(self._key, f"{expires}.{generation}.{self._tag}".encode(), hashlib.sha256).hexdigest()
+        return f"{expires}.{generation}.{mac}"
 
     def valid_session(self, value: str) -> bool:
         try:
-            expires = int(value.split(".", 1)[0])
+            expires_s, generation_s, _mac = value.split(".", 2)
+            expires, generation = int(expires_s), int(generation_s)
         except (ValueError, AttributeError):
-            return False
+            return False  # a cookie of the format before generations: log in again
         try:
-            return expires > time.time() and expires - SESSION_S >= self.revoked_before and hmac.compare_digest(self._sign(expires), value)
+            return expires > time.time() and generation == self.generation and hmac.compare_digest(self._sign(expires, generation), value)
         except TypeError:  # a non-ASCII cookie
             return False
 
@@ -118,19 +122,20 @@ class Auth:
         """Blocking."""
         try:
             with open(self.revoked_path or "", encoding="utf-8") as fh:
-                self.revoked_before = int(fh.read().strip() or 0)
+                self.generation = int(fh.read().strip() or 0)
         except (OSError, ValueError):
-            self.revoked_before = 0
+            self.generation = 0
 
     def revoke_all(self) -> None:
-        """Blocking: every session issued until now ends.  Written first: a
-        revocation that did not reach the disk would come undone at a restart."""
-        revoked = int(time.time()) + 1
+        """Blocking: every session issued until now ends, also one issued in
+        the same second as an earlier logout.  Written first: a revocation
+        that did not reach the disk would come undone at a restart."""
+        generation = max(int(time.time()) + 1, self.generation + 1)
         if self.revoked_path:
             with open(self.revoked_path + ".tmp", "w", encoding="utf-8") as fh:
-                fh.write(str(revoked))
+                fh.write(str(generation))
             os.replace(self.revoked_path + ".tmp", self.revoked_path)
-        self.revoked_before = revoked
+        self.generation = generation
 
     # ----- brute-force brake -------------------------------------------------
 
