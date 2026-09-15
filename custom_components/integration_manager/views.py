@@ -320,10 +320,7 @@ class RestartView(ManagerView):
     async def post(self, request: web.Request) -> web.Response:
         if request.content_type != "application/json":
             return self.json_message("Content-Type must be application/json", status_code=400)
-        if self.installer.busy:
-            return self.json({"ok": False, "error": "another action is running (install/start): wait for it"})
-        await self.installer.restart()
-        return self.json({"ok": True})
+        return self.json(await self.installer.restart())  # refuses while an install/start runs
 
 
 # ----- config / options flows ---------------------------------------------
