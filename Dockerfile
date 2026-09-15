@@ -22,6 +22,11 @@ COPY entrypoint.py run.py logbuffer.py backupkit.py jsonio.py registry.json requ
 COPY custom_components/integration_manager /app/manager_src/integration_manager
 COPY patches /app/patches
 
+# which commit the image was built from, shown in the UI next to the version
+# (set by the image and CI workflows; a local build is "local" unless given)
+ARG HRI_BUILD=local
+ENV HRI_BUILD=${HRI_BUILD}
+
 VOLUME ["/config"]
 EXPOSE 8087
 
