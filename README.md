@@ -797,7 +797,10 @@ hass_<domain>/manager/result                        outcome of a manager action,
   against `ca_certs`, a CA file inside `/config` (for example
   `/config/mqtt-ca.pem`). `tls_insecure` skips only the check that the
   certificate names the host: anyone holding a certificate from that CA can
-  then pose as the broker and read the credentials. The check for foreign
+  then pose as the broker and read the credentials. A certificate that fails
+  the check shows on the MQTT page with its reason (`TLS handshake failed:
+  unable to get local issuer certificate`), checked again at most once a
+  minute while the connection keeps failing. The check for foreign
   retained data and every cleanup connect the same way. Client certificates
   are not supported.
 
