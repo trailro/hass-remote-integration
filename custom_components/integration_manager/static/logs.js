@@ -1,11 +1,12 @@
 let groups=[], gOn=new Set(), lastId=0, shown=0, gen=0, following=false, resetting=0;
+const MAX_ROWS=200;  // the list keeps the newest lines only: following live drops the oldest
 function prefixes(){ return groups.filter(g=>gOn.has(g.name)).flatMap(g=>g.loggers); }
-function line(r){ return `<span class="l ${esc(r.level)}"><span class="ts">${esc(r.ts.slice(11))}</span> ${esc(r.level.padEnd(7))} <span class="lg">${esc(r.logger)}</span> ${esc(r.message)}${r.exc?`<span class="exc">${esc(r.exc)}</span>`:''}</span>`; }
+function line(r){ return `<span class="l ${esc(r.level)}"><span class="ts">${esc(r.ts.slice(0,10)+' '+r.ts.slice(11))}</span> ${esc(r.level.padEnd(7))} <span class="lg">${esc(r.logger)}</span> ${esc(r.message)}${r.exc?`<span class="exc">${esc(r.exc)}</span>`:''}</span>`; }
 async function fetchLogs(reset){
  // a reset (new filter) invalidates every answer still on its way; follow polls never overlap
  if(reset){ gen++; resetting++; } else if(following||resetting) return;  // a follow poll during a reset would append with the old lastId
  const mine=gen; if(!reset) following=true;
- const p=new URLSearchParams({level:$('#level').value,q:$('#q').value,limit:reset?500:200,since_id:reset?0:lastId});
+ const p=new URLSearchParams({level:$('#level').value,q:$('#q').value,limit:MAX_ROWS,since_id:reset?0:lastId});
  prefixes().forEach(x=>p.append('prefix',x));
  let r; try{ r=await (await fetch('/api/logs?'+p)).json(); } finally { if(reset) resetting--; else following=false; }
  if(mine!==gen) return;
@@ -13,10 +14,12 @@ async function fetchLogs(reset){
  $('#cap').textContent=r.capacity; $('#path').textContent=r.path||''; $('#ts').textContent=new Date().toLocaleTimeString();
  const out=$('#out'); if(reset){out.innerHTML='';shown=0;}
  const atBottom=out.scrollTop+out.clientHeight>=out.scrollHeight-20;
- if(r.records.length){ out.insertAdjacentHTML('beforeend',r.records.map(line).join('')); shown+=r.records.length; lastId=Math.max(lastId,...r.records.map(x=>x.id)); }
+ if(r.records.length){ out.insertAdjacentHTML('beforeend',r.records.map(line).join('')); lastId=Math.max(lastId,...r.records.map(x=>x.id)); }
  if(r.truncated&&!reset) out.insertAdjacentHTML('beforeend','<span class="l WARNING">… more new lines than fit in one read; continuing at the next</span>');
+ const rows=out.children; while(rows.length>MAX_ROWS) rows[0].remove();
+ shown=rows.length;
  if(reset||atBottom) out.scrollTop=out.scrollHeight;
- $('#n').textContent=`${shown} shown`;
+ $('#n').textContent=`${shown} shown (newest ${MAX_ROWS} at most)`;
 }
 async function loadGroups(){
  groups=await (await fetch('/api/logs/loggers')).json();
