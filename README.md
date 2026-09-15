@@ -700,7 +700,12 @@ hass_<domain>/manager/result                        outcome of a manager action,
   mirrored `camera.front` becomes `sensor.camera_front`, next to a real
   `sensor.camera_front`), both are announced, the main HA gives one a `_2`
   suffix, and the log names them; `discovery_default_id_duplicates` counts
-  them. An integration named `call`, `cmd`, `result`, `services`, `manager`,
+  them. A light, fan, siren or humidifier whose state is `unknown` stays
+  unknown on the main HA. An entity disabled in the container stays on the
+  main HA with its customisations and shows unavailable there; it is still
+  announced, with `enabled_by_default: false`, which the main HA applies only
+  when it creates an entity. Deleting the entity removes it there.
+  An integration named `call`, `cmd`, `result`, `services`, `manager`,
   `health` or `status` publishes its documents under
   `<name>-integration/<domain>/<object_id>`, so they never land on the
   command, call or result topics.
@@ -713,22 +718,31 @@ hass_<domain>/manager/result                        outcome of a manager action,
 - **Service calls**: publish a JSON object to `call/<domain>/<service>` (service
   data plus optional `entity_id`, and an optional `_id`); the result comes back
   on `result/...`. A repeated `_id` within five minutes is answered from memory
-  and never executed twice; the comparison keeps the type, so `1` and `"1"`
-  are two different calls. `homeassistant`, `shell_command`, `python_script`,
+  and never executed twice (the latest 1000 `_id`s are kept); the comparison
+  keeps the type, so `1` and `"1"` are two different calls. At most 50 service
+  calls and commands run at once, a timed-out call counting until its service
+  returns: beyond that a call is answered `too many calls in progress` (a
+  retry with the same `_id` runs once there is room) and a command is
+  rejected. `homeassistant`, `shell_command`, `python_script`,
   `hassio` and `integration_manager` are never callable.
   `persistent_notification` and `notify.persistent_notification` are not
   callable over MQTT and are left out of the MQTT service catalog; the Services
   page can still call them. `NaN`, `Infinity`, numbers too large to be finite
   (`1e999`), payloads larger than 256 KB and JSON nested deeper than 64 levels
-  are rejected, with an answer on `result/...`. Values of `code`, `usercode`,
-  `user_code`, `pin`, `passcode`, `password`, `secret` and `token` are masked
-  in the command history, the status and the log. A call reaches only entities
+  are rejected, with an answer on `result/...`. Values of keys ending in
+  `code`, `pin` or `key` as a word of their own (`code`, `user_code`,
+  `api_key`, not `zipcode` or `code_format`), or in `usercode`, `passcode`,
+  `password`, `passwd`, `secret`, `token`, `apikey`, `passkey` or `bindkey`
+  (`access_token`, `api_token`, not `token_type`) are masked in the command
+  history, the status and the log; `translation_key`, `sort_key` and
+  `primary_key` stay readable. A call reaches only entities
   the container publishes: an `entity_id` of `all`, or an entity, group (and
   its members), area, floor, label or device that resolves to an excluded or
   unknown entity, is refused, and so is a target that cannot be read (an id
   that is not a string). Entity ids in the service data count too: fields
   ending in `entity_id` or `entity_ids`, `group_members`,
-  `snapshot_entities` and `entities` (a list or a mapping keyed by entity id),
+  `snapshot_entities`, `entities`, `add_entities` and `remove_entities` (a
+  list or a mapping keyed by entity id),
   at any depth; an entity id in a field with another name is not recognised,
   so do not rely on excluding an entity to keep it from a service that takes
   it under a different name. A `device_id` that is not a
@@ -775,6 +789,14 @@ hass_<domain>/manager/result                        outcome of a manager action,
 - Before connecting, the container checks that no *foreign* retained data sits
   under its base topic, and refuses to connect if there is (override with
   `force_base_topic`).
+- **TLS**: tick `tls` on the MQTT page (brokers usually take TLS on port
+  8883). The broker's certificate is verified against the system CAs, or
+  against `ca_certs`, a CA file inside `/config` (for example
+  `/config/mqtt-ca.pem`). `tls_insecure` skips only the check that the
+  certificate names the host: anyone holding a certificate from that CA can
+  then pose as the broker and read the credentials. The check for foreign
+  retained data and every cleanup connect the same way. Client certificates
+  are not supported.
 
 ---
 
@@ -889,6 +911,8 @@ What is in place:
   backup nor its configuration archive may hold more than 100000 files. Config entries
   with an invalid id are skipped.
 - Dangerous service domains are not callable, over MQTT or from the UI.
+- Without `tls` (see *MQTT reference*), the broker connection, the MQTT
+  password included, travels unencrypted.
 
 **Do not expose the port to the internet.** Put it behind a reverse proxy with
 authentication if you need remote access.
@@ -911,7 +935,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | `HRI_DEV_SRC` | `./dev-src` | Dev mode: directory mounted at `/dev-src` |
 | `HRI_DEBUGPY` | unset | Dev mode: debugger port |
 | `HRI_DEBUGPY_HOST` | `127.0.0.1` | Dev mode: address debugpy binds inside the container (the dev overlay sets `0.0.0.0`) |
-| `HRI_CALL_TIMEOUT` | `60` | Seconds a service call or command may take before it is reported as a timeout |
+| `HRI_CALL_TIMEOUT` | `60` | Seconds a service call or command may take before it is reported as a timeout (a whole number, at least 1; an invalid value logs a warning and uses 60) |
 | `HRI_TRACEMALLOC` | unset | Diagnostics: allocation tracing frames (costs memory); a value that is not a number traces 25 |
 | `HRI_TRACE_IMPORT` | unset | Diagnostics: log who imports the given packages |
 | `HRI_DEBUG` | unset | Debug logging for the manager, and blocking-call detection on the event loop |

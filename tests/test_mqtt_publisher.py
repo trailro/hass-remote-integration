@@ -103,7 +103,6 @@ class ManagerCommandTest(unittest.TestCase):
 
 
 class ManagerResultTest(unittest.IsolatedAsyncioTestCase):
-    @unittest.skipUnless(hasattr(MqttPublisher, "async_publish_manager_result"), "publish_manager_result is synchronous")
     async def test_result_on_a_dropped_connection_does_not_raise(self):
         pub = publisher()
         pub.manager = None

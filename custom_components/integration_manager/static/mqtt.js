@@ -1,7 +1,7 @@
 async function mqtt(){
   const s=await (await fetch('api/mqtt/status')).json();
   $('#mqconn').innerHTML=s.enabled?(s.connected?'<span class="ok">connected</span>':`<span class="bad">disconnected</span> ${s.connect_error?'<span class="err">'+esc(s.connect_error)+'</span>':''}`):'<span class="warn">disabled</span>';
-  $('#mqbroker').innerHTML=`${esc(s.host)}:${esc(s.port)} · ${s.has_identity?`<code>${esc(s.wanted_base_topic)}</code>/… <span class="mut">(derived from the running integration)</span>`:'<span class="warn">no identity: start an integration first, then MQTT connects as hass_&lt;domain&gt;</span>'}${s.identity_moved?' <span class="warn">identity changed: reconnect to move to '+esc(s.wanted_base_topic)+'</span>':''}${s.foreign_count?` <span class="bad">base topic in use by something else: ${s.foreign_count} foreign retained topics (e.g. ${esc((s.foreign_topics||[])[0]||'')})</span>`:''}`;
+  $('#mqbroker').innerHTML=`${esc(s.host)}:${esc(s.port)}${s.tls?' · TLS':''} ·${s.has_identity?`<code>${esc(s.wanted_base_topic)}</code>/… <span class="mut">(derived from the running integration)</span>`:'<span class="warn">no identity: start an integration first, then MQTT connects as hass_&lt;domain&gt;</span>'}${s.identity_moved?' <span class="warn">identity changed: reconnect to move to '+esc(s.wanted_base_topic)+'</span>':''}${s.foreign_count?` <span class="bad">base topic in use by something else: ${s.foreign_count} foreign retained topics (e.g. ${esc((s.foreign_topics||[])[0]||'')})</span>`:''}`;
   $('#mqcount').textContent=`${s.published} / ${s.cleared} · ${s.entities_last_run} of ${s.entities_total} entities with a state in the last run${s.entities_registry_only?` · ${s.entities_registry_only} registry-only (disabled/no state: no document, discovery only)`:''}`;
   $('#mqfull').textContent=`${s.last_full_republish||'—'} · incremental ${s.last_incremental_republish||'—'} (${s.entities_last_incremental??0} changed, ${s.unchanged_skipped||0} unchanged skipped so far)`;
   $('#mqrules').innerHTML=`${s.rules||0} per-entity rule(s): exclude / rename / disable-by-default only on the MQTT side · edit per entity on the <a href="/entities" style="color:#58a6ff">entities page</a> or <a href="#" id="mqrulesedit" style="color:#58a6ff">as JSON</a> (globs like <code>sensor.*_rssi</code> allowed)`;
@@ -21,7 +21,7 @@ async function mqttConfigLoad(){
   MQ_BOOL.forEach(k=>$('#mq_'+k).checked=!!c[k]); $('#mq_base_topic').disabled=true; $('#mq_base_topic').title='derived from the running integration';
   $('#mq_exclude_integrations').value=(c.exclude_integrations||[]).join(',');
 }
-const MQ_TEXT=['host','username','discovery_prefix'], MQ_INT={port:1883,republish_interval_s:300,full_republish_interval_min:60}, MQ_BOOL=['enabled','discovery_enabled','force_base_topic','manager_discovery','manager_commands'];
+const MQ_TEXT=['host','username','discovery_prefix','ca_certs'], MQ_INT={port:1883,republish_interval_s:300,full_republish_interval_min:60}, MQ_BOOL=['enabled','discovery_enabled','force_base_topic','manager_discovery','manager_commands','tls','tls_insecure'];
 $('#mqsave').onclick=async()=>{
   const body={password:$('#mq_password').value, exclude_integrations:$('#mq_exclude_integrations').value.split(',').map(s=>s.trim()).filter(Boolean)};
   MQ_TEXT.forEach(k=>body[k]=$('#mq_'+k).value); MQ_BOOL.forEach(k=>body[k]=$('#mq_'+k).checked);

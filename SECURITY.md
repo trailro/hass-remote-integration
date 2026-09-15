@@ -35,6 +35,8 @@ from plain HTTP traffic. These are:
   publish through the target (entity, group, device, area, floor, label) or
   through the entity fields the README lists; an entity id passed in a
   service field with another name is a documented limit, not a bypass;
+- with MQTT `tls` on and `tls_insecure` off: a connection to a broker whose
+  certificate is not verified, or that does not name the host;
 - path traversal or unsafe archive handling in backups, restores, imports,
   patches or log files;
 - anything that lets a page on another origin make the manager do something.
