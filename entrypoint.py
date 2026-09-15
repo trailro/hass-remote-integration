@@ -18,6 +18,7 @@ from __future__ import annotations
 import html
 import http.server
 import hashlib
+import glob
 import json
 import os
 import re
@@ -343,8 +344,24 @@ def reset_storage_for_rebuild(wanted: str, restored: bool) -> bool:
             pass
         return False
     storage = os.path.join(CONFIG_DIR, ".storage")
-    shutil.rmtree(storage, ignore_errors=True)
-    os.makedirs(storage, exist_ok=True)
+    # set aside in one rename: a delete that fails half-way would boot the older version
+    # on part of the newer configuration; a failed rename leaves everything as it was
+    aside = f"{storage}.pre-rebuild-{time.strftime('%Y%m%d-%H%M%S')}"
+    try:
+        if os.path.isdir(storage):
+            os.rename(storage, aside)
+        os.makedirs(storage, exist_ok=False)
+    except OSError as err:
+        log(f"clean start for Home Assistant {plan.get('to')} failed: .storage could not be set aside ({err}); the configuration is kept")
+        if os.path.isdir(aside) and not os.path.exists(storage):
+            try:
+                os.rename(aside, storage)
+            except OSError as back:
+                log(f"putting .storage back failed too ({back}): it is in {aside}")
+        return False
+    shutil.rmtree(aside, ignore_errors=True)  # the pre-change backup holds it; leftovers are removed at the next clean start
+    for old in glob.glob(f"{storage}.pre-rebuild-*"):
+        shutil.rmtree(old, ignore_errors=True)
     plan["stage"] = "import"
     write_json(REBUILD_FILE, plan)
     log(f"clean start for Home Assistant {plan.get('to')}: .storage emptied, the integration is rebuilt after the boot (backup {plan.get('backup')})")

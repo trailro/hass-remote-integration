@@ -87,3 +87,47 @@ class ApplyConfigChangesTest(unittest.TestCase):
         self.assertTrue(self.ep.restore_after_failed_change(state, "2026.9.2", "2026.8.3"))
         self.assertEqual(state["recovery"]["parts"], ["storage", "manager"])
         self.assertEqual(backupkit.pending_parts(self.cfg), ["storage", "manager"])
+
+
+
+class CleanStartAtomicTest(unittest.TestCase):
+    def test_failed_set_aside_keeps_storage_and_reports_not_done(self):
+        from unittest import mock
+
+        cfg = tempfile.mkdtemp()
+        os.environ["HRI_CONFIG"] = cfg
+        sys.modules.pop("entrypoint", None)
+        ep = importlib.import_module("entrypoint")
+        os.makedirs(os.path.join(cfg, ".storage"))
+        os.makedirs(os.path.join(ep.STATE_DIR, "import-extracted"))
+        with open(os.path.join(cfg, ".storage", "core.config_entries"), "w", encoding="utf-8") as fh:
+            fh.write("{}")
+        with open(os.path.join(ep.STATE_DIR, "import-extracted", "summary.json"), "w", encoding="utf-8") as fh:
+            json.dump({"type": "ha-downgrade-rebuild"}, fh)
+        with open(ep.REBUILD_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"stage": "reset", "to": "2026.8.3", "backup": "b.zip"}, fh)
+        with mock.patch.object(backupkit, "validate", return_value={}), mock.patch.object(ep.os, "rename", side_effect=OSError("busy")):
+            self.assertFalse(ep.reset_storage_for_rebuild("2026.8.3", False))
+        self.assertTrue(os.path.isfile(os.path.join(cfg, ".storage", "core.config_entries")))
+        with open(ep.REBUILD_FILE, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["stage"], "reset")  # not marked as emptied
+
+    def test_successful_reset_empties_storage(self):
+        from unittest import mock
+
+        cfg = tempfile.mkdtemp()
+        os.environ["HRI_CONFIG"] = cfg
+        sys.modules.pop("entrypoint", None)
+        ep = importlib.import_module("entrypoint")
+        os.makedirs(os.path.join(cfg, ".storage"))
+        os.makedirs(os.path.join(ep.STATE_DIR, "import-extracted"))
+        with open(os.path.join(cfg, ".storage", "core.config_entries"), "w", encoding="utf-8") as fh:
+            fh.write("{}")
+        with open(os.path.join(ep.STATE_DIR, "import-extracted", "summary.json"), "w", encoding="utf-8") as fh:
+            json.dump({"type": "ha-downgrade-rebuild"}, fh)
+        with open(ep.REBUILD_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"stage": "reset", "to": "2026.8.3", "backup": "b.zip"}, fh)
+        with mock.patch.object(backupkit, "validate", return_value={}):
+            self.assertTrue(ep.reset_storage_for_rebuild("2026.8.3", False))
+        self.assertEqual(os.listdir(os.path.join(cfg, ".storage")), [])
+        self.assertEqual([n for n in os.listdir(cfg) if n.startswith(".storage.pre-rebuild")], [])

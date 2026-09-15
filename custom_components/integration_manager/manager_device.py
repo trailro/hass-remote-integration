@@ -46,6 +46,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import threading
 import time
@@ -79,7 +80,8 @@ VERSION_CHECK_S = 12 * 3600
 MIN_INTERVAL_S = {"backup": 600, "check_updates": 300}  # a flood of presses must not rotate every backup away
 LAG_TICK_S = 1.0
 HISTORY_FILE = "resource_history.json"
-LATEST_FILE = "latest_versions.json"  # last known releases: update entities do not flap after a restart or a restore
+LATEST_FILE = "latest_versions.json"
+STABLE_TAG = re.compile(r"[vV]?\d+(?:\.\d+){0,3}")  # 1.2, v1.2.3; not 1.2.0b1, 1.3.0rc1, feature/x or a SHA  # last known releases: update entities do not flap after a restart or a restore
 HISTORY_SAVE_S = 600
 HISTORY_POINTS = 360         # at most this many points per series in an answer
 LEAK_MIN_SPAN_H = 6          # memory growth is judged over at least this much history
@@ -376,7 +378,9 @@ class ManagerDevice:
         domain = inst.running
         if not domain:
             return None
-        known = [t for t in (inst.state.installed.get(domain) or {}).get("versions", {}) if t != inst.LOCAL_TAG]
+        # store tags count only when they are plain release numbers: a beta, a branch or a commit kept
+        # for testing must never be what the update button installs (the release check is stable-only)
+        known = [t for t in (inst.state.installed.get(domain) or {}).get("versions", {}) if STABLE_TAG.fullmatch(t)]
         if inst.updates.get(domain):
             known.append(inst.updates[domain])
         return max(known, key=vkey) if known else None

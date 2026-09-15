@@ -38,6 +38,7 @@ from .http_util import ManagerView, with_body
 
 _LOGGER = logging.getLogger(__name__)
 WS_TIMEOUT = 20
+WS_MAX_MSG = 256 * 1024 * 1024  # a large parent's entity registry list is several MB (aiohttp's default cap is 4 MB)
 
 
 class ParentHA:
@@ -56,7 +57,8 @@ class ParentHA:
         out: list[Any] = []
         try:
             async with asyncio.timeout(WS_TIMEOUT * 4):
-              async with session.ws_connect(ws_url, timeout=ClientWSTimeout(ws_receive=WS_TIMEOUT, ws_close=5), heartbeat=30) as ws:
+              async with session.ws_connect(ws_url, timeout=ClientWSTimeout(ws_receive=WS_TIMEOUT, ws_close=5), heartbeat=30,
+                                      max_msg_size=WS_MAX_MSG) as ws:
                   first = await asyncio.wait_for(ws.receive_json(), WS_TIMEOUT)
                   if first.get("type") != "auth_required":
                       raise ValueError(f"unexpected handshake: {first.get('type')}")
@@ -69,7 +71,8 @@ class ParentHA:
                       while True:
                           msg = await asyncio.wait_for(ws.receive(), WS_TIMEOUT)
                           if msg.type != WSMsgType.TEXT:
-                              raise ValueError(f"websocket closed ({msg.type})")
+                              detail = f": {ws.exception()}" if msg.type == WSMsgType.ERROR and ws.exception() else ""
+                              raise ValueError(f"websocket closed ({WSMsgType(msg.type).name}{detail})")
                           data = json.loads(msg.data)
                           if data.get("id") != i or data.get("type") != "result":
                               continue
