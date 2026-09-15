@@ -594,8 +594,13 @@ hass_<domain>/manager/result                        outcome of a manager action,
   data plus optional `entity_id`, and an optional `_id`); the result comes back
   on `result/...`. A repeated `_id` within five minutes is answered from memory
   and never executed twice. `homeassistant`, `shell_command`, `python_script`,
-  `hassio` and `integration_manager` are never callable. A call needs a JSON
-  object, `{}` when it has no data: an empty payload is rejected.
+  `persistent_notification`, `hassio` and `integration_manager` are never
+  callable. A call reaches only entities the container publishes: an
+  `entity_id` of `all`, or an entity, area, floor, label or device that resolves
+  to an excluded or unknown entity, is refused. A `device_id` that is not a
+  Home Assistant device (a hardware address a service takes as data) stays plain
+  service data. A call needs a JSON object, `{}` when it has no data: an empty
+  payload is rejected.
 - **Manager device**: with discovery on, or with `manager_discovery` alone (for
   example while running in shadow mode), the main Home Assistant gets a
   `hass-remote-integration (hass_<domain>)` device. It shows whether the

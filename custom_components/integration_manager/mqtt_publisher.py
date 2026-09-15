@@ -84,7 +84,23 @@ HISTORY_MAX = 200      # commands and calls remembered (in memory)
 DEDUP_WINDOW_S = 300   # a call repeating an _id seen this recently is answered from history, not run again
 # Never callable over MQTT (anyone with broker credentials could otherwise
 # stop this instance or run arbitrary commands); the catalog hides them too.
-CALL_DENY_DOMAINS = frozenset({"homeassistant", "shell_command", "python_script", "hassio", "integration_manager"})
+# persistent_notification: dismiss_all would erase the manager's own smoke-test and HA-change notifications.
+CALL_DENY_DOMAINS = frozenset({"homeassistant", "shell_command", "python_script", "hassio", "integration_manager", "persistent_notification"})
+_CODE_VALUE = re.compile(r"""((?<![A-Za-z0-9_])["']?code["']?\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'[^']*'|[^,}\s]+)""")
+
+
+def _mask_codes(text: str) -> str:
+    """Alarm and lock codes stay out of the command history, the status and the log."""
+    return _CODE_VALUE.sub(lambda m: m.group(1) + '"***"', text)
+
+
+def _call_key(domain: str, service: str, call_id: Any) -> str:
+    """The dedup key keeps the type of the id: 1 and "1" are two different calls."""
+    return f"{domain}.{service}:{json.dumps(call_id, sort_keys=True, default=str)}"
+
+
+def _no_constant(name: str) -> Any:
+    raise ValueError(f"{name} is not a number a service accepts")
 
 
 @dataclass
@@ -387,11 +403,14 @@ class MqttPublisher:
                 self.stats["connect_error"] = f"{type(err).__name__}: {err}"
 
     async def async_reload_config(self) -> None:
-        """Adopt settings that do not need a reconnect (discovery on/off)."""
-        new = await self.hass.async_add_executor_job(self._load)
-        if self.config.discovery_enabled and not new.discovery_enabled:
-            self._set_undiscover_due(True)  # e.g. Undo on Cutover: its own cleanup clears this once the broker confirmed
-        self.config = new
+        """Adopt settings that do not need a reconnect (discovery on/off).  Under the
+        connection lock: a reconnect in flight would otherwise assign the config it
+        loaded before this change and re-announce what Undo just cleared."""
+        async with self._conn_lock:
+            new = await self.hass.async_add_executor_job(self._load)
+            if self.config.discovery_enabled and not new.discovery_enabled:
+                self._set_undiscover_due(True)  # e.g. Undo on Cutover: its own cleanup clears this once the broker confirmed
+            self.config = new
 
     def _undiscover_file(self) -> str:
         return self.hass.config.path("integration_manager", "mqtt_undiscover.json")
@@ -829,8 +848,8 @@ class MqttPublisher:
             return
         try:
             mapped = disc.command_to_service(domain, object_id, field, payload)
-        except (ValueError, KeyError, OverflowError) as err:
-            _LOGGER.warning("MQTT command %s=%r rejected: %s", msg.topic, payload, err)
+        except (ValueError, KeyError, OverflowError, RecursionError) as err:
+            _LOGGER.warning("MQTT command %s=%r rejected: %s", msg.topic, _mask_codes(payload), err)
             self._finish(rec, "rejected", str(err))
             return
         if mapped is None:
@@ -840,7 +859,7 @@ class MqttPublisher:
         svc_domain, service, data = mapped
         rec["what"] = f"{domain}.{object_id}/{field} → {svc_domain}.{service}"
         self.stats["commands"] += 1
-        self.stats["last_command"] = f"{msg.topic} = {payload}"
+        self.stats["last_command"] = _mask_codes(f"{msg.topic} = {payload}")
 
         async def _call() -> None:
             if svc_domain == "climate" and service == "set_temperature" and ("target_temp_high" in data) != ("target_temp_low" in data):
@@ -900,7 +919,8 @@ class MqttPublisher:
         self.hass.loop.call_soon_threadsafe(lambda: self.hass.async_create_task(self.async_publish_manager_result(result)))
 
     def _remember(self, kind: str, what: str, data: Any, call_id: Any = None) -> dict[str, Any]:
-        rec = {"id": call_id, "kind": kind, "what": what, "data": (json.dumps(data, default=str) if not isinstance(data, str) else data)[:200],
+        text = json.dumps(data, default=str) if not isinstance(data, str) else data
+        rec = {"id": call_id, "kind": kind, "what": what, "data": _mask_codes(text)[:200],
                "received": time.time(), "finished": None, "duration_ms": None, "state": "running", "error": None, "result": None}
         self.history.append(rec)
         return rec
@@ -927,6 +947,37 @@ class MqttPublisher:
         iso = lambda t: time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t)) if t else None
         rows = list(self.history)[-limit:]
         return [{**r, "received": iso(r["received"]), "finished": iso(r["finished"]), "result": None} for r in reversed(rows)]
+
+    def _call_target_problem(self, data: dict[str, Any]) -> str | None:
+        """A call reaches only entities this container publishes, like a cmd/ topic: the target
+        (entity ids, and area/floor/label/device ids resolved the way Home Assistant resolves them)
+        must not name anything else.  A device_id that is not a registry device (a RAMSES address
+        given to send_packet, say) resolves to nothing and stays plain service data."""
+        from homeassistant.const import ENTITY_MATCH_ALL
+        from homeassistant.helpers.target import TargetSelection, async_extract_referenced_entity_ids
+
+        ids = data.get("entity_id")
+        named = [ids] if isinstance(ids, str) else ids if isinstance(ids, list) else []
+        if any(isinstance(x, str) and ENTITY_MATCH_ALL in (p.strip() for p in x.split(",")) for x in named):
+            return "entity_id all is not accepted over MQTT: name the entities"
+        try:
+            selected = async_extract_referenced_entity_ids(self.hass, TargetSelection(data), expand_group=False)
+        except Exception:  # noqa: BLE001 - a malformed target is the service schema's to reject
+            return None
+        outside = sorted(e for e in selected.referenced | selected.indirectly_referenced if e not in self._topics)
+        if outside:
+            return f"not entities this container publishes: {', '.join(outside[:5])}{'…' if len(outside) > 5 else ''}"
+        return None
+
+    def _excluded_now(self, entity_id: str) -> bool:
+        """Excluded by a rule or by its integration: an entity excluded while this process was down
+        still has a retained discovery config and document, which the orphan sweep must remove."""
+        from homeassistant.helpers import entity_registry as er
+
+        if self.rules.for_entity(entity_id).get("exclude"):
+            return True
+        entry = er.async_get(self.hass).async_get(entity_id)
+        return bool(entry and entry.platform in self.config.exclude_integrations)
 
     def _reject_empty_call(self, rest: str) -> None:
         """A call needs a JSON object ({} without data); an empty payload is what clearing a retained call looks like."""
@@ -956,16 +1007,16 @@ class MqttPublisher:
             self._finish(self._remember("call", f"{domain}.{service}", payload), "rejected", f"domain {domain} is not callable over MQTT")
             return
         try:
-            data = json.loads(payload) if payload.strip() else {}
+            data = json.loads(payload, parse_constant=_no_constant) if payload.strip() else {}
             if not isinstance(data, dict):
                 raise ValueError("payload must be a JSON object")
-        except ValueError as err:
+        except (ValueError, RecursionError) as err:
             self._publish_result(domain, service, {"id": _call_id_of(payload), "service": f"{domain}.{service}", "ok": False, "error": f"bad payload: {err}"})
             self._finish(self._remember("call", f"{domain}.{service}", payload), "rejected", f"bad payload: {err}")
             return
         call_id = data.pop("_id", None)
         # an _id is unique per service for the consumer (a counter that restarts, one per automation)
-        call_key = f"{domain}.{service}:{call_id}" if call_id not in (None, "") else None
+        call_key = _call_key(domain, service, call_id) if call_id not in (None, "") else None
         prior = self._seen_call(call_key)
         if prior is not None:
             # A retry of the same _id (the consumer did not see the result in
@@ -983,7 +1034,7 @@ class MqttPublisher:
         if call_id not in (None, ""):
             self._calls[call_key] = rec  # the canonical record: duplicates never replace it
         self.stats["calls"] += 1
-        self.stats["last_call"] = f"{domain}.{service} {json.dumps(data)[:120]}"
+        self.stats["last_call"] = _mask_codes(f"{domain}.{service} {json.dumps(data)}")[:140]
 
         async def _call() -> None:
             base: dict[str, Any] = {"id": call_id, "service": f"{domain}.{service}"}
@@ -993,8 +1044,14 @@ class MqttPublisher:
                 self._finish(rec, "error", res["error"], res)
                 _LOGGER.warning("MQTT call %s.%s failed: unknown service", domain, service)
                 return
+            if problem := self._call_target_problem(data):
+                res = {**base, "ok": False, "error": problem}
+                self._publish_result(domain, service, res)
+                self._finish(rec, "rejected", problem, res)
+                _LOGGER.warning("MQTT call %s.%s refused: %s", domain, service, problem)
+                return
             wants = self.hass.services.supports_response(domain, service) != SupportsResponse.NONE
-            _LOGGER.debug("MQTT call %s.%s start (response=%s) data=%s", domain, service, wants, data)
+            _LOGGER.debug("MQTT call %s.%s start (response=%s) data=%s", domain, service, wants, _mask_codes(json.dumps(data, default=str)))
             # Not wait_for(): cancelling a service handler that shields or
             # swallows CancelledError would hang the timeout itself.  The
             # call keeps running; the caller gets a timeout now and the real
@@ -1454,7 +1511,7 @@ class MqttPublisher:
                 comps = doc.get("components") if isinstance(doc.get("components"), dict) else {}
                 gone = {key: c.get("platform") for key, c in comps.items()
                         if isinstance(c, dict) and str(c.get("unique_id") or "").startswith(self.prefix)
-                        and self._entity_gone(str(c["unique_id"])[len(self.prefix):])}
+                        and (self._entity_gone(eid := str(c["unique_id"])[len(self.prefix):]) or self._excluded_now(eid))}
                 live = {key for key, c in comps.items() if isinstance(c, dict) and c.get("unique_id") and key not in gone}
                 did = topic.split("/")[-2]
                 if did not in groups:
@@ -1469,7 +1526,7 @@ class MqttPublisher:
                     removed_components += len(extra)
             elif "published_at" in doc and topic not in set(self._topics.values()):
                 eid = doc.get("entity_id")
-                if isinstance(eid, str) and self._entity_gone(eid):
+                if isinstance(eid, str) and (self._entity_gone(eid) or self._excluded_now(eid)):
                     docs.append(topic)
         self._boot_components = {}  # decided: from here on configs carry only what exists
         if docs:
