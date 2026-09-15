@@ -68,6 +68,16 @@ class PipReasonTest(unittest.TestCase):
         self.assertEqual(preflight._pip_reason(""), "pip failed")
 
 
+class BuildReasonTest(unittest.TestCase):
+    def test_compiler_line_before_the_summary(self):
+        err = ("building 'netifaces' extension\nerror: command 'gcc' failed: No such file or directory\n"
+               "ERROR: Failed building wheel for netifaces\nERROR: Failed to build one or more wheels\n")
+        self.assertEqual(preflight._build_reason(err), "error: command 'gcc' failed: No such file or directory")
+
+    def test_without_a_compiler_line(self):
+        self.assertEqual(preflight._build_reason("x\nERROR: Failed to build one or more wheels\n"), "ERROR: Failed to build one or more wheels")
+
+
 class SourceOnlyTest(unittest.TestCase):
     def test_wheel_rows_are_not_built(self):
         calls = []
