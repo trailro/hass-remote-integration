@@ -76,7 +76,12 @@ def _wanted(rel: str, domains: set[str]) -> bool:
     if not rel.startswith(".storage/") or rel.count("/") != 1:
         return False
     f = rel[len(".storage/"):]
-    return any(f == d or f.startswith(d + ".") or f.startswith(d + "_") for d in domains) and ".bak" not in f and "_backup" not in f
+    return _store_owner(f, domains) is not None and ".bak" not in f and "_backup" not in f
+
+
+def _store_owner(f: str, domains: set[str]) -> str | None:
+    """The domain a store file is named after (<domain>, <domain>.x, <domain>_x); the longest one wins."""
+    return max((d for d in domains if f == d or f.startswith((d + ".", d + "_"))), key=len, default=None)
 
 
 def inspect_backup(config_dir: str, password: str | None, domains: set[str]) -> dict[str, Any]:
@@ -233,9 +238,14 @@ def _summarize(out_dir: str, meta: dict[str, Any], domains: set[str]) -> dict[st
             dom = next((e["domain"] for e in entries if e["entry_id"] == cid), None)
             if dom in by_domain:
                 by_domain[dom]["devices"] += 1
+    # foo_bar_tokens matches the prefix of foo too: a file belongs to the longest domain of the backup it is named after
+    known = set(domains) | set(by_domain)
+    for f in list(storage_files):
+        if f".storage/{f}" not in CORE_STORES and _store_owner(f, known) not in domains:
+            os.remove(os.path.join(out_dir, ".storage", f))  # another integration's store: never kept on this volume
+            storage_files.remove(f)
     for dom, d in by_domain.items():
-        d["storage_files"] = [f for f in storage_files
-                              if (f == dom or f.startswith(dom + ".") or f.startswith(dom + "_")) and ".bak" not in f and "_backup" not in f]
+        d["storage_files"] = [f for f in storage_files if _store_owner(f, known) == dom and ".bak" not in f and "_backup" not in f]
     return {
         "name": meta.get("name"), "date": meta.get("date"), "protected": bool(meta.get("protected")),
         "ha_version": (meta.get("homeassistant") or {}).get("version"), "type": meta.get("type"),

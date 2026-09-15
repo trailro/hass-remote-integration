@@ -220,7 +220,9 @@ Choose whichever fits the integration, on the **Integration** page:
   or not). The config entries of the installed integration come over with
   their data *and* options, and entity ids, names, icons and disabled flags
   are aligned, so entities keep the same ids they had in your main HA. A
-  config entry whose id is not plain letters and digits is skipped.
+  config entry whose id is not plain letters and digits is skipped. A store
+  file belongs to the longest domain of the backup it is named after:
+  `foo_bar_tokens` comes with `foo_bar`, never with `foo`.
 
 ### 3. Start it
 
@@ -360,7 +362,9 @@ Once the new version has run (after the smoke test), *What changed between
 versions* on the Integration page compares its entities and services with those
 of the version before: entities added, removed or renamed, entities whose unit,
 device class, state class or category changed, and services or service fields
-added or removed. State attributes are not compared. Removed, renamed or changed entities and removed services or
+added or removed. State attributes are not compared. An entity that only gains
+a unique id in the new version, under the same entity id, counts as the same
+entity. Removed, renamed or changed entities and removed services or
 fields are what break automations in your main HA, so they also raise a
 notification. The last ten reports are kept.
 
@@ -470,7 +474,10 @@ leaves uploaded backups alone for their first 7 days. An upload never replaces
 an existing backup: a name already taken gets a `-2`, `-3`, … suffix.
 A restore never rolls back the record of what happened: the timeline, the
 resource history, the change reports and the last known release versions are
-not part of backups, and neither are the login key and the logout record.
+not part of backups, and neither are the login key and the logout record, a
+store file Home Assistant is writing at that moment (`.storage/tmp…`) or an
+original an import set aside (`.storage/*.pre-import`). A backup whose file
+names are not in their plain form (`./`, `//`, `..`) is refused.
 
 Every backup records the Home Assistant version it was made on (the *HA* column),
 and Home Assistant only migrates a configuration forward. Restoring a backup
