@@ -12,7 +12,7 @@ let LOADING=false, AGAIN=false;
 async function load(){ if(LOADING){ AGAIN=true; return; } LOADING=true; try{ do{ AGAIN=false; await loadNow(); }while(AGAIN); } finally { LOADING=false; } }  // no overlapping polls; a change made meanwhile loads right after
 async function loadNow(){
  const p=new URLSearchParams({file:$('#file').value,lines:$('#lines').value,q:$('#q').value});
- const r=await (await fetch('/api/log_files/tail?'+p)).json();
+ const r=await (await fetch('/api/log_files/tail?'+p,{headers:{'X-Requested-With':'fetch'}})).json();
  $('#path').textContent=r.path||'—'; $('#size').textContent=r.bytes!=null?`${(r.bytes/1024).toFixed(0)} KB · ${r.total_lines_scanned} lines read`:'';
  $('#ts').textContent=new Date().toLocaleTimeString(); $('#n').textContent=`${(r.lines||[]).length} lines`;
  $('#fmterr').textContent=r.format_error?'the stored format is ignored: '+r.format_error:'';

@@ -78,7 +78,7 @@ async function resources(){
   const m=await (await fetch('api/manager')).json(); const r=m.resources||{}, u=m.updates||{};
   const v=(x,unit)=>x==null?'—':esc(String(x))+unit;
   const ups=[['home_assistant','Home Assistant'],['manager','hass-remote-integration']].filter(([k])=>u[k]&&u[k].latest_version&&u[k].latest_version!==u[k].installed_version)
-    .map(([k,label])=>`<a href="${esc(u[k].release_url||'#')}" target="_blank" rel="noopener" style="text-decoration:none"><span class="tag warn">${label} ${esc(u[k].latest_version)}</span></a>`).join(' ');
+    .map(([k,label])=>`<a href="${esc(/^https?:\/\//i.test(u[k].release_url||'')?u[k].release_url:'#')}" target="_blank" rel="noopener" style="text-decoration:none"><span class="tag warn">${label} ${esc(u[k].latest_version)}</span></a>`).join(' ');
   $('#ov-res').innerHTML=`memory ${v(r.memory_mb,' MiB')} · CPU ${v(r.cpu_pct,' %')} · event loop lag ${v(r.loop_lag_ms,' ms')} (max ${v(r.loop_lag_max_ms,' ms')}) · ${v(r.threads,'')} threads · volume ${v(r.volume_used_pct,' % used')}, ${v(r.volume_free_gb,' GB free')}`+(r.memory_mb==null?' <span class="mut">(first sample within a minute of the start)</span>':'')+(ups?' · '+ups:'');
 }
 // ----- resource history -----

@@ -280,6 +280,8 @@ class LogFileTailView(ManagerView):
         self.installer = installer
 
     async def get(self, request: web.Request) -> web.Response:
+        if request.headers.get("X-Requested-With") != "fetch":
+            return self.json_message("X-Requested-With: fetch required", status_code=400)  # log lines are for this UI, not for any page's requests
         q = request.query
         try:
             lines = max(1, min(int(q.get("lines", DEFAULT_LINES) or DEFAULT_LINES), MAX_LINES))

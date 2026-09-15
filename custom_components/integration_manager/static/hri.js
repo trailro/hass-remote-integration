@@ -3,7 +3,7 @@
 const _hriFetch=window.fetch.bind(window);
 window.fetch=async(...a)=>{const r=await _hriFetch(...a); if(r.status===401&&location.pathname!=='/login') location.href='/login?next='+encodeURIComponent(location.pathname+location.search); return r;};
 const $=s=>document.querySelector(s);
-const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function post(url,body){const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body||{})});return r.json();}
 async function del(url){const r=await fetch(url,{method:'DELETE'});return r.json();}
 const log=m=>{console.log(m); const el=$('#flash'); if(el){el.textContent=m; clearTimeout(el._t); el._t=setTimeout(()=>{el.textContent=''},8000);}};
