@@ -230,10 +230,17 @@ version of an integration that is already loaded, or applying YAML). The page
 says so; use *Restart process*.
 
 About five minutes after a start, a **smoke test** checks the health verdict.
-If it fails right after a version switch, the manager rolls back to the
-previous version and its backup automatically (configurable on **System**).
-A failed smoke test raises a notification and stays in the last error until
-another version runs healthy, also across the rollback's restart.
+If the new version does not set up right after a version switch (a config
+entry in `setup_error` or `migration_error`, the integration not loaded, a
+setup that never finishes), the manager rolls back to the previous version
+and its backup automatically (configurable on **System**). A config entry
+still in `setup_retry` (a device or broker not reachable yet) gets one more
+smoke interval first, and is rolled back only if it has not loaded by then.
+A `degraded` verdict (entities unavailable, silent, or without a state yet)
+is never rolled back: the version did set up, so it is kept, and the
+notification says it is degraded. A failed or degraded smoke test raises a
+notification and stays in the last error until another version runs healthy,
+also across the rollback's restart.
 
 ### 4. Connect MQTT
 
@@ -704,8 +711,15 @@ What is in place:
   UI, stored in files readable only by the owner, and never logged or included
   in the diagnostics zip. The diagnostics zip, the log tails and the inspection
   of an imported Home Assistant backup mask passwords, tokens, device keys
-  (`local_key`, `noise_psk`, `encryption_key`, …), PINs, `Bearer` values and
-  credentials in URLs. Backups contain them; the login key and the logout
+  (`local_key`, `noise_psk`, `encryption_key`, Z-Wave `network_key` and
+  `s0`/`s2_*_key`, `bindkey`, `aes_key`, `ssl_key`, …), PINs, one-time codes,
+  HMAC keys, webhook ids and cloudhook URLs, `Authorization` values (`Bearer`,
+  `Basic` and any other scheme) and credentials in URLs.
+- A release is downloaded only up to 100 MB and unpacked only up to 300 MB and
+  20000 files; symbolic links in the archive are skipped. A requirement in a
+  manifest that is a pip option (`--index-url …`, `-e …`) or not a valid
+  requirement blocks the preflight and refuses the install and the start.
+  The environment builder downloads exactly the commit its Check verified. Backups contain them; the login key and the logout
   record stay out of backups, so a restore never revives a logged-out session.
   The key of an encrypted Home Assistant backup you import is only used for
   that request.
@@ -791,7 +805,8 @@ Every page is backed by a JSON API on the same port, so everything can be
 scripted. With a password set, send it as `Authorization: Bearer <password>`. POST
 bodies are JSON (`Content-Type: application/json`), and requests that reach out
 to the internet or another server (`/api/catalog`, `/api/patch_editor`,
-`/api/parity`, `?refresh=1`) also need `X-Requested-With: fetch`. The main entry points:
+`/api/parity`, `/api/releases/preview`, `/api/diagnostics`, `/api/log_files/tail`, `?refresh=1`)
+also need `X-Requested-With: fetch`. The main entry points:
 
 | Area | Endpoints |
 |---|---|

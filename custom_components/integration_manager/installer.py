@@ -48,7 +48,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import package as pkg_util
 
 import jsonio
-from jsonio import is_stable_tag, vkey, write_json
+from jsonio import ha_vkey, is_stable_tag, tag_key, vkey, write_json
 
 from . import change_report, events, patches
 from .settings import Settings
@@ -59,6 +59,52 @@ GITHUB_API = "https://api.github.com/repos/{repo}"
 RAW_GITHUB = "https://raw.githubusercontent.com/{repo}/{tag}/custom_components/{domain}/manifest.json"
 BUILTIN_REGISTRY = "/app/registry.json"
 RELEASE_CACHE_S = 300
+DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024  # a release zipball; integrations are a few MB
+UNPACK_MAX_BYTES = 300 * 1024 * 1024    # summed uncompressed size of an archive
+UNPACK_MAX_MEMBERS = 20000
+_DOMAIN_RE = re.compile(r"^[a-z0-9_]{1,64}$")
+_TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+@-]{0,100}$")  # as the views check a tag
+
+
+def tag_ok(tag: Any) -> bool:
+    return isinstance(tag, str) and bool(_TAG_RE.match(tag)) and ".." not in tag
+
+
+def bad_requirement(req: Any) -> str | None:
+    """Why ``req`` must not reach pip or uv, or None: an option ("-e ...",
+    "--index-url ...") in a manifest would change what gets installed from where."""
+    if not isinstance(req, str) or req.strip().startswith("-"):
+        return f"requirement {str(req)[:100]!r} is an option, not a package"
+    try:
+        from packaging.requirements import Requirement
+
+        Requirement(req)
+    except Exception as err:  # noqa: BLE001
+        return f"requirement {req[:100]!r} is not a valid requirement ({err})"
+    return None
+
+
+async def read_capped(resp, what: str, limit: int | None = None) -> bytes:
+    """The body of a download, refused above ``limit`` (announced or streamed)."""
+    limit = DOWNLOAD_MAX_BYTES if limit is None else limit
+    if resp.content_length is not None and resp.content_length > limit:
+        raise RuntimeError(f"{what}: {resp.content_length} bytes, more than the {limit // 1048576} MB allowed")
+    buf = bytearray()
+    async for chunk in resp.content.iter_chunked(1 << 16):
+        buf += chunk
+        if len(buf) > limit:
+            raise RuntimeError(f"{what}: more than the {limit // 1048576} MB allowed")
+    return bytes(buf)
+
+
+def _rmtree_under(path: str, base: str) -> None:
+    """Blocking: shutil.rmtree, only for a directory strictly inside ``base``
+    (a domain or tag like ".." from a damaged state.json must not reach the volume)."""
+    real, root = os.path.realpath(path), os.path.realpath(base)
+    if not real.startswith(root + os.sep):
+        _LOGGER.warning("not deleting %s: outside %s", path, base)
+        return
+    shutil.rmtree(real, ignore_errors=True)
 
 
 def instance_key(domain: str | None) -> str | None:
@@ -159,6 +205,7 @@ class Installer:
         self._smoke_pending: dict[str, Any] | None = None
         self._smoke_handle = None
         self._smoke_waiting: dict[tuple[str, str], float] = {}  # (domain, tag) -> when the smoke test first had to wait
+        self._smoke_rechecked: set[tuple[str, str]] = set()  # (domain, tag) already given a second look for a setup_retry entry
         self.updates: dict[str, str] = {}  # domain -> newest stable tag not yet in the store
         self.updates_checked_at: str | None = None
         self._loaded_tags: dict[str, str] = {}  # domain -> tag whose code this process imported
@@ -250,7 +297,26 @@ class Installer:
         if not isinstance(data, dict) or "installed" not in data:
             _LOGGER.error("state.json has an unknown layout; starting with an empty state (file kept)")
             return State()
-        return State(**{k: v for k, v in data.items() if k in State.__dataclass_fields__})
+        state = State(**{k: v for k, v in data.items() if k in State.__dataclass_fields__})
+        installed = state.installed if isinstance(state.installed, dict) else {}
+        state.installed = {}
+        for domain, rec in installed.items():
+            # the names become paths (custom_components/<domain>, versions/<domain>/<tag>): a hand-edited or damaged file must not point elsewhere
+            if not _DOMAIN_RE.match(str(domain)) or not isinstance(rec, dict):
+                _LOGGER.warning("state.json: dropping installed entry %r (not a valid domain)", str(domain)[:80])
+                continue
+            versions = rec.get("versions") if isinstance(rec.get("versions"), dict) else {}
+            for tag in [t for t in versions if not tag_ok(t)]:
+                _LOGGER.warning("state.json: dropping %s version %r (not a valid tag)", domain, str(tag)[:80])
+                versions.pop(tag)
+            rec["versions"] = versions
+            for key in ("running_tag", "previous_tag"):
+                if rec.get(key) is not None and not tag_ok(rec[key]):
+                    rec[key] = None
+            state.installed[domain] = rec
+        if state.domain is not None and state.domain not in state.installed:
+            state.domain = None
+        return state
 
     def _save_state(self) -> None:
         # atomic (tmp + replace) but no fsync on the event loop: a torn file is
@@ -441,7 +507,7 @@ class Installer:
             "name": self.spec(domain).get("name") or domain,
             "repo": self.spec(domain).get("repo"),
             "versions": versions,
-            "newest_tag": max(versions, key=vkey) if versions else None,
+            "newest_tag": max(versions, key=tag_key) if versions else None,
             "running": running,
             "running_tag": rec.get("running_tag"),
             "previous_tag": rec.get("previous_tag"),
@@ -566,6 +632,8 @@ class Installer:
         spec = self.spec(domain)
         if not spec:
             raise ValueError(f"unknown integration {domain}")
+        if not spec.get("repo"):
+            raise ValueError(f"{domain} is a dev-mode integration (no repository): there is no release to preview")
         session = async_get_clientsession(self.hass)
         async with session.get(RAW_GITHUB.format(repo=spec["repo"], tag=tag, domain=domain), headers=self.settings.github_headers()) as resp:
             if resp.status != 200:
@@ -616,8 +684,10 @@ class Installer:
         events.emit("replace", f"{old} replaced by {new_domain}; backup {pre['name']} taken first", old=old, new=new_domain, backup=pre["name"])
         return {"replaced": old, "pre_replace_backup": pre["name"]}
 
-    async def install(self, tag: str, domain: str | None = None, replace: bool = False) -> dict[str, Any]:
-        """Download a release into the version store.  Nothing runs yet."""
+    async def install(self, tag: str, domain: str | None = None, replace: bool = False, archive_ref: str | None = None) -> dict[str, Any]:
+        """Download a release into the version store.  Nothing runs yet.
+        ``archive_ref``: the commit to download when it is known (the builder's
+        check verified it); ``tag`` stays the name in the store."""
         import backupkit
 
         if backupkit.pending(self.config_dir):
@@ -634,12 +704,17 @@ class Installer:
             return {"ok": False, "error": "another action is running"}
         self.busy = True
         self.state.last_error = ""
+        fresh = tag not in ((self.state.installed.get(domain) or {}).get("versions") or {})
+        stored = False
         try:
             session = async_get_clientsession(self.hass)
-            async with session.get(GITHUB_API.format(repo=spec["repo"]) + f"/zipball/{tag}", headers=self.settings.github_headers()) as resp:
-                _gh_check(resp, f"{spec['repo']}@{tag}")
-                blob = await resp.read()
+            async with session.get(GITHUB_API.format(repo=spec["repo"]) + f"/zipball/{archive_ref or tag}", headers=self.settings.github_headers()) as resp:
+                _gh_check(resp, f"{spec['repo']}@{archive_ref or tag}")
+                blob = await read_capped(resp, f"{spec['repo']}@{archive_ref or tag}")
             manifest = await self.hass.async_add_executor_job(self._store_version, blob, domain, tag)
+            stored = True
+            if (why := next((w for w in map(bad_requirement, manifest.get("requirements", [])) if w), None)):
+                raise RuntimeError(f"{domain} {tag}: {why}")
             # only now, with the new release verified and in the store, does the
             # current integration go (a bad tag or a GitHub error leaves it untouched)
             replaced = await self._replace_current(domain)
@@ -665,12 +740,23 @@ class Installer:
             return {"ok": True, "domain": domain, "tag": tag, "version": manifest.get("version"), "pin": pin, "redeployed": was_running, **replaced}
         except Exception as err:  # noqa: BLE001
             _LOGGER.exception("install %s %s failed", domain, tag)
+            if stored and fresh and tag not in ((self.state.installed.get(domain) or {}).get("versions") or {}):
+                # stored, never recorded: nothing would ever list or remove that directory
+                await self.hass.async_add_executor_job(self._drop_unrecorded, domain, tag)
             self.state.last_error = f"{type(err).__name__}: {err}"
             events.emit("error", f"install {domain} {tag} failed: {self.state.last_error}", domain=domain, tag=tag)
             self._save_state()
             return {"ok": False, "error": self.state.last_error}
         finally:
             self.busy = False
+
+    def _drop_unrecorded(self, domain: str, tag: str) -> None:
+        """Blocking: a version directory whose install failed after it was stored."""
+        _rmtree_under(self._version_dir(domain, tag), self.versions_dir)
+        try:
+            os.rmdir(os.path.join(self.versions_dir, domain))  # only when empty: a domain that was never installed
+        except OSError:
+            pass
 
     async def remove_version(self, domain: str, tag: str) -> dict[str, Any]:
         rec = self.state.installed.get(domain)
@@ -682,7 +768,7 @@ class Installer:
             return {"ok": False, "error": "another action is running"}
         self.busy = True
         try:
-            await self.hass.async_add_executor_job(shutil.rmtree, self._version_dir(domain, tag), True)
+            await self.hass.async_add_executor_job(_rmtree_under, self._version_dir(domain, tag), self.versions_dir)
         finally:
             self.busy = False
         rec["versions"].pop(tag, None)
@@ -710,7 +796,7 @@ class Installer:
         rec = self.state.installed.get(domain)
         if not rec or not rec.get("versions"):
             return {"ok": False, "error": f"{domain} is not installed"}
-        tag = tag or rec.get("running_tag") or max(rec["versions"], key=vkey)
+        tag = tag or rec.get("running_tag") or max(rec["versions"], key=tag_key)
         if tag not in rec["versions"] or not os.path.isdir(self._version_dir(domain, tag)):
             return {"ok": False, "error": f"{domain} {tag} is not in the version store"}
         if self.busy:
@@ -720,9 +806,11 @@ class Installer:
         if backupkit.pending(self.config_dir):
             return {"ok": False, "error": "a restore is scheduled for the next restart: restart (or cancel it in the Backup card) first"}
         min_ha = self.min_ha_of(domain, tag)
-        if min_ha and not boot and vkey(min_ha) > vkey(homeassistant.const.__version__):
+        if min_ha and not boot and ha_vkey(str(min_ha)) > ha_vkey(homeassistant.const.__version__):
             return {"ok": False, "error": f"{domain} {tag} needs Home Assistant {min_ha} or newer (hacs.json); this is {homeassistant.const.__version__}: "
                                           "update Home Assistant first, or prepare both together in the Environment builder"}
+        if (why := next((w for w in map(bad_requirement, rec["versions"][tag].get("requirements") or []) if w), None)):
+            return {"ok": False, "error": f"{domain} {tag} is refused: {why}"}
         self.busy = True
         prev_domain = self.state.domain if self.state.domain != domain else None
         was_running = self.state.domain == domain
@@ -911,6 +999,7 @@ class Installer:
         self._smoke_pending = None
         self.state.pending_smoke = None
         self._smoke_waiting.clear()
+        self._smoke_rechecked.clear()
 
     def _schedule_smoke(self, domain: str, tag: str, can_rollback: bool) -> None:
         delay = self.settings.int_("smoke_test_s", 0, 86400)
@@ -956,9 +1045,11 @@ class Installer:
 
     async def _smoke_check(self, domain: str, tag: str, can_rollback: bool) -> None:
         """Health verdict without the boot grace, `smoke_test_s` after a
-        start.  ok -> recorded.  Not ok after a version switch with
-        auto_rollback -> full rollback + restart; otherwise recorded as the
-        last error (health on MQTT shows it too)."""
+        start.  ok -> recorded.  degraded (entities unavailable or silent:
+        the version did set up) -> recorded and announced, the version kept.
+        error after a version switch with auto_rollback -> full rollback +
+        restart (an entry in setup_retry first gets one more interval);
+        otherwise recorded as the last error (health on MQTT shows it too)."""
         self._smoke_handle = None
         if self.state.domain != domain or self.running_tag != tag:
             self._smoke_waiting.pop((domain, tag), None)
@@ -982,8 +1073,6 @@ class Installer:
                 60, lambda: self.hass.async_create_task(self._smoke_check(domain, tag, can_rollback)))
             return
         self._smoke_waiting.pop((domain, tag), None)
-        self._smoke_pending = None
-        self.state.pending_smoke = None  # the verdict is recorded below, whatever it is
         try:
             h = self.health_source(grace=False) if self.health_source else self.health()
         except Exception as err:  # noqa: BLE001
@@ -991,7 +1080,27 @@ class Installer:
         if hung:
             # Home Assistant puts no timeout on an entry's setup: a version that never finishes it is broken
             h = {**h, "state": "error", "reason": f"config entry still setting up after {int(waited)} s"}
+        retrying = [e for e in self._entries_of(domain) if not e.disabled_by and e.state.value == "setup_retry"]
+        if not hung and h.get("state") not in ("ok", "degraded") and retrying and (domain, tag) not in self._smoke_rechecked:
+            # ConfigEntryNotReady (a device or broker not reachable yet): Home Assistant retries on its own,
+            # so one more interval before a rollback; still not loaded then, it is judged like any error
+            self._smoke_rechecked.add((domain, tag))
+            delay = max(60, self.settings.int_("smoke_test_s", 0, 86400))
+            self._smoke_pending = {"domain": domain, "tag": tag, "at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() + delay)),
+                                   "auto_rollback": can_rollback and self.settings.bool_("auto_rollback"), "recheck": True}
+            events.emit("smoke", f"{domain} {tag}: config entry '{retrying[0].title}' is retrying its setup; checked again in {delay} s",
+                        domain=domain, tag=tag, state="setup_retry")
+            self._smoke_handle = self.hass.loop.call_later(
+                delay, lambda: self.hass.async_create_task(self._smoke_check(domain, tag, can_rollback)))
+            return
+        self._smoke_rechecked.discard((domain, tag))
+        self._smoke_pending = None
+        self.state.pending_smoke = None  # the verdict is recorded below, whatever it is
         ok = h.get("state") == "ok"
+        # degraded = set up, but entities unavailable, silent or without a state yet: a device or the bus, which an
+        # older version would not bring back; a rollback (restore + restart) is only for a version that does not set up
+        degraded = h.get("state") == "degraded"
+        rollback = not ok and not degraded and can_rollback and self.settings.bool_("auto_rollback")
         if ok:
             await self.async_finish_change_report(domain, tag)
             prev = self.state.last_smoke if isinstance(self.state.last_smoke, dict) else {}
@@ -1008,11 +1117,11 @@ class Installer:
         rec = {"domain": domain, "tag": tag, "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "state": h.get("state"), "reason": h.get("reason", ""),
                "action": "none"}
         events.emit("smoke", f"{domain} {tag}: {h.get('state')}" + (f" ({h.get('reason')})" if h.get("reason") else "")
-                    + ("" if ok else ("; full rollback" if can_rollback and self.settings.bool_("auto_rollback") else "; no automatic rollback")),
+                    + ("" if ok else "; version kept" if degraded else "; full rollback" if rollback else "; no automatic rollback"),
                     domain=domain, tag=tag, state=h.get("state"))
         if ok:
             _LOGGER.info("smoke test %s %s: ok", domain, tag)
-        elif can_rollback and self.settings.bool_("auto_rollback"):
+        elif rollback:
             _LOGGER.error("smoke test %s %s FAILED (%s: %s): full rollback", domain, tag, h.get("state"), h.get("reason"))
             res = await self.rollback_full(domain, rejected=True)
             if res.get("ok"):
@@ -1024,6 +1133,9 @@ class Installer:
                 return
             rec["action"] = f"rollback failed: {res.get('error')}"
             self.state.last_error = f"smoke test of {domain} {tag} failed ({h.get('reason')}) and the rollback too: {res.get('error')}"
+        elif degraded:
+            _LOGGER.warning("smoke test %s %s: degraded (%s): version kept, no rollback", domain, tag, h.get("reason"))
+            self.state.last_error = f"smoke test of {domain} {tag}: degraded: {h.get('reason')}; version kept"
         else:
             _LOGGER.warning("smoke test %s %s failed: %s: %s (no automatic rollback)", domain, tag, h.get("state"), h.get("reason"))
             self.state.last_error = f"smoke test of {domain} {tag} failed: {h.get('state')}: {h.get('reason')}"
@@ -1040,8 +1152,12 @@ class Installer:
         last = self.state.last_smoke
         if not isinstance(last, dict) or last.get("state") == "ok" or not last.get("at") or last.get("at") == self.state.smoke_announced:
             return
-        text = (f"The smoke test of {last.get('domain')} {last.get('tag')} failed: {last.get('state')}"
-                + (f" ({last.get('reason')})" if last.get("reason") else "") + f". Action: {last.get('action') or 'none'}.")
+        if last.get("state") == "degraded":
+            text = (f"The smoke test of {last.get('domain')} {last.get('tag')} found it degraded" + (f" ({last.get('reason')})" if last.get("reason") else "")
+                    + ". The version is kept: a degraded integration is not rolled back automatically. Action: none.")
+        else:
+            text = (f"The smoke test of {last.get('domain')} {last.get('tag')} failed: {last.get('state')}"
+                    + (f" ({last.get('reason')})" if last.get("reason") else "") + f". Action: {last.get('action') or 'none'}.")
         pn.async_create(self.hass, text, title="Integration smoke test", notification_id=f"hri_smoke_{last.get('domain')}")
         self.state.smoke_announced = last.get("at")
         self._save_state()
@@ -1254,15 +1370,16 @@ class Installer:
             self.state.restart_required = True  # its code keeps running until then
         for entry in list(self._entries_of(domain)):
             await self.hass.config_entries.async_remove(entry.entry_id)
-        await self.hass.async_add_executor_job(shutil.rmtree, self._component_dir(domain), True)
-        await self.hass.async_add_executor_job(shutil.rmtree, os.path.join(self.versions_dir, domain), True)
-        await self.hass.async_add_executor_job(shutil.rmtree, patches.patch_dir(self.config_dir, domain), True)
+        # recorded as gone before the trees go: a crash in between leaves stray files, never a record of files that are not there
+        self.state.installed.pop(domain, None)
+        self._save_state()
+        await self.hass.async_add_executor_job(_rmtree_under, self._component_dir(domain), os.path.join(self.config_dir, "custom_components"))
+        await self.hass.async_add_executor_job(_rmtree_under, os.path.join(self.versions_dir, domain), self.versions_dir)
+        await self.hass.async_add_executor_job(_rmtree_under, patches.patch_dir(self.config_dir, domain), os.path.dirname(patches.patch_dir(self.config_dir, "_")))
         try:
             os.remove(self.yaml_path(domain))  # a later reinstall must not inherit stale YAML
         except OSError:
             pass
-        self.state.installed.pop(domain, None)
-        self._save_state()
         if self.on_domain_removed is not None:
             try:
                 self.last_identity_cleared = await self.on_domain_removed(instance_key(domain) or "") or 0
@@ -1572,6 +1689,11 @@ class Installer:
         (replaced); returns its manifest.  Shared by the version store and
         the preflight scratch directory."""
         with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+            infos = zf.infolist()
+            if len(infos) > UNPACK_MAX_MEMBERS:
+                raise RuntimeError(f"archive has {len(infos)} members, more than {UNPACK_MAX_MEMBERS}")
+            if sum(i.file_size for i in infos) > UNPACK_MAX_BYTES:  # the declared size: zipfile never reads past it
+                raise RuntimeError(f"archive unpacks to more than {UNPACK_MAX_BYTES // 1048576} MB")
             names = zf.namelist()
             tops = {n.split("/", 1)[0] for n in names if "/" in n}
             at_root = f"{next(iter(tops))}/custom_components/{domain}/" if len(tops) == 1 else None
@@ -1585,14 +1707,19 @@ class Installer:
             os.makedirs(dest)
             root = os.path.realpath(dest)
             try:
-                for n in names:
+                for info in infos:
+                    n = info.filename
                     if not n.startswith(prefix) or n.endswith("/"):
+                        continue
+                    if (info.external_attr >> 16) & 0o170000 == 0o120000:
+                        # written as a file it would hold the link's target path as its content
+                        _LOGGER.warning("%s: symbolic link %s in the archive skipped", domain, n)
                         continue
                     target = os.path.realpath(os.path.join(dest, n[len(prefix):]))
                     if not target.startswith(root + os.sep):
                         raise RuntimeError(f"zip member escapes the component dir: {n}")
                     os.makedirs(os.path.dirname(target), exist_ok=True)
-                    with zf.open(n) as src, open(target, "wb") as dst:
+                    with zf.open(info) as src, open(target, "wb") as dst:
                         shutil.copyfileobj(src, dst)
                 manifest = self._manifest_at(dest)
                 if not manifest or manifest.get("domain") != domain:
@@ -1792,8 +1919,10 @@ class Installer:
         """pip only for requirements that are not satisfied (HA's
         install_package always spawns pip): a start with nothing new costs
         nothing.  ``force`` reinstalls everything (repair)."""
-        failed = []
-        todo = [r for r in dict.fromkeys(requirements) if force or not pkg_util.is_installed(r)]
+        failed = [r for r in dict.fromkeys(requirements) if bad_requirement(r)]  # never handed to pip or uv
+        if failed:
+            _LOGGER.error("requirements refused: %s", "; ".join(bad_requirement(r) or "" for r in failed))
+        todo = [r for r in dict.fromkeys(requirements) if r not in failed and (force or not pkg_util.is_installed(r))]
         for req in todo:
             if not pkg_util.install_package(req, constraints=self.constraints, timeout=600):
                 failed.append(req)

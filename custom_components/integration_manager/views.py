@@ -27,7 +27,7 @@ from .flow_page import FLOW_HTML
 from .ui import version_info
 from .flows import FlowDriver
 from .ha_updater import HaUpdater
-from .installer import Installer
+from .installer import _DOMAIN_RE, Installer
 from .mqtt_publisher import MqttPublisher
 from .mqtt_rules import FIELDS
 from .ui import load_template, render
@@ -303,7 +303,7 @@ class InstallView(ManagerView):
         domain = body.get("domain") or None
         if not tag or not _TAG_RE.match(tag) or ".." in tag:
             return self.json({"ok": False, "error": f"invalid tag {tag[:80]!r}"})
-        if domain is not None and not isinstance(domain, str):
+        if domain is not None and not (isinstance(domain, str) and _DOMAIN_RE.match(domain)):
             return self.json({"ok": False, "error": "invalid domain"})
         res = await self.installer.install(tag, domain=domain, replace=bool(body.get("replace")))
         if res.get("ok") and res.get("replaced") and self.publisher is not None:
