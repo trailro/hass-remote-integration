@@ -319,6 +319,11 @@ def parse_unified(text: str) -> list[_FilePatch]:
         if h is not None and (len(h.old_lines) != h.old_n or len(h.new_lines) != h.new_n):
             raise ValueError(f"hunk @@ -{h.old_start},{h.old_n} @@ declares {h.old_n} old / {h.new_n} new lines "
                              f"but carries {len(h.old_lines)} / {len(h.new_lines)} (truncated or edited diff)")
+        if h is not None and (not h.old_lines or not h.new_lines):
+            # located by content only: lines added or removed with nothing around them have no place in the file,
+            # and a removal leaves nothing to recognise once applied
+            raise ValueError(f"hunk @@ -{h.old_start},{h.old_n} @@ only adds or removes lines, without any context line: "
+                             "it cannot be located in the file; make the diff with context (diff -u, git diff)")
 
     for line in text.splitlines():
         in_hunk = hunk is not None and not hunk.complete
@@ -363,7 +368,8 @@ def _resolve(path: str, ctx: PatchContext) -> str | None:
     rel = path
     for prefix in ("b/", "a/", "./"):
         if rel.startswith(prefix):
-            rel = rel[len(prefix):]
+            rel = rel[len(prefix):]  # one prefix: b/a/x.py is a/x.py
+            break
     if ".." in rel.split("/") or rel.startswith("/"):
         return None
     for root in (ctx.component_dir, ctx.site_packages):

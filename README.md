@@ -349,7 +349,9 @@ switches, restarts if needed, smoke-tests, and rolls back on its own if the new
 version does not set up; a degraded version is kept and reported. *Full
 rollback* on the Integration page brings back the previous version together
 with the config as it was before the update; its restart is
-smoke-tested too, without a further automatic rollback. After an automatic
+smoke-tested too, without a further automatic rollback. One full rollback runs at
+a time: a second one (a double click, or a manual one while the automatic one
+runs) is refused. After an automatic
 rollback there is no Full rollback target: the version the smoke test rejected
 is never offered again that way.
 
@@ -600,7 +602,9 @@ integration starts and at every boot:
 
 Two formats: a `*.py` module with `apply(ctx)` and `status(ctx)` (robust,
 because it can find code by pattern), or a unified diff `*.patch` (applied only
-when its context matches, never leaves broken Python behind). Two optional
+when its context matches, never leaves broken Python behind; a hunk that only
+adds or removes lines without a single context line, as `diff -U0` makes, is
+refused because it cannot be located). Two optional
 headers retire a patch on its own:
 
 ```python
@@ -636,7 +640,10 @@ list it, or leave it out if you do not have one.)
 The directory is mounted read-only at `/dev-src`. The **Install** page lists
 every `manifest.json` it finds there; *Install as local* copies it into the
 version store as version `local`, which you start like any other. *Reinstall +
-restart* refreshes the running copy after you edit the code.
+restart* refreshes the running copy after you edit the code. Symbolic links in
+the directory are skipped, never followed, and the limits of a release archive
+apply (300 MB, 20000 files); `__pycache__`, `.git`, `.mypy_cache` and
+`.pytest_cache` are left out.
 
 `HRI_DEBUGPY=5678` (set by the dev overlay, bound to `127.0.0.1` only) makes
 the process listen for a debugger: attach VS Code to `localhost:5678`.

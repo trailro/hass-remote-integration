@@ -23,10 +23,12 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from jsonio import read_json, write_json
 
 from .http_util import ManagerView
+from .installer import read_capped
 
 _LOGGER = logging.getLogger(__name__)
 
 DATA_URL = "https://data-v2.hacs.xyz/integration/data.json"
+MAX_BYTES = 32 * 1024 * 1024  # about 2 MB in 2026
 CACHE_S = 12 * 3600
 RETRY_S = 120
 MAX_RESULTS = 40
@@ -50,7 +52,7 @@ class Catalog:
                 session = async_get_clientsession(self.hass)
                 async with session.get(DATA_URL, timeout=aiohttp.ClientTimeout(total=60)) as resp:
                     resp.raise_for_status()
-                    raw = await resp.read()
+                    raw = await read_capped(resp, "HACS catalog", MAX_BYTES)
                 rows = await self.hass.async_add_executor_job(self._parse_and_store, raw)
                 self.error = ""
             except Exception as err:  # noqa: BLE001 - offline, HACS down: the cached list still works

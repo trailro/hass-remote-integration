@@ -33,6 +33,7 @@ import os
 import re
 import shutil
 import site
+import stat
 import sys
 import time
 import zipfile
@@ -63,6 +64,7 @@ RELEASE_CACHE_S = 300
 DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024  # a release zipball; integrations are a few MB
 UNPACK_MAX_BYTES = 300 * 1024 * 1024    # summed uncompressed size of an archive
 UNPACK_MAX_MEMBERS = 20000
+DEV_COPY_IGNORE = frozenset({"__pycache__", ".git", ".mypy_cache", ".pytest_cache"})
 _DOMAIN_RE = re.compile(r"^[a-z0-9_]{1,64}\Z")  # \Z: "$" also matches before a trailing newline
 _TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+@-]{0,100}\Z")  # as the views check a tag
 SCRATCH_PREFIXES = (".staging-", ".old-", ".preflight-")  # never a tag: tags do not start with a dot
@@ -806,8 +808,7 @@ class Installer:
                 self._save_state()
             was_running = domain == self.state.domain and self._dom(domain).get("running_tag") == tag
             if was_running:  # reinstall of the running version: refresh the files in place
-                await self.hass.async_add_executor_job(self._deploy, domain, tag)
-                await self.hass.async_add_executor_job(self._ensure_deployed, domain, tag)  # rewrites the .hri-tag marker
+                await self.hass.async_add_executor_job(self._ensure_deployed, domain, tag, True)  # one copy + the .hri-tag marker
                 self.state.restart_required = True
                 self._save_state()
             return {"ok": True, "domain": domain, "tag": tag, "version": manifest.get("version"), "pin": pin, "redeployed": was_running, **replaced}
@@ -893,6 +894,7 @@ class Installer:
         self.busy = True
         prev_domain = self.state.domain if self.state.domain != domain else None
         was_running = self.state.domain == domain
+        deploy_started = False
         try:
             if not boot and self.state.pending_start:
                 self.cancel_pending_start()  # a manual start supersedes an older intention
@@ -915,6 +917,7 @@ class Installer:
                 pre = await self.async_backup(label)
                 await self.hass.async_add_executor_job(backupkit.prune, self.config_dir, self.settings.backup_keep, self.protected_backups() | {pre["name"]})
                 backup = pre["name"]
+            deploy_started = True
             deployed = await self.hass.async_add_executor_job(self._ensure_deployed, domain, tag)
             failed = await self.hass.async_add_executor_job(self._install_requirements, await self._requirements_for(domain))
             if failed and switching and rec.get("running_tag"):
@@ -1015,6 +1018,14 @@ class Installer:
                     await self._enable_entries(prev_domain)
                 except Exception:  # noqa: BLE001
                     _LOGGER.exception("could not re-enable %s after the failed start", prev_domain)
+            old_tag = rec.get("running_tag")
+            if deploy_started and old_tag != tag and old_tag in rec["versions"]:
+                # the new files went out but were never recorded: the record and the next boot expect the old ones
+                try:
+                    await self.hass.async_add_executor_job(self._ensure_deployed, domain, old_tag)
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception("could not put back the files of %s %s after the failed start", domain, old_tag)
+                    self.state.restart_required = True
             if rec.get("running_tag") == tag and self.state.domain == domain:
                 self.state.restart_required = True  # recorded as running: the next boot's reconcile sets up files, patches and entries
             try:
@@ -1473,9 +1484,29 @@ class Installer:
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("retained MQTT documents of %s not cleared: %s", domain, err)
 
+    _rollback_running = False
+
     async def rollback_full(self, domain: str | None = None, rejected: bool = False) -> dict[str, Any]:
         """Previous version AND the backup taken before the switch (registries,
         config entry as it was), applied at the restart the caller triggers."""
+        if self._rollback_running:
+            # an automatic one overlapping a manual one, or a double click: the second schedule would drop the
+            # first one's archive, and its failed start would cancel the restore the first one reports as done
+            return {"ok": False, "error": "a full rollback is already running"}
+        self._rollback_running = True  # before the first await
+        try:
+            return await self._rollback_full(domain, rejected)
+        finally:
+            self._rollback_running = False
+
+    def _cancel_own_restore(self, zip_name: str) -> None:
+        """Blocking: cancel the scheduled restore only while it is still this operation's archive."""
+        import backupkit
+
+        if (backupkit._pending_meta(self.config_dir) or {}).get("zip") == zip_name:
+            backupkit.cancel_restore(self.config_dir)
+
+    async def _rollback_full(self, domain: str | None, rejected: bool) -> dict[str, Any]:
         import backupkit
 
         domain = domain or self.state.domain
@@ -1509,10 +1540,10 @@ class Installer:
         try:
             res = await self.start(domain, prev_tag, own_restore=zip_name)  # start() refuses other scheduled restores, not this one
         except BaseException:
-            await self.hass.async_add_executor_job(backupkit.cancel_restore, self.config_dir)
+            await self.hass.async_add_executor_job(self._cancel_own_restore, zip_name)
             raise
         if not res.get("ok"):
-            await self.hass.async_add_executor_job(backupkit.cancel_restore, self.config_dir)
+            await self.hass.async_add_executor_job(self._cancel_own_restore, zip_name)
             return res
         self.state.pending_change = None  # a rollback is not a version change to report
         if rejected:
@@ -1936,6 +1967,9 @@ class Installer:
             return {"ok": False, "error": "another action is running"}
         self.busy = True  # before the first await: two requests must not both reach the staging directory
         self.state.last_error = ""
+        tag = self.LOCAL_TAG
+        fresh = tag not in ((self.state.installed.get(domain) or {}).get("versions") or {})
+        registered = stored = recorded = False
         try:
             cands = await self.hass.async_add_executor_job(self.dev_candidates)
             cand = next((c for c in cands["candidates"] if c["domain"] == domain and (path is None or c["path"] == path)), None)
@@ -1944,30 +1978,22 @@ class Installer:
                         else f"dev source directory {cands['dir']} does not exist (bind-mount it: see docker-compose.dev.yml)"}
             if domain not in self.registry():
                 self.add_to_registry(domain, "", cand.get("name"), local=True)
-            tag = self.LOCAL_TAG
-            dest = self._version_dir(domain, tag)
-
-            def _copy() -> dict[str, Any]:
-                staging = os.path.join(os.path.dirname(dest), ".staging-" + os.path.basename(dest))
-                shutil.rmtree(staging, ignore_errors=True)
-                shutil.copytree(cand["path"], staging, ignore=shutil.ignore_patterns("__pycache__", ".git", ".mypy_cache", ".pytest_cache"))
-                shutil.rmtree(dest, ignore_errors=True)
-                os.replace(staging, dest)
-                return self._manifest_at(dest) or {}
-
-            manifest = await self.hass.async_add_executor_job(_copy)
+                registered = True
+            manifest = await self.hass.async_add_executor_job(self._store_local, cand["path"], domain, tag)
+            stored = True
             replaced = await self._replace_current(domain)  # after the copy succeeded
             spec = self.spec(domain)
             pin = next((r for r in manifest.get("requirements", []) if _req_name(r).replace("-", "_") in
                         (spec.get("patch_module") or "",)), None)
             self._dom(domain)["versions"][tag] = {"installed_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "version": manifest.get("version"),
                                                  "requirements": manifest.get("requirements", []), "pin": pin, "source": cand["path"]}
+            recorded = True
             self.state.last_action = f"installed {domain} from {cand['path']} as {tag}"
             self._save_state()
+            await self.hass.async_add_executor_job(_rmtree_under, self._aside_dir(domain, tag), self.versions_dir)
             was_running = domain == self.state.domain and self._dom(domain).get("running_tag") == tag
             if was_running:
-                await self.hass.async_add_executor_job(self._deploy, domain, tag)
-                await self.hass.async_add_executor_job(self._ensure_deployed, domain, tag)
+                await self.hass.async_add_executor_job(self._ensure_deployed, domain, tag, True)
                 failed = await self.hass.async_add_executor_job(self._install_requirements, await self._requirements_for(domain))
                 self.state.restart_required = True
                 self._save_state()
@@ -1979,21 +2005,91 @@ class Installer:
                     "redeployed": was_running, "restart_required": was_running, "pip_failed": failed, **replaced}
         except Exception as err:  # noqa: BLE001
             _LOGGER.exception("install_local %s failed", domain)
+            if fresh and not recorded:
+                await self.hass.async_add_executor_job(self._drop_unrecorded, domain, tag)
+            elif stored and not recorded:
+                await self.hass.async_add_executor_job(self._restore_aside, domain, tag)
+            if registered and not recorded:
+                # a dev-mode entry for a copy that never made it into the store
+                data = jsonio.read_json(self.user_registry_file, {})
+                if isinstance(data, dict) and isinstance(data.get("integrations"), dict) and data["integrations"].pop(domain, None) is not None:
+                    write_json(self.user_registry_file, data, fsync=False)
+                    self._registry_cache = None
             self.state.last_error = f"{type(err).__name__}: {err}"
             self._save_state()
             return {"ok": False, "error": self.state.last_error}
         finally:
             self.busy = False
 
+    def _store_local(self, src: str, domain: str, tag: str) -> dict[str, Any]:
+        """Blocking: a dev directory into versions/<domain>/<tag>, as _store_version does for a release (staging,
+        the copy already there set aside).  Links are skipped, never followed: one to /config/secrets.yaml would
+        copy the secret into the store and every backup, one to .. would recurse.  The release limits apply."""
+        final = self._version_dir(domain, tag)
+        staging = os.path.join(os.path.dirname(final), ".staging-" + os.path.basename(final))
+        shutil.rmtree(staging, ignore_errors=True)
+        os.makedirs(staging)
+        files = size = 0
+        try:
+            for dirpath, dirs, names in os.walk(src):  # a linked directory is listed in dirs, never entered
+                rel = os.path.relpath(dirpath, src)
+                out = os.path.normpath(os.path.join(staging, rel))
+                keep = []
+                for n in sorted(dirs):
+                    if n in DEV_COPY_IGNORE:
+                        continue
+                    if os.path.islink(os.path.join(dirpath, n)):
+                        _LOGGER.warning("%s: symbolic link %s in the dev directory skipped", domain, os.path.join(rel, n))
+                        continue
+                    os.makedirs(os.path.join(out, n))
+                    keep.append(n)
+                dirs[:] = keep
+                for n in sorted(names):
+                    if n in DEV_COPY_IGNORE:
+                        continue
+                    path = os.path.join(dirpath, n)
+                    st = os.lstat(path)
+                    if not stat.S_ISREG(st.st_mode):
+                        _LOGGER.warning("%s: %s in the dev directory skipped (a symbolic link or not a regular file)", domain, os.path.join(rel, n))
+                        continue
+                    files, size = files + 1, size + st.st_size
+                    if files > UNPACK_MAX_MEMBERS:
+                        raise RuntimeError(f"{src} has more than {UNPACK_MAX_MEMBERS} files")
+                    if size > UNPACK_MAX_BYTES:
+                        raise RuntimeError(f"{src} holds more than {UNPACK_MAX_BYTES // 1048576} MB")
+                    shutil.copy2(path, os.path.join(out, n), follow_symlinks=False)
+            manifest = self._manifest_at(staging)
+            if not manifest or manifest.get("domain") != domain:
+                raise RuntimeError("manifest.json missing or its domain differs")
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        aside = self._aside_dir(domain, tag)
+        shutil.rmtree(aside, ignore_errors=True)
+        if os.path.isdir(final):
+            os.replace(final, aside)
+        os.replace(staging, final)
+        return manifest
+
     def _deploy(self, domain: str, tag: str) -> None:
-        """Copy the stored version into custom_components/<domain>."""
+        """Copy the stored version into custom_components/<domain>; the files there stay until the new copy replaced them."""
         src = self._version_dir(domain, tag)
         target = self._component_dir(domain)
-        tmp = target + ".deploying"
+        tmp, aside = target + ".deploying", target + ".replaced"
         shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(aside, ignore_errors=True)
         shutil.copytree(src, tmp)
-        shutil.rmtree(target, ignore_errors=True)
-        os.replace(tmp, target)
+        had = os.path.isdir(target)
+        if had:
+            os.replace(target, aside)
+        try:
+            os.replace(tmp, target)
+        except OSError:
+            if had:
+                os.replace(aside, target)
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
+        shutil.rmtree(aside, ignore_errors=True)
 
     def _tree_hash(self, domain: str) -> str | None:
         """Blocking: the deployed code's content (bytecode caches and the tag marker left out)."""
@@ -2017,22 +2113,23 @@ class Installer:
                     return None
         return h.hexdigest()
 
-    def _ensure_deployed(self, domain: str, tag: str) -> bool:
+    def _ensure_deployed(self, domain: str, tag: str, force: bool = False) -> bool:
         """Deploy unless custom_components/<domain> already holds this tag's
-        files (compared by manifest version + the .hri-tag marker).  Returns True when
-        it deployed."""
+        files (compared by manifest version + the .hri-tag marker); ``force``: a reinstall
+        of the running copy deploys anyway.  Returns True when it deployed."""
         want = self._manifest_at(self._version_dir(domain, tag)) or {}
         have = self.installed_manifest(domain) or {}
         marker = os.path.join(self._component_dir(domain), ".hri-tag")
         try:
-            have_tag = open(marker, encoding="utf-8").read().strip()
+            with open(marker, encoding="utf-8") as fh:
+                have_tag = fh.read().strip()
         except OSError:
             have_tag = None
         # the tag alone is not enough: "local" or a branch name gets new code under
         # the same tag, so the marker also carries when that copy entered the store
         rec = ((self.state.installed.get(domain) or {}).get("versions") or {}).get(tag) or {}
         stamp = f"{tag}\n{rec.get('installed_at') or ''}".strip()
-        if have and have.get("version") == want.get("version") and have_tag == stamp:
+        if not force and have and have.get("version") == want.get("version") and have_tag == stamp:
             return False
         self._deploy(domain, tag)
         with open(marker, "w", encoding="utf-8") as fh:
