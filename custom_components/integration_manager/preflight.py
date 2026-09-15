@@ -93,6 +93,26 @@ def _patch_after_update(text: str, new_versions: dict[str, str]) -> str:
     return "applies" if (not r.specifier or r.specifier.contains(ver, prereleases=True)) else "skipped"
 
 
+def _config_flow_version(component_dir: str) -> int | None:
+    """Blocking: VERSION of the ConfigFlow class in <component>/config_flow.py, read with ast (never imported)."""
+    import ast
+
+    try:
+        with open(os.path.join(component_dir, "config_flow.py"), encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+    except (OSError, SyntaxError, ValueError):
+        return None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef) or not any(k.arg == "domain" for k in node.keywords):
+            continue
+        for item in node.body:
+            if isinstance(item, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "VERSION" for t in item.targets):
+                if isinstance(item.value, ast.Constant) and isinstance(item.value.value, int):
+                    return item.value.value
+        return 1  # a config flow without VERSION is version 1
+    return None
+
+
 async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: str | None = None) -> dict[str, Any]:
     t0 = time.monotonic()
     spec = installer.spec(domain)
@@ -187,6 +207,20 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
                "entries_here": len(installer._entries_of(domain))}
         if not manifest.get("config_flow") and not yaml_present and not cfg["entries_here"]:
             warnings.append("no config flow and no YAML stored here: the integration would start unconfigured")
+        entries = installer._entries_of(domain)
+        if not manifest.get("config_flow") and entries:
+            warnings.append(f"{ref} has no config flow, but {len(entries)} config entr{'y exists' if len(entries) == 1 else 'ies exist'} here: "
+                            "Home Assistant cannot set them up with this version (they come back when a version with a config flow runs)")
+        flow_version = await hass.async_add_executor_job(_config_flow_version, scratch)
+        cfg["config_flow_version"] = flow_version
+        newest_entry = max((e.version for e in entries), default=None)
+        if flow_version is not None and newest_entry is not None and newest_entry > flow_version:
+            warnings.append(f"config entries here are at version {newest_entry}, {ref}'s config flow is version {flow_version}: "
+                            "Home Assistant cannot migrate an entry back (migration_error). Full rollback right after an upgrade "
+                            "brings the entry back as it was; otherwise delete the entry and set it up again")
+        if manifest.get("config_flow") and yaml_present and not entries:
+            warnings.append("YAML is stored here and this version has a config flow: if it imports the YAML into a config entry, "
+                            "remove the YAML afterwards (it is still applied at every boot)")
 
         return {
             "domain": domain, "ref": ref, "repo": repo, "target_ha": target, "current_ha": ha_version,

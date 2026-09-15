@@ -182,6 +182,9 @@ class BuildCheckView(ManagerView):
                 await self.updater.validate(ha)
             except ValueError as err:
                 ha_check = {"version": ha, "ok": False, "error": str(err)}
+            if ha_check["ok"] and ha != HA_VERSION and ha_vkey(ha) < ha_vkey(HA_VERSION):
+                ha_check = {"version": ha, "ok": False,
+                            "error": f"older than the running {HA_VERSION}: switch Home Assistant down on the System page first (it asks what the older version starts with)"}
         async with self._pf._lock:
             try:
                 report = await preflight.run(self.hass, self.installer, domain, ref, ha or None)

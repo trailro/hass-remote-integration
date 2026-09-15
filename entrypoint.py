@@ -480,7 +480,13 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
             state["last_restore"] = result
             return save_state(state)  # before the schedule is removed: see backupkit.apply_pending
 
-        state["last_restore"] = backupkit.apply_pending(CONFIG_DIR, log, record=record)
+        # after a crash fallback ha.json still names the crashed version as current, but the storage
+        # was written by the newer of the two: a backup labelled with the older one would be offered
+        # for a downgrade to exactly the version that cannot read it
+        owner = current
+        if state.get("fallback_from") and current and wanted:
+            owner = max(current, wanted, key=backupkit.ha_vkey)
+        state["last_restore"] = backupkit.apply_pending(CONFIG_DIR, log, record=record, storage_version=owner)
         restored = True
     change = state.get("change")
     recovery = state.get("recovery")
@@ -560,8 +566,8 @@ def main() -> None:
         wanted = (latest_stable() if os.environ.get("HA_VERSION_LATEST", "1") != "0" else None) or DEFAULT_VERSION
         log(f"fresh volume: installing Home Assistant {wanted}")
     current = state.get("current")
-    if not state.get("_corrupt"):
-        state["last_error"] = ""
+    # last_error stays until a new version change is asked for (ha_updater.set_desired clears it): a
+    # fallback or a failed install must still be visible after the next ordinary restart
 
     # A venv can install fine and still fail to boot (a package HA dropped,
     # an incompatible integration).  run.py resets boot_failures once HA is

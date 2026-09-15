@@ -102,7 +102,10 @@ class HaUpdater:
         import backupkit
 
         listed = backups if backups is not None else backupkit.list_backups(self.hass.config.config_dir)  # newest first
-        fits = [b for b in listed if b.get("ha_version") and _key(b["ha_version"]) <= _key(version)]
+        # a pre-restore copy holds whatever was on the volume at that moment (a half-migrated or crashed
+        # configuration too): never the configuration a downgrade restores
+        fits = [b for b in listed if b.get("ha_version") and _key(b["ha_version"]) <= _key(version)
+                and "pre-restore" not in str(b.get("name") or "")]
         # this volume's own backups first: an uploaded one comes from somewhere else
         own = [b for b in fits if not str(b.get("name") or "").startswith("upload-")]
         return (own or fits or [None])[0]

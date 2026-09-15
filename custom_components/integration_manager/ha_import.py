@@ -659,7 +659,7 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
         version=int(src.get("version") or 1),
         minor_version=int(src.get("minor_version") or 1),
         unique_id=src.get("unique_id"),
-        source="import",
+        source=src.get("source") or "import",
         discovery_keys=MappingProxyType({}),
         subentries_data=src.get("subentries") or [],
         pref_disable_new_entities=src.get("pref_disable_new_entities"),
@@ -885,7 +885,11 @@ async def async_finish_rebuild(hass: HomeAssistant, aligner: RegistryAligner, in
 
     domain, backup, to = plan.get("domain"), plan.get("backup"), plan.get("to")
     head = f"Home Assistant {to} started with a clean configuration"
-    tail = f" The previous configuration is in backup {plan.get('boot_backup') or backup}."
+    if plan.get("boot_backup"):
+        tail = (f" It was rebuilt from backup {backup}, taken when the switch was scheduled: changes made after that are not"
+                f" in it. The configuration from right before this start is in backup {plan['boot_backup']}.")
+    else:
+        tail = f" The previous configuration is in backup {backup}."
     retry = False
     try:
         if not domain:

@@ -88,6 +88,8 @@ class State:
     rollback_backup: str | None = None           # the backup a full rollback restores: protected until that restore succeeded
     release_updates: dict[str, str] = field(default_factory=dict)  # last release check: domain -> newest stable tag not in the store
     pending_change: dict[str, Any] | None = None  # {domain, from_tag, to_tag, at, before}: compared once the new version runs
+    ha_error_reported: str | None = None           # the Home Assistant version-change error already announced
+    smoke_announced: str | None = None             # "at" of the failed smoke verdict already raised as a notification
     last_restore_reported: str | None = None      # "at" of the restore outcome already put on the timeline
 
 
@@ -392,7 +394,10 @@ class Installer:
             out.add(str(change["backup"]))
         recovery = ha_state.get("recovery") if isinstance(ha_state, dict) else None
         if isinstance(recovery, dict) and recovery.get("backup"):
-            out.add(str(recovery["backup"]))  # a failed switch comes back from it, retried at every fallback
+            out.add(str(recovery["backup"]))
+        last_restore = ha_state.get("last_restore") if isinstance(ha_state, dict) else None
+        if isinstance(last_restore, dict) and last_restore.get("backup"):
+            out.add(str(last_restore["backup"]))  # just restored: the first start after it must not prune it away  # a failed switch comes back from it, retried at every fallback
         plan = jsonio.read_json(os.path.join(self.state_dir, "rebuild-pending.json"), {}) or {}
         if isinstance(plan, dict):
             for key in ("backup", "boot_backup"):  # boot_backup: taken by the entrypoint right before the clean start
@@ -565,6 +570,13 @@ class Installer:
             if resp.status != 200:
                 raise ValueError(f"manifest.json not found for {domain} {tag} (HTTP {resp.status})")
             new = json.loads(await resp.text())
+        min_ha = None
+        try:
+            async with session.get(f"https://raw.githubusercontent.com/{spec['repo']}/{tag}/hacs.json", headers=self.settings.github_headers()) as r2:
+                if r2.status == 200:
+                    min_ha = (json.loads(await r2.text()) or {}).get("homeassistant")
+        except (ValueError, OSError, AttributeError):
+            min_ha = None  # the preview still shows the manifest
         rec = self.state.installed.get(domain, {})
         cur_tag = rec.get("running_tag")
         old = (self._manifest_at(self._version_dir(domain, cur_tag)) if cur_tag else None) or {}
@@ -575,7 +587,7 @@ class Installer:
                 "requirements_added": sorted(new_req - old_req), "requirements_removed": sorted(old_req - new_req),
                 "requirements_unchanged": sorted(new_req & old_req), "dependencies": new.get("dependencies", []),
                 "after_dependencies": new.get("after_dependencies", []), "config_flow": new.get("config_flow"),
-                "min_ha_version": new.get("homeassistant"), "currently_installed_versions": self._requirement_versions(sorted(new_req))}
+                "min_ha_version": min_ha or new.get("homeassistant"), "currently_installed_versions": self._requirement_versions(sorted(new_req))}
 
     # ----- install (into the store) -------------------------------------------
 
@@ -633,7 +645,8 @@ class Installer:
             pin = next((r for r in manifest.get("requirements", []) if _req_name(r).replace("-", "_") in
                         (spec.get("patch_module") or "",)), None)
             self._dom(domain)["versions"][tag] = {"installed_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "version": manifest.get("version"),
-                                                 "requirements": manifest.get("requirements", []), "pin": pin}
+                                                 "requirements": manifest.get("requirements", []), "pin": pin,
+                                                 "min_ha": manifest.get("_hri_min_ha")}
             self.state.last_action = f"installed {domain} {tag} into the version store"
             self._save_state()
             events.emit("install", f"{domain} {tag} (version {manifest.get('version')}) into the version store", domain=domain, tag=tag)
@@ -705,6 +718,10 @@ class Installer:
 
         if backupkit.pending(self.config_dir):
             return {"ok": False, "error": "a restore is scheduled for the next restart: restart (or cancel it in the Backup card) first"}
+        min_ha = self.min_ha_of(domain, tag)
+        if min_ha and not boot and vkey(min_ha) > vkey(homeassistant.const.__version__):
+            return {"ok": False, "error": f"{domain} {tag} needs Home Assistant {min_ha} or newer (hacs.json); this is {homeassistant.const.__version__}: "
+                                          "update Home Assistant first, or prepare both together in the Environment builder"}
         self.busy = True
         prev_domain = self.state.domain if self.state.domain != domain else None
         was_running = self.state.domain == domain
@@ -976,6 +993,15 @@ class Installer:
         ok = h.get("state") == "ok"
         if ok:
             await self.async_finish_change_report(domain, tag)
+            prev = self.state.last_smoke if isinstance(self.state.last_smoke, dict) else {}
+            # the verdict right after an automatic rollback belongs to that rollback: the failure it undid
+            # must stay visible (notification, last error) until the user dismisses it or starts something else
+            after_rollback = prev.get("state") != "ok" and str(prev.get("action") or "").startswith(f"full rollback to {tag} ")
+            if not after_rollback:
+                if self.state.last_error.startswith(f"smoke test of {domain} "):
+                    self.state.last_error = ""  # this version is healthy: an older version's failure no longer describes what runs
+                self._dismiss_smoke_notification(domain)
+            self._notify_yaml_imported(domain)
         elif isinstance(self.state.pending_change, dict) and self.state.pending_change.get("domain") == domain:
             self.state.pending_change = None  # an unhealthy version would report its missing entities as "removed"
         rec = {"domain": domain, "tag": tag, "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "state": h.get("state"), "reason": h.get("reason", ""),
@@ -987,13 +1013,13 @@ class Installer:
             _LOGGER.info("smoke test %s %s: ok", domain, tag)
         elif can_rollback and self.settings.bool_("auto_rollback"):
             _LOGGER.error("smoke test %s %s FAILED (%s: %s): full rollback", domain, tag, h.get("state"), h.get("reason"))
-            res = await self.rollback_full(domain)
+            res = await self.rollback_full(domain, rejected=True)
             if res.get("ok"):
                 rec["action"] = f"full rollback to {res['tag']} + restart (restoring {res['restore']})"
                 self.state.last_smoke = rec
                 self.state.last_error = f"smoke test of {domain} {tag} failed: {h.get('reason')}; rolled back to {res['tag']}"
                 self._save_state()
-                await self.restart()
+                await self.restart()  # the notification is raised after the restart (announce_smoke): it would not survive it
                 return
             rec["action"] = f"rollback failed: {res.get('error')}"
             self.state.last_error = f"smoke test of {domain} {tag} failed ({h.get('reason')}) and the rollback too: {res.get('error')}"
@@ -1002,6 +1028,40 @@ class Installer:
             self.state.last_error = f"smoke test of {domain} {tag} failed: {h.get('state')}: {h.get('reason')}"
         self.state.last_smoke = rec
         self._save_state()
+        if not ok:
+            self.announce_smoke()
+
+    def announce_smoke(self) -> None:
+        """A failed smoke test (and what was done about it) as a persistent notification, once per verdict;
+        called after the verdict and at boot (an automatic rollback restarts before it could show)."""
+        from homeassistant.components import persistent_notification as pn
+
+        last = self.state.last_smoke
+        if not isinstance(last, dict) or last.get("state") == "ok" or not last.get("at") or last.get("at") == self.state.smoke_announced:
+            return
+        text = (f"The smoke test of {last.get('domain')} {last.get('tag')} failed: {last.get('state')}"
+                + (f" ({last.get('reason')})" if last.get("reason") else "") + f". Action: {last.get('action') or 'none'}.")
+        pn.async_create(self.hass, text, title="Integration smoke test", notification_id=f"hri_smoke_{last.get('domain')}")
+        self.state.smoke_announced = last.get("at")
+        self._save_state()
+
+    def _dismiss_smoke_notification(self, domain: str) -> None:
+        from homeassistant.components import persistent_notification as pn
+
+        pn.async_dismiss(self.hass, f"hri_smoke_{domain}")
+
+    def _notify_yaml_imported(self, domain: str) -> None:
+        """A version with a config flow imported the YAML stored here into a config entry: the YAML is
+        still applied at every boot, which can import it again or keep a deprecation warning."""
+        from homeassistant.components import persistent_notification as pn
+
+        if not os.path.isfile(self.yaml_path(domain)):
+            return
+        imported = [e.title for e in self._entries_of(domain) if getattr(e, "source", None) == "import"]
+        if imported:
+            pn.async_create(self.hass, f"{domain} imported its YAML configuration into a config entry ({', '.join(imported)}). "
+                            "The YAML stored on the Integration page is still applied at every boot: remove it there once the entry works.",
+                            title="YAML configuration imported", notification_id=f"hri_yaml_imported_{domain}")
 
     async def async_finish_change_report(self, domain: str, tag: str) -> None:
         """Compare the snapshot taken before a version switch with what the
@@ -1189,7 +1249,7 @@ class Installer:
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("retained MQTT documents of %s not cleared: %s", domain, err)
 
-    async def rollback_full(self, domain: str | None = None) -> dict[str, Any]:
+    async def rollback_full(self, domain: str | None = None, rejected: bool = False) -> dict[str, Any]:
         """Previous version AND the backup taken before the switch (registries,
         config entry as it was), applied at the restart the caller triggers."""
         import backupkit
@@ -1215,6 +1275,11 @@ class Installer:
         if not res.get("ok"):
             return res
         self.state.pending_change = None  # a rollback is not a version change to report
+        if rejected:
+            # start() recorded the version the smoke test just rejected as "previous", with a backup of its broken
+            # state: a Full rollback would put exactly that back.  After an automatic rollback there is nothing to go back to.
+            rec["previous_tag"] = None
+            rec["pre_update_backup"] = None
         self.busy = True  # straight after start() released it: nothing may start before the restore is scheduled
         try:
             # not the manager part: start() already wrote a consistent state.json
@@ -1228,6 +1293,8 @@ class Installer:
         finally:
             self.busy = False
         self._cancel_smoke()
+        # a verdict after the rollback's restart too, but never another rollback: a failure is reported, not looped
+        self.state.pending_smoke = {"domain": domain, "tag": prev_tag, "can_rollback": False}
         self.state.restart_required = True
         self.state.last_action = f"full rollback of {domain} to {prev_tag}: restoring {backup} at restart"
         self.state.rollback_backup = backup
@@ -1453,7 +1520,10 @@ class Installer:
         failed = pip_failed or (await self.hass.async_add_executor_job(self._install_requirements, reqs) if deployed else [])
         outcome = patched_now or await self.hass.async_add_executor_job(self._apply_patches, domain)
         self.state.last_action = f"reconciled {domain} {tag}; patches: {outcome}" + (f"; pip failed: {', '.join(failed)}" if failed else "")
-        self.state.last_error = "" if not failed else "reconcile: pip failed"
+        if failed:
+            self.state.last_error = "reconcile: pip failed"
+        elif self.state.last_error.startswith("reconcile:"):
+            self.state.last_error = ""  # only what reconcile itself reported: a smoke failure or rollback stays visible across the restart
         if not failed and not (missing and domain in self.hass.config.components):
             self.state.restart_required = False
         self._save_state()
@@ -1495,10 +1565,31 @@ class Installer:
                 raise
         return manifest
 
+    @staticmethod
+    def _hacs_min_ha(blob: bytes) -> str | None:
+        """Blocking: the minimum Home Assistant version a release declares in its hacs.json (repository root)."""
+        try:
+            with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+                names = zf.namelist()
+                tops = {n.split("/", 1)[0] for n in names if "/" in n}
+                path = f"{next(iter(tops))}/hacs.json" if len(tops) == 1 else "hacs.json"
+                if path not in names:
+                    return None
+                data = json.loads(zf.read(path))
+        except (zipfile.BadZipFile, KeyError, ValueError, StopIteration):
+            return None
+        value = data.get("homeassistant") if isinstance(data, dict) else None
+        return str(value) if isinstance(value, (str, int, float)) and str(value).strip() else None
+
+    def min_ha_of(self, domain: str | None, tag: str | None) -> str | None:
+        rec = ((self.state.installed.get(domain or "") or {}).get("versions") or {}).get(tag or "") or {}
+        return rec.get("min_ha")
+
     def _store_version(self, blob: bytes, domain: str, tag: str) -> dict[str, Any]:
         final_dir = self._version_dir(domain, tag)
         staging = os.path.join(os.path.dirname(final_dir), ".staging-" + os.path.basename(final_dir))  # cannot be a tag: tags never start with a dot
         manifest = self._unpack(blob, domain, staging)
+        manifest = {**manifest, "_hri_min_ha": self._hacs_min_ha(blob)}  # not written anywhere: the version record keeps it
         final = self._version_dir(domain, tag)
         shutil.rmtree(final, ignore_errors=True)
         os.replace(staging, final)

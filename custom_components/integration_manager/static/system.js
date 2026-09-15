@@ -53,6 +53,7 @@ async function haSet(v,action){
     keep:down?'The current configuration is kept.':'The new version migrates the configuration as usual.'}[mode];
   if(!confirm(`${action==='rollback'?'Roll back':'Switch'} to Home Assistant ${v} and restart the process?\n\n- A backup of the current configuration is taken first.\n- ${cfg}\n- A version that is not installed yet takes a few minutes; the current venv is kept for rollback.`))return;
   const r=await post('api/ha/'+action,action==='update'?{version:v,config:mode}:{config:mode}); if(!r.ok){log('ERROR: '+r.error);return;}
+  if((r.warnings||[]).length&&!confirm(`Home Assistant ${v} is scheduled, but:\n\n- ${r.warnings.join('\n- ')}\n\nRestart now? (Cancel keeps it scheduled: choose the running version to drop it.)`)){ log(`HA ${v} scheduled, not restarted: ${r.warnings.join(' · ')}`); ha(); return; }
   const rr=await post('api/restart'); if(!rr.ok){log('ERROR: '+rr.error);return;}
   log(`HA ${v} scheduled, backup ${r.backup}${r.restore?', configuration from '+r.restore:''}${r.config==='rebuild'?', clean start with rebuild':''}; restarting…`); setTimeout(()=>location.reload(),8000);
 }

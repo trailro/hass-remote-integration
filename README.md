@@ -294,7 +294,7 @@ Once the new version has run (after the smoke test), *What changed between
 versions* on the Integration page compares its entities and services with those
 of the version before: entities added, removed or renamed, entities whose unit,
 device class, state class or category changed, and services or service fields
-added or removed. Removed, renamed or changed entities and removed services or
+added or removed. State attributes are not compared. Removed, renamed or changed entities and removed services or
 fields are what break automations in your main HA, so they also raise a
 notification. The last ten reports are kept.
 

@@ -85,8 +85,11 @@ def iter_files(config_dir: str):
                     yield os.path.join(root, f), rel
 
 
-def create(config_dir: str, label: str = "") -> dict:
-    """Write <config>/backups/<timestamp>[-label].zip and return its record."""
+def create(config_dir: str, label: str = "", storage_version: str | None = None) -> dict:
+    """Write <config>/backups/<timestamp>[-label].zip and return its record.
+    ``storage_version``: the Home Assistant version that wrote .storage, when
+    it is not the current one (a crash fallback: the crashed version is still
+    recorded as current)."""
     import tempfile
 
     bdir = os.path.join(config_dir, BACKUP_DIR)
@@ -115,7 +118,7 @@ def create(config_dir: str, label: str = "") -> dict:
                 except FileNotFoundError:
                     continue  # vanished while zipping (a deploy in progress)
                 count += 1
-                info = {"created": stamp, "label": label, "files": count, "tool": "hass-remote-integration", "ha_version": ha_version(config_dir)}
+                info = {"created": stamp, "label": label, "files": count, "tool": "hass-remote-integration", "ha_version": storage_version or ha_version(config_dir)}
             zf.writestr("backup-info.json", json.dumps(info))
         os.replace(tmp, final)
     except BaseException:
@@ -438,6 +441,8 @@ def _wipe_trees(config_dir: str, names: list[str], parts: list[str] | None = Non
             rel = os.path.join(top, entry)
             if top == STATE_DIR and (entry in ("ha.json", "ha-install.log", "backups") or entry.startswith(("pre-restore-", "restore-pending"))):
                 continue
+            if rel in SECRET_FILES and rel not in names:
+                continue  # settings and MQTT credentials the backup does not have stay as they are
             if _excluded(rel):
                 continue
             path = os.path.join(d, entry)
@@ -449,7 +454,7 @@ def _names(zf: zipfile.ZipFile) -> list[str]:
     return [n for n in zf.namelist() if n != "backup-info.json" and n != f"{STATE_DIR}/ha.json" and not _excluded(n)]
 
 
-def apply_pending(config_dir: str, log=print, record=None) -> dict | None:
+def apply_pending(config_dir: str, log=print, record=None, storage_version: str | None = None) -> dict | None:
     """Called by entrypoint.py with HA stopped.  Order: validate (CRC) ->
     pre-restore backup -> extract into a staging dir -> wipe + move into
     place.  If anything fails after the wipe, the pre-restore backup is
@@ -470,6 +475,7 @@ def apply_pending(config_dir: str, log=print, record=None) -> dict | None:
     try:
         validate(src)
         meta = _pending_meta(config_dir) or {}
+        result["backup"] = meta.get("name")  # the source: protected from pruning afterwards
         pre = None
         if meta.get("pre_restore"):  # a retry after a restore a power loss interrupted: its first copy is the real "before"
             try:
@@ -478,7 +484,7 @@ def apply_pending(config_dir: str, log=print, record=None) -> dict | None:
             except Exception:  # noqa: BLE001 - gone or unreadable: take a new one
                 pre = None
         if pre is None:
-            pre = create(config_dir, "pre-restore")
+            pre = create(config_dir, "pre-restore", storage_version)
             try:
                 write_json(os.path.join(config_dir, PENDING_META), {**meta, "pre_restore": pre["name"]})
             except OSError:

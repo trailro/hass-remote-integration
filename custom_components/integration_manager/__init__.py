@@ -158,6 +158,15 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     last_restore = ha_state.get("last_restore") if isinstance(ha_state, dict) else None
     events.emit("boot", f"Home Assistant {ha_version}; running {installer.state.domain or 'nothing'} {installer.running_tag or ''}".strip()
                 + (f"; restart required" if installer.state.restart_required else ""), ha=ha_version)
+    installer.announce_smoke()  # a failed verdict whose automatic rollback restarted before it could be shown
+    ha_error = ha_state.get("last_error") if isinstance(ha_state, dict) else None
+    if ha_error and ha_error != installer.state.ha_error_reported:
+        from homeassistant.components import persistent_notification as ha_pn
+
+        events.emit("ha", ha_error, version=ha_version)
+        ha_pn.async_create(hass, ha_error, title="Home Assistant version", notification_id="hri_ha_version_error")
+        installer.state.ha_error_reported = ha_error
+        installer._save_state()
     if isinstance(last_restore, dict) and last_restore.get("ok") and installer.state.rollback_backup:
         installer.state.rollback_backup = None  # restored: the regular pruning applies to it again
         installer._save_state()
