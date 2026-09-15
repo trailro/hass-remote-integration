@@ -9,7 +9,30 @@ import json
 import os
 import re
 import tempfile
+import threading
+from collections.abc import Callable
 from typing import Any
+
+_UPDATE_LOCKS: dict[str, threading.Lock] = {}
+_UPDATE_LOCKS_GUARD = threading.Lock()
+
+
+def update_json(path: str, change: Callable[[Any], Any], *, fsync: bool = True, read: Callable[[str], Any] | None = None) -> Any:
+    """read -> change -> atomic write of one file under a process-wide lock
+    per file: two read-modify-writes from different threads (the loop and an
+    executor job) no longer interleave and drop each other's update.
+    `change` gets what `read` returned (read_json: None when missing or
+    unreadable) and returns the document to write, or None to leave the file
+    alone; that value is returned.  Only this process: the entrypoint writes
+    before HA starts."""
+    key = os.path.realpath(path)
+    with _UPDATE_LOCKS_GUARD:
+        lock = _UPDATE_LOCKS.setdefault(key, threading.Lock())
+    with lock:
+        new = change(read(path) if read is not None else read_json(path))
+        if new is not None:
+            write_json(path, new, fsync=fsync)
+        return new
 
 
 def write_json(path: str, data: Any, *, indent: int = 2, fsync: bool = True, mode: int | None = None, sort_keys: bool = False) -> None:

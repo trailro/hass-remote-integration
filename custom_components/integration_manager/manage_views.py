@@ -453,7 +453,7 @@ class SettingsView(ManagerView):
                     return self.json({"ok": False, "error": f"could not reach GitHub: {type(err).__name__}: {err}"})
             new["github_token"] = token
         st.data.update(new)
-        await self.installer.hass.async_add_executor_job(st.save)
+        await st.async_save()
         self.installer._releases_cache.clear()
         if getattr(self.installer, "scheduler", None) is not None:
             self.installer.scheduler.rearm()

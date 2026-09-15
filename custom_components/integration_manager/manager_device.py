@@ -63,7 +63,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from jsonio import ha_vkey, is_stable_tag, read_json, vkey, write_json
 
-from . import events, preflight
+from . import events, preflight, writer
 from .discovery import MANAGER_ACTIONS
 from .http_util import ManagerView
 from .memdiag import _proc_status
@@ -263,7 +263,9 @@ class ManagerDevice:
         known = {k: v for k, v in known.items() if v}
         if known != self._latest_saved and self._latest_file:
             self._latest_saved = known
-            self.hass.async_add_executor_job(write_json, self._latest_file, known)
+            # ordered: an un-awaited executor job could land after a newer one, and _latest_saved then
+            # suppressed the rewrite that would have fixed the file
+            writer.write_nowait(self._latest_file, known)
 
     async def _first_sample(self, _now: Any) -> None:
         await self.async_sample()
@@ -467,7 +469,7 @@ class ManagerDevice:
                 self._running = action
                 self._last_run[action] = time.time()  # wall clock, kept on disk (a monotonic clock restarts with the process)
                 if self._runs_file:
-                    await self.hass.async_add_executor_job(write_json, self._runs_file, dict(self._last_run))
+                    await writer.async_write(self._runs_file, self._last_run)
                 self.publisher.publish_manager()  # in_progress shows at once
                 try:
                     res = await getattr(self, f"_do_{action}")()

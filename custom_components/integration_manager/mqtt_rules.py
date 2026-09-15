@@ -19,8 +19,9 @@ import logging
 import os
 import re
 
-from jsonio import write_json
 from typing import Any
+
+from . import writer
 
 FIELDS = ("exclude", "name", "enabled_by_default", "entity_category", "device_class", "icon")
 
@@ -50,8 +51,9 @@ class MqttRules:
                 logging.getLogger(__name__).error("mqtt rule %r ignored: %s", k, err)
         self.rules = out
 
-    def save(self) -> None:
-        write_json(self.path, {"rules": self.rules}, indent=1, sort_keys=True, fsync=False)
+    async def async_save(self) -> None:
+        """The rules as they are now (copied on the loop, where they change), written by the ordered writer."""
+        await writer.async_write(self.path, {"rules": self.rules}, indent=1, sort_keys=True)
 
     @staticmethod
     def clean(rule: dict[str, Any]) -> dict[str, Any]:
@@ -74,7 +76,7 @@ class MqttRules:
             out[k] = v
         return out
 
-    def replace_all(self, rules: dict[str, Any], save: bool = True) -> None:
+    def replace_all(self, rules: dict[str, Any]) -> None:
         if not isinstance(rules, dict):
             raise ValueError("rules must be an object")
         new = {}
@@ -85,10 +87,8 @@ class MqttRules:
             if cleaned:
                 new[pattern] = cleaned
         self.rules = new
-        if save:
-            self.save()
 
-    def set(self, entity_id: str, save: bool = True, **changes: Any) -> dict[str, Any]:
+    def set(self, entity_id: str, **changes: Any) -> dict[str, Any]:
         """Update the exact-id rule of one entity (None removes a field)."""
         cur = dict(self.rules.get(entity_id) or {})
         for k, v in changes.items():
@@ -101,8 +101,6 @@ class MqttRules:
             self.rules[entity_id] = cur
         else:
             self.rules.pop(entity_id, None)
-        if save:
-            self.save()
         return cur
 
     def for_entity(self, entity_id: str) -> dict[str, Any]:

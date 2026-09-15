@@ -36,7 +36,7 @@ from jsonio import write_json
 
 from homeassistant import loader
 from homeassistant.config_entries import ConfigEntry, ConfigEntryDisabler, ConfigEntryState
-from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, EVENT_STATE_CHANGED
+from homeassistant.const import EVENT_HOMEASSISTANT_FINAL_WRITE, EVENT_HOMEASSISTANT_STARTED, EVENT_STATE_CHANGED
 from homeassistant.components import persistent_notification as pn
 from homeassistant.core import CoreState, Event, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
@@ -293,6 +293,7 @@ class RegistryAligner:
         self.maps: dict[str, dict[str, Any]] = self._load()
         self._pending: set[str] = set()
         self._save_handle = None
+        self._stopped = False  # past the final write: a save is written at once, no timer that may never fire
 
     def _load(self) -> dict[str, dict[str, Any]]:
         try:
@@ -345,15 +346,30 @@ class RegistryAligner:
         the loop on every first state)."""
         if self._save_handle is not None:
             self._save_handle.cancel()
+            self._save_handle = None
+        if self._stopped:
+            self.hass.async_add_executor_job(self._write, *self._snapshot())
+            return
 
         def _flush() -> None:
             self._save_handle = None
-            self.maps = {d: m for d, m in self.maps.items() if m.get("entities") or m.get("devices")}
-            snapshot = json.dumps({"domains": self.maps}, indent=1) if self.maps else None
-            self._seq = getattr(self, "_seq", 0) + 1
-            self.hass.async_add_executor_job(self._write, snapshot, self._seq)  # schedules itself; a future, not a coroutine
+            self.hass.async_add_executor_job(self._write, *self._snapshot())  # schedules itself; a future, not a coroutine
 
         self._save_handle = self.hass.loop.call_later(2, _flush)
+
+    def _snapshot(self) -> tuple[str | None, int]:
+        """On the loop: the map as JSON, numbered so an older write never lands over a newer one."""
+        self.maps = {d: m for d, m in self.maps.items() if m.get("entities") or m.get("devices")}
+        self._seq = getattr(self, "_seq", 0) + 1
+        return (json.dumps({"domains": self.maps}, indent=1) if self.maps else None), self._seq
+
+    async def _on_final_write(self, _event: Event | None) -> None:
+        """A change of the last 2 s would otherwise die with its debounce timer."""
+        self._stopped = True
+        if self._save_handle is not None:
+            self._save_handle.cancel()
+            self._save_handle = None
+            await self.hass.async_add_executor_job(self._write, *self._snapshot())
 
     def _write(self, snapshot: str | None, seq: int | None = None) -> None:
         if seq is not None and seq < getattr(self, "_written_seq", 0):
@@ -380,6 +396,7 @@ class RegistryAligner:
         self.hass.bus.async_listen(er.EVENT_ENTITY_REGISTRY_UPDATED, self._on_entity)
         self.hass.bus.async_listen(dr.EVENT_DEVICE_REGISTRY_UPDATED, self._on_device)
         self.hass.bus.async_listen(EVENT_STATE_CHANGED, self._on_state)
+        self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_FINAL_WRITE, self._on_final_write)
         if self.maps:
             self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, self._on_started)
 

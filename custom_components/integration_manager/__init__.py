@@ -11,7 +11,7 @@ from homeassistant.helpers.typing import ConfigType
 
 from .flows import FlowDriver
 from .installer import Installer, track_delayed_stores
-from . import events, notifications
+from . import events, notifications, writer
 from .build_views import BuildCheckView, BuildOptionsView, BuildPageView, BuildPrepareView, DevInstallView, DevView, PreflightView
 from .manage_views import EventsView, InstalledActionView, PatchActionView, PatchEditView, PatchReadView, PatchUploadView, PatchesView, ReleaseCheckView, ReleasePreviewView, RunView, SettingsView, YamlView
 from .mqtt_publisher import MqttPublisher
@@ -78,6 +78,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     track_delayed_stores()  # before the integration is set up: backups write its pending saves
     installer = Installer(hass)
     hass.data[DOMAIN] = installer
+    writer.async_register(hass)  # the ordered JSON writer (settings, MQTT config/rules) drains at the final write
 
     # Requirements live in the image's site-packages; after a rebuild they
     # are gone while /config still has the integration and the recorded tag.
