@@ -645,8 +645,16 @@ def manager_device(key: str, prefix: str, topics: dict[str, str], integration: s
 def _json_or_text(payload: str) -> Any:
     try:
         return json.loads(payload)
-    except ValueError:
+    except (ValueError, RecursionError):
         return payload
+
+
+def _num(p: str) -> float:
+    """A command value: NaN and infinity pass float() and every min/max comparison, so refuse them here."""
+    value = float(p)
+    if not math.isfinite(value):
+        raise ValueError(f"{p!r} is not a finite number")
+    return value
 
 
 def _pick(field: str, table: dict[str, Any]) -> tuple[str, str, dict[str, Any]] | None:
@@ -665,9 +673,9 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
 
     if domain == "climate":
         return _pick(field, {
-            "temperature": lambda: ("climate", "set_temperature", {**t, "temperature": float(p)}),
-            "temperature_high": lambda: ("climate", "set_temperature", {**t, "target_temp_high": float(p)}),
-            "temperature_low": lambda: ("climate", "set_temperature", {**t, "target_temp_low": float(p)}),
+            "temperature": lambda: ("climate", "set_temperature", {**t, "temperature": _num(p)}),
+            "temperature_high": lambda: ("climate", "set_temperature", {**t, "target_temp_high": _num(p)}),
+            "temperature_low": lambda: ("climate", "set_temperature", {**t, "target_temp_low": _num(p)}),
             "mode": lambda: ("climate", "set_hvac_mode", {**t, "hvac_mode": p}),
             "preset_mode": lambda: ("climate", "set_preset_mode", {**t, "preset_mode": p}),
             "fan_mode": lambda: ("climate", "set_fan_mode", {**t, "fan_mode": p}),
@@ -675,7 +683,7 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
         })
     if domain == "water_heater":
         return _pick(field, {
-            "temperature": lambda: ("water_heater", "set_temperature", {**t, "temperature": float(p)}),
+            "temperature": lambda: ("water_heater", "set_temperature", {**t, "temperature": _num(p)}),
             "mode": lambda: ("water_heater", "set_operation_mode", {**t, "operation_mode": p}),
         })
     if domain == "switch" and field == "state":
@@ -683,13 +691,13 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
     if domain == "select" and field == "option":
         return "select", "select_option", {**t, "option": p}
     if domain == "number" and field == "value":
-        return "number", "set_value", {**t, "value": float(p)}
+        return "number", "set_value", {**t, "value": _num(p)}
     if domain == "light":
         if field == "state":
             return "light", "turn_on" if on else "turn_off", t
         return _pick(field, {
-            "brightness": lambda: ("light", "turn_on", {**t, "brightness": int(float(p))}),
-            "color_temp": lambda: ("light", "turn_on", {**t, "color_temp_kelvin": int(float(p))}),
+            "brightness": lambda: ("light", "turn_on", {**t, "brightness": int(_num(p))}),
+            "color_temp": lambda: ("light", "turn_on", {**t, "color_temp_kelvin": int(_num(p))}),
             "rgb": lambda: ("light", "turn_on", {**t, "rgb_color": [int(x) for x in p.split(",")]}),
             "effect": lambda: ("light", "turn_on", {**t, "effect": p}),
         })
@@ -697,21 +705,21 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
         if field == "command":
             return "cover", {"OPEN": "open_cover", "CLOSE": "close_cover", "STOP": "stop_cover"}[p.upper()], t
         if field == "position":
-            return "cover", "set_cover_position", {**t, "position": int(float(p))}
+            return "cover", "set_cover_position", {**t, "position": int(_num(p))}
         if field == "tilt":
-            return "cover", "set_cover_tilt_position", {**t, "tilt_position": int(float(p))}
+            return "cover", "set_cover_tilt_position", {**t, "tilt_position": int(_num(p))}
     if domain == "valve":
         if field == "command":
             return "valve", {"OPEN": "open_valve", "CLOSE": "close_valve", "STOP": "stop_valve"}[p.upper()], t
         if field == "position":
             if p.upper() in ("OPEN", "CLOSE", "STOP"):  # a position valve sends its stop payload to the same topic
                 return "valve", {"OPEN": "open_valve", "CLOSE": "close_valve", "STOP": "stop_valve"}[p.upper()], t
-            return "valve", "set_valve_position", {**t, "position": int(float(p))}
+            return "valve", "set_valve_position", {**t, "position": int(_num(p))}
     if domain == "fan":
         if field == "state":
             return "fan", "turn_on" if on else "turn_off", t
         return _pick(field, {
-            "percentage": lambda: ("fan", "set_percentage", {**t, "percentage": int(float(p))}),
+            "percentage": lambda: ("fan", "set_percentage", {**t, "percentage": int(_num(p))}),
             "preset_mode": lambda: ("fan", "set_preset_mode", {**t, "preset_mode": p}),
             "oscillate": lambda: ("fan", "oscillate", {**t, "oscillating": p == "oscillate_on"}),
             "direction": lambda: ("fan", "set_direction", {**t, "direction": p}),
@@ -738,7 +746,7 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
         if field == "state":
             return "humidifier", "turn_on" if on else "turn_off", t
         return _pick(field, {
-            "humidity": lambda: ("humidifier", "set_humidity", {**t, "humidity": int(float(p))}),
+            "humidity": lambda: ("humidifier", "set_humidity", {**t, "humidity": int(_num(p))}),
             "mode": lambda: ("humidifier", "set_mode", {**t, "mode": p}),
         })
     if domain == "alarm_control_panel" and field == "command":
@@ -746,7 +754,7 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
         if p.strip().startswith("{"):  # {"action": ..., "code": ...} from the command template; a bare action still works
             try:
                 body = json.loads(p)
-            except ValueError:
+            except (ValueError, RecursionError):
                 body = {}
             if isinstance(body, dict):
                 action, code = str(body.get("action") or ""), body.get("code")
@@ -767,7 +775,9 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
         if field == "send_command":
             data = _json_or_text(p)
             if isinstance(data, dict):
-                return "vacuum", "send_command", {**data, **t}  # the payload cannot retarget the command
+                # the payload cannot retarget the command: Home Assistant would add every target key to the entity
+                extra = {k: v for k, v in data.items() if k not in ("entity_id", "device_id", "area_id", "floor_id", "label_id")}
+                return "vacuum", "send_command", {**extra, **t}
             return "vacuum", "send_command", {**t, "command": p}
     if domain == "lawn_mower" and field == "command":
         return "lawn_mower", {"start_mowing": "start_mowing", "pause": "pause", "dock": "dock"}[p], t

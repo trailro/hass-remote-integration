@@ -79,6 +79,7 @@ MANAGER_REPO = "trailro/hass-remote-integration"
 MAX_RELEASES = 20  # newer releases remembered for the banner
 VERSION_CHECK_S = 12 * 3600
 MIN_INTERVAL_S = {"backup": 600, "check_updates": 300}  # a flood of presses must not rotate every backup away
+RUNS_FILE = "manager_actions.json"  # when each action last ran: a restart must not reset the limits
 LAG_TICK_S = 1.0
 HISTORY_FILE = "resource_history.json"
 LATEST_FILE = "latest_versions.json"  # last known releases: update entities do not flap after a restart or a restore
@@ -226,7 +227,9 @@ class ManagerDevice:
         self.manager_tag: str | None = known.get("manager_tag")
         self.manager_releases: list[dict[str, str]] = known.get("manager_releases") if isinstance(known.get("manager_releases"), list) else []
         self._ha_latest: str | None = known.get("home_assistant")
-        self._last_run: dict[str, float] = {}
+        self._runs_file = os.path.join(config_dir, "integration_manager", RUNS_FILE) if config_dir else None
+        runs = read_json(self._runs_file, {}) if self._runs_file else {}
+        self._last_run: dict[str, float] = {k: float(v) for k, v in (runs if isinstance(runs, dict) else {}).items() if isinstance(v, (int, float))}
         self.last_action: dict[str, Any] | None = None
         self._ha_desired: str | None = None
         self._cpu_at: tuple[float, float] | None = None
@@ -457,12 +460,14 @@ class ManagerDevice:
             res: dict[str, Any] = {"ok": False, "error": f"unknown action {action!r}"}
         elif self._action_lock.locked():
             res = {"ok": False, "error": f"{self._running} is still running"}
-        elif (wait := MIN_INTERVAL_S.get(action, 0) - (time.monotonic() - self._last_run.get(action, -1e9))) > 0:
+        elif (wait := MIN_INTERVAL_S.get(action, 0) - (time.time() - self._last_run.get(action, -1e12))) > 0:
             res = {"ok": False, "error": f"{action} ran moments ago: try again in {int(wait) + 1} s"}
         else:
             async with self._action_lock:
                 self._running = action
-                self._last_run[action] = time.monotonic()
+                self._last_run[action] = time.time()  # wall clock, kept on disk (a monotonic clock restarts with the process)
+                if self._runs_file:
+                    await self.hass.async_add_executor_job(write_json, self._runs_file, dict(self._last_run))
                 self.publisher.publish_manager()  # in_progress shows at once
                 try:
                     res = await getattr(self, f"_do_{action}")()

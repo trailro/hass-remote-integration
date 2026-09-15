@@ -31,7 +31,8 @@ from plain HTTP traffic. These are:
   backup encryption keys) exposed through the API, the logs, the timeline, the
   diagnostics zip or the UI;
 - service calls over MQTT or from the UI that get past the deny list, or MQTT
-  commands that reach entities the container does not publish;
+  commands and service calls that reach entities the container does not
+  publish;
 - path traversal or unsafe archive handling in backups, restores, imports,
   patches or log files;
 - anything that lets a page on another origin make the manager do something.
