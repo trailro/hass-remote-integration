@@ -134,10 +134,11 @@ class MemoryDiagView(ManagerView):
         self.hass = hass
 
     async def get(self, request: web.Request) -> web.Response:
+        # both walk every gc-tracked object: not something a link on any web page may trigger
+        if request.headers.get("X-Requested-With") != "fetch":
+            return self.json_message("the memory probe walks the whole heap: send the header X-Requested-With: fetch", status_code=400)
         name = request.query.get("refs", "").strip()
         if name:
-            if request.headers.get("X-Requested-With") != "fetch":
-                return self.json_message("refs walks the whole heap: send the header X-Requested-With: fetch", status_code=400)
             if not name.replace(".", "").replace("_", "").isalnum():
                 return self.json_message("refs must be a type name", status_code=400)
             return self.json(await self.hass.async_add_executor_job(referrers, name))

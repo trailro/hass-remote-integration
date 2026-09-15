@@ -11,7 +11,11 @@ logs every browser out, and the key never leaves the container.  Logging
 out ends every session (a stateless cookie cannot be revoked alone): a
 timestamp on the volume invalidates every cookie issued before it.  Failed
 attempts are slowed down; after MAX_FAILURES within FAILURE_WINDOW_S from one
-address that address is refused until the window passes.
+address that address is refused until the window passes, and after
+GLOBAL_MAX_FAILURES within GLOBAL_WINDOW_S from all addresses together (many
+addresses, e.g. an IPv6 range) every password attempt is refused until the
+count drops.  The cookie name carries the port: browsers send cookies to every
+port of a host, so two instances on one host would otherwise share one name.
 """
 
 from __future__ import annotations
@@ -36,11 +40,15 @@ from .ui import load_template
 
 _LOGGER = logging.getLogger(__name__)
 
-COOKIE = "hri_session"
+LEGACY_COOKIE = "hri_session"  # the name before it carried the port: a valid one is moved to COOKIE on its next request
+COOKIE = f"hri_session_{os.environ.get('HRI_PORT', '8087').strip() or '8087'}"
 SESSION_S = 30 * 86400
 MAX_FAILURES = 5
 FAILURE_WINDOW_S = 900
-OPEN_PATHS = frozenset({"/login", "/api/login", "/static/hri.css"})
+GLOBAL_MAX_FAILURES = 30
+GLOBAL_WINDOW_S = 300
+MAX_KEYS = 1000
+OPEN_PATHS = frozenset({"/login", "/api/login", "/static/hri.css", "/static/login.js"})
 DATA_KEY = "integration_manager_auth"
 
 LOGIN_HTML = load_template("login")
@@ -91,6 +99,8 @@ class Auth:
         self._tag = hashlib.sha256(b"session:" + password.encode()).hexdigest()[:16]
         self._key = key
         self._failures: dict[str, list[float]] = {}
+        self._global: list[float] = []  # every failure, whatever the address
+        self._global_locked = False
 
     # ----- credentials -------------------------------------------------------
 
@@ -140,6 +150,31 @@ class Auth:
 
     # ----- brute-force brake -------------------------------------------------
 
+    @staticmethod
+    def _left(attempts: list[float], now: float) -> int:
+        recent = [t for t in attempts if now - t < FAILURE_WINDOW_S]
+        return int(FAILURE_WINDOW_S - (now - recent[-MAX_FAILURES])) + 1 if len(recent) >= MAX_FAILURES else 0
+
+    def _global_left(self, now: float) -> int:
+        self._global = [t for t in self._global if now - t < GLOBAL_WINDOW_S][-GLOBAL_MAX_FAILURES:]
+        if len(self._global) < GLOBAL_MAX_FAILURES:
+            self._global_locked = False
+            return 0
+        return int(GLOBAL_WINDOW_S - (now - self._global[0])) + 1
+
+    def _prune(self, now: float) -> None:
+        """Forget unlocked addresses, oldest first, down to half the table; a locked one is never forgotten
+        (an attacker filling the table from fresh addresses must not free the address it has locked)."""
+        unlocked = sorted((c for c, ts in self._failures.items() if not self._left(ts, now)), key=lambda c: self._failures[c][-1])
+        for c in unlocked[:max(0, len(self._failures) - MAX_KEYS // 2)]:
+            self._failures.pop(c, None)
+
+    def _table_full(self, client: str, now: float) -> bool:
+        if client in self._failures or len(self._failures) < MAX_KEYS:
+            return False
+        self._prune(now)
+        return len(self._failures) >= MAX_KEYS
+
     def locked_for(self, client: str) -> int:
         """Seconds this address is still refused (0 = may try)."""
         now = time.monotonic()
@@ -148,19 +183,26 @@ class Auth:
             self._failures[client] = recent
         else:
             self._failures.pop(client, None)
-        return int(FAILURE_WINDOW_S - (now - recent[0])) + 1 if len(recent) >= MAX_FAILURES else 0
+        own = self._left(recent, now)
+        if not own and self._table_full(client, now):  # every slot holds a locked address: a new one counts as locked
+            own = min(self._left(ts, now) for ts in self._failures.values())
+        return max(own, self._global_left(now))
 
     def failed(self, client: str) -> None:
+        now = time.monotonic()
+        self._global.append(now)
+        if not self._global_locked and self._global_left(now):
+            self._global_locked = True
+            _LOGGER.warning("%s failed logins from all addresses within %s s: every login refused for up to %s s",
+                            GLOBAL_MAX_FAILURES, GLOBAL_WINDOW_S, GLOBAL_WINDOW_S)
+            events.emit("auth", f"{GLOBAL_MAX_FAILURES} failed logins within {GLOBAL_WINDOW_S // 60} minutes from many addresses: "
+                                f"every login refused for up to {GLOBAL_WINDOW_S // 60} minutes")
+        if self._table_full(client, now):
+            return  # counted in the global budget; locked_for already treats this address as locked
         attempts = self._failures.setdefault(client, [])
-        attempts.append(time.monotonic())
+        attempts.append(now)
         if len(attempts) == MAX_FAILURES:
             events.emit("auth", f"{MAX_FAILURES} failed logins from {client}: refused for {FAILURE_WINDOW_S // 60} minutes", client=client)
-        if len(self._failures) > 1000:  # many addresses: forget the oldest, unlocked ones first
-            # an attacker filling the table from fresh addresses must not free the address it has locked
-            now = time.monotonic()
-            locked = {c for c, ts in self._failures.items() if sum(now - t < FAILURE_WINDOW_S for t in ts) >= MAX_FAILURES}
-            for c in sorted(self._failures, key=lambda c: (c in locked, self._failures[c][-1]))[:500]:
-                self._failures.pop(c, None)
 
     def succeeded(self, client: str) -> None:
         self._failures.pop(client, None)
@@ -185,6 +227,12 @@ def _client(request: web.Request) -> str:
     return client_key(request.remote)
 
 
+def _set_session_cookie(response: web.StreamResponse, request: web.Request, value: str, max_age: int) -> None:
+    response.set_cookie(COOKIE, value, max_age=max_age, path="/", httponly=True, samesite="Strict",
+                        secure=request.secure or os.environ.get("HRI_COOKIE_SECURE", "") == "1")  # behind a TLS proxy the request looks plain
+    response.del_cookie(LEGACY_COOKIE, path="/")
+
+
 async def async_setup_auth(hass: HomeAssistant) -> Auth:
     """Install the password check (after the host guard) when a password is set."""
     password = await hass.async_add_executor_job(_configured_password)
@@ -201,6 +249,12 @@ async def async_setup_auth(hass: HomeAssistant) -> Auth:
     async def password_guard(request: web.Request, handler):
         if request.path in OPEN_PATHS or auth.valid_session(request.cookies.get(COOKIE, "")):
             return await handler(request)
+        legacy = request.cookies.get(LEGACY_COOKIE, "")
+        if legacy and auth.valid_session(legacy):  # a session from before the port-specific name: moved over once
+            response = await handler(request)
+            if isinstance(response, web.StreamResponse) and not response.prepared:
+                _set_session_cookie(response, request, legacy, max(0, int(legacy.split(".", 1)[0]) - int(time.time())))
+            return response
         header = request.headers.get("Authorization", "")
         if header.startswith("Bearer "):
             client = _client(request)
@@ -258,8 +312,7 @@ class LoginView(ManagerView):
             return self.json({"ok": False, "error": "wrong password"}, status_code=401)
         self.auth.succeeded(client)
         response = self.json({"ok": True})
-        response.set_cookie(COOKIE, self.auth.new_session(), max_age=SESSION_S, path="/", httponly=True, samesite="Strict",
-                            secure=request.secure or os.environ.get("HRI_COOKIE_SECURE", "") == "1")  # behind a TLS proxy the request looks plain
+        _set_session_cookie(response, request, self.auth.new_session(), SESSION_S)
         return response
 
 
@@ -278,4 +331,5 @@ class LogoutView(ManagerView):
                 return self.json({"ok": False, "error": f"logout could not be recorded on the volume: {err}"}, status_code=500)
         response = self.json({"ok": True})
         response.del_cookie(COOKIE, path="/")
+        response.del_cookie(LEGACY_COOKIE, path="/")
         return response

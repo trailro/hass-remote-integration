@@ -108,6 +108,9 @@ class LogsApiView(ManagerView):
         self.hass = hass
 
     async def get(self, request: web.Request) -> web.Response:
+        if request.headers.get("X-Requested-With") != "fetch":
+            # a search over the whole on-disk buffer: not something a link on any web page may trigger
+            return self.json_message("X-Requested-With: fetch required", status_code=400)
         handler = logbuffer.find() if logbuffer else None
         if handler is None:
             return self.json({"records": [], "capacity": 0, "error": "log file handler not installed"})

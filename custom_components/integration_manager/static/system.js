@@ -1,6 +1,6 @@
 let REG={}, RUN=null, INSTALLED={};
 async function sysStatus(){
-  const s=await (await fetch('api/status')).json(); REG=s.registry||{}; RUN=s.running; INSTALLED=s.installed||{};
+  const s=await (await fetch('api/status',{headers:{'X-Requested-With':'fetch'}})).json(); REG=s.registry||{}; RUN=s.running; INSTALLED=s.installed||{};
   if(IMS) imRender();
   $('#restart').disabled=s.busy; $('#restartnote').textContent=s.state.restart_required?'restart required (new code for an already loaded integration)':'';
   $('#last').textContent=s.state.last_action?('last action: '+s.state.last_action):'';

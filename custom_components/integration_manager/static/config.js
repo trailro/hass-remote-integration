@@ -1,7 +1,7 @@
 let DOM=new URLSearchParams(location.search).get('domain')||'', ST=null, flow=null;
 
 async function load(){
-  ST=await (await fetch('api/status')).json();
+  ST=await (await fetch('api/status',{headers:{'X-Requested-With':'fetch'}})).json();
   DOM=ST.integration||'';  // one integration per container
   $('#domnote').innerHTML=DOM?'the integration of this container (several versions of it can be in the store, one runs)':'no integration installed yet: <a href="/install">Install</a> one';
   const x=(ST.installed||{})[DOM]; $('#domtitle').textContent=DOM||'no integration';
@@ -71,7 +71,7 @@ function renderChange(x,open){
 }
 async function loadPatches(){
   const t=$('#plist'); t.querySelectorAll('tr:not(:first-child)').forEach(e=>e.remove()); if(!DOM) return;
-  const r=await (await fetch(`api/patches/${encodeURIComponent(DOM)}`)).json(); if(!r.ok) return;
+  const r=await (await fetch(`api/patches/${encodeURIComponent(DOM)}`,{headers:{'X-Requested-With':'fetch'}})).json(); if(!r.ok) return;
   for(const p of r.patches){const tr=document.createElement('tr'); tr.innerHTML=`<td>${esc(p.name)}${p.bundled?' <span class="tag" title="shipped with the image (patches/<domain>/ in the repo); a user upload of the same name overrides it">bundled</span>':''}</td><td class="mut">${p.scope?p.scope.map(esc).join(', '):'all'}</td><td><span class="${p.status==='applied'||p.status==='already applied'?'ok':p.status==='skipped'?'mut':'warn'}">${esc(p.status)}</span></td><td class="mut">${esc(p.detail||'')}</td><td><button data-e="${esc(p.name)}">${p.bundled?'View / override':'Edit'}</button>${p.bundled?'':` <button data-n="${esc(p.name)}">Delete</button>`}</td>`; t.appendChild(tr);}
   t.querySelectorAll('button[data-e]').forEach(b=>b.onclick=()=>pedEdit(b.dataset.e));
   t.querySelectorAll('button[data-n]').forEach(b=>b.onclick=async()=>{ if(!confirm(`Delete patch ${b.dataset.n}?`)) return; await post(`api/patches/${encodeURIComponent(DOM)}/${encodeURIComponent(b.dataset.n)}/delete`); loadPatches(); });

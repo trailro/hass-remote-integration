@@ -55,18 +55,18 @@ function callForm(domain,s){const keys=Object.keys(s.fields||{});
   <label>extra service data <span class="mut">JSON, merged over the fields above (for fields the catalog does not list)</span></label><textarea id="ct_extra" rows="2" placeholder="{}"></textarea>
   <div class="row" style="margin-top:8px"><button class="primary" id="ct_go">Call service</button><span id="ct_msg" class="mut"></span></div><pre id="ct_out"></pre></div>`;}
 function wireCall(x,domain,s){const go=x.querySelector('#ct_go'); if(!go) return;
- go.onclick=async()=>{const data={}; let bad='';
+ go.onclick=async()=>{const data={}; let bad=''; const badJson=new Set();
   for(const [k,f] of Object.entries(s.fields||{})){const el=x.querySelector(`#cf_${CSS.escape(k)}`); if(!el) continue; const kind=el.dataset.kind;
    if(kind==='boolean'){ data[k]=el.checked; continue; }
    if(kind==='bool3'){ if(el.value!=='') data[k]=el.value==='true'; continue; }
    if(kind==='multi'){ const vals=[...el.querySelectorAll('input[type=checkbox]:checked')].map(c=>c.value);
     const custom=el.querySelector('input[data-custom]'); if(custom) vals.push(...custom.value.split(',').map(t=>t.trim()).filter(Boolean));
-    if(vals.length||f.required) data[k]=vals; continue; }
+    if(vals.length) data[k]=vals; continue; }  // nothing picked: not sent (a required one is reported below)
    const v=el.value; if(v===''||v==null){ if(f.required&&kind==='text') data[k]=''; continue; }  // a required text field may be cleared on purpose
-   if(kind==='number') data[k]=Number(v); else if(kind==='json'){ try{data[k]=JSON.parse(v);}catch(e){bad+=`${k}: invalid JSON. `;} } else data[k]=v; }
+   if(kind==='number') data[k]=Number(v); else if(kind==='json'){ try{data[k]=JSON.parse(v);}catch(e){bad+=`${k}: invalid JSON. `; badJson.add(k);} } else data[k]=v; }
   const extraEl=x.querySelector('#ct_extra'); if(extraEl&&extraEl.value.trim()){ try{const extra=JSON.parse(extraEl.value); if(extra===null||typeof extra!=='object'||Array.isArray(extra)) throw new Error(); Object.assign(data,extra);}catch(e){bad+='extra data: invalid JSON (an object). ';} }
   // checked against the final data: a value given only in the extra JSON counts
-  for(const [k,f] of Object.entries(s.fields||{})) if(f.required&&!(k in data)&&!bad.includes(`${k}:`)) bad+=`${k} is required. `;
+  for(const [k,f] of Object.entries(s.fields||{})) if(f.required&&!(k in data)&&!badJson.has(k)) bad+=`${k} is required. `;
   const msg=x.querySelector('#ct_msg'), out=x.querySelector('#ct_out'); if(bad){msg.innerHTML='<span class="bad">'+esc(bad)+'</span>';return;}
   const body={domain,service:s.name,data}; const tEl=x.querySelector('#ct_entity'); if(tEl&&tEl.value.trim()) body.target={entity_id:tEl.value.split(',').map(t=>t.trim()).filter(Boolean)};
   if(!confirm(`Call ${domain}.${s.name} now with ${JSON.stringify(body.data)}${body.target?' on '+body.target.entity_id.join(', '):''}?`)) return;

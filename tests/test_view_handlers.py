@@ -12,13 +12,18 @@ import custom_components.integration_manager as im
 from custom_components.integration_manager import http_util, parity
 
 HANDLERS = ("get", "post", "put", "delete", "patch")
+# modules allowed not to import in the test venv, with the reason; any other import error fails the test
+# (a module skipped silently is a module whose views are never checked)
+IMPORT_FAILURES_ALLOWED: dict[str, str] = {}
 
 
-def _views():
+def _views(errors=None):
     for info in pkgutil.iter_modules(im.__path__):
         try:
             mod = importlib.import_module(f"{im.__name__}.{info.name}")
-        except Exception:  # noqa: BLE001 - a module that needs a running HA to import is not a view module
+        except Exception as err:  # noqa: BLE001
+            if info.name not in IMPORT_FAILURES_ALLOWED and errors is not None:
+                errors.append(f"{info.name}: {type(err).__name__}: {err}")
             continue
         for _, cls in inspect.getmembers(mod, inspect.isclass):
             if issubclass(cls, http_util.ManagerView) and cls is not http_util.ManagerView and cls.__module__ == mod.__name__:
@@ -31,7 +36,9 @@ def _is_with_body(fn):
 
 class HandlerWiringTest(unittest.TestCase):
     def test_every_body_handler_is_wrapped_and_no_helper_is(self):
-        views = list(_views())
+        errors: list[str] = []
+        views = list(_views(errors))
+        self.assertEqual(errors, [], "modules that failed to import (add to IMPORT_FAILURES_ALLOWED with a reason if expected)")
         self.assertIn(parity.CutoverView, views)
         for cls in views:
             for name, fn in cls.__dict__.items():

@@ -50,6 +50,13 @@ those projects.
   those installs for a small gain in a single-purpose container. Keep the
   container unprivileged (no `--privileged`), pass only the devices it needs,
   and keep the volume private to Docker.
+- **Other services on the same host name see the session cookie.** Browsers
+  send cookies to every port of a host, so a web app on another port of the
+  same IP address or name receives `hri_session_<port>` and can overwrite it.
+  The port in the cookie name only separates instances of this project. Serve
+  the UI under its own host name (a reverse proxy) when other web apps share
+  the machine; a report that relies on a hostile app on the same host name is
+  not a vulnerability in this project.
 - **GitHub Actions are pinned to commit SHAs** and updated by Dependabot; the
   Python packages the manager adds next to Home Assistant are bounded in
   `requirements.txt` and resolved against Home Assistant's constraints.

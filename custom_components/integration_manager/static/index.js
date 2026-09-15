@@ -1,6 +1,6 @@
 let REG={}, RUN=null, INSTALLED={};
 async function status(){
-  const s=await (await fetch('api/status')).json();
+  const s=await (await fetch('api/status',{headers:{'X-Requested-With':'fetch'}})).json();
   $('#ha').textContent=s.ha_version;
   $('#comps').textContent=s.components.join(', ');
   REG=s.registry||{}; RUN=s.running; INSTALLED=s.installed||{};
