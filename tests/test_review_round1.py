@@ -110,7 +110,7 @@ class LogoutTest(unittest.TestCase):
     def test_tampered_or_expired_cookie(self):
         auth = Auth("pw", b"k" * 32)
         expires = int(time.time()) - 1
-        self.assertFalse(auth.valid_session(auth._sign(expires)))
+        self.assertFalse(auth.valid_session(auth._sign(expires, auth.generation)))
         self.assertFalse(auth.valid_session(f"{int(time.time()) + SESSION_S}.deadbeef"))
 
 

@@ -290,8 +290,13 @@ def schedule_restore(config_dir: str, name: str, parts: list[str] | None = None,
     if (parts is None or "storage" in parts) and info.get("ha_version") and boot and ha_vkey(info["ha_version"]) > ha_vkey(boot):
         raise ValueError(f"backup was made on Home Assistant {info['ha_version']}, newer than {boot} that boots next: update HA first")
     with _PENDING_LOCK:
-        zip_name = f"restore-pending-{int(time.time() * 1000)}.zip"
-        dst = os.path.join(config_dir, STATE_DIR, zip_name)
+        import tempfile
+
+        # a name no earlier schedule can have (two in the same millisecond used to share one): a failure
+        # below removes only this operation's files, never the archive a confirmed schedule points at
+        fd, dst = tempfile.mkstemp(dir=os.path.join(config_dir, STATE_DIR), prefix="restore-pending-", suffix=".zip")
+        os.close(fd)
+        zip_name = os.path.basename(dst)
         try:
             shutil.copyfile(src, dst + ".tmp")
             os.replace(dst + ".tmp", dst)
