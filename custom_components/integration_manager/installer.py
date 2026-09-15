@@ -1503,8 +1503,7 @@ class Installer:
         """Blocking: cancel the scheduled restore only while it is still this operation's archive."""
         import backupkit
 
-        if (backupkit._pending_meta(self.config_dir) or {}).get("zip") == zip_name:
-            backupkit.cancel_restore(self.config_dir)
+        backupkit.cancel_restore(self.config_dir, only_zip=zip_name)
 
     async def _rollback_full(self, domain: str | None, rejected: bool) -> dict[str, Any]:
         import backupkit

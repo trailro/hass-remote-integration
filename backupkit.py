@@ -431,8 +431,12 @@ def _drop_stale_pending(config_dir: str, keep: str | None = None) -> None:
             pass
 
 
-def cancel_restore(config_dir: str) -> bool:
+def cancel_restore(config_dir: str, only_zip: str | None = None) -> bool:
+    """``only_zip``: cancel only while the schedule is still that archive's (checked under the same lock a
+    new schedule takes, so a restore scheduled by someone else in between is never cancelled)."""
     with _PENDING_LOCK:
+        if only_zip is not None and (_pending_meta(config_dir) or {}).get("zip") != only_zip:
+            return False
         had = pending(config_dir)
         try:
             os.remove(os.path.join(config_dir, PENDING_META))  # first: from here on nothing is scheduled
