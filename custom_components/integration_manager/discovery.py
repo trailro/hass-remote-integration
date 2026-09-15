@@ -582,6 +582,8 @@ def device_block(hass: HomeAssistant, device_id: str | None, integration: str, p
 # Anything else (an empty payload that clears a retained command, a typo) is refused.
 MANAGER_ACTIONS = {"install_integration": "install", "install_home_assistant": "install", "restart": "restart",
                    "backup": "backup", "check_updates": "check"}
+HEALTH_INTERVAL_S = 60
+HEALTH_EXPIRE_AFTER_S = 3 * HEALTH_INTERVAL_S
 
 
 def manager_device(key: str, prefix: str, topics: dict[str, str], integration: str | None, version: str,
@@ -596,12 +598,15 @@ def manager_device(key: str, prefix: str, topics: dict[str, str], integration: s
     integ = integration or "none"
     common = {"availability": [{"topic": topics["status"]}], "payload_available": "online", "payload_not_available": "offline"}
     health, mgr, cmd = topics["health"], topics["manager"], topics["cmd"]
+    # health is republished every HEALTH_INTERVAL_S: a loop that stopped checking keeps the connection (and the
+    # retained "ok") alive, so both health entities go unavailable when three publications in a row are missing
+    expire = {"expire_after": HEALTH_EXPIRE_AFTER_S}
     comps: dict[str, dict[str, Any]] = {
-        f"binary_sensor.{key}_integration": {**common, "platform": "binary_sensor", "name": f"{integ} integration", "device_class": "connectivity",
+        f"binary_sensor.{key}_integration": {**common, **expire, "platform": "binary_sensor", "name": f"{integ} integration", "device_class": "connectivity",
                                               "entity_category": "diagnostic", "json_attributes_topic": health,
                                               "unique_id": f"{prefix}health_online", "default_entity_id": f"binary_sensor.{key}_integration",
                                               "state_topic": health, "value_template": _tpl("'ON' if value_json.state in ['ok', 'degraded'] else 'OFF'")},
-        f"sensor.{key}_health": {**common, "platform": "sensor", "name": f"{integ} health", "icon": "mdi:heart-pulse",
+        f"sensor.{key}_health": {**common, **expire, "platform": "sensor", "name": f"{integ} health", "icon": "mdi:heart-pulse",
                                  "entity_category": "diagnostic", "json_attributes_topic": health,
                                  "unique_id": f"{prefix}health_state", "default_entity_id": f"sensor.{key}_health",
                                  "state_topic": health, "value_template": _tpl("value_json.state")},

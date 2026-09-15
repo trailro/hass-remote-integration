@@ -229,7 +229,8 @@ class ManagerDevice:
         self._ha_latest: str | None = known.get("home_assistant")
         self._runs_file = os.path.join(config_dir, "integration_manager", RUNS_FILE) if config_dir else None
         runs = read_json(self._runs_file, {}) if self._runs_file else {}
-        self._last_run: dict[str, float] = {k: float(v) for k, v in (runs if isinstance(runs, dict) else {}).items() if isinstance(v, (int, float))}
+        self._last_run: dict[str, float] = {k: float(v) for k, v in (runs if isinstance(runs, dict) else {}).items()
+                                            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)}
         self.last_action: dict[str, Any] | None = None
         self._ha_desired: str | None = None
         self._cpu_at: tuple[float, float] | None = None
@@ -415,7 +416,7 @@ class ManagerDevice:
         # for testing must never be what the update button installs (the release check is stable-only)
         min_ha_of = getattr(inst, "min_ha_of", lambda _d, _t: None)
         known = [t for t in (inst.state.installed.get(domain) or {}).get("versions", {})
-                 if is_stable_tag(t) and not ((m := min_ha_of(domain, t)) and vkey(m) > vkey(HA_VERSION))]
+                 if is_stable_tag(t) and not ((m := min_ha_of(domain, t)) and ha_vkey(m) > ha_vkey(HA_VERSION))]
         if inst.updates.get(domain):
             known.append(inst.updates[domain])
         return max(known, key=vkey) if known else None
@@ -457,21 +458,34 @@ class ManagerDevice:
 
     # ----- actions -------------------------------------------------------------
 
+    def _limit_wait(self, action: str) -> float:
+        """Seconds until the action may run again. A timestamp that cannot be right (not finite, or further ahead
+        than one interval: a hand-edited file, a clock that was far off) limits nothing; the wait never exceeds the interval."""
+        interval = MIN_INTERVAL_S.get(action, 0)
+        last = self._last_run.get(action)
+        now = time.time()
+        if not interval or last is None or not math.isfinite(last) or last > now + interval:
+            return 0.0
+        return min(interval, interval - (now - last))
+
     async def async_action(self, action: str, rec: dict[str, Any] | None = None) -> dict[str, Any]:
         if action not in MANAGER_ACTIONS:
             res: dict[str, Any] = {"ok": False, "error": f"unknown action {action!r}"}
         elif self._action_lock.locked():
             res = {"ok": False, "error": f"{self._running} is still running"}
-        elif (wait := MIN_INTERVAL_S.get(action, 0) - (time.time() - self._last_run.get(action, -1e12))) > 0:
+        elif (wait := self._limit_wait(action)) > 0:
             res = {"ok": False, "error": f"{action} ran moments ago: try again in {int(wait) + 1} s"}
         else:
             async with self._action_lock:
                 self._running = action
                 self._last_run[action] = time.time()  # wall clock, kept on disk (a monotonic clock restarts with the process)
-                if self._runs_file:
-                    await writer.async_write(self._runs_file, self._last_run)
-                self.publisher.publish_manager()  # in_progress shows at once
                 try:
+                    if self._runs_file:
+                        try:
+                            await writer.async_write(self._runs_file, self._last_run)
+                        except Exception as err:  # noqa: BLE001 - a full volume must not leave the action shown as running, unanswered
+                            _LOGGER.warning("the limit of manager action %s was not saved (it applies until a restart): %s", action, err)
+                    self.publisher.publish_manager()  # in_progress shows at once
                     res = await getattr(self, f"_do_{action}")()
                 except (ValueError, OSError) as err:
                     res = {"ok": False, "error": str(err)}
