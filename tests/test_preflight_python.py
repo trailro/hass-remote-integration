@@ -43,6 +43,31 @@ class CodeChecksTest(unittest.TestCase):
             self.assertEqual(preflight._code_checks(d), ([], []))
 
 
+class NotLoadedFoldersTest(unittest.TestCase):
+    def test_tests_and_scripts_are_not_checked(self):
+        d = _component({"__init__.py": "x = 1\n", "tests/test_old.py": "print 'py2'\n", "scripts/tool.py": "import imp\n"})
+        self.assertEqual(preflight._code_checks(d), ([], []))
+
+    def test_a_nested_package_named_like_them_still_is(self):
+        d = _component({"__init__.py": "x = 1\n", "api/tests/helper.py": "print 'py2'\n"})
+        self.assertEqual(len(preflight._code_checks(d)[0]), 1)
+
+
+class PipReasonTest(unittest.TestCase):
+    def test_conflict_line_instead_of_help_link(self):
+        err = ("ERROR: Cannot install pycrypto==2.6.1 because these package versions have conflicting dependencies.\n"
+               "ERROR: ResolutionImpossible: for help visit https://pip.pypa.io/en/latest/topics/dependency-resolution/\n")
+        self.assertTrue(preflight._pip_reason(err).startswith("ERROR: Cannot install pycrypto==2.6.1"))
+
+    def test_python_version_line(self):
+        err = "ERROR: Package 'scipy' requires a different Python: 3.14.7 not in '<3.13,>=3.9'\n"
+        self.assertIn("requires a different Python", preflight._pip_reason(err))
+
+    def test_unknown_error_keeps_the_last_line(self):
+        self.assertEqual(preflight._pip_reason("something\nERROR: boom\n"), "ERROR: boom")
+        self.assertEqual(preflight._pip_reason(""), "pip failed")
+
+
 class SourceOnlyTest(unittest.TestCase):
     def test_wheel_rows_are_not_built(self):
         calls = []
