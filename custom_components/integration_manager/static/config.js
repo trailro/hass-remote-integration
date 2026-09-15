@@ -263,18 +263,23 @@ function pollProgress(delay=2000){
 }
 $('#start').onclick=async()=>{try{log(`start flow ${DOM}`);const r=await post('api/flow/start',{domain:DOM});if(r.message){log('error: '+r.message);return;}flow={id:r.flow_id,kind:'config'};render(r);}catch(e){log('error: '+e.message)}};
 $('#submit').onclick=async()=>{ if(!flow) return; let input; try{input=$('#submit').dataset.external==='1'?null:collect();}catch(e){$('#baseerr').textContent='invalid JSON: '+e.message;return;}
-  try{ const url=flow.kind==='config'?`api/flow/${flow.id}`:`api/options/${flow.id}`; const r=await post(url,{user_input:input}); if(r.message){$('#baseerr').textContent=r.message;return;} render(r);}catch(e){log('error: '+e.message)} };
+  try{ const url=flow.kind==='config'?`api/flow/${flow.id}`:`api/options/${flow.id}`; const r=await post(url,{user_input:input}); if(r.type==='invalid_data'){ for(const [k,v] of Object.entries(r.errors||{})){ const w=[...$('#form').querySelectorAll('[data-name]')].find(x=>x.dataset.name===k); if(w&&w._err) w._err.textContent=String(v); else $('#baseerr').textContent=`${k}: ${v}`; } return; } if(r.message){$('#baseerr').textContent=r.message;return;} render(r);}catch(e){log('error: '+e.message)} };
 $('#abort').onclick=async()=>{ if(!flow) return; clearTimeout(PROGRESS_T); await del(flow.kind==='config'?`api/flow/${flow.id}`:`api/options/${flow.id}`); log('aborted'); flow=null; $('#stepcard').hidden=true; $('#abort').disabled=true; $('#flowid').textContent=''; };
 async function entries(){
   const r=await (await fetch('api/entries')).json();
   const t=$('#entries'); t.querySelectorAll('tr:not(:first-child)').forEach(e=>e.remove());
   for(const e of r){ if(DOM&&e.domain!==DOM) continue; const tr=document.createElement('tr');
     tr.innerHTML=`<td>${esc(e.domain)}</td><td>${esc(e.title)}</td><td class="${e.state==='loaded'?'ok':(e.disabled_by?'mut':'warn')}">${e.disabled_by?'disabled ('+esc(e.disabled_by)+')':esc(e.state)}</td><td>${esc(e.version)}</td>
-      <td><button data-a="options" data-id="${esc(e.entry_id)}" ${e.supports_options&&e.state==='loaded'?'':'disabled'}>Options</button> <button data-a="reload" data-id="${esc(e.entry_id)}">Reload</button> <button data-a="delete" data-id="${esc(e.entry_id)}">Delete</button></td>`;
+      <td><button data-a="options" data-id="${esc(e.entry_id)}" ${e.supports_options&&e.state==='loaded'?'':'disabled'}>Options</button> ${e.supports_reconfigure?`<button data-a="reconfigure" data-id="${esc(e.entry_id)}">Reconfigure</button> `:''}<button data-a="reload" data-id="${esc(e.entry_id)}">Reload</button> <button data-a="delete" data-id="${esc(e.entry_id)}">Delete</button></td>`;
     t.appendChild(tr); }
   t.querySelectorAll('button').forEach(b=>b.onclick=async()=>{const a=b.dataset.a,id=b.dataset.id;
     if(a==='delete'){ if(!confirm('Delete this config entry?')) return; await post(`api/entries/${id}/delete`,{}); return entries(); }
     if(a==='reload'){ await post(`api/entries/${id}/reload`,{}); return entries(); }
-    if(a==='options'){ const r=await post(`api/entries/${id}/options`,{}); if(r.message||!r.flow_id){log('error: '+(r.message||'no flow'));return;} flow={id:r.flow_id,kind:'options'}; render(r); } });
+    if(a==='options'){ const r=await post(`api/entries/${id}/options`,{}); if(r.message||!r.flow_id){log('error: '+(r.message||'no flow'));return;} flow={id:r.flow_id,kind:'options'}; render(r); }
+    if(a==='reconfigure'){ const r=await post('api/flow/start',{domain:DOM,source:'reconfigure',entry_id:id}); if(r.message||!r.flow_id){log('error: '+(r.message||r.reason||'no flow'));return;} flow={id:r.flow_id,kind:'config'}; render(r); }
+    if(a==='continue'){ const r=await post(`api/flow/${id}`,{user_input:null}); if(r.message||!r.type){log('error: '+(r.message||'no flow'));return;} flow={id,kind:'config'}; render(r); } });
+  let prog=[]; try{ prog=await (await fetch('api/flow/progress')).json(); }catch(e){}
+  const pb=$('#flowsprogress'); if(!pb) return; pb.innerHTML='';
+  for(const f of (Array.isArray(prog)?prog:[]).filter(f=>f.handler===DOM&&f.source!=='user')){ const b=document.createElement('button'); b.textContent=`Continue ${f.source||'flow'}${f.step_id?' · '+f.step_id:''}`; b.onclick=async()=>{ const r=await post(`api/flow/${f.flow_id}`,{user_input:null}); if(r.message){log('error: '+r.message);return;} flow={id:f.flow_id,kind:'config'}; render(r); }; pb.appendChild(b); pb.appendChild(document.createTextNode(' ')); }
 }
 load().catch(e=>log('error: '+e.message));

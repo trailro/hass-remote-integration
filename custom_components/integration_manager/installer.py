@@ -22,6 +22,7 @@ Model
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import io
 import json
@@ -157,6 +158,7 @@ class Installer:
         self.updates_checked_at: str | None = None
         self._loaded_tags: dict[str, str] = {}  # domain -> tag whose code this process imported
         self.busy = False
+        self._backup_lock = asyncio.Lock()  # backups on their own queue up instead of refusing each other
         os.makedirs(self.versions_dir, exist_ok=True)
         self.state = self._load_state()
         self.updates = dict(self.state.release_updates or {})  # the badge and the update entity survive a restart
@@ -858,6 +860,7 @@ class Installer:
             self._smoke_handle = None
         self._smoke_pending = None
         self.state.pending_smoke = None
+        self._smoke_waiting.clear()
 
     def _schedule_smoke(self, domain: str, tag: str, can_rollback: bool) -> None:
         delay = self.settings.int_("smoke_test_s", 0, 86400)
@@ -908,6 +911,7 @@ class Installer:
         last error (health on MQTT shows it too)."""
         self._smoke_handle = None
         if self.state.domain != domain or self.running_tag != tag:
+            self._smoke_waiting.pop((domain, tag), None)
             self._smoke_pending = None
             ps = self.state.pending_smoke
             if isinstance(ps, dict) and (ps.get("domain"), ps.get("tag")) == (domain, tag):
@@ -915,7 +919,11 @@ class Installer:
                 self._save_state()
             return
         still_setting_up = any(e.state.value == "setup_in_progress" for e in self._entries_of(domain) if not e.disabled_by)
-        waited = time.monotonic() - self._smoke_waiting.setdefault((domain, tag), time.monotonic())
+        if still_setting_up:  # the clock runs only while the entry is setting up, not while an install was busy
+            waited = time.monotonic() - self._smoke_waiting.setdefault((domain, tag), time.monotonic())
+        else:
+            self._smoke_waiting.pop((domain, tag), None)
+            waited = 0.0
         hung = still_setting_up and not self.busy and self.hass.is_running and waited > max(self.SETUP_WAIT_S, self.settings.int_("smoke_test_s", 0, 86400))
         if (self.busy or not self.hass.is_running or still_setting_up) and not hung:
             # an install/start in progress, or (at boot) HA not started / the entry
@@ -1261,16 +1269,22 @@ class Installer:
                 _LOGGER.warning("store %s could not be flushed before the backup: %s", getattr(store, "key", "?"), err)
         return flushed
 
+    @property
+    def backup_running(self) -> bool:
+        return self._backup_lock.locked()
+
     async def async_backup_exclusive(self, label: str = "") -> dict[str, Any]:
         """A backup on its own (UI, daily, MQTT): busy while it runs, so no
-        deploy replaces the files it is zipping.  Raises ValueError when busy."""
-        if self.busy:
-            raise ValueError("an install/start is running: try again in a moment")
-        self.busy = True
-        try:
-            return await self.async_backup(label)
-        finally:
-            self.busy = False
+        deploy replaces the files it is zipping.  Another backup is waited for;
+        raises ValueError while an install, start or restore is running."""
+        async with self._backup_lock:
+            if self.busy:
+                raise ValueError("an install, start or restore is running: try again in a moment")
+            self.busy = True
+            try:
+                return await self.async_backup(label)
+            finally:
+                self.busy = False
 
     async def async_backup(self, label: str = "") -> dict[str, Any]:
         """A backup that contains what HA knows now, not what it last wrote."""

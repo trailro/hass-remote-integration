@@ -48,7 +48,7 @@ class Scheduler:
 
     async def _daily(self, _now) -> None:
         st = self.installer.settings
-        if st.bool_("backup_daily") and self.installer.busy:
+        if st.bool_("backup_daily") and self.installer.busy and not self.installer.backup_running:
             _LOGGER.info("daily backup skipped: an install/start is running; retrying in 30 min")
             async_call_later(self.hass, 1800, self._daily)
             return

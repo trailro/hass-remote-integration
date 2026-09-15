@@ -498,6 +498,8 @@ class MqttPublisher:
         c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"{self.client_id}-{suffix}-clear", clean_session=True)
         if self.config.username:
             c.username_pw_set(self.config.username, self.config.password or None)
+        ack: dict[str, Any] = {"rc": None}
+        c.on_connect = lambda cl, u, flags, rc, props=None: ack.__setitem__("rc", rc)
         c.connect(self.config.host, self.config.port, keepalive=30)
         try:
             c.loop_start()
@@ -505,6 +507,11 @@ class MqttPublisher:
             # one budget for the whole sweep, not 5 s per topic: a broker that stops acknowledging
             # would otherwise hold the reconnect lock (or an uninstall) for hours
             deadline = time.monotonic() + min(120.0, 15.0 + 0.02 * len(infos))
+            # is_connected() is false until the broker's CONNACK: a slow (remote, TLS) broker is not a lost one
+            while time.monotonic() < deadline and ack["rc"] is None:
+                time.sleep(0.05)
+            if ack["rc"] is None or ack["rc"] != 0:
+                raise RuntimeError(f"the broker did not accept the cleanup connection ({ack['rc']})")
             while time.monotonic() < deadline and c.is_connected() and not all(i.is_published() for i in infos):
                 time.sleep(0.1)
             unconfirmed = sum(1 for i in infos if not i.is_published())

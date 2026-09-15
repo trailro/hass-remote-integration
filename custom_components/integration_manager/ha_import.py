@@ -553,11 +553,33 @@ def _unmask(given: Any, stored: Any) -> Any:
     if isinstance(given, dict) and isinstance(stored, dict):
         return {k: (stored[k] if k in stored and given[k] != stored[k] and given[k] == scrub({k: stored[k]})[k] else _unmask(v, stored.get(k)))
                 for k, v in given.items()}
-    if isinstance(given, list) and isinstance(stored, list) and len(given) == len(stored):
-        return [_unmask(g, s) for g, s in zip(given, stored)]
+    if isinstance(given, list) and isinstance(stored, list):
+        if len(given) == len(stored):
+            return [_unmask(g, s) for g, s in zip(given, stored)]
+        # items removed or added in the form: pair each with the stored item whose masked form it still is
+        masked = [scrub(s) for s in stored]
+        return [stored[masked.index(g)] if g in masked else g for g in given]
     if isinstance(given, str) and isinstance(stored, str) and given != stored and given == scrub(stored):
         return stored
     return given
+
+
+def _still_masked(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(_still_masked(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_still_masked(v) for v in value)
+    return isinstance(value, str) and "***" in value
+
+
+# the entry is in and set up as far as the device allows now: a device offline
+# (retry) or a login to renew (reauth) is not a failed import
+_KEEP_STATES = (ConfigEntryState.LOADED, ConfigEntryState.SETUP_RETRY, ConfigEntryState.SETUP_IN_PROGRESS)
+
+
+def _reauth_pending(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    return any(f.get("context", {}).get("source") == "reauth" and f.get("context", {}).get("entry_id") == entry.entry_id
+               for f in hass.config_entries.flow.async_progress_by_handler(entry.domain))
 
 
 async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entry_id: str, data: dict[str, Any] | None,
@@ -592,6 +614,8 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
         data = _unmask(data, src.get("data") or {})
     if options is not None:
         options = _unmask(options, src.get("options") or {})
+    if _still_masked(data) or _still_masked(options):
+        raise ValueError("a masked value (***) could not be matched to the backup's value: enter it again, or leave that field as inspected")
     # the original id: integrations name store files and other state after it
     # (<domain>.<entry_id>); only an id already taken here gets a new one
     original_id = src.get("entry_id")
@@ -612,7 +636,7 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
         pref_disable_polling=src.get("pref_disable_polling"),
         # not running: the entry is stored disabled and enabled when the
         # integration is started (HA skips setup of disabled entries)
-        disabled_by=None if running else ConfigEntryDisabler.USER,
+        disabled_by=ConfigEntryDisabler.USER if (not running or src.get("disabled_by")) else None,
     )
     copied: list[str] = []   # new files in place (copy succeeded)
     moved: list[str] = []    # originals set aside as .pre-import (recorded BEFORE the move: a failed copy must still restore them)
@@ -658,7 +682,7 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
             merged = await hass.async_add_executor_job(_build_map, out_dir, domain, entry_id)
             aligner.merge_map(merged)
         await hass.config_entries.async_add(entry)
-        if running and entry.state is not ConfigEntryState.LOADED:
+        if running and not entry.disabled_by and entry.state not in _KEEP_STATES and not _reauth_pending(hass, entry):
             reason = entry.reason or entry.state.value
             await hass.config_entries.async_remove(entry.entry_id)
             _undo()
@@ -668,14 +692,15 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
     except Exception as err:  # noqa: BLE001
         _undo()
         raise ValueError(f"{type(err).__name__}: {err}") from None
-    finally:
-        # Done with the other instance's .storage either way (it holds every
-        # integration's credentials): remove the extraction right away
-        # (apply_all keeps it until its last entry).
-        if cleanup:
-            await hass.async_add_executor_job(clear, cfg)
+    # Done with the other instance's .storage (it holds every integration's
+    # credentials): removed right away once imported (apply_all keeps it until
+    # its last entry).  A failed import keeps it for the retry; Clear removes it.
+    if cleanup:
+        await hass.async_add_executor_job(clear, cfg)
     await hass.async_add_executor_job(_commit)
-    result: dict[str, Any] = {"entry_id": entry.entry_id, "state": entry.state.value, "copied_storage": copied, "cleaned_up": True}
+    result: dict[str, Any] = {"entry_id": entry.entry_id, "state": entry.state.value, "copied_storage": copied, "cleaned_up": cleanup}
+    if entry.state is not ConfigEntryState.LOADED and not entry.disabled_by:
+        result["note"] = f"imported; not loaded yet ({entry.reason or entry.state.value}): Home Assistant retries it or asks for a new login"
     if align:
         try:
             result["alignment"] = aligner.align_existing()
@@ -685,7 +710,7 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
 
 
 async def apply_all(hass: HomeAssistant, aligner: RegistryAligner, domains: list[str] | None, align: bool, copy_storage: bool,
-                    running: str | None, installed: set[str]) -> dict[str, Any]:
+                    running: str | None, installed: set[str], keep_failed: bool = True) -> dict[str, Any]:
     """Import every config entry of every installed integration found in the
     inspected backup (or of ``domains`` only), data/options as they are.
     Domains that already have a config entry here are skipped."""
@@ -710,12 +735,17 @@ async def apply_all(hass: HomeAssistant, aligner: RegistryAligner, domains: list
             except ValueError as err:
                 results.append({"domain": domain, "entry_id": entry["entry_id"], "error": str(err)})
     finally:
-        await hass.async_add_executor_job(clear, cfg)
+        failed = [r for r in results if "error" in r]
+        if not failed or not keep_failed:
+            await hass.async_add_executor_job(clear, cfg)
     return {"imported": [r for r in results if "state" in r], "skipped": [r for r in results if "skipped" in r],
-            "failed": [r for r in results if "error" in r], "cleaned_up": True}
+            "failed": failed, "cleaned_up": not failed or not keep_failed}
 
 
 # ----- clean start on a Home Assistant downgrade -----------------------------
+
+
+REBUILD_ATTEMPTS = 3  # a device offline at every start must not keep the plan forever
 
 
 def stage_rebuild(config_dir: str, backup_name: str, domain: str | None, ha_version: str, target: str) -> dict[str, Any]:
@@ -802,6 +832,7 @@ async def async_finish_rebuild(hass: HomeAssistant, aligner: RegistryAligner, in
     domain, backup, to = plan.get("domain"), plan.get("backup"), plan.get("to")
     head = f"Home Assistant {to} started with a clean configuration"
     tail = f" The previous configuration is in backup {backup}."
+    retry = False
     try:
         if not domain:
             msg = f"{head}; no integration was running, so there was nothing to rebuild.{tail}"
@@ -810,6 +841,11 @@ async def async_finish_rebuild(hass: HomeAssistant, aligner: RegistryAligner, in
         else:
             res = await _locked(apply_all(hass, aligner, [domain], True, True, domain, set(installer.state.installed)))
             ok, failed = res["imported"], res["failed"]
+            attempts = int(plan.get("attempts") or 0) + 1
+            retry = bool(failed) and not ok and attempts < REBUILD_ATTEMPTS
+            if retry:
+                await hass.async_add_executor_job(write_json, os.path.join(cfg, REBUILD_FILE), {**plan, "attempts": attempts})
+                tail = f" It is tried again at the next start ({attempts} of {REBUILD_ATTEMPTS}).{tail}"
             if not ok and not failed:
                 msg = f"{head}; {domain} had no config entry to rebuild.{tail}"
             else:
@@ -818,7 +854,8 @@ async def async_finish_rebuild(hass: HomeAssistant, aligner: RegistryAligner, in
     except Exception as err:  # noqa: BLE001 - reported, the plan must not run again
         msg = f"{head}; rebuilding {domain} failed: {type(err).__name__}: {err}.{tail}"
     finally:
-        await hass.async_add_executor_job(drop_rebuild, cfg)
+        if not retry:
+            await hass.async_add_executor_job(drop_rebuild, cfg)
     _LOGGER.info(msg)
     events.emit("rebuild", msg, backup=backup, version=to)
     pn.async_create(hass, msg, title="Home Assistant version change", notification_id="hri_ha_rebuild")

@@ -45,6 +45,38 @@ def _cached(path: str, loader_fn) -> Any:
     return data
 
 
+def _optional(path: str, loader_fn) -> dict[str, Any]:
+    """Blocking: a file an integration may not ship ({} when missing or not a mapping)."""
+    try:
+        data = _cached(path, loader_fn)
+    except OSError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _flat_fields(desc: dict[str, Any], tr_svc: dict[str, Any]) -> dict[str, Any]:
+    """Fields of a service, those inside sections (light.turn_on's
+    advanced_fields) listed like the others, as HA's own loader does."""
+    tr_fields = _dict(tr_svc.get("fields"))
+    fields: dict[str, Any] = {}
+    for fname, fdesc in _dict(desc.get("fields")).items():
+        fdesc = _dict(fdesc)
+        if isinstance(fdesc.get("fields"), dict):  # a section
+            fields.update(_flat_fields({"fields": fdesc["fields"]}, tr_svc))
+            continue
+        tr_field = _dict(tr_fields.get(fname))
+        fields[fname] = {
+            **fdesc,
+            "name": tr_field.get("name") or fdesc.get("name"),
+            "description": tr_field.get("description") or fdesc.get("description"),
+        }
+    return fields
+
+
 async def service_rows(hass: HomeAssistant) -> list[dict[str, Any]]:
     registered = hass.services.async_services()
     out: list[dict[str, Any]] = []
@@ -53,27 +85,16 @@ async def service_rows(hass: HomeAssistant) -> list[dict[str, Any]]:
         try:
             integration = await loader.async_get_integration(hass, domain)
             custom = not integration.is_built_in
-            path = integration.file_path / "services.yaml"
-            if path.is_file():
-                yaml_desc = await hass.async_add_executor_job(_cached, str(path), load_yaml_dict) or {}
-            tr_path = integration.file_path / "translations" / "en.json"
-            if tr_path.is_file():
-                tr = await hass.async_add_executor_job(_cached, str(tr_path), _load_json) or {}
-                tr_services = tr.get("services") or {}
+            yaml_desc = await hass.async_add_executor_job(_optional, str(integration.file_path / "services.yaml"), load_yaml_dict)
+            tr = await hass.async_add_executor_job(_optional, str(integration.file_path / "translations" / "en.json"), _load_json)
+            tr_services = _dict(tr.get("services"))
         except (loader.IntegrationNotFound, HomeAssistantError, OSError, ValueError):
             pass
         services = []
         for name in sorted(registered[domain]):
-            desc = yaml_desc.get(name) or {}
-            tr_svc = tr_services.get(name) or {}
-            fields = {}
-            for fname, fdesc in (desc.get("fields") or {}).items():
-                tr_field = (tr_svc.get("fields") or {}).get(fname) or {}
-                fields[fname] = {
-                    **(fdesc or {}),
-                    "name": tr_field.get("name") or (fdesc or {}).get("name"),
-                    "description": tr_field.get("description") or (fdesc or {}).get("description"),
-                }
+            desc = _dict(yaml_desc.get(name))
+            tr_svc = _dict(tr_services.get(name))
+            fields = _flat_fields(desc, tr_svc)
             resp = desc.get("response")
             services.append(
                 {

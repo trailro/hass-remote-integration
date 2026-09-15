@@ -85,9 +85,21 @@ def snapshot(hass: HomeAssistant, domain: str) -> dict[str, Any]:
     return {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "entities": entities, "services": services}
 
 
+def _current_key(key: str, rec: dict[str, Any], after: dict[str, Any]) -> str:
+    """A before-snapshot saved by an older manager used "uid:<unique_id>";
+    compared with the current "uid:<domain>:<unique_id>" every entity would
+    show as removed and added."""
+    if key in after or not key.startswith("uid:") or not isinstance(rec, dict):
+        return key
+    domain = str(rec.get("entity_id") or "").split(".", 1)[0]
+    new = f"uid:{domain}:{key[4:]}"
+    return new if domain and new in after else key
+
+
 def build(pending: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     before = pending.get("before") or {}
     b, a = before.get("entities") or {}, after.get("entities") or {}
+    b = {_current_key(k, v, a): v for k, v in b.items()}
     bs, as_ = before.get("services") or {}, after.get("services") or {}
     both = sorted(set(a) & set(b))
     changed = []

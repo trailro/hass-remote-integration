@@ -27,8 +27,13 @@ from .installer import Installer
 from .logfiles_page import _entry_paths, _log_files
 from .memdiag import snapshot as memory_snapshot
 
-_SECRET_KEY = re.compile(r"(password|passwd|token|secret|api_key|apikey|access_key|private_key|credential)", re.I)
-_SECRET_TEXT = re.compile(r"((?:password|passwd|token|secret|api[_-]?key)['\"]?\s*[=:]\s*['\"]?)([^'\",\s}]+)", re.I)
+_SECRET_KEY = re.compile(
+    r"(password|passwd|passphrase|token|secret|credential|bearer|cookie|psk"
+    r"|(api|access|private|local|encryption|device|client|master|app|user|shared|signing|session|auth|link)[_-]?key"
+    r"|^(key|pin|auth|pass)$|[_-](pin|pass)$)", re.I)
+_SECRET_TEXT = re.compile(r"((?:password|passwd|passphrase|token|secret|api[_-]?key|local[_-]?key|psk)['\"]?\s*[=:]\s*['\"]?)([^'\",\s}]+)", re.I)
+_BEARER = re.compile(r"\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}", re.I)
+_URL_CRED = re.compile(r"(\b[a-z][a-z0-9+.-]*://[^/\s:@]*:)[^@\s/]+@", re.I)
 _GH_TOKEN = re.compile(r"\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
 LOG_FILE_TAIL = 500
 DIAG_CACHE_S = 10  # a link any page can hit: one build at a time, repeats within this window get the same zip
@@ -36,11 +41,15 @@ DIAG_CACHE_S = 10  # a link any page can hit: one build at a time, repeats withi
 
 def scrub(value: Any) -> Any:
     if isinstance(value, dict):
-        return {k: ("***" if _SECRET_KEY.search(str(k)) and isinstance(v, str) and v else scrub(v)) for k, v in value.items()}
-    if isinstance(value, list):
+        # any non-empty value under a secret key, whatever its type (a numeric pin, a list of tokens, an auth block)
+        return {k: ("***" if _SECRET_KEY.search(str(k)) and v not in (None, "", [], {}) and not isinstance(v, bool) else scrub(v))
+                for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
         return [scrub(v) for v in value]
     if isinstance(value, str):
-        return _GH_TOKEN.sub("***", _SECRET_TEXT.sub(r"\1***", value))
+        value = _SECRET_TEXT.sub(r"\1***", value)
+        value = _BEARER.sub(lambda m: f"{m.group(1)} ***", value)
+        return _GH_TOKEN.sub("***", _URL_CRED.sub(r"\1***@", value))
     return value
 
 

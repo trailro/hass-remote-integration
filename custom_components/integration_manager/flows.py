@@ -13,7 +13,7 @@ from typing import Any
 
 
 from homeassistant import data_entry_flow
-from homeassistant.config_entries import SOURCE_USER, ConfigEntry
+from homeassistant.config_entries import SOURCE_RECONFIGURE, SOURCE_USER, ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
 
@@ -76,10 +76,14 @@ class FlowDriver:
 
     on_entry_created = None  # async callable(result) -> str | None, set by the manager
 
-    async def start(self, domain: str) -> dict[str, Any]:
-        result = await self.hass.config_entries.flow.async_init(
-            domain, context={"source": SOURCE_USER}
-        )
+    async def start(self, domain: str, source: str = SOURCE_USER, entry_id: str | None = None) -> dict[str, Any]:
+        context: dict[str, Any] = {"source": source}
+        if source == SOURCE_RECONFIGURE:
+            entry = self.hass.config_entries.async_get_entry(entry_id or "")
+            if entry is None or entry.domain != domain:
+                raise ValueError(f"no config entry {entry_id} of {domain}")
+            context["entry_id"] = entry.entry_id
+        result = await self.hass.config_entries.flow.async_init(domain, context=context)
         if result.get("type") == "create_entry" and self.on_entry_created is not None:
             # a flow that creates its entry on the first step
             note = await self.on_entry_created(result)
@@ -101,7 +105,8 @@ class FlowDriver:
     def in_progress(self) -> list[dict[str, Any]]:
         return _jsonable(
             [
-                {"flow_id": f["flow_id"], "handler": f["handler"], "step_id": f.get("step_id")}
+                {"flow_id": f["flow_id"], "handler": f["handler"], "step_id": f.get("step_id"),
+                 "source": (f.get("context") or {}).get("source"), "entry_id": (f.get("context") or {}).get("entry_id")}
                 for f in self.hass.config_entries.flow.async_progress()
             ]
         )
@@ -140,6 +145,7 @@ class FlowDriver:
             "minor_version": e.minor_version,
             "source": e.source,
             "supports_options": e.supports_options,
+            "supports_reconfigure": e.supports_reconfigure,
             "disabled_by": e.disabled_by.value if e.disabled_by else None,
             "data_keys": sorted(e.data.keys()),
             "options_keys": sorted(e.options.keys()),

@@ -97,6 +97,7 @@ def create(config_dir: str, label: str = "") -> dict:
             name = f"{stamp}{'-' + safe if safe else ''}-{n}.zip"
             n += 1
     final = os.path.join(bdir, name)
+    _drop_dead_partials(bdir)
     fd, tmp = tempfile.mkstemp(dir=bdir, prefix=f".{name}.", suffix=".tmp")
     os.close(fd)
     count = 0
@@ -164,15 +165,34 @@ def describe(config_dir: str, name: str) -> dict:
             "ha_version": info.get("ha_version") if isinstance(info.get("ha_version"), str) else None}
 
 
+PARTIAL_STALE_S = 6 * 3600  # older than any backup takes to write: left by a process killed mid-backup
+
+
+def _drop_dead_partials(bdir: str) -> None:
+    """The hidden temp file and the empty name reservation of a backup whose
+    process was killed while writing it."""
+    now = time.time()
+    for n in os.listdir(bdir):
+        path = os.path.join(bdir, n)
+        try:
+            st = os.stat(path)
+            if now - st.st_mtime > PARTIAL_STALE_S and ((n.startswith(".") and n.endswith(".tmp")) or (n.endswith(".zip") and st.st_size == 0)):
+                os.remove(path)
+        except OSError:
+            continue
+
+
 def list_backups(config_dir: str) -> list[dict]:
     bdir = os.path.join(config_dir, BACKUP_DIR)
     if not os.path.isdir(bdir):
         return []
     out = []
     for n in os.listdir(bdir):
-        if not n.endswith(".zip"):
+        if not n.endswith(".zip") or n.startswith("."):
             continue
         try:
+            if os.path.getsize(os.path.join(bdir, n)) == 0:
+                continue  # a name reserved by a backup still being written (or one killed while writing)
             out.append(describe(config_dir, n))
         except FileNotFoundError:
             continue  # pruned by a concurrent request between listdir and stat
