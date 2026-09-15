@@ -39,3 +39,15 @@ from plain HTTP traffic. These are:
 
 Problems in Home Assistant itself or in the integrations you run belong to
 those projects.
+
+## Design choices that are not vulnerabilities
+
+- **The image runs as root inside the container.** The integration needs the
+  hardware it talks to (serial and USB devices whose group differs from host to
+  host), and existing volumes are owned by root. A non-root user would break
+  those installs for a small gain in a single-purpose container. Keep the
+  container unprivileged (no `--privileged`), pass only the devices it needs,
+  and keep the volume private to Docker.
+- **GitHub Actions are pinned to commit SHAs** and updated by Dependabot; the
+  Python packages the manager adds next to Home Assistant are bounded in
+  `requirements.txt` and resolved against Home Assistant's constraints.

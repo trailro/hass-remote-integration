@@ -261,7 +261,8 @@ class MqttPublisher:
         # idempotency: _id -> the canonical call record (state, result) for DEDUP_WINDOW_S,
         # independent of the visual history (which commands can push out)
         self._calls: dict[str, dict[str, Any]] = {}
-        self._range_pending: dict[str, dict[str, Any]] = {}  # entity_id -> the first half of a range change, waiting for the second
+        self._range_pending: dict[str, dict[str, Any]] = {}
+        self._collision_warned: set[str] = set()  # entities skipped for a component key clash, warned once each  # entity_id -> the first half of a range change, waiting for the second
         self._registry_timer: asyncio.TimerHandle | None = None
         # entity_id -> document topic last published (the registry entry is
         # already gone when the remove event fires, so recompute is wrong)
@@ -1290,8 +1291,23 @@ class MqttPublisher:
         without a state (disabled) are included as enabled_by_default=false."""
         ent_reg = er.async_get(self.hass)
         groups: dict[str, tuple[dict[str, Any], dict[str, dict[str, Any]]]] = {}
-        counts = {"mirrored": 0, "disabled": 0}
+        counts = {"mirrored": 0, "disabled": 0, "collisions": 0}
         seen: set[str] = set()
+        keys: dict[tuple[str, str], str] = {}  # (discovery id, component key) -> the entity that has it
+
+        def add(disc_id: str, block: dict[str, Any], entity_id: str, comp: dict[str, Any]) -> None:
+            # The component key replaces the first "." with "_": image_processing.x and image.processing_x
+            # share one key, and the second would silently overwrite the first in the device config.
+            # Keys stay as they are (changing them would recreate every entity on the main HA): the second is skipped.
+            owner = keys.setdefault((disc_id, _comp_key(entity_id)), entity_id)
+            if owner != entity_id:
+                counts["collisions"] += 1
+                if entity_id not in self._collision_warned:
+                    self._collision_warned.add(entity_id)
+                    _LOGGER.warning("MQTT discovery: %s skipped, its component key %s is already used by %s on the same device",
+                                    entity_id, _comp_key(entity_id), owner)
+                return
+            groups.setdefault(disc_id, (block, {}))[1][entity_id] = comp
         for state in self.hass.states.async_all():
             seen.add(state.entity_id)
             entry = ent_reg.async_get(state.entity_id)
@@ -1310,7 +1326,7 @@ class MqttPublisher:
             if comp["platform"] != state.domain:
                 counts["mirrored"] += 1
             disc_id, block = disc.device_block(self.hass, entry.device_id if entry else None, integration, self.prefix)
-            groups.setdefault(disc_id, (block, {}))[1][state.entity_id] = comp
+            add(disc_id, block, state.entity_id, comp)
         loaded = set(self.hass.config.components)
         for entry in list(ent_reg.entities.values()):
             if entry.entity_id in seen or entry.platform in self.config.exclude_integrations:
@@ -1331,7 +1347,7 @@ class MqttPublisher:
             if comp["platform"] != entry.domain:
                 counts["mirrored"] += 1
             disc_id, block = disc.device_block(self.hass, entry.device_id, entry.platform, self.prefix)
-            groups.setdefault(disc_id, (block, {}))[1][entry.entity_id] = comp
+            add(disc_id, block, entry.entity_id, comp)
         return groups, counts
 
     def discovery_preview(self) -> list[dict[str, Any]]:
@@ -1414,6 +1430,7 @@ class MqttPublisher:
         self.stats["discovery_devices"] = len(groups)
         self.stats["discovery_components"] = sum(len(c) for _, c in groups.values())
         self.stats["discovery_mirrored"] = counts["mirrored"]
+        self.stats["discovery_collisions"] = counts.get("collisions", 0)
         self.stats["discovery_disabled"] = counts["disabled"]
 
     def _clear_stale_docs(self) -> int:
