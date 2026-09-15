@@ -205,18 +205,23 @@ class PatchUploadView(ManagerView):
         name = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(field.filename or ""))
         if not patches.valid_name(name):
             return self.json({"ok": False, "error": "file must be <name>.py or <name>.patch"})
-        data = b""
+        buf = bytearray()
         while chunk := await field.read_chunk(1 << 16):
-            data += chunk
-            if len(data) > MAX_PATCH:
+            buf += chunk
+            if len(buf) > MAX_PATCH:
                 return self.json({"ok": False, "error": "patch too large"})
+        data = bytes(buf)
         text = data.decode("utf-8", errors="replace")
         if (err := patches.validate(name, text)):
             return self.json({"ok": False, "error": err})
         d = patches.patch_dir(self.hass.config.config_dir, domain)
-        os.makedirs(d, exist_ok=True)
-        with open(os.path.join(d, name), "wb") as fh:
-            fh.write(data)
+
+        def _store() -> None:
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, name), "wb") as fh:
+                fh.write(data)
+
+        await self.hass.async_add_executor_job(_store)
         return self.json({"ok": True, "name": name, "scope": patches.version_scope(text)})
 
 
@@ -282,18 +287,23 @@ class PatchEditView(ManagerView):
             return self.json_message("unknown operation", status_code=400)
         if (err := patches.validate(name, text)):
             return self.json({"ok": False, "error": err})
-        overrides = patches.is_bundled(cfg, domain, name)
-        if body.get("create") and os.path.isfile(os.path.join(patches.patch_dir(cfg, domain), name)):
-            return self.json({"ok": False, "error": f"a patch named {name} exists already: choose another name or edit that one"})
+        create = bool(body.get("create"))
 
-        def _write() -> None:
+        def _write() -> bool | None:
+            """None: refused (exists); else whether it overrides a bundled patch."""
             d = patches.patch_dir(cfg, domain)
+            overrides = patches.is_bundled(cfg, domain, name)
+            if create and os.path.isfile(os.path.join(d, name)):
+                return None
             os.makedirs(d, exist_ok=True)
             with open(os.path.join(d, name + ".tmp"), "w", encoding="utf-8") as fh:
                 fh.write(text)
             os.replace(os.path.join(d, name + ".tmp"), os.path.join(d, name))
+            return overrides
 
-        await self.hass.async_add_executor_job(_write)
+        overrides = await self.hass.async_add_executor_job(_write)
+        if overrides is None:
+            return self.json({"ok": False, "error": f"a patch named {name} exists already: choose another name or edit that one"})
         return self.json({"ok": True, "name": name, "scope": patches.version_scope(text), "overrides_bundled": overrides})
 
 
@@ -327,15 +337,18 @@ class PatchActionView(ManagerView):
             return self.json({"ok": True, "result": out, "restart_required": changed and domain in self.hass.config.components})
         if not patches.valid_name(name):
             return self.json({"ok": False, "error": "bad name"})
-        if patches.is_bundled(cfg, domain, name):
-            return self.json({"ok": False, "error": "bundled with the image: cannot be deleted (a user patch of the same name overrides it)"})
-        path = os.path.join(patches.patch_dir(cfg, domain), name)
-        if not os.path.isfile(path):
-            return self.json({"ok": False, "error": "no such patch"})
         if action == "delete":
-            if patches.is_bundled(cfg, domain, name):
-                return self.json({"ok": False, "error": "bundled with the image: cannot be deleted (a user patch of the same name overrides it)"})
-            os.remove(path)
+            def _delete() -> str | None:
+                if patches.is_bundled(cfg, domain, name):
+                    return "bundled with the image: cannot be deleted (a user patch of the same name overrides it)"
+                path = os.path.join(patches.patch_dir(cfg, domain), name)
+                if not os.path.isfile(path):
+                    return "no such patch"
+                os.remove(path)
+                return None
+
+            if (err := await self.hass.async_add_executor_job(_delete)):
+                return self.json({"ok": False, "error": err})
             if domain == self.installer.running:
                 rows = await self.hass.async_add_executor_job(self.installer._patch_rows, domain)
                 self.installer._notify_patches(domain, rows)
