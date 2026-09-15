@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import logging
 import os
 import secrets
@@ -154,16 +155,34 @@ class Auth:
         attempts.append(time.monotonic())
         if len(attempts) == MAX_FAILURES:
             events.emit("auth", f"{MAX_FAILURES} failed logins from {client}: refused for {FAILURE_WINDOW_S // 60} minutes", client=client)
-        if len(self._failures) > 1000:  # many addresses: forget the oldest
-            for c in sorted(self._failures, key=lambda c: self._failures[c][-1])[:500]:
+        if len(self._failures) > 1000:  # many addresses: forget the oldest, unlocked ones first
+            # an attacker filling the table from fresh addresses must not free the address it has locked
+            now = time.monotonic()
+            locked = {c for c, ts in self._failures.items() if sum(now - t < FAILURE_WINDOW_S for t in ts) >= MAX_FAILURES}
+            for c in sorted(self._failures, key=lambda c: (c in locked, self._failures[c][-1]))[:500]:
                 self._failures.pop(c, None)
 
     def succeeded(self, client: str) -> None:
         self._failures.pop(client, None)
 
 
+def client_key(remote: str | None) -> str:
+    """The lockout key of an address: an IPv4-mapped IPv6 address is its IPv4
+    address, any other IPv6 address its /64 (one host holds a whole /64 and
+    would otherwise get a fresh budget per address)."""
+    try:
+        ip = ipaddress.ip_address((remote or "").split("%", 1)[0])
+    except ValueError:
+        return remote or "unknown"
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            return str(ip.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{ip}/64", strict=False))
+    return str(ip)
+
+
 def _client(request: web.Request) -> str:
-    return request.remote or "unknown"
+    return client_key(request.remote)
 
 
 async def async_setup_auth(hass: HomeAssistant) -> Auth:
