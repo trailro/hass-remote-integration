@@ -1291,8 +1291,25 @@ class Installer:
             await self.hass.async_add_executor_job(backupkit.validate, zip_path)
         except ValueError as err:
             return {"ok": False, "error": f"the pre-update backup is unusable ({err}); only a plain start of {prev_tag} is possible"}
-        res = await self.start(domain, prev_tag)
+        if backupkit.pending(self.config_dir):
+            return {"ok": False, "error": "a restore is scheduled for the next restart: restart (or cancel it in the Backup card) first"}
+        try:
+            # scheduled BEFORE the files change: a kill between the two then restores the backup at the next boot
+            # (its custom_components are the old code), never boots the old code on the migrated .storage.
+            # not the manager part: start() writes a consistent state.json (and it holds this rollback's
+            # verdict/last_error); .storage brings back the un-migrated config entry, custom_components the old files
+            zip_name = os.path.basename(await self.hass.async_add_executor_job(
+                backupkit.schedule_restore, self.config_dir, backup, ["storage", "custom_components"], None, True))
+        except (ValueError, OSError) as err:
+            return {"ok": False, "error": f"the backup could not be scheduled, nothing was changed: {err}"}
+        try:
+            with backupkit.own_schedule(zip_name):  # start() refuses to run while a restore is scheduled: not this one
+                res = await self.start(domain, prev_tag)
+        except BaseException:
+            await self.hass.async_add_executor_job(backupkit.cancel_restore, self.config_dir)
+            raise
         if not res.get("ok"):
+            await self.hass.async_add_executor_job(backupkit.cancel_restore, self.config_dir)
             return res
         self.state.pending_change = None  # a rollback is not a version change to report
         if rejected:
@@ -1300,18 +1317,6 @@ class Installer:
             # state: a Full rollback would put exactly that back.  After an automatic rollback there is nothing to go back to.
             rec["previous_tag"] = None
             rec["pre_update_backup"] = None
-        self.busy = True  # straight after start() released it: nothing may start before the restore is scheduled
-        try:
-            # not the manager part: start() already wrote a consistent state.json
-            # (and it holds this rollback's verdict/last_error); .storage brings
-            # back the un-migrated config entry, custom_components the old files
-            await self.hass.async_add_executor_job(backupkit.schedule_restore, self.config_dir, backup, ["storage", "custom_components"])
-        except (ValueError, OSError) as err:
-            self._cancel_smoke()  # its failure would roll back to the bad version, and again
-            self._save_state()
-            return {"ok": False, "error": f"files rolled back, but the backup could not be scheduled: {err}"}
-        finally:
-            self.busy = False
         self._cancel_smoke()
         # a verdict after the rollback's restart too, but never another rollback: a failure is reported, not looped
         self.state.pending_smoke = {"domain": domain, "tag": prev_tag, "can_rollback": False}
