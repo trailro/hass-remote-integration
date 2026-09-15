@@ -40,6 +40,10 @@ function fieldInput(name,f){const sel=f.selector||{}, k=Object.keys(sel)[0], v=s
  const id=`cf_${name}`;
  if(k==='boolean'&&f.required) return `<label>${esc(name)} <span class="req">*</span></label><input type="checkbox" id="${esc(id)}" data-kind="boolean" style="width:auto" ${ex===true?'checked':''}>`;
  if(k==='boolean') return `<label>${esc(name)} <span class="mut">${ex===true||ex===false?'default '+ex:'optional'}</span></label><select id="${esc(id)}" data-kind="bool3"><option value="">— (not sent)</option><option value="true">true</option><option value="false">false</option></select>`;
+ const opts=k==='select'&&v.options?v.options.map(o=>typeof o==='object'?{val:o.value,lab:o.label??o.value}:{val:o,lab:o}):null;
+ if(opts&&v.multiple){ const pre=new Set([].concat(ex===''?[]:ex).map(String));  // a list, as the selector declares: checkboxes, and a custom entry when allowed
+  return `<label>${esc(name)}${f.required?' <span class="req">*</span>':''} <span class="mut">one or more</span></label><div id="${esc(id)}" data-kind="multi" class="multi">${opts.map(o=>`<label style="display:inline-flex;gap:4px;margin-right:10px"><input type="checkbox" style="width:auto" value="${esc(o.val)}" ${pre.has(String(o.val))?'checked':''}>${esc(o.lab)}</label>`).join('')}${v.custom_value?`<input type="text" data-custom="1" placeholder="other values, comma separated">`:''}</div>`; }
+ if(opts&&v.custom_value) return `<label>${esc(name)}${f.required?' <span class="req">*</span>':''} <span class="mut">pick or type</span></label><input type="text" id="${esc(id)}" data-kind="text" list="${esc(id)}_list" value="${typeof ex==='string'||typeof ex==='number'?esc(ex):''}"><datalist id="${esc(id)}_list">${opts.map(o=>`<option value="${esc(o.val)}">${esc(o.lab)}</option>`).join('')}</datalist>`;
  if(k==='select'&&v.options) return `<label>${esc(name)}${f.required?' <span class="req">*</span>':''}</label><select id="${esc(id)}" data-kind="select"><option value="">—</option>${v.options.map(o=>{const val=typeof o==='object'?o.value:o, lab=typeof o==='object'?(o.label??o.value):o; return `<option value="${esc(val)}" ${String(ex)===String(val)?'selected':''}>${esc(lab)}</option>`}).join('')}</select>`;
  if(k==='number') return `<label>${esc(name)}${f.required?' <span class="req">*</span>':''} <span class="mut">${esc(v.unit_of_measurement||'')}</span></label><input type="number" id="${esc(id)}" data-kind="number" ${v.min!=null?'min="'+esc(v.min)+'"':''} ${v.max!=null?'max="'+esc(v.max)+'"':''} step="${esc(v.step??'any')}" value="${ex!==''&&typeof ex!=='object'?esc(ex):''}">`;
  if(k==='object'||typeof ex==='object'&&ex!==null) return `<label>${esc(name)}${f.required?' <span class="req">*</span>':''} <span class="mut">JSON</span></label><textarea id="${esc(id)}" data-kind="json" rows="3">${ex!==''&&ex!==null?esc(JSON.stringify(ex,null,1)):''}</textarea>`;
@@ -55,9 +59,14 @@ function wireCall(x,domain,s){const go=x.querySelector('#ct_go'); if(!go) return
   for(const [k,f] of Object.entries(s.fields||{})){const el=x.querySelector(`#cf_${CSS.escape(k)}`); if(!el) continue; const kind=el.dataset.kind;
    if(kind==='boolean'){ data[k]=el.checked; continue; }
    if(kind==='bool3'){ if(el.value!=='') data[k]=el.value==='true'; continue; }
-   const v=el.value; if(v===''||v==null){ if(f.required) bad+=`${k} is required. `; continue; }
+   if(kind==='multi'){ const vals=[...el.querySelectorAll('input[type=checkbox]:checked')].map(c=>c.value);
+    const custom=el.querySelector('input[data-custom]'); if(custom) vals.push(...custom.value.split(',').map(t=>t.trim()).filter(Boolean));
+    if(vals.length||f.required) data[k]=vals; continue; }
+   const v=el.value; if(v===''||v==null){ if(f.required&&kind==='text') data[k]=''; continue; }  // a required text field may be cleared on purpose
    if(kind==='number') data[k]=Number(v); else if(kind==='json'){ try{data[k]=JSON.parse(v);}catch(e){bad+=`${k}: invalid JSON. `;} } else data[k]=v; }
-  const extraEl=x.querySelector('#ct_extra'); if(extraEl&&extraEl.value.trim()){ try{Object.assign(data,JSON.parse(extraEl.value));}catch(e){bad+='extra data: invalid JSON. ';} }
+  const extraEl=x.querySelector('#ct_extra'); if(extraEl&&extraEl.value.trim()){ try{const extra=JSON.parse(extraEl.value); if(extra===null||typeof extra!=='object'||Array.isArray(extra)) throw new Error(); Object.assign(data,extra);}catch(e){bad+='extra data: invalid JSON (an object). ';} }
+  // checked against the final data: a value given only in the extra JSON counts
+  for(const [k,f] of Object.entries(s.fields||{})) if(f.required&&!(k in data)&&!bad.includes(`${k}:`)) bad+=`${k} is required. `;
   const msg=x.querySelector('#ct_msg'), out=x.querySelector('#ct_out'); if(bad){msg.innerHTML='<span class="bad">'+esc(bad)+'</span>';return;}
   const body={domain,service:s.name,data}; const tEl=x.querySelector('#ct_entity'); if(tEl&&tEl.value.trim()) body.target={entity_id:tEl.value.split(',').map(t=>t.trim()).filter(Boolean)};
   if(!confirm(`Call ${domain}.${s.name} now with ${JSON.stringify(body.data)}${body.target?' on '+body.target.entity_id.join(', '):''}?`)) return;
