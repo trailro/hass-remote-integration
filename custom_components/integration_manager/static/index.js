@@ -36,7 +36,7 @@ function renderIntegrations(s){
   }
   t.querySelectorAll('button[data-a]').forEach(b=>b.onclick=async()=>{const d=b.dataset.d, a=b.dataset.a;
     if(a==='start'){ const tag=t.querySelector(`select[data-sel="${d}"]`).value; const other=RUN&&RUN.domain&&RUN.domain!==d?` ${RUN.domain} is stopped first (its entries disabled).`:'';
-      if(!confirm(`Start ${d} ${tag}?${other} Its files are deployed, requirements installed, patches applied, config entries enabled; MQTT identity becomes hass_${d}.`)) return;
+      if(!confirm(`Start ${d} ${tag}?${other} A preflight runs first unless it is the version already deployed. Its files are deployed, requirements installed, patches applied, config entries the manager disabled enabled again (entries you disabled stay disabled); MQTT identity becomes hass_${d}.`)) return;
       log(`preflight and start of ${d} ${tag}…`); const r=await startIntegration({domain:d,tag}); if(r.cancelled){log(r.error);return;} log(r.ok?`started ${r.domain} ${r.tag}${r.restart_required?' — RESTART REQUIRED to load the new code':''}${r.pip_failed&&r.pip_failed.length?' · pip failed: '+r.pip_failed.join(', '):''}${r.mqtt&&r.mqtt.connect_error?' · MQTT: '+r.mqtt.connect_error:''}`:'ERROR: '+r.error); await status(); await mqttSummary(); }
     if(a==='stop'){ if(!confirm(`Stop ${d}? Its config entries are disabled; MQTT disconnects (retained state stays on the broker, marked offline).`)) return; const r=await post('api/run/stop'); log(r.ok?`stopped ${r.stopped}`:'ERROR: '+r.error); await status(); await mqttSummary(); }
     if(a==='uninstall'){ if(!confirm(`Uninstall ${d}? Every version, the deployed files and its config entries are removed.`)) return; const r=await post(`api/installed/${d}/uninstall`); log(r.ok?`uninstalled ${d}`:'ERROR: '+r.error); await status(); await mqttSummary(); }
@@ -73,7 +73,7 @@ async function timeline(){
   if(!(r.events||[]).length){ const tr=document.createElement('tr'); tr.innerHTML='<td colspan="3" class="mut">nothing recorded yet</td>'; t.appendChild(tr); }
 }
 $('#evrefresh').onclick=timeline; timeline().catch(()=>{}); setInterval(timeline,30000);
-$('#restart').onclick=async()=>{if(!confirm('Restart the process?'))return;log('restarting…');await post('api/restart');setTimeout(()=>location.reload(),6000)};
+$('#restart').onclick=async()=>{if(!confirm('Restart the process?'))return;log('restarting…');const r=await post('api/restart');if(!r.ok){log('ERROR: restart refused: '+r.error);return;}setTimeout(()=>location.reload(),6000)};
 async function resources(){
   const m=await (await fetch('api/manager')).json(); const r=m.resources||{}, u=m.updates||{};
   const v=(x,unit)=>x==null?'—':esc(String(x))+unit;

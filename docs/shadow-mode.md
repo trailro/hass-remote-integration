@@ -73,6 +73,9 @@ connections on unload.
   entity ids your automations use.
 - The Cutover page compares both sides entity by entity, by discovery unique
   id, and needs only read access to the main HA (URL and a long-lived token).
+  *Enable discovery* reads the main HA's config entries and entity registry to
+  make sure the integration is gone there; if the token cannot read them, it
+  only checks whether the integration is still loaded.
   It compares the MQTT entities this container announces with the MQTT
   entities on the main HA; the main HA's own entities of the integration are
   not part of it, so compare those (entity ids, states) by hand before the cutover.

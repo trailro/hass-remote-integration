@@ -172,7 +172,7 @@ The UI has one page per task:
 | **Install** | Install from the registry or any GitHub repo, the environment builder, dev mode |
 | **MQTT** | Broker connection, translator status, discovery, recent commands, health rules |
 | **Cutover** | Compare with your main HA, enable discovery, undo |
-| **Entities / Devices / Services** | Inspect, rename, disable, call services |
+| **Entities / Devices / Services** | Inspect, rename, disable, call services (the form sends lists for multiple-choice fields, accepts typed custom values, and checks required fields after the extra JSON is merged) |
 | **Logs / Log files** | The integration's logs and the log files it writes |
 | **System** | Home Assistant version, backups and restore, import from a HA backup, settings, diagnostics |
 
@@ -194,7 +194,9 @@ integration, any release, branch or commit, and a Home Assistant version, then
 Python requirements with `pip --dry-run`, evaluates patches and dependencies
 and the minimum HA version, and tells you whether anything blocks the
 combination, without touching the running environment. *Prepare* installs
-exactly the combination that passed. Check also warns about configuration the
+exactly the combination that passed, at the commit Check saw: if a branch has
+moved since, run Check again, and if GitHub cannot say which commit the ref
+points at, Prepare refuses. Check also warns about configuration the
 release cannot take over: config entries here while the release has no config
 flow, entries at a newer version than its config flow (Home Assistant cannot
 migrate an entry back), and YAML stored here that a config flow release will
@@ -214,16 +216,21 @@ Choose whichever fits the integration, on the **Integration** page:
   When a later release imports that YAML into a config entry, a notification
   says so: remove the YAML then, because it is still applied at every boot.
 - **Import from your existing Home Assistant** (on **System**): upload a
-  standard HA backup (`.tar`, encrypted or not). The config entries of the
-  installed integration come over with their data *and* options, and entity
-  ids, names, icons and disabled flags are aligned, so entities keep the same
-  ids they had in your main HA.
+  standard HA backup (the uncompressed `.tar` Home Assistant writes, encrypted
+  or not). The config entries of the installed integration come over with
+  their data *and* options, and entity ids, names, icons and disabled flags
+  are aligned, so entities keep the same ids they had in your main HA. A
+  config entry whose id is not plain letters and digits is skipped.
 
 ### 3. Start it
 
 Click **Start** on the **Overview** or **Integration** page. The version is
-deployed, its requirements installed, patches applied, its config entries
-enabled. A backup is taken first when something changes.
+deployed, its requirements installed, patches applied, and the config entries
+the manager disabled (on a stop or a switch) are enabled again; an entry you
+disabled yourself stays disabled. A backup is taken first when something
+changes. Starting a version other than the deployed one runs its preflight
+first (see [Updating the integration](#updating-the-integration)); blockers
+ask whether to start anyway.
 
 Some starts need a process restart (for example switching to a different
 version of an integration that is already loaded, or applying YAML). The page
@@ -262,12 +269,18 @@ HA for a while, with MQTT enabled and discovery off, and compare.
 1. Make sure only one side talks to the hardware in a way that conflicts
    (for example, only one side sends commands to the devices).
 2. On **Cutover**, give your main HA's URL and a long-lived access token
-   (optional; used only to compare). The page lists entities missing on either
-   side and differences in state, names and flags.
+   (optional). They are used to compare, and by *Enable discovery* to check
+   that the main HA no longer has config entries or entity ids of the
+   integration. The URL must not contain `user:password@`: the token
+   authenticates. The page lists entities missing on either side and
+   differences in state, names and flags.
 3. When you are happy: **remove the integration from your main HA** (delete
    its config entries; disabling keeps its entity ids registered, and the
-   Cutover page refuses then), then click *Enable discovery* on **Cutover**. Your main HA creates the entities from
-   MQTT; the page watches until all of them exist.
+   Cutover page refuses then), then click *Enable discovery* on **Cutover**.
+   Your main HA creates the entities from MQTT; the page watches until all of
+   them exist. The entity ids stay the same, but the unique ids are new
+   (`hass_<domain>_<entity id>`), so areas, labels and custom names set on the
+   removed entities have to be set again.
 4. Changed your mind? *Undo* removes every discovery config again, so your
    main HA drops the entities.
 
@@ -300,7 +313,8 @@ The top bar shows the version that runs and the commit its image was built
 from (`v0.14.0 · 1a2b3c4`), linking to that release. When GitHub has newer
 releases than the one running (checked with the other update checks), a banner
 under the top bar says so and links the release notes of each newer release,
-newest first. Hiding it lasts until a newer release is published.
+newest first. Hiding it applies in that browser only, until a newer release is
+published.
 
 With a password set, 0.11.0 changes the session cookie format: log in once
 after updating. Going back to an image older than 0.11.0 is possible (the
@@ -312,16 +326,20 @@ expires or you log out once more.
 
 Install the new release (Install or Integration page), then *Switch to* it.
 The switch runs the **Preflight** of that release first, or reuses one run in
-the last 30 minutes. Blockers stop the switch and are listed with a choice to
-start anyway; warnings do not stop it. An update started from your main HA
-over MQTT refuses on blockers, since nobody is there to confirm, and says why
-in its result. Through the API, `POST /api/run/start` answers
-`needs_force` with the report, and `force: true` starts anyway. Starting the
-version that is already deployed, a dev build, a rollback and a restore skip
-the preflight. The manager backs up, switches,
-restarts if needed, smoke-tests, and rolls back on its own if the new version
-is unhealthy. *Full rollback* on the Integration page brings back the previous
-version together with the config as it was before the update; its restart is
+the last 30 minutes (reports are kept in memory, per release and running Home
+Assistant version, so a restart forgets them). Blockers stop the switch and
+are listed with a choice to start anyway; warnings do not stop it. An update
+started from your main HA over MQTT refuses on blockers, since nobody is there
+to confirm, and says why in its result. Through the API, `POST /api/run/start`
+answers `needs_force` with the report, and `force: true` starts anyway.
+Starting the version that is already deployed, a dev build, an integration
+without a GitHub repository, a rollback and a restore skip the preflight. A
+preflight that cannot run (GitHub unreachable, for example) does not stop the
+start; the API result then says why in `preflight_note`. The manager backs up,
+switches, restarts if needed, smoke-tests, and rolls back on its own if the new
+version does not set up; a degraded version is kept and reported. *Full
+rollback* on the Integration page brings back the previous version together
+with the config as it was before the update; its restart is
 smoke-tested too, without a further automatic rollback. After an automatic
 rollback there is no Full rollback target: the version the smoke test rejected
 is never offered again that way.
@@ -344,7 +362,10 @@ notification. The last ten reports are kept.
 On **System**, choose a version and install it. The process restarts, the new
 Home Assistant is installed into a new venv (the page shows progress), and the
 integration's requirements are reinstalled there. If the new version fails to
-boot three times in a row, the container falls back to the previous one. What
+boot three times in a row, the container falls back to the previous one. A
+boot counts as good once the integration has set up, or 10 minutes after Home
+Assistant started; stopping or restarting the container during a boot does not
+count as a failure. What
 happened (a fallback, a failed install) stays on **System** until the next
 version change and is announced once as a notification. Before restarting,
 the page warns when the target is older than the minimum Home Assistant the
@@ -393,14 +414,17 @@ three have to support that Python:
   source during the install. The preflight builds it for real. The image has no
   compiler, so a pure-Python package builds and one with C code is a blocker.
 - **The integration's own code.** The preflight compiles every `.py` file with
-  the image's Python (a syntax error is a blocker naming the file and line). It
-  also warns about imports of standard modules that Python has removed
-  (`imp`, `distutils`, `asyncore`, `telnetlib` and the rest of PEP 594), unless
-  the import is guarded by `try/except ImportError` or something installed
-  provides the module.
+  the image's Python (a syntax error is a blocker naming the file and line),
+  except in the top-level folders `tests`, `test`, `scripts`, `tools`, `docs`
+  and `examples`, which Home Assistant does not load. It also warns about
+  imports of standard modules that Python has removed (`imp`, `distutils`,
+  `asyncore`, `telnetlib` and the rest of PEP 594), unless the import sits in a
+  `try` whose `except` catches `ImportError` or something broader
+  (`ModuleNotFoundError`, `Exception`, `BaseException`, a bare `except`), or
+  something installed provides the module.
 
 What the preflight cannot see is caught by the smoke test after the switch:
-an unhealthy version is rolled back automatically.
+a version that does not set up is rolled back automatically.
 
 ### Backups
 
@@ -412,10 +436,13 @@ applied at the next restart, can be partial (only `.storage`, only the manager
 state, …), and is rolled back if it fails halfway. Restoring the YAML part also
 removes root `*.yaml` / `*.yml` files that are not in the backup, so a file
 created after it (a `secrets.yaml`, for example) does not survive the restore.
-A restore interrupted halfway (a stop, a full disk) puts the previous
-configuration back and stays scheduled, so the next boot tries again; if even
-putting it back fails, the restore still stays scheduled and the pre-restore
-backup named in the error is kept from pruning. Backups, restored files and
+A restore that fails (a full disk, a file that cannot be written) puts the
+previous configuration back and is not retried: the schedule is dropped and
+the outcome is `failed`. A restore cut off halfway (`docker stop`, a power
+loss, Ctrl-C) stays scheduled, and the next boot applies it again from the
+same pre-restore backup. If even putting the configuration back fails, the
+restore stays scheduled and the pre-restore backup named in the error is kept
+from pruning and cannot be deleted. Backups, restored files and
 uploads are created readable by the container user only (umask 077).
 Automatic pruning keeps the newest backups by the date they were made (never
 later than the file's own date), never removes the backup it runs after, and
@@ -612,13 +639,28 @@ hass_<domain>/manager/result                        outcome of a manager action,
   commands; the rest (cameras, media players, weather, …) are mirrored as
   read-only sensors with all attributes. Per-entity rules on the Entities page
   or as JSON can exclude an entity or change its name, icon, category or
-  default enablement on the MQTT side only.
+  default enablement on the MQTT side only. An entity excluded while the
+  container was down is removed from the main HA at the next connection. When
+  two entities of one device would get the same component key
+  (`image_processing.x` and `image.processing_x`), the second is skipped with a
+  warning in the log; `discovery_collisions` in `GET /api/mqtt/status` counts
+  them.
+- **Commands**: numeric command topics accept only finite numbers. Text
+  values, notify messages and select options are used exactly as sent, spaces
+  included. The two bounds of a thermostat range change arrive as two
+  commands and become one service call: the first waits up to 1 s for the
+  second. An alarm panel with a code asks for it on the main HA and sends it
+  with the action.
 - **Service calls**: publish a JSON object to `call/<domain>/<service>` (service
   data plus optional `entity_id`, and an optional `_id`); the result comes back
   on `result/...`. A repeated `_id` within five minutes is answered from memory
-  and never executed twice. `homeassistant`, `shell_command`, `python_script`,
-  `persistent_notification`, `hassio` and `integration_manager` are never
-  callable. A call reaches only entities the container publishes: an
+  and never executed twice; the comparison keeps the type, so `1` and `"1"`
+  are two different calls. `homeassistant`, `shell_command`, `python_script`,
+  `hassio` and `integration_manager` are never callable.
+  `persistent_notification` is not callable over MQTT and is left out of the
+  MQTT service catalog; the Services page can still call it. `NaN`, `Infinity` and deeply nested JSON
+  are rejected. Alarm and lock codes are masked in the command history, the
+  status and the log. A call reaches only entities the container publishes: an
   `entity_id` of `all`, or an entity, area, floor, label or device that resolves
   to an excluded or unknown entity, is refused. A `device_id` that is not a
   Home Assistant device (a hardware address a service takes as data) stays plain
@@ -638,9 +680,12 @@ hass_<domain>/manager/result                        outcome of a manager action,
   preflight, then installs and starts the release the way the UI does (backup,
   smoke test, automatic rollback) and restarts when the loaded code has to be
   replaced; installing Home Assistant (upgrades only) takes a backup, keeps the
-  configuration and restarts. Anyone who can publish under the base topic can use them, so
-  turn this on only on a broker with credentials. hass-remote-integration
-  itself is updated by pulling a new image.
+  configuration and restarts. The limits of *Back up now* and *Check for
+  updates* survive a restart. A restart asked for over MQTT, on its own or
+  after an install, is skipped while an install or start is still running, and
+  the result says so. Anyone who can publish under the base topic can use
+  them, so turn this on only on a broker with credentials.
+  hass-remote-integration itself is updated by pulling a new image.
 - **Stop, uninstall, restore**: the identity (`hass_<domain>`) belongs to the
   running integration. *Stop* is not a removal: the whole device, the manager
   device included, goes unavailable on the main Home Assistant and keeps its
@@ -670,7 +715,7 @@ secret) to require a password:
   generation, signed into the cookie and kept across restarts and restores);
 - scripts send the password as `Authorization: Bearer <password>`;
 - after 5 wrong attempts from one address, that address is refused for 15
-  minutes;
+  minutes (for IPv6, the whole /64 it belongs to);
 - changing the password logs every browser out.
 
 Over plain HTTP the password and the session travel unencrypted, so on a
@@ -719,15 +764,19 @@ What is in place:
   (`local_key`, `noise_psk`, `encryption_key`, Z-Wave `network_key` and
   `s0`/`s2_*_key`, `bindkey`, `aes_key`, `ssl_key`, …), PINs, one-time codes,
   HMAC keys, webhook ids and cloudhook URLs, `Authorization` values (`Bearer`,
-  `Basic` and any other scheme) and credentials in URLs.
+  `Basic` and any other scheme) and credentials in URLs. Backups contain
+  them; the login key and the logout record stay out of backups, so a restore
+  never revives a logged-out session. The key of an encrypted Home Assistant
+  backup you import is only used for that request.
 - A release is downloaded only up to 100 MB and unpacked only up to 300 MB and
   20000 files; symbolic links in the archive are skipped. A requirement in a
   manifest that is a pip option (`--index-url …`, `-e …`) or not a valid
   requirement blocks the preflight and refuses the install and the start.
-  The environment builder downloads exactly the commit its Check verified. Backups contain them; the login key and the logout
-  record stay out of backups, so a restore never revives a logged-out session.
-  The key of an encrypted Home Assistant backup you import is only used for
-  that request.
+  The environment builder downloads exactly the commit its Check verified.
+- An imported Home Assistant backup must be the uncompressed `.tar` Home
+  Assistant writes. Its configuration archive may be at most 2 GB, its
+  `backup.json` at most 1 MB, and what it unpacks at most 2 GB. Config entries
+  with an invalid id are skipped.
 - Dangerous service domains are not callable, over MQTT or from the UI.
 
 **Do not expose the port to the internet.** Put it behind a reverse proxy with
@@ -746,7 +795,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | `HRI_PORT` | `8087` | Port of the UI and API |
 | `HRI_NAME` | `hass-remote-integration` | Container and volume name |
 | `HRI_VERSION` | `latest` | Image tag Compose pulls, for example `0.14.0` |
-| `TZ` | `UTC` | Time zone |
+| `TZ` | `UTC` | Time zone; an unknown zone falls back to UTC, with an error in the log |
 | `HA_VERSION_LATEST` | `1` | `0` installs the image's baseline HA on a fresh volume instead of the newest |
 | `HRI_DEV_SRC` | `./dev-src` | Dev mode: directory mounted at `/dev-src` |
 | `HRI_DEBUGPY` | unset | Dev mode: debugger port |
@@ -771,6 +820,12 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
     auth_revoked                time of the last logout: sessions from before it are invalid
     mqtt.json                   broker configuration (mode 600)
     mqtt_rules.json             per-entity MQTT rules
+    mqtt_identity.json          base topic and discovery prefix retained data was last published under
+    mqtt_undiscover.json        a discovery cleanup the broker has not confirmed yet
+    ha.json                     Home Assistant version, version changes, boot failures, last restore
+    rebuild-pending.json        a clean-start rebuild still to run after a Home Assistant downgrade
+    latest_versions.json        last known releases (update entities, the banner)
+    manager_actions.json        when each MQTT manager action last ran
     registry.json               your registry entries (see below)
     versions/<domain>/<tag>/    version store
     patches/<domain>/           your patches
@@ -808,15 +863,17 @@ A registry entry in `integration_manager/registry.json` has this shape; only
 
 Every page is backed by a JSON API on the same port, so everything can be
 scripted. With a password set, send it as `Authorization: Bearer <password>`. POST
-bodies are JSON (`Content-Type: application/json`), and requests that reach out
-to the internet or another server (`/api/catalog`, `/api/patch_editor`,
-`/api/parity`, `/api/releases/preview`, `/api/diagnostics`, `/api/log_files/tail`, `?refresh=1`)
-also need `X-Requested-With: fetch`. The main entry points:
+bodies are JSON (`Content-Type: application/json`). Requests that reach out to
+the internet or another server, or that return logs, patches or diagnostics,
+also need `X-Requested-With: fetch`: `/api/catalog`, `/api/patch_editor`,
+`/api/patches/<domain>/upload`, `/api/parity`, `/api/releases/preview`,
+`/api/diagnostics`, `/api/log_files/tail` and `?refresh=1`. The main entry
+points:
 
 | Area | Endpoints |
 |---|---|
 | Status | `GET /api/status`, `GET /api/summary`, `GET /api/manager`, `GET /api/manager/history?hours=`, `GET /api/mqtt/status`, `GET /api/events`, `GET /api/notifications`, `POST /api/notifications/dismiss_all` |
-| Integration | `POST /api/install`, `GET /api/change_reports`, `POST /api/run/{start,stop}`, `GET /api/releases`, `POST /api/releases/preflight`, `POST /api/installed/<domain>/{uninstall,rollback_full,remove_version}` |
+| Integration | `POST /api/install`, `GET /api/change_reports`, `POST /api/run/{start,stop}`, `GET /api/releases`, `GET /api/releases/preview?domain=&tag=`, `POST /api/releases/preflight`, `POST /api/installed/<domain>/{uninstall,rollback_full,remove_version}` |
 | Builder / dev | `GET /api/catalog?q=`, `POST /api/build/{check,prepare}`, `GET /api/dev`, `POST /api/dev/install` |
 | Configuration | `POST /api/flow/start`, `POST /api/flow/<id>`, `GET/POST /api/yaml/<domain>`, `GET /api/patches/<domain>`, `GET /api/patch_editor/<domain>?name=`, `POST /api/patch_editor/<domain>/{check,save}`, `GET /api/entries` |
 | MQTT | `GET/POST /api/mqtt/config`, `POST /api/mqtt/{reconnect,republish}`, `GET /api/mqtt/discovery`, `GET /api/mqtt/commands` |
@@ -825,6 +882,14 @@ also need `X-Requested-With: fetch`. The main entry points:
 | Cutover | `GET /api/parity`, `POST /api/cutover/{status,enable,undo}` |
 | Logs | `GET /api/logs`, `GET /api/log_files`, `GET /api/log_files/tail?file=&lines=&q=`, `GET/POST /api/settings` (`log_format`) |
 | Diagnostics | `GET /api/diagnostics` (zip, secrets removed), `GET /api/diag/memory` |
+
+`GET /api/summary` includes `manager_update`: the running release and the
+newer ones the banner shows. `POST /api/run/start` takes `force`; without it, a
+start with preflight blockers answers `needs_force` with the report in
+`preflight`, and a start whose preflight could not run says why in
+`preflight_note`. `POST /api/backups/<name>/restore` takes `force` too: a
+backup that does not record its Home Assistant version answers `needs_force`
+when `.storage` is restored.
 
 ---
 
@@ -836,6 +901,9 @@ also need `X-Requested-With: fetch`. The main entry points:
 - **"restart required" does not go away.** Click *Restart process* on the
   Overview; some changes (a new version of a loaded integration, YAML) only take
   effect at a restart.
+- **Restart process does nothing.** A restart is refused while an install or
+  a start is running; the page shows the error. Wait for it to finish and
+  restart again.
 - **MQTT says the base topic is in use.** Something else left retained messages
   under `hass_<domain>/`. Remove them, or tick `force_base_topic` if they are
   yours from an earlier setup.
@@ -911,7 +979,8 @@ A few things that shaped the code, useful if you read it:
 - The code checks read the source only. Modules imported dynamically
   (`importlib`, `__import__`), code that behaves differently on this Python at
   run time, and incompatibilities inside requirements are caught by the smoke
-  test and the automatic rollback, not by the preflight.
+  test, not by the preflight: a version that does not set up is rolled back,
+  a degraded one is kept and reported.
 
 ## License
 
