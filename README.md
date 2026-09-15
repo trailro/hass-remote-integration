@@ -233,7 +233,8 @@ disabled yourself stays disabled. A backup is taken first when something
 changes. Starting a version other than the deployed one runs its preflight
 first (not for a dev build or an integration without a GitHub repository; see
 [Updating the integration](#updating-the-integration)); blockers ask whether
-to start anyway.
+to start anyway. If a start fails after the new files went out, the files of the
+version that was running are put back.
 
 Some starts need a process restart (for example switching to a different
 version of an integration that is already loaded, or applying YAML). The page
@@ -526,8 +527,10 @@ are dropped and a warning says how many.
 
 **Log files** shows files the integration writes itself, such as traffic dumps
 or debug logs. It appears in the menu only when there are any. The files are
-found through the integration's config entries (any setting ending in `.log`),
-the registry's `log_dir`, and `*.log` files in the config root.
+found through the integration's config entries (any setting ending in `.log`,
+with its rotated copies), and the `*.log` files and their rotated copies
+(`*.log.1`, `*.log.2026-09-10`) in the registry's `log_dir` and in the config
+root. Symbolic links are never listed.
 
 By default every line is shown whole. The **Formatting** box at the bottom of
 the page splits lines into columns. A format is a JSON object:
@@ -878,7 +881,8 @@ What is in place:
 - Home Assistant's onboarding API (`/api/onboarding…`) answers `403`. An
   integration that depends on `frontend` or `panel_custom` loads it, and while
   no Home Assistant user exists it would let any page create the owner account.
-- The Logs page lists regular `*.log` files only; symbolic links are skipped, so
+- The Logs page lists regular log files only (`*.log` and rotated copies such as
+  `*.log.1`); symbolic links are skipped, so
   a link cannot put another file of the volume (`secrets.yaml`) on the page.
 - A `Content-Security-Policy` on every response: scripts only from the
   manager's own static files (no inline script), no plugins, no framing by
@@ -935,7 +939,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | `HRI_DEV_SRC` | `./dev-src` | Dev mode: directory mounted at `/dev-src` |
 | `HRI_DEBUGPY` | unset | Dev mode: debugger port |
 | `HRI_DEBUGPY_HOST` | `127.0.0.1` | Dev mode: address debugpy binds inside the container (the dev overlay sets `0.0.0.0`) |
-| `HRI_CALL_TIMEOUT` | `60` | Seconds a service call or command may take before it is reported as a timeout (a whole number, at least 1; an invalid value logs a warning and uses 60) |
+| `HRI_CALL_TIMEOUT` | `60` | Seconds a service call or command may take before it is reported as a timeout (a whole number; a value that is not one logs a warning and uses 60, one below 1 uses 1) |
 | `HRI_TRACEMALLOC` | unset | Diagnostics: allocation tracing frames (costs memory); a value that is not a number traces 25 |
 | `HRI_TRACE_IMPORT` | unset | Diagnostics: log who imports the given packages |
 | `HRI_DEBUG` | unset | Debug logging for the manager, and blocking-call detection on the event loop |
@@ -988,7 +992,9 @@ a backup. Edit these files by hand only while the container is stopped:
 `settings.json` and `mqtt_rules.json` are read when the process starts and
 overwritten by the next save from the UI, and a hand edit of `mqtt.json` is
 picked up by *Reconnect* but lost after a second save from the MQTT page.
-`registry.json` is read again whenever it changes.
+`registry.json` is read again whenever it changes. In `settings.json` a switch
+written as `"true"`/`"false"`, `"on"`/`"off"`, `"yes"`/`"no"` or `"1"`/`"0"` is
+read as that value; any other text uses the default.
 
 A registry entry in `integration_manager/registry.json` has this shape; only
 `repo` is required:
@@ -1008,8 +1014,8 @@ A registry entry in `integration_manager/registry.json` has this shape; only
 | `name` | Display name on the Install page |
 | `repo` | GitHub `owner/repo` that publishes the releases |
 | `patch_module` | Python package whose site-packages the patches target |
-| `quiet_loggers` | Loggers started at WARNING (default `custom_components.<domain>`) |
-| `log_dir` | Directory under `/config` where the integration writes log files |
+| `quiet_loggers` | Loggers started at WARNING (default `custom_components.<domain>`); a value that is not a list of logger names is ignored with a warning in the log |
+| `log_dir` | Directory under `/config` where the integration writes log files; its `*.log` files and their rotated copies appear on **Log files** |
 
 ### API
 
@@ -1107,8 +1113,9 @@ sh verify.sh test      # validates discovery payloads against the installed HA's
 sh verify.sh unit      # unit tests (tests/, stdlib unittest) in the container's HA venv
 ```
 
-`verify.sh` reads `HRI_NAME`, `HRI_PORT`, `HRI_IMAGE`, `HRI_NETWORK`, `HRI_PASSWORD` and `TZ`
-from the environment or from `.env`.
+`verify.sh` reads `HRI_NAME`, `HRI_PORT`, `HRI_IMAGE`, `HRI_NETWORK`, `HRI_PASSWORD`
+(or `HRI_PASSWORD_FILE`, which wins) and `TZ` from the environment or from `.env`.
+`start` exits non-zero when the API does not come up (a timeout or a restart loop).
 
 CI runs on every push to `main` and every pull request: syntax checks, then,
 natively on both `amd64` and `arm64`, an image build, a boot on a fresh volume,

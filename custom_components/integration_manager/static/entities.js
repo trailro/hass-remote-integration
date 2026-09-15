@@ -63,7 +63,7 @@ function render(){
      x.querySelector('.act-name-save').onclick=()=>act('name',{name:x.querySelector('.act-name').value.trim()||null});
      x.querySelector('.act-mqtt').onclick=()=>act(r.mqtt_rule&&r.mqtt_rule.exclude?'mqtt_include':'mqtt_exclude',{},r.mqtt_rule&&r.mqtt_rule.exclude?null:`Stop publishing ${r.entity_id} on MQTT? Its retained document is cleared and the consuming HA gets the removal form.`);
      x.querySelector('.act-mqtt-name-save').onclick=()=>act('mqtt_name',{name:x.querySelector('.act-mqtt-name').value.trim()||null});
-     x.querySelector('.act-toggle').onclick=()=>act(r.disabled?'enable':'disable',{},r.disabled?null:`Disable ${r.entity_id}? The integration stops creating it and the consuming HA sees it disabled.`);
+     x.querySelector('.act-toggle').onclick=()=>act(r.disabled?'enable':'disable',{},r.disabled?null:`Disable ${r.entity_id}? The integration stops creating it; the consuming HA keeps it, with its customisations, and shows it unavailable.`);
      x.querySelector('.act-delete').onclick=()=>act('delete',{},`Delete ${r.entity_id} from the registry? If the integration still provides it, it comes back at the next restart (as in HA).`);
    }
    tb.appendChild(x);
