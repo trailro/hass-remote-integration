@@ -7,6 +7,8 @@ active page, live chips from /api/summary) and the static assets under
 from __future__ import annotations
 
 import hashlib
+import html
+import json
 import os
 
 from aiohttp import web
@@ -40,6 +42,23 @@ def _version() -> str:
 
 
 ASSET_VERSION = _version()
+RELEASES_URL = "https://github.com/trailro/hass-remote-integration/releases"
+
+
+def _manager_version() -> str:
+    try:
+        with open(os.path.join(os.path.dirname(__file__), "manifest.json"), encoding="utf-8") as fh:
+            return str(json.load(fh).get("version") or "")
+    except (OSError, ValueError):
+        return ""
+
+
+MANAGER_VERSION = _manager_version()
+MANAGER_BUILD = (os.environ.get("HRI_BUILD") or "local").strip() or "local"  # commit the image was built from
+
+
+def version_info() -> dict[str, str]:
+    return {"version": MANAGER_VERSION, "build": MANAGER_BUILD, "build_short": MANAGER_BUILD[:7] if MANAGER_BUILD != "local" else "local"}
 _ASSETS = frozenset(os.listdir(STATIC_DIR))  # no directory listing on the event loop per request
 
 
@@ -57,7 +76,12 @@ class StaticView(ManagerView):
 def topbar(active: str) -> str:
     links = "".join(f'<a class="nav{" active" if path == active else ""}" href="{path}"'
                     f'{" id=\"nav-logfiles\" hidden" if path == "/logfiles" else ""}>{label}</a>' for path, label, _ in PAGES)
-    return (f'<nav class="topbar"><a class="brand" href="/">hass<b>-remote-</b>integration</a>{links}'
+    v = version_info()
+    href = f"{RELEASES_URL}/tag/v{v['version']}" if v["version"] else RELEASES_URL
+    ver = (f'<a class="ver" href="{html.escape(href)}" target="_blank" rel="noopener" '
+           f'title="hass-remote-integration {html.escape(v["version"])}, build {html.escape(v["build"])}">'
+           f'v{html.escape(v["version"])} · {html.escape(v["build_short"])}</a>')
+    return (f'<nav class="topbar"><a class="brand" href="/">hass<b>-remote-</b>integration</a>{ver}{links}'
             f'<span class="spacer"></span><span id="tb-chips"></span></nav>')
 
 

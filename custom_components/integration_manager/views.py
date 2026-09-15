@@ -24,6 +24,7 @@ from .http_util import BadRequest, ManagerView, with_body, _json_object
 
 from . import events, ha_import, notifications
 from .flow_page import FLOW_HTML
+from .ui import version_info
 from .flows import FlowDriver
 from .ha_updater import HaUpdater
 from .installer import Installer
@@ -70,6 +71,8 @@ class StatusView(ManagerView):
     async def get(self, request: web.Request) -> web.Response:
         data = await self.installer.status()
         data["components"] = sorted(self.installer.hass.config.components)
+        v = version_info()
+        data["manager_version"], data["manager_build"] = v["version"], v["build"]
         return self.json(data)
 
 
@@ -93,6 +96,7 @@ class SummaryView(ManagerView):
             "mqtt": {"enabled": self.publisher.config.enabled, "connected": bool(self.publisher.stats.get("connected"))},
             "notifications": notifications.count(self.installer.hass),
             "auth": bool(getattr(self.installer.hass.data.get("integration_manager_auth"), "enabled", False)),
+            "manager": version_info(),
         })
 
 
