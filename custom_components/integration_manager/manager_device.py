@@ -496,6 +496,15 @@ class ManagerDevice:
                 if not self.installer.busy:
                     break
                 await asyncio.sleep(0.5)
+            if self.installer.busy:  # restarting would kill it half-way
+                skipped = "restart skipped: an install/start is still running"
+                res = {**res, "note": f"{res['note']}; {skipped}" if res.get("note") else skipped}
+                if action == "restart":
+                    res.update(ok=False, error=skipped)
+                self.last_action = res
+                events.emit("mqtt", f"manager action {action} from MQTT: {skipped}", action=action)
+                await self.publisher.async_publish_manager_result(res)
+                return res
             await self.installer.restart()
         return res
 

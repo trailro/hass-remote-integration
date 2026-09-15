@@ -1554,13 +1554,17 @@ class Installer:
             self._save_state()  # a fresh volume has none yet, and a backup without it cannot be restored
         return await self.hass.async_add_executor_job(backupkit.create, self.config_dir, label)
 
-    async def restart(self) -> None:
+    async def restart(self) -> dict[str, Any]:
+        if self.busy:
+            return {"ok": False, "error": "another action is running (install/start): wait for it"}
+        self.busy = True  # before the first await: no install/start may begin while the process goes down
         self.state.restart_required = False
         self.state.last_action = "restart requested"
         self._save_state()
         events.emit("restart", "process restart requested")
         await self.hass.async_add_executor_job(self._reset_boot_failures)
         self.hass.async_create_task(self.hass.async_stop())
+        return {"ok": True}
 
     def _reset_boot_failures(self) -> None:
         """A deliberate restart before HA reached STARTED must not count as
