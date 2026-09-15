@@ -60,8 +60,10 @@ def read_json(path: str, default: Any = None) -> Any:
 
 
 def vkey(v: str | None) -> tuple[int, ...]:
-    """Sort key for version strings / tags: the first four integers."""
-    return tuple(int(x) for x in re.findall(r"\d+", v or "0")[:4])
+    """Sort key for version strings / tags: the first four integers, padded to
+    four (1.2.0 and v1.2 are the same release, not an update); no digits = ()."""
+    parts = tuple(int(x) for x in re.findall(r"\d+", v or "0")[:4])
+    return parts + (0,) * (4 - len(parts)) if parts else ()
 
 
 _STABLE_TAG = re.compile(r"[vV]?\d+(?:\.\d+){0,3}")
@@ -72,11 +74,17 @@ def is_stable_tag(tag: str | None) -> bool:
     return bool(tag) and bool(_STABLE_TAG.fullmatch(str(tag)))
 
 
+def tag_key(tag: str | None) -> tuple[bool, tuple[int, ...]]:
+    """Sort key for picking a tag nobody named: a stable release outranks a
+    beta, a branch or "local" whatever their numbers say."""
+    return is_stable_tag(tag), vkey(tag)
+
+
 def ha_vkey(v: str | None) -> tuple[int, ...]:
     """Sort key for Home Assistant versions: a beta (2026.9.0b2) sorts before
     its release (2026.9.0), unlike vkey."""
-    m = re.fullmatch(r"\s*(\d+)\.(\d+)\.(\d+)(?:b(\d+))?\s*", v or "")
+    m = re.fullmatch(r"\s*(\d+)\.(\d+)(?:\.(\d+))?(?:b(\d+))?\s*", v or "")  # hacs.json may say 2024.1
     if not m:
-        return vkey(v) + (1, 0)
+        return vkey(v)[:3] + (1, 0)
     y, mo, p, b = m.groups()
-    return (int(y), int(mo), int(p), 0 if b is not None else 1, int(b or 0))
+    return (int(y), int(mo), int(p or 0), 0 if b is not None else 1, int(b or 0))

@@ -32,7 +32,7 @@ import time
 import urllib.request
 
 import backupkit  # /app/backupkit.py: apply a restore scheduled from the UI
-from jsonio import vkey, write_json
+from jsonio import ha_vkey, vkey, write_json
 
 CONFIG_DIR = os.environ.get("HRI_CONFIG", "/config")
 PORT = int(os.environ.get("HRI_PORT", "8087"))
@@ -57,7 +57,7 @@ def _python_fits(spec: str | None) -> bool:
         m = re.match(r"\s*(>=|>|<=|<|==|!=)\s*([\d.]+)", part)
         if not m:
             continue
-        op, want = m.group(1), vkey(m.group(2))
+        op, want = m.group(1), tuple(int(x) for x in re.findall(r"\d+", m.group(2)))  # unpadded: ==3.13 is a prefix
         have = py[:len(want)]
         ok = {">=": have >= want, ">": have > want, "<=": have <= want, "<": have < want, "==": have == want, "!=": have != want}[op]
         if not ok:
@@ -158,7 +158,7 @@ def installed_versions() -> list[str]:
     for name in os.listdir(CONFIG_DIR):
         if name.startswith("venv-") and name != "venv-current" and venv_ok(name[5:]):
             out.append(name[5:])
-    return sorted(out, key=vkey)
+    return sorted(out, key=ha_vkey)  # a beta sorts before its release: the fallback never prefers it
 
 
 SAFE_HOST_SUFFIXES = (".local", ".lan", ".home", ".internal", ".home.arpa", ".localdomain")  # as hostguard.py

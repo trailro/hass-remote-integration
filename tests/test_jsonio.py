@@ -8,7 +8,8 @@ from jsonio import ha_vkey, vkey
 class VkeyTest(unittest.TestCase):
     def test_v_prefix_is_ignored(self):
         self.assertEqual(vkey("v1.2.3"), vkey("1.2.3"))
-        self.assertEqual(vkey("V1.2.3"), (1, 2, 3))
+        self.assertEqual(vkey("V1.2.3"), (1, 2, 3, 0))
+        self.assertEqual(vkey("1.2.0"), vkey("v1.2"))
 
     def test_numeric_order(self):
         self.assertGreater(vkey("1.10.0"), vkey("1.9.0"))
@@ -22,12 +23,12 @@ class VkeyTest(unittest.TestCase):
     def test_non_versions(self):
         self.assertEqual(vkey("local"), ())
         self.assertEqual(vkey("feature/x"), ())
-        self.assertEqual(vkey("release-2"), (2,))
+        self.assertEqual(vkey("release-2"), (2, 0, 0, 0))
         self.assertLess(vkey("local"), vkey("0.0.1"))
 
     def test_empty(self):
-        self.assertEqual(vkey(""), (0,))
-        self.assertEqual(vkey(None), (0,))
+        self.assertEqual(vkey(""), (0, 0, 0, 0))
+        self.assertEqual(vkey(None), (0, 0, 0, 0))
 
 
 class HaVkeyTest(unittest.TestCase):
@@ -44,8 +45,8 @@ class HaVkeyTest(unittest.TestCase):
     def test_fallback(self):
         self.assertEqual(ha_vkey("v2026.9.0"), ha_vkey("2026.9.0"))
         self.assertEqual(ha_vkey("local"), (1, 0))
-        self.assertEqual(ha_vkey(""), (0, 1, 0))
-        self.assertEqual(ha_vkey(None), (0, 1, 0))
+        self.assertEqual(ha_vkey(""), (0, 0, 0, 1, 0))
+        self.assertEqual(ha_vkey(None), (0, 0, 0, 1, 0))
         self.assertLess(ha_vkey(None), ha_vkey("2026.1.0"))
 
 
