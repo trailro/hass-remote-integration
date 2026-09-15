@@ -460,23 +460,41 @@ class TlsErrorReportTest(unittest.TestCase):
         err = mp.ssl.SSLCertVerificationError(1, "certificate verify failed")
         err.verify_message = "unable to get local issuer certificate"
         ctx.wrap_socket.side_effect = err
-        with mock.patch.object(mp.ssl, "create_default_context", return_value=ctx) as create, \
+        with mock.patch.object(mp.ssl, "SSLContext", return_value=ctx), \
                 mock.patch.object(mp.socket, "create_connection", return_value=mock.MagicMock()) as conn, \
                 mock.patch.object(mp.events, "emit") as emit, self.assertLogs(mp._LOGGER, "WARNING") as logs:
             pub._on_connect_fail(None, None)
             pub._on_connect_fail(None, None)
         self.assertIn("unable to get local issuer certificate", pub.stats["connect_error"])
-        create.assert_called_once_with(cafile="/config/a.pem")
+        ctx.load_verify_locations.assert_called_once_with("/config/a.pem")
         self.assertEqual(conn.call_count, 1)
         self.assertEqual((len(logs.output), emit.call_count), (1, 1))
 
     def test_tls_insecure_skips_only_the_host_name_check(self):
         pub = self._pub(tls=True, tls_insecure=True)
         ctx = mock.MagicMock()
-        with mock.patch.object(mp.ssl, "create_default_context", return_value=ctx), \
+        with mock.patch.object(mp.ssl, "SSLContext", return_value=ctx), \
                 mock.patch.object(mp.socket, "create_connection", return_value=mock.MagicMock()):
             self.assertEqual(pub._tls_handshake_error(), "")
         self.assertFalse(ctx.check_hostname)
+        ctx.load_default_certs.assert_called_once_with()
+
+    def test_context_is_not_stricter_than_paho(self):
+        """create_default_context on Python 3.13+ adds VERIFY_X509_STRICT, which paho's tls_set does not: a CA without
+        keyUsage then fails for a different reason than the one paho hit."""
+        pub = self._pub(tls=True)
+        real_context, made = mp.ssl.SSLContext, []
+
+        def make(protocol):
+            made.append(real_context(protocol))
+            return made[-1]
+
+        with mock.patch.object(mp.ssl, "SSLContext", side_effect=make), \
+                mock.patch.object(mp.socket, "create_connection", side_effect=ConnectionRefusedError()):
+            self.assertEqual(pub._tls_handshake_error(), "")
+        self.assertEqual(len(made), 1)
+        self.assertFalse(made[0].verify_flags & mp.ssl.VERIFY_X509_STRICT)
+        self.assertTrue(made[0].check_hostname)
 
     def test_unreachable_broker_keeps_the_generic_message(self):
         pub = self._pub(tls=True)

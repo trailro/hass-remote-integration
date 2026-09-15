@@ -964,7 +964,13 @@ class MqttPublisher:
         """Blocking (paho thread): paho reports a failed TLS handshake as a plain connect failure, without the reason.
         One handshake of our own, with the same CA and host name check, names it: a wrong CA, a host name mismatch."""
         try:
-            ctx = ssl.create_default_context(cafile=self.config.ca_certs or None)
+            # built like paho's tls_set: create_default_context adds VERIFY_X509_STRICT (Python 3.13+), which refuses a
+            # hand-made CA without keyUsage and would name that instead of paho's real reason
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            if self.config.ca_certs:
+                ctx.load_verify_locations(self.config.ca_certs)
+            else:
+                ctx.load_default_certs()
             if self.config.tls_insecure:
                 ctx.check_hostname = False
             with socket.create_connection((self.config.host, self.config.port), timeout=5) as sock, \
@@ -986,7 +992,7 @@ class MqttPublisher:
             if reason != self._last_disconnect:  # one warning and one event per reason, not one per retry
                 self._last_disconnect = reason
                 _LOGGER.warning("MQTT disconnected (%s)%s; paho will retry", reason, hint)
-                events.emit("mqtt", f"disconnected ({reason}); reconnecting")
+                events.emit("mqtt", f"disconnected ({reason}){hint}; reconnecting")
 
     def _cmd_base(self) -> str:
         return f"{self.base_topic}/cmd"
