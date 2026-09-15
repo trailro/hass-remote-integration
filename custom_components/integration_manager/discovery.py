@@ -649,7 +649,7 @@ def _json_or_text(payload: str) -> Any:
         return payload
 
 
-def _num(p: str) -> float:
+def _finite(p: str) -> float:
     """A command value: NaN and infinity pass float() and every min/max comparison, so refuse them here."""
     value = float(p)
     if not math.isfinite(value):
@@ -673,9 +673,9 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
 
     if domain == "climate":
         return _pick(field, {
-            "temperature": lambda: ("climate", "set_temperature", {**t, "temperature": _num(p)}),
-            "temperature_high": lambda: ("climate", "set_temperature", {**t, "target_temp_high": _num(p)}),
-            "temperature_low": lambda: ("climate", "set_temperature", {**t, "target_temp_low": _num(p)}),
+            "temperature": lambda: ("climate", "set_temperature", {**t, "temperature": _finite(p)}),
+            "temperature_high": lambda: ("climate", "set_temperature", {**t, "target_temp_high": _finite(p)}),
+            "temperature_low": lambda: ("climate", "set_temperature", {**t, "target_temp_low": _finite(p)}),
             "mode": lambda: ("climate", "set_hvac_mode", {**t, "hvac_mode": p}),
             "preset_mode": lambda: ("climate", "set_preset_mode", {**t, "preset_mode": p}),
             "fan_mode": lambda: ("climate", "set_fan_mode", {**t, "fan_mode": p}),
@@ -683,7 +683,7 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
         })
     if domain == "water_heater":
         return _pick(field, {
-            "temperature": lambda: ("water_heater", "set_temperature", {**t, "temperature": _num(p)}),
+            "temperature": lambda: ("water_heater", "set_temperature", {**t, "temperature": _finite(p)}),
             "mode": lambda: ("water_heater", "set_operation_mode", {**t, "operation_mode": p}),
         })
     if domain == "switch" and field == "state":
@@ -691,13 +691,13 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
     if domain == "select" and field == "option":
         return "select", "select_option", {**t, "option": p}
     if domain == "number" and field == "value":
-        return "number", "set_value", {**t, "value": _num(p)}
+        return "number", "set_value", {**t, "value": _finite(p)}
     if domain == "light":
         if field == "state":
             return "light", "turn_on" if on else "turn_off", t
         return _pick(field, {
-            "brightness": lambda: ("light", "turn_on", {**t, "brightness": int(_num(p))}),
-            "color_temp": lambda: ("light", "turn_on", {**t, "color_temp_kelvin": int(_num(p))}),
+            "brightness": lambda: ("light", "turn_on", {**t, "brightness": int(_finite(p))}),
+            "color_temp": lambda: ("light", "turn_on", {**t, "color_temp_kelvin": int(_finite(p))}),
             "rgb": lambda: ("light", "turn_on", {**t, "rgb_color": [int(x) for x in p.split(",")]}),
             "effect": lambda: ("light", "turn_on", {**t, "effect": p}),
         })
@@ -705,21 +705,21 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
         if field == "command":
             return "cover", {"OPEN": "open_cover", "CLOSE": "close_cover", "STOP": "stop_cover"}[p.upper()], t
         if field == "position":
-            return "cover", "set_cover_position", {**t, "position": int(_num(p))}
+            return "cover", "set_cover_position", {**t, "position": int(_finite(p))}
         if field == "tilt":
-            return "cover", "set_cover_tilt_position", {**t, "tilt_position": int(_num(p))}
+            return "cover", "set_cover_tilt_position", {**t, "tilt_position": int(_finite(p))}
     if domain == "valve":
         if field == "command":
             return "valve", {"OPEN": "open_valve", "CLOSE": "close_valve", "STOP": "stop_valve"}[p.upper()], t
         if field == "position":
             if p.upper() in ("OPEN", "CLOSE", "STOP"):  # a position valve sends its stop payload to the same topic
                 return "valve", {"OPEN": "open_valve", "CLOSE": "close_valve", "STOP": "stop_valve"}[p.upper()], t
-            return "valve", "set_valve_position", {**t, "position": int(_num(p))}
+            return "valve", "set_valve_position", {**t, "position": int(_finite(p))}
     if domain == "fan":
         if field == "state":
             return "fan", "turn_on" if on else "turn_off", t
         return _pick(field, {
-            "percentage": lambda: ("fan", "set_percentage", {**t, "percentage": int(_num(p))}),
+            "percentage": lambda: ("fan", "set_percentage", {**t, "percentage": int(_finite(p))}),
             "preset_mode": lambda: ("fan", "set_preset_mode", {**t, "preset_mode": p}),
             "oscillate": lambda: ("fan", "oscillate", {**t, "oscillating": p == "oscillate_on"}),
             "direction": lambda: ("fan", "set_direction", {**t, "direction": p}),
@@ -746,7 +746,7 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
         if field == "state":
             return "humidifier", "turn_on" if on else "turn_off", t
         return _pick(field, {
-            "humidity": lambda: ("humidifier", "set_humidity", {**t, "humidity": int(_num(p))}),
+            "humidity": lambda: ("humidifier", "set_humidity", {**t, "humidity": int(_finite(p))}),
             "mode": lambda: ("humidifier", "set_mode", {**t, "mode": p}),
         })
     if domain == "alarm_control_panel" and field == "command":
