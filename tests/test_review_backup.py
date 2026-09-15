@@ -442,9 +442,10 @@ class FullRollbackOrderTest(unittest.TestCase):
         inst._save_state = lambda: None
         seen = {}
 
-        async def start(domain, tag):
-            seen["scheduled"] = backupkit.pending_archive(cfg) is not None
-            seen["pending_inside"] = backupkit.pending(cfg)
+        async def start(domain, tag, own_restore=None):
+            archive = backupkit.pending_archive(cfg)
+            seen["scheduled"] = archive is not None
+            seen["own_restore_is_the_scheduled_one"] = archive is not None and os.path.basename(archive) == own_restore
             return start_result
 
         inst.start = start
@@ -457,7 +458,7 @@ class FullRollbackOrderTest(unittest.TestCase):
         with mock.patch.object(mod.events, "emit"):
             res = asyncio.run(inst.rollback_full())
         self.assertTrue(res["ok"], res)
-        self.assertEqual(seen, {"scheduled": True, "pending_inside": False})
+        self.assertEqual(seen, {"scheduled": True, "own_restore_is_the_scheduled_one": True})
         self.assertTrue(backupkit.pending(cfg))
         self.assertEqual(backupkit.pending_parts(cfg), ["storage", "custom_components"])
 

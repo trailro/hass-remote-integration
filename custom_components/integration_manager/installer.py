@@ -789,10 +789,12 @@ class Installer:
 
     # ----- start / stop -----------------------------------------------------
 
-    async def start(self, domain: str, tag: str | None = None, boot: bool = False) -> dict[str, Any]:
+    async def start(self, domain: str, tag: str | None = None, boot: bool = False, own_restore: str | None = None) -> dict[str, Any]:
         """Make (domain, tag) the running integration.  ``boot``: called by
         the deferred start during this boot, where run.py applies the YAML
-        and sets the domain up right after (no restart for either)."""
+        and sets the domain up right after (no restart for either).
+        ``own_restore``: the archive of a restore the caller scheduled itself as the first
+        step of the same operation (a full rollback); any other scheduled restore refuses."""
         rec = self.state.installed.get(domain)
         if not rec or not rec.get("versions"):
             return {"ok": False, "error": f"{domain} is not installed"}
@@ -803,7 +805,8 @@ class Installer:
             return {"ok": False, "error": "another action is running"}
         import backupkit
 
-        if backupkit.pending(self.config_dir):
+        scheduled = backupkit.pending_archive(self.config_dir)
+        if scheduled is not None and (own_restore is None or os.path.basename(scheduled) != own_restore):
             return {"ok": False, "error": "a restore is scheduled for the next restart: restart (or cancel it in the Backup card) first"}
         min_ha = self.min_ha_of(domain, tag)
         if min_ha and not boot and ha_vkey(str(min_ha)) > ha_vkey(homeassistant.const.__version__):
@@ -1420,8 +1423,7 @@ class Installer:
         except (ValueError, OSError) as err:
             return {"ok": False, "error": f"the backup could not be scheduled, nothing was changed: {err}"}
         try:
-            with backupkit.own_schedule(zip_name):  # start() refuses to run while a restore is scheduled: not this one
-                res = await self.start(domain, prev_tag)
+            res = await self.start(domain, prev_tag, own_restore=zip_name)  # start() refuses other scheduled restores, not this one
         except BaseException:
             await self.hass.async_add_executor_job(backupkit.cancel_restore, self.config_dir)
             raise

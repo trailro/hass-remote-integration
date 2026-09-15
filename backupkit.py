@@ -37,9 +37,7 @@ PENDING_GLOB = "restore-pending*.zip"
 # a restore that was applied but whose outcome could not be recorded (a full disk): the meta is renamed
 # to this (a rename needs no free space), so the next boot does not apply the same restore again
 APPLIED_META = os.path.join(STATE_DIR, "restore-applied.json")
-import contextvars
 
-_OWN_SCHEDULE: contextvars.ContextVar[str | None] = contextvars.ContextVar("own_schedule", default=None)
 _PENDING_LOCK = threading.Lock()  # schedule, cancel and apply never interleave (two schedules would drop each other's archive)
 PARTS = ("storage", "custom_components", "manager", "yaml")  # selectable restore parts
 MARKER = "integration_manager/state.json"  # every backup must carry it
@@ -462,22 +460,7 @@ def pending_parts(config_dir: str) -> list[str]:
 
 
 def pending(config_dir: str) -> bool:
-    path = pending_archive(config_dir)
-    # the caller scheduled this restore itself as the first step of one operation (a full rollback)
-    return path is not None and os.path.basename(path) != _OWN_SCHEDULE.get()
-
-
-class own_schedule:
-    """Within this block (this task only) pending() ignores the schedule of archive ``zip_name``."""
-
-    def __init__(self, zip_name: str) -> None:
-        self.zip_name = zip_name
-
-    def __enter__(self):
-        self._token = _OWN_SCHEDULE.set(self.zip_name)
-
-    def __exit__(self, *exc):
-        _OWN_SCHEDULE.reset(self._token)
+    return pending_archive(config_dir) is not None
 
 
 def _extract_to(zf: zipfile.ZipFile, names: list[str], root: str) -> int:
