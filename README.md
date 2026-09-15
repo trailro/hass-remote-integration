@@ -119,7 +119,7 @@ Put your settings in a `.env` file next to `docker-compose.yml`:
 ```bash
 TZ=Europe/Berlin          # your time zone
 HRI_PORT=8087             # port of the UI
-# HRI_VERSION=0.13.0      # optional: pin a release (default: latest)
+# HRI_VERSION=0.14.0      # optional: pin a release (default: latest)
 # HRI_PASSWORD=...        # optional: require a password for the UI and API
 ```
 
@@ -292,10 +292,12 @@ gives the container 240 s to stop (`stop_grace_period`; a stop that hangs
 longer ends the process anyway) and runs an init process; with plain
 `docker run`, add `--init --stop-timeout 240 --restart unless-stopped`. The
 restart policy is required: a restart from the UI or MQTT exits the process
-and relies on Docker to start it again.
+and relies on Docker to start it again. A `docker-compose.yml` downloaded before 0.14.0
+still says 120 s: download it again (or change `stop_grace_period`) when you
+update.
 
 The top bar shows the version that runs and the commit its image was built
-from (`v0.13.0 · 1a2b3c4`), linking to that release. When GitHub has newer
+from (`v0.14.0 · 1a2b3c4`), linking to that release. When GitHub has newer
 releases than the one running (checked with the other update checks), a banner
 under the top bar says so and links the release notes of each newer release,
 newest first. Hiding it lasts until a newer release is published.
@@ -743,7 +745,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 |---|---|---|
 | `HRI_PORT` | `8087` | Port of the UI and API |
 | `HRI_NAME` | `hass-remote-integration` | Container and volume name |
-| `HRI_VERSION` | `latest` | Image tag Compose pulls, for example `0.13.0` |
+| `HRI_VERSION` | `latest` | Image tag Compose pulls, for example `0.14.0` |
 | `TZ` | `UTC` | Time zone |
 | `HA_VERSION_LATEST` | `1` | `0` installs the image's baseline HA on a fresh volume instead of the newest |
 | `HRI_DEV_SRC` | `./dev-src` | Dev mode: directory mounted at `/dev-src` |
