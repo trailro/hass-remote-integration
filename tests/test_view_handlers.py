@@ -50,7 +50,7 @@ class FakePublisher:
     def __init__(self):
         self.config = mock.Mock(discovery_enabled=True)
         self.stats = {"connected": True, "discovery_devices": 3}
-        self.save = mock.Mock()
+        self.async_save = mock.AsyncMock()
         self.async_reload_config = mock.AsyncMock()
         self.async_republish_all = mock.AsyncMock(return_value=7)
         self.async_clear_discovery = mock.AsyncMock(return_value=5)

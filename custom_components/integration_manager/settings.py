@@ -8,8 +8,9 @@ from __future__ import annotations
 import json
 import os
 
-from jsonio import write_json
 from typing import Any
+
+from . import writer
 
 DEFAULTS: dict[str, Any] = {
     "backup_keep": 5, "github_token": "",
@@ -43,8 +44,9 @@ class Settings:
         except (OSError, ValueError):
             pass
 
-    def save(self) -> None:
-        write_json(self.path, self.data, indent=1, mode=0o600)
+    async def async_save(self) -> None:
+        """Copied now, on the loop that changes it; written by the ordered writer."""
+        await writer.async_write(self.path, self.data, indent=1, mode=0o600)
 
     @property
     def backup_keep(self) -> int:

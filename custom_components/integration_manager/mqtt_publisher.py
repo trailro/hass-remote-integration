@@ -62,7 +62,7 @@ from homeassistant.const import __version__ as ha_version_str
 from homeassistant.helpers.event import async_track_time_interval
 
 from . import discovery as disc
-from . import events
+from . import events, writer
 from jsonio import read_json, write_json
 
 from .mqtt_rules import MqttRules
@@ -272,7 +272,7 @@ class MqttPublisher:
         self._resync_excluded = False  # integrations were excluded while disconnected: sweep the broker at the next connect
         self._undiscover_due = False  # discovery was turned off: remove the announced entities at the next full republish
         self._last_event: dict[str, str] = {}  # event entity -> the occurrence (state = its time) last emitted or seen
-        self._save_lock = threading.Lock()  # two saves (the MQTT form, a cutover) must not overwrite each other
+        self._saved: dict[str, Any] | None = None  # the mqtt.json this process last queued: the base of the next save
         # once per process, after HA started: what this process never published (so the in-memory discovery
         # map cannot compute removal forms for it) but is still retained, e.g. entities a restore took away
         self._orphan_sweep_due = True
@@ -312,23 +312,38 @@ class MqttPublisher:
         except (OSError, ValueError, TypeError):
             return MqttConfig()
 
-    def save(self, updates: dict[str, Any]) -> MqttConfig:
+    async def async_save(self, updates: dict[str, Any]) -> MqttConfig:
         """Validate types strictly: a null/NaN from the form would be stored
         and crash async_start() on the next boot, before the UI exists.
-        Starts from what is on disk: a save not adopted yet (waiting for a
-        reconnect) must not be undone by the next one."""
-        with self._save_lock:
-            return self._save_locked(updates)
-
-    def _save_locked(self, updates: dict[str, Any]) -> MqttConfig:
-        current = asdict(self.config)
+        Validated on the loop (two saves, the MQTT form and a cutover, see each
+        other in order), written by the ordered writer; a write error reaches
+        the caller.  Written to disk only: async_reconnect() adopts it, so it
+        can still compare the old topics against the new ones and clear them."""
+        new = asdict(self._validated(updates))
+        self._saved = new
         try:
-            with open(self.path, encoding="utf-8") as fh:
-                on_disk = json.load(fh)
-            if isinstance(on_disk, dict):
-                current.update({k: v for k, v in on_disk.items() if k in current})
-        except (OSError, ValueError):
-            pass  # no file yet (or unreadable): the running config is the base
+            await writer.async_write(self.path, new, mode=0o600)
+        except BaseException:
+            if self._saved is new:
+                self._saved = None  # not on disk: the file is the base again
+            raise
+        return MqttConfig(**new)
+
+    def _validated(self, updates: dict[str, Any]) -> MqttConfig:
+        """Starts from the last save this process queued, else from what is on
+        disk: a save not adopted yet (waiting for a reconnect) must not be
+        undone by the next one."""
+        current = asdict(self.config)
+        if self._saved is not None:
+            current.update(self._saved)
+        else:
+            try:  # once per process: a few hundred bytes, on the loop
+                with open(self.path, encoding="utf-8") as fh:
+                    on_disk = json.load(fh)
+                if isinstance(on_disk, dict):
+                    current.update({k: v for k, v in on_disk.items() if k in current})
+            except (OSError, ValueError):
+                pass  # no file yet (or unreadable): the running config is the base
         for k, v in updates.items():
             if k not in current or k in ("base_topic", "client_id"):
                 continue  # derived from the running integration, never stored from the UI
@@ -362,11 +377,7 @@ class MqttPublisher:
             elif k in ("base_topic", "discovery_prefix") and any(ch in v for ch in "+#"):
                 raise ValueError(f"{k} must not contain MQTT wildcards")
             current[k] = v
-        # Written to disk only; async_reconnect() adopts it, so it can still
-        # compare the old topics against the new ones and clear them.
-        new = MqttConfig(**current)
-        write_json(self.path, asdict(new), mode=0o600, fsync=False)
-        return new
+        return MqttConfig(**current)
 
     def public_config(self) -> dict[str, Any]:
         d = asdict(self.config)

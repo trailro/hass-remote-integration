@@ -331,14 +331,14 @@ class CutoverView(ManagerView):
             if problems:
                 return self.json({"ok": False, "error": "; ".join(problems)})
             if not s["discovery_enabled"]:
-                await self.hass.async_add_executor_job(self.publisher.save, {"discovery_enabled": True})
+                await self.publisher.async_save({"discovery_enabled": True})
                 await self.publisher.async_reload_config()  # no reconnect: the parent would see every entity flap to unavailable
             n = await self.publisher.async_republish_all(full=True)
             events.emit("cutover", f"discovery enabled on the parent: {n} documents republished")
             return self.json({"ok": True, "republished": n, **self._status()})
         if action == "undo":
             if s["discovery_enabled"]:
-                await self.hass.async_add_executor_job(self.publisher.save, {"discovery_enabled": False})
+                await self.publisher.async_save({"discovery_enabled": False})
                 await self.publisher.async_reload_config()
             try:
                 cleared = await self.publisher.async_clear_discovery()

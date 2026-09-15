@@ -160,17 +160,17 @@ class EntityActionView(ManagerView):
                     name = body.get("name")
                     if name is not None and not isinstance(name, str):
                         raise ValueError("name must be a string or null")
-                # mutate on the loop (the publisher reads the rules there), write in the executor
+                # mutate on the loop (the publisher reads the rules there), copied there and written by the ordered writer
                 if action == "mqtt_name":
-                    rule = rules.set(entity_id, save=False, name=(name.strip() or None) if name else None)
+                    rule = rules.set(entity_id, name=(name.strip() or None) if name else None)
                 elif action == "mqtt_exclude":
-                    rule = rules.set(entity_id, save=False, exclude=True)
+                    rule = rules.set(entity_id, exclude=True)
                 else:
                     # a glob may still exclude it: then store an explicit exclude=false override
-                    rule = rules.set(entity_id, save=False, exclude=None)
+                    rule = rules.set(entity_id, exclude=None)
                     if rules.for_entity(entity_id).get("exclude"):
-                        rule = rules.set(entity_id, save=False, exclude=False)
-                await self.hass.async_add_executor_job(rules.save)
+                        rule = rules.set(entity_id, exclude=False)
+                await rules.async_save()
                 res = await self.publisher.async_apply_rules()
                 return self.json({"ok": True, "entity_id": entity_id, "mqtt_rule": rule, **res})
         except ValueError as err:

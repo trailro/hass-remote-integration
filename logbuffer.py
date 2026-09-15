@@ -7,15 +7,23 @@ or a crash.  Nothing is held in memory but a per-logger record counter.
 
 Kept outside the custom component on purpose: run.py imports it before
 /config/custom_components is importable, and the component finds the
-handler on the root logger by its ``query`` method.
+handler by its ``query`` method, on the root logger or behind its queue.
+
+run.py puts the root handlers (stderr and this file) behind a queue, like
+HA's bootstrap does with homeassistant.util.logging: the thread that logs
+(the event loop included) only enqueues, one listener thread writes.
 """
 
 from __future__ import annotations
 
+import copy
 import itertools
 import json
 import logging
+import logging.handlers
 import os
+import queue
+import threading
 import time
 from typing import Any
 
@@ -74,11 +82,10 @@ class FileLogHandler(logging.Handler):
             msg = record.getMessage()
         except Exception:  # noqa: BLE001
             msg = str(record.msg)
-        exc = None
-        if record.exc_info:
-            exc = logging.Formatter().formatException(record.exc_info)
+        # through the queue the traceback arrives rendered (exc_text), the exception itself dropped
+        exc = logging.Formatter().formatException(record.exc_info) if record.exc_info else record.exc_text
         rec = {
-            "id": next(self._ids),
+            "id": 0,
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(record.created)) + f".{int(record.msecs):03d}",
             "level": record.levelname,
             "levelno": record.levelno,
@@ -86,8 +93,9 @@ class FileLogHandler(logging.Handler):
             "message": msg,
             "exc": exc,
         }
-        data = json.dumps(rec, ensure_ascii=False, default=str) + "\n"
         with self.lock:
+            rec["id"] = next(self._ids)  # under the lock: ids grow in file order, also when a direct write at exit meets the listener
+            data = json.dumps(rec, ensure_ascii=False, default=str) + "\n"
             self.loggers[record.name] = self.loggers.get(record.name, 0) + 1
             try:
                 if self._size + len(data) > self.max_bytes:
@@ -170,17 +178,108 @@ class FileLogHandler(logging.Handler):
 
 
 def install(path: str) -> FileLogHandler:
-    root = logging.getLogger()
-    for h in root.handlers:
-        if isinstance(h, FileLogHandler):
-            return h
+    if isinstance(existing := find(), FileLogHandler):
+        return existing
     handler = FileLogHandler(path)
-    root.addHandler(handler)
+    logging.getLogger().addHandler(handler)
     return handler
 
 
 def find() -> FileLogHandler | None:
     for h in logging.getLogger().handlers:
-        if hasattr(h, "query") and hasattr(h, "loggers"):
-            return h  # type: ignore[return-value]
+        listener = getattr(h, "listener", None)
+        for candidate in (listener.handlers if listener is not None else (h,)):
+            if hasattr(candidate, "query") and hasattr(candidate, "loggers"):
+                return candidate  # type: ignore[return-value]
     return None
+
+
+class _QueueListener(logging.handlers.QueueListener):
+    def handle(self, record: Any) -> None:
+        if isinstance(record, threading.Event):
+            record.set()  # a flush marker: everything queued before it is written
+            return
+        super().handle(record)
+
+    def stop(self, timeout: float | None = None) -> bool:  # the stock stop joins without a timeout
+        thread = self._thread
+        if thread is None:
+            return True
+        self.enqueue_sentinel()
+        thread.join(timeout)
+        if thread.is_alive():
+            return False
+        self._thread = None
+        return True
+
+
+class _QueueHandler(logging.handlers.QueueHandler):
+    """The message is rendered on the logging thread, like the stock handler
+    (its arguments may change afterwards), but the traceback stays apart:
+    the stock prepare folds it into the message, process.log keeps both
+    fields."""
+
+    listener: _QueueListener
+
+    def prepare(self, record: logging.LogRecord) -> logging.LogRecord:
+        record = copy.copy(record)
+        try:
+            record.message = record.getMessage()
+        except Exception:  # noqa: BLE001
+            record.message = str(record.msg)
+        record.msg, record.args = record.message, None
+        if record.exc_info:
+            record.exc_text = record.exc_text or logging.Formatter().formatException(record.exc_info)
+            record.exc_info = None  # the traceback objects hold frames: not kept alive in the queue
+        return record
+
+    def handle(self, record: logging.LogRecord) -> Any:
+        # no handler lock: the queue is thread-safe (HomeAssistantQueueHandler skips it too)
+        rv = self.filter(record)
+        if isinstance(rv, logging.LogRecord):
+            record = rv
+        if rv:
+            self.emit(record)
+        return rv
+
+
+def _queue_handler(logger: logging.Logger) -> _QueueHandler | None:
+    return next((h for h in logger.handlers if isinstance(h, _QueueHandler)), None)
+
+
+def activate_queue(logger: logging.Logger | None = None) -> None:
+    """Move the logger's handlers (root: stderr and process.log) behind a
+    queue.  The swap is one assignment, not atomic against another thread
+    logging at that moment: call it while one thread logs (run.py, before HA
+    boots)."""
+    logger = logger or logging.getLogger()
+    if _queue_handler(logger) is not None:
+        return
+    q: queue.SimpleQueue = queue.SimpleQueue()
+    handler = _QueueHandler(q)
+    handler.listener = _QueueListener(q, *logger.handlers, respect_handler_level=True)
+    handler.listener.start()
+    logger.handlers = [handler]
+
+
+def flush_queue(timeout: float = 5.0, logger: logging.Logger | None = None) -> bool:
+    """Wait, at most `timeout`, until what was queued so far is written."""
+    handler = _queue_handler(logger or logging.getLogger())
+    if handler is None:
+        return True
+    done = threading.Event()
+    handler.queue.put_nowait(done)
+    return done.wait(timeout)
+
+
+def stop_queue(timeout: float = 5.0, logger: logging.Logger | None = None) -> bool:
+    """Back to the handlers themselves, what was queued written first (bounded):
+    run.py before os._exit, so lines logged afterwards are written at once.
+    False when a handler kept the listener from finishing (a blocked stderr)."""
+    logger = logger or logging.getLogger()
+    handler = _queue_handler(logger)
+    if handler is None:
+        return True
+    flushed = flush_queue(timeout, logger)
+    logger.handlers = [h for h in logger.handlers if h is not handler] + list(handler.listener.handlers)
+    return handler.listener.stop(timeout if flushed else 0.1) and flushed

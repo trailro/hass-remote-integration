@@ -481,7 +481,7 @@ class MqttConfigView(ManagerView):
     async def post(self, request: web.Request) -> web.Response:
         try:
             body = await _json_object(request)
-            cfg = await self.publisher.hass.async_add_executor_job(self.publisher.save, body)
+            await self.publisher.async_save(body)
         except (BadRequest, ValueError) as err:
             return self.json({"ok": False, "error": str(err)})
         await self.publisher.async_reconnect()
@@ -515,8 +515,8 @@ class MqttRulesView(ManagerView):
     @with_body
     async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
         try:
-            self.publisher.rules.replace_all(body.get("rules") or {}, save=False)  # on the loop: readers live here
-            await self.publisher.hass.async_add_executor_job(self.publisher.rules.save)
+            self.publisher.rules.replace_all(body.get("rules") or {})  # on the loop: readers live here
+            await self.publisher.rules.async_save()
         except ValueError as err:
             return self.json({"ok": False, "error": str(err)})
         res = await self.publisher.async_apply_rules()

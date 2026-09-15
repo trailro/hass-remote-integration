@@ -47,6 +47,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import package as pkg_util
 
+from . import writer
 import jsonio
 from jsonio import ha_vkey, is_stable_tag, tag_key, vkey, write_json
 
@@ -319,9 +320,9 @@ class Installer:
         return state
 
     def _save_state(self) -> None:
-        # atomic (tmp + replace) but no fsync on the event loop: a torn file is
-        # impossible, only a power cut between replace and flush loses the last write
-        write_json(self.state_file, asdict(self.state), fsync=False)
+        # on the loop, where the state changes: saves land in the order of the changes.  Fsynced: a power
+        # cut must not bring back a state from before an install or a switch (a sync costs ms, not loop lag)
+        write_json(self.state_file, asdict(self.state))
 
     def _dom(self, domain: str) -> dict[str, Any]:
         return self.state.installed.setdefault(domain, asdict(Domain()))
@@ -1524,6 +1525,8 @@ class Installer:
             if lock is not None:
                 async with lock:
                     pass
+        if not await writer.async_drain(30):  # settings, MQTT config and rules saves still queued
+            failed.append("manager JSON files: saves still pending after 30 s")
         if failed:
             raise OSError(f"stores could not be written before the backup: {'; '.join(failed[:3])}")
         return flushed
@@ -1563,20 +1566,25 @@ class Installer:
         self._save_state()
         events.emit("restart", "process restart requested")
         await self.hass.async_add_executor_job(self._reset_boot_failures)
+        if not await writer.async_drain(10):  # the final write drains it too, but a stop stage could time out first
+            _LOGGER.warning("restart: JSON saves still pending after 10 s")
         self.hass.async_create_task(self.hass.async_stop())
         return {"ok": True}
 
     def _reset_boot_failures(self) -> None:
         """A deliberate restart before HA reached STARTED must not count as
-        a crash for the entrypoint's fallback logic."""
-        path = os.path.join(self.state_dir, "ha.json")
-        data = jsonio.read_json(path)
-        if isinstance(data, dict) and data.get("boot_failures"):
-            data["boot_failures"] = 0
-            try:
-                write_json(path, data)
-            except OSError:
-                pass
+        a crash for the entrypoint's fallback logic.  Under the per-file lock:
+        this runs in the executor while the loop may be writing ha.json."""
+
+        def reset(data: Any) -> dict[str, Any] | None:
+            if isinstance(data, dict) and data.get("boot_failures"):
+                return {**data, "boot_failures": 0}
+            return None  # unreadable, or nothing to take back: left alone
+
+        try:
+            jsonio.update_json(os.path.join(self.state_dir, "ha.json"), reset)
+        except OSError:
+            pass
 
     async def _requirements_for(self, domain: str) -> list[str]:
         """Manifest requirements plus those of the integration's dependencies."""

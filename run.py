@@ -24,7 +24,7 @@ if os.environ.get("HRI_TRACEMALLOC"):  # before the heavy imports, so they are t
     tracemalloc.start(max(1, int(os.environ["HRI_TRACEMALLOC"])))
 
 import logbuffer  # /app/logbuffer.py: the process log on disk, for the manager UI
-from jsonio import read_json, write_json
+from jsonio import read_json, update_json
 import shutil
 import signal
 import sys
@@ -51,6 +51,8 @@ TASK_CANCEL_TIMEOUT_S = 5  # homeassistant.runner.TASK_CANCELATION_TIMEOUT
 # HA's own stop stages add up to 210 s; the compose file's stop_grace_period is the same 240 s
 STOP_WATCHDOG_S = 240
 BOOT_OK_CAP_S = 600
+WRITER_DRAIN_S = 10  # at exit: the manager's JSON saves still queued
+LOG_FLUSH_S = 5  # at exit: log lines still queued
 _boot_settled = False  # this boot's boot_failures count is resolved: marked ok, or taken back after a stop
 
 
@@ -244,15 +246,14 @@ def _time_zone() -> str:
 
 
 def _update_ha_json(change: Callable[[dict], dict]) -> None:
-    """One read-modify-write of ha.json, on the loop: ha_updater writes it
-    on the loop too (fsync=False, no await in between), so the two never
-    interleave and neither loses the other's update."""
+    """One read-modify-write of ha.json under jsonio's per-file lock:
+    ha_updater (on the loop) and the installer's restart (in the executor)
+    update it too, and an executor write between our read and our write
+    dropped their change.  Fsynced: the entrypoint's fallback reads it after
+    a power cut.  An unreadable file is left alone."""
     path = os.path.join(CONFIG_DIR, "integration_manager", "ha.json")
-    state = read_json(path)
-    if not isinstance(state, dict):
-        return
     try:
-        write_json(path, change(state), fsync=False)
+        update_json(path, lambda state: change(state) if isinstance(state, dict) else None)
     except OSError:
         pass
 
@@ -386,7 +387,12 @@ def _arm_stop_watchdog(timeout: float = STOP_WATCHDOG_S) -> threading.Thread:
 
     def watch() -> None:
         time.sleep(timeout)
-        _LOGGER.critical("still not stopped %s s after the stop began: exiting hard", int(timeout))
+        msg = f"still not stopped {int(timeout)} s after the stop began: exiting hard"
+        _LOGGER.critical(msg)
+        # the line waits in the log queue behind whatever holds the listener up (a blocked stderr):
+        # give it a moment, then write it to process.log directly
+        if not logbuffer.flush_queue(LOG_FLUSH_S) and (handler := logbuffer.find()) is not None:
+            handler.handle(_LOGGER.makeRecord(_LOGGER.name, logging.CRITICAL, __file__, 0, msg, (), None))
         os._exit(1)
 
     thread = threading.Thread(target=watch, name="stop-watchdog", daemon=True)
@@ -595,6 +601,7 @@ def main() -> int:
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     )
     logbuffer.install(os.path.join(CONFIG_DIR, "integration_manager", "process.log"))  # before HA boots: /logs shows the boot too
+    logbuffer.activate_queue()  # stderr and process.log written by one thread, not by whoever logs; only this thread logs yet
     _install_excepthooks()
     _install_import_tracer()
     # chatty loggers (the registry's quiet_loggers) would flood the
@@ -619,7 +626,17 @@ def main() -> int:
         rc = _run_loop(_boot)
     except BaseException:  # noqa: BLE001
         _LOGGER.critical("hass-remote-integration crashed", exc_info=True)
-    logging.shutdown()
+    _exit(rc)
+
+
+def _exit(rc: int) -> None:
+    """What is still queued goes out first, bounded: the manager's JSON
+    saves, then the log lines (the last "stopping" ones among them)."""
+    writer = sys.modules.get("custom_components.integration_manager.writer")  # only if the manager was ever set up
+    if writer is not None and not writer.drain(WRITER_DRAIN_S):
+        _LOGGER.error("JSON saves still pending %s s after the loop ended: exiting without them", WRITER_DRAIN_S)
+    if logbuffer.stop_queue(LOG_FLUSH_S):
+        logging.shutdown()  # skipped when a handler is stuck (a blocked stderr): flushing it would hang the exit
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(rc)  # a thread stuck in C code would otherwise still block interpreter exit

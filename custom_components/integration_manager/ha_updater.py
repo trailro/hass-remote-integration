@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 
-from jsonio import ha_vkey, write_json
+from jsonio import ha_vkey, update_json
 import os
 import re
 import sys
@@ -54,9 +54,6 @@ class HaUpdater:
         if not isinstance(data, dict):
             raise ValueError("ha.json is unreadable: restart the container, the entrypoint rebuilds it from the volume")
         return data
-
-    def _write(self, data: dict[str, Any]) -> None:
-        write_json(self.file, data, fsync=False)  # called on the loop; the replace stays atomic
 
     def _installed_venvs(self) -> list[str]:
         out = []
@@ -178,16 +175,19 @@ class HaUpdater:
         version = version.strip()
         if not _STABLE.match(version) and not re.match(r"^\d{4}\.\d{1,2}\.\d+(b\d+)?$", version):
             raise ValueError(f"not a Home Assistant version: {version!r}")
-        state = self._read_for_update()
-        state["desired"] = version
-        state["last_error"] = ""
-        state.pop("recovery", None)  # a new intention supersedes what a failed fallback left behind
-        if change:
-            state["change"] = change
-        else:
-            state.pop("change", None)
-        self._write(state)
-        return state
+
+        def apply(state: dict[str, Any]) -> dict[str, Any]:
+            state["desired"] = version
+            state["last_error"] = ""
+            state.pop("recovery", None)  # a new intention supersedes what a failed fallback left behind
+            if change:
+                state["change"] = change
+            else:
+                state.pop("change", None)
+            return state
+
+        # under the per-file lock: run.py (loop) and a restart (executor) update ha.json too; fsynced
+        return update_json(self.file, apply, read=lambda _path: self._read_for_update())
 
     def cancel_config_change(self) -> list[str]:
         """Blocking: what a scheduled version change prepared for its boot (a
