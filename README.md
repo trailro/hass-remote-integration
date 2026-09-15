@@ -119,7 +119,7 @@ Put your settings in a `.env` file next to `docker-compose.yml`:
 ```bash
 TZ=Europe/Berlin          # your time zone
 HRI_PORT=8087             # port of the UI
-# HRI_VERSION=0.12.0      # optional: pin a release (default: latest)
+# HRI_VERSION=0.13.0      # optional: pin a release (default: latest)
 # HRI_PASSWORD=...        # optional: require a password for the UI and API
 ```
 
@@ -194,7 +194,13 @@ integration, any release, branch or commit, and a Home Assistant version, then
 Python requirements with `pip --dry-run`, evaluates patches and dependencies
 and the minimum HA version, and tells you whether anything blocks the
 combination, without touching the running environment. *Prepare* installs
-exactly the combination that passed.
+exactly the combination that passed. Check also warns about configuration the
+release cannot take over: config entries here while the release has no config
+flow, entries at a newer version than its config flow (Home Assistant cannot
+migrate an entry back), and YAML stored here that a config flow release will
+import. A release that declares a newer minimum Home Assistant in `hacs.json`
+cannot be started on an older one; prepare it together with that Home
+Assistant version.
 
 ### 2. Configure it
 
@@ -205,6 +211,8 @@ Choose whichever fits the integration, on the **Integration** page:
   its code).
 - **YAML config**: for integrations configured in `configuration.yaml`, paste
   what would go under `<domain>:`. It is validated on save and applied at boot.
+  When a later release imports that YAML into a config entry, a notification
+  says so: remove the YAML then, because it is still applied at every boot.
 - **Import from your existing Home Assistant** (on **System**): upload a
   standard HA backup (`.tar`, encrypted or not). The config entries of the
   installed integration come over with their data *and* options, and entity
@@ -224,6 +232,8 @@ says so; use *Restart process*.
 About five minutes after a start, a **smoke test** checks the health verdict.
 If it fails right after a version switch, the manager rolls back to the
 previous version and its backup automatically (configurable on **System**).
+A failed smoke test raises a notification and stays in the last error until
+another version runs healthy, also across the rollback's restart.
 
 ### 4. Connect MQTT
 
@@ -274,7 +284,7 @@ gives the container 120 s to stop (`stop_grace_period`) and runs an init
 process; with plain `docker run`, add `--init --stop-timeout 120`.
 
 The top bar shows the version that runs and the commit its image was built
-from (`v0.12.0 · 73ca5be`), linking to that release.
+from (`v0.13.0 · 1a2b3c4`), linking to that release.
 
 With a password set, 0.11.0 changes the session cookie format: log in once
 after updating. Going back to an image older than 0.11.0 is possible (the
@@ -288,7 +298,15 @@ Install the new release (Install or Integration page), optionally run
 **Preflight** on it first, then *Switch to* it. The manager backs up, switches,
 restarts if needed, smoke-tests, and rolls back on its own if the new version
 is unhealthy. *Full rollback* on the Integration page brings back the previous
-version together with the config as it was before the update.
+version together with the config as it was before the update; its restart is
+smoke-tested too, without a further automatic rollback. After an automatic
+rollback there is no Full rollback target: the version the smoke test rejected
+is never offered again that way.
+
+A downgrade of the integration after its config entries were migrated to a
+newer format usually fails (`migration_error`), which the preflight warns
+about. Full rollback right after the upgrade brings the entries back as they
+were.
 
 Once the new version has run (after the smoke test), *What changed between
 versions* on the Integration page compares its entities and services with those
@@ -303,7 +321,12 @@ notification. The last ten reports are kept.
 On **System**, choose a version and install it. The process restarts, the new
 Home Assistant is installed into a new venv (the page shows progress), and the
 integration's requirements are reinstalled there. If the new version fails to
-boot three times in a row, the container falls back to the previous one.
+boot three times in a row, the container falls back to the previous one. What
+happened (a fallback, a failed install) stays on **System** until the next
+version change and is announced once as a notification. Before restarting,
+the page warns when the target is older than the minimum Home Assistant the
+running integration declares, and when keeping the configuration on a
+downgrade could fail.
 
 Every version change, up or down, takes a backup of the current configuration
 first. This is what makes it practical to try an integration on several Home
@@ -322,7 +345,9 @@ therefore asks what the older version starts with:
   options, its own store files are copied, and entity ids, names, icons,
   hidden and disabled flags and device names are applied again, all from the
   backup taken just before the switch. Areas, labels, other entity settings
-  and the last known states are not carried over.
+  and the last known states are not carried over. Changes made after the
+  switch was scheduled are not rebuilt; the configuration from right before
+  the clean start is kept in a backup of its own, which the notification names.
 - **Keep the current configuration.** This works when the older version can
   read the newer storage formats; otherwise the boot fails and the container
   falls back to the version you came from.
@@ -649,7 +674,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 |---|---|---|
 | `HRI_PORT` | `8087` | Port of the UI and API |
 | `HRI_NAME` | `hass-remote-integration` | Container and volume name |
-| `HRI_VERSION` | `latest` | Image tag Compose pulls, for example `0.12.0` |
+| `HRI_VERSION` | `latest` | Image tag Compose pulls, for example `0.13.0` |
 | `TZ` | `UTC` | Time zone |
 | `HA_VERSION_LATEST` | `1` | `0` installs the image's baseline HA on a fresh volume instead of the newest |
 | `HRI_DEV_SRC` | `./dev-src` | Dev mode: directory mounted at `/dev-src` |
