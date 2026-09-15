@@ -26,6 +26,7 @@ from __future__ import annotations
 import difflib
 import importlib.metadata as md
 import importlib.util
+import itertools
 import logging
 import os
 import re
@@ -139,8 +140,22 @@ def _read_text(path: str) -> str:
         return fh.read()
 
 
+_LOAD_SEQ = itertools.count()
+# (patch, domain, running tag, site-packages, patch mtime, deployed dir mtime) -> status(ctx) of a .py patch: /api/status
+# polls every few seconds and must not import and run each module each time; any apply_all starts over
+_PY_STATUS: dict[tuple[Any, ...], str] = {}
+
+
+def _mtime(path: str) -> int:
+    try:
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return -1
+
+
 def _load_module(path: str):
-    name = "user_patch_" + re.sub(r"\W", "_", os.path.basename(path))
+    # unique per load: two threads loading the same patch must not pop each other's sys.modules entry mid-import
+    name = "user_patch_" + re.sub(r"\W", "_", os.path.basename(path)) + f"_{next(_LOAD_SEQ)}"
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[name] = mod  # dataclasses and typing resolve the module through sys.modules while it executes
@@ -155,6 +170,8 @@ def _run(config_dir: str, domain: str, site_packages: str, component_dir: str, r
     """status() and apply_all() share everything but the verb."""
     ctx = PatchContext(config_dir, domain, site_packages, component_dir)
     out = []
+    if apply or len(_PY_STATUS) > 256:
+        _PY_STATUS.clear()  # applying changes what status(ctx) reports
     for name in list_patches(config_dir, domain):
         path = patch_path(config_dir, domain, name)
         bundled = is_bundled(config_dir, domain, name)
@@ -165,9 +182,12 @@ def _run(config_dir: str, domain: str, site_packages: str, component_dir: str, r
             if not applies:
                 out.append({"name": name, "status": "skipped", "detail": why, "scope": scope, "bundled": bundled})
                 continue
-            if name.endswith(".py"):
-                mod = _load_module(path)
-                st = str(mod.apply(ctx) if apply else mod.status(ctx))
+            if name.endswith(".py") and apply:
+                st = str(_load_module(path).apply(ctx))
+            elif name.endswith(".py"):
+                key = (path, domain, running_tag, site_packages, _mtime(path), _mtime(component_dir))
+                if (st := _PY_STATUS.get(key)) is None:
+                    st = _PY_STATUS[key] = str(_load_module(path).status(ctx))
             else:
                 st = _diff_apply(text, ctx) if apply else _diff_status(text, ctx)
             out.append({"name": name, "status": st, "detail": why, "scope": scope, "bundled": bundled})
