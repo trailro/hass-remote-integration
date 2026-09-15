@@ -273,6 +273,9 @@ Home Assistant writes its registries last when it stops, so the compose file
 gives the container 120 s to stop (`stop_grace_period`) and runs an init
 process; with plain `docker run`, add `--init --stop-timeout 120`.
 
+The top bar shows the version that runs and the commit its image was built
+from (`v0.12.0 · 73ca5be`), linking to that release.
+
 With a password set, 0.11.0 changes the session cookie format: log in once
 after updating. Going back to an image older than 0.11.0 is possible (the
 volume stays readable), but that older image honours logouts only by time, so
@@ -370,7 +373,8 @@ integration.
 ### Logs and log files
 
 **Logs** shows the process log: everything Home Assistant and the integration
-log, with filters and a live follow. Loggers listed in the registry's
+log, with filters and a live follow. Each line carries its date and time, and
+the list holds the newest 200 lines (following live drops the oldest). Loggers listed in the registry's
 `quiet_loggers` start at WARNING; raise one at runtime while you investigate.
 
 **Log files** shows files the integration writes itself, such as traffic dumps
