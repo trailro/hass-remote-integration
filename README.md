@@ -657,7 +657,14 @@ hass_<domain>/manager/result                        outcome of a manager action,
   two entities of one device would get the same component key
   (`image_processing.x` and `image.processing_x`), the second is skipped with a
   warning in the log; `discovery_collisions` in `GET /api/mqtt/status` counts
-  them.
+  them. When two entities ask for the same entity id on the main HA (a
+  mirrored `camera.front` becomes `sensor.camera_front`, next to a real
+  `sensor.camera_front`), both are announced, the main HA gives one a `_2`
+  suffix, and the log names them; `discovery_default_id_duplicates` counts
+  them. An integration named `call`, `cmd`, `result`, `services`, `manager`,
+  `health` or `status` publishes its documents under
+  `<name>-integration/<domain>/<object_id>`, so they never land on the
+  command, call or result topics.
 - **Commands**: numeric command topics accept only finite numbers. Text
   values, notify messages and select options are used exactly as sent, spaces
   included. The two bounds of a thermostat range change arrive as two
@@ -670,12 +677,22 @@ hass_<domain>/manager/result                        outcome of a manager action,
   and never executed twice; the comparison keeps the type, so `1` and `"1"`
   are two different calls. `homeassistant`, `shell_command`, `python_script`,
   `hassio` and `integration_manager` are never callable.
-  `persistent_notification` is not callable over MQTT and is left out of the
-  MQTT service catalog; the Services page can still call it. `NaN`, `Infinity` and deeply nested JSON
-  are rejected. Alarm and lock codes are masked in the command history, the
-  status and the log. A call reaches only entities the container publishes: an
-  `entity_id` of `all`, or an entity, area, floor, label or device that resolves
-  to an excluded or unknown entity, is refused. A `device_id` that is not a
+  `persistent_notification` and `notify.persistent_notification` are not
+  callable over MQTT and are left out of the MQTT service catalog; the Services
+  page can still call them. `NaN`, `Infinity`, numbers too large to be finite
+  (`1e999`), payloads larger than 256 KB and JSON nested deeper than 64 levels
+  are rejected, with an answer on `result/...`. Values of `code`, `usercode`,
+  `user_code`, `pin`, `passcode`, `password`, `secret` and `token` are masked
+  in the command history, the status and the log. A call reaches only entities
+  the container publishes: an `entity_id` of `all`, or an entity, group (and
+  its members), area, floor, label or device that resolves to an excluded or
+  unknown entity, is refused, and so is a target that cannot be read (an id
+  that is not a string). Entity ids in the service data count too: fields
+  ending in `entity_id` or `entity_ids`, `group_members`,
+  `snapshot_entities` and `entities` (a list or a mapping keyed by entity id),
+  at any depth; an entity id in a field with another name is not recognised,
+  so do not rely on excluding an entity to keep it from a service that takes
+  it under a different name. A `device_id` that is not a
   Home Assistant device (a hardware address a service takes as data) stays plain
   service data. A call needs a JSON object, `{}` when it has no data: an empty
   payload is rejected.
@@ -686,7 +703,9 @@ hass_<domain>/manager/result                        outcome of a manager action,
   for Home Assistant in the container and for hass-remote-integration itself,
   and sensors for memory, CPU, event-loop lag (the worst delay of a
   one-second timer in the last minute, which is how an integration that blocks
-  the loop shows up), volume usage and the patch status.
+  the loop shows up), volume usage and the patch status. Health is published
+  every minute; the two health entities go unavailable when three minutes pass
+  without one, so a stuck container never keeps showing an old `ok`.
 - **Manager actions** (`manager_commands`, off by default): *Install* on the
   integration and Home Assistant update entities, plus *Restart*, *Back up now*
   (at most every 10 minutes) and *Check for updates* (every 5 minutes) buttons. Installing the integration runs the

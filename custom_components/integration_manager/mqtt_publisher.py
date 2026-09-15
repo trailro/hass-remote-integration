@@ -2,7 +2,8 @@
 
 Topic layout (retained JSON unless noted):
   <base>/status                                  "online" | "offline" (LWT)
-  <base>/<integration>/<domain>/<object_id>      one document per entity
+  <base>/<integration>/<domain>/<object_id>      one document per entity (an integration named like one of
+                                                 our own segments, e.g. "call", uses "<name>-integration")
   <base>/<integration>/event_stream/<object_id>  event entities, NOT retained
   <base>/services/<domain>                       service catalog per domain
   <base>/cmd/<domain>/<object_id>/<field>        entity commands (subscribed)
@@ -53,7 +54,7 @@ from homeassistant.const import (
     EVENT_SERVICE_REMOVED,
     EVENT_STATE_CHANGED,
 )
-from homeassistant.core import CoreState, Event, HomeAssistant, State, SupportsResponse, callback
+from homeassistant.core import CoreState, Event, HomeAssistant, State, SupportsResponse, callback, valid_entity_id
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
@@ -70,7 +71,7 @@ from .services_catalog import service_rows
 
 _LOGGER = logging.getLogger(__name__)
 ORPHAN_SWEEP_DELAY_S = 300  # after HA started: integrations still adding entities (a device slow to answer) have had time
-HEALTH_INTERVAL_S = 60
+HEALTH_INTERVAL_S = disc.HEALTH_INTERVAL_S  # the health entities on the main HA expire after three missed publications
 REPUBLISH_BATCH = 200          # documents per batch before yielding to the event loop
 REPUBLISH_BATCH_PAUSE_S = 0.02
 HEALTH_GRACE_S = 900  # after a (re)start, at most this long before unavailable / silent entities count
@@ -91,12 +92,71 @@ CALL_DENY_DOMAINS = frozenset({"homeassistant", "shell_command", "python_script"
 # Over MQTT only (the Services page is the operator's): dismiss_all from anyone with broker credentials would erase
 # the manager's own smoke-test and HA-change notifications, and create could plant fake ones.
 MQTT_CALL_DENY_DOMAINS = CALL_DENY_DOMAINS | {"persistent_notification"}
-_CODE_VALUE = re.compile(r"""((?<![A-Za-z0-9_])["']?code["']?\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'[^']*'|[^,}\s]+)""")
+# notify.persistent_notification creates the same notifications as persistent_notification.create
+MQTT_CALL_DENY_SERVICES = frozenset({("notify", "persistent_notification")})
+# A call payload is scanned before it is parsed: a huge or deeply nested one is refused with an answer
+# (json.loads would raise RecursionError, and everything that walks the data after it could too).
+CALL_MAX_BYTES = 256 * 1024
+CALL_MAX_DEPTH = 64
+# Topic segments of our own under the base topic: an integration with one of these names gets its documents under
+# "<name>-integration" ("-" is never part of an integration domain), otherwise an integration called "call" would
+# publish its documents where live subscribers take them as service calls.
+RESERVED_TOPIC_SEGMENTS = frozenset({"call", "cmd", "result", "services", "manager", "health", "status"})
+_CODE_VALUE = re.compile(
+    r"""((?<![A-Za-z0-9_])["']?(?:code|usercode|user_code|pin|passcode|password|secret|token)["']?\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'[^']*'|[^,}\s]+)""",
+    re.IGNORECASE)
+_JSON_STRING = re.compile(r'"(?:[^"\\]+|\\.)*"?')
+_JSON_BRACKET = re.compile(r"[\[\]{}]")
+# service data fields that name entities besides the target (media_player.join, scene.apply/create, ...)
+_ENTITY_LIST_KEYS = frozenset({"group_members", "snapshot_entities", "entities"})
 
 
 def _mask_codes(text: str) -> str:
-    """Alarm and lock codes stay out of the command history, the status and the log."""
+    """Alarm and lock codes, PINs, passwords and tokens stay out of the command history, the status and the log."""
     return _CODE_VALUE.sub(lambda m: m.group(1) + '"***"', text)
+
+
+def _payload_problem(payload: str) -> str | None:
+    """Why a call payload is not parsed at all: too large, or nested deeper than CALL_MAX_DEPTH (brackets inside strings don't count)."""
+    if len(payload) > CALL_MAX_BYTES or len(payload.encode(errors="replace")) > CALL_MAX_BYTES:
+        return f"larger than {CALL_MAX_BYTES // 1024} KB"
+    depth = 0
+    for m in _JSON_BRACKET.finditer(_JSON_STRING.sub("", payload)):
+        depth += 1 if m.group() in "[{" else -1
+        if depth > CALL_MAX_DEPTH:
+            return f"nested deeper than {CALL_MAX_DEPTH} levels"
+    return None
+
+
+def _finite_float(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"{text} is not a number a service accepts")
+    return value
+
+
+def _loads_call(payload: str) -> Any:
+    if problem := _payload_problem(payload):
+        raise ValueError(problem)
+    return json.loads(payload, parse_constant=_no_constant, parse_float=_finite_float)
+
+
+def _entity_ids_in(value: Any) -> set[str]:
+    """Entity ids named in service data outside the target: values of keys ending in entity_id/entity_ids, and of
+    group_members, snapshot_entities and entities (a list, a comma-separated string, or a mapping keyed by entity id),
+    at any depth.  Only what looks like an entity id counts; ids in other fields are not recognised."""
+    found: set[str] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            name = str(key).lower()
+            if name.endswith(("entity_id", "entity_ids")) or name in _ENTITY_LIST_KEYS:
+                names = list(item) if isinstance(item, dict) else [item] if isinstance(item, str) else item if isinstance(item, list) else []
+                found.update(p.strip().lower() for x in names if isinstance(x, str) for p in x.split(","))
+            found |= _entity_ids_in(item)
+    elif isinstance(value, list):
+        for item in value:
+            found |= _entity_ids_in(item)
+    return {e for e in found if valid_entity_id(e)}
 
 
 def _call_key(domain: str, service: str, call_id: Any) -> str:
@@ -162,8 +222,8 @@ def platform_of(hass: HomeAssistant, entity_id: str) -> str | None:
 def _call_id_of(payload: str) -> Any:
     """The "_id" of a call payload when it can be read (echoed in a refusal), else None."""
     try:
-        data = json.loads(payload)
-    except ValueError:
+        data = _loads_call(payload)
+    except (ValueError, RecursionError):
         return None
     return data.get("_id") if isinstance(data, dict) else None
 
@@ -262,6 +322,7 @@ class MqttPublisher:
         # independent of the visual history (which commands can push out)
         self._calls: dict[str, dict[str, Any]] = {}
         self._range_pending: dict[str, dict[str, Any]] = {}
+        self._default_id_warned: set[str] = set()  # entities whose default_entity_id another entity asked for first, warned once each
         self._collision_warned: set[str] = set()  # entities skipped for a component key clash, warned once each  # entity_id -> the first half of a range change, waiting for the second
         self._registry_timer: asyncio.TimerHandle | None = None
         # entity_id -> document topic last published (the registry entry is
@@ -981,7 +1042,7 @@ class MqttPublisher:
 
     def _remember(self, kind: str, what: str, data: Any, call_id: Any = None) -> dict[str, Any]:
         text = json.dumps(data, default=str) if not isinstance(data, str) else data
-        rec = {"id": call_id, "kind": kind, "what": what, "data": _mask_codes(text)[:200],
+        rec = {"id": call_id, "kind": kind, "what": what, "data": _mask_codes(text[:1000])[:200],
                "received": time.time(), "finished": None, "duration_ms": None, "state": "running", "error": None, "result": None}
         self.history.append(rec)
         return rec
@@ -1013,22 +1074,25 @@ class MqttPublisher:
         """A call reaches only entities this container publishes, like a cmd/ topic: the target
         (entity ids, and area/floor/label/device ids resolved the way Home Assistant resolves them)
         must not name anything else.  A device_id that is not a registry device (a RAMSES address
-        given to send_packet, say) resolves to nothing and stays plain service data."""
+        given to send_packet, say) resolves to nothing and stays plain service data.  A group counts
+        with its members; entity ids in other fields of the data count too (see _entity_ids_in)."""
         from homeassistant.const import ENTITY_MATCH_ALL
         from homeassistant.helpers.target import TargetSelection, async_extract_referenced_entity_ids
 
         ids = data.get("entity_id")
         named = [ids] if isinstance(ids, str) else ids if isinstance(ids, list) else []
         # "a, b" is split by the service schema only after this check: split it the same way first
-        split = [p.strip() for x in named if isinstance(x, str) for p in x.split(",") if p.strip()]
+        split = [p.strip().lower() for x in named if isinstance(x, str) for p in x.split(",") if p.strip()]
         if ENTITY_MATCH_ALL in split:
             return "entity_id all is not accepted over MQTT: name the entities"
         try:
             selection = {**data, "entity_id": split} if "entity_id" in data else data
-            selected = async_extract_referenced_entity_ids(self.hass, TargetSelection(selection), expand_group=False)
-        except Exception:  # noqa: BLE001 - a malformed target is the service schema's to reject
-            return None
-        outside = sorted(e for e in selected.referenced | selected.indirectly_referenced if e not in self._topics)
+            selected = async_extract_referenced_entity_ids(self.hass, TargetSelection(selection), expand_group=True)
+        except Exception as err:  # noqa: BLE001 - what cannot be resolved here cannot be checked: never passed on unchecked
+            return f"the target cannot be read ({type(err).__name__}): entity, device, area, floor and label ids must be strings"
+        # expansion replaces a group by its members: the group named must be published too
+        wanted = selected.referenced | selected.indirectly_referenced | {e for e in split if valid_entity_id(e)} | _entity_ids_in(data)
+        outside = sorted(e for e in wanted if e not in self._topics)
         if outside:
             return f"not entities this container publishes: {', '.join(outside[:5])}{'…' if len(outside) > 5 else ''}"
         return None
@@ -1036,12 +1100,11 @@ class MqttPublisher:
     def _excluded_now(self, entity_id: str) -> bool:
         """Excluded by a rule or by its integration: an entity excluded while this process was down
         still has a retained discovery config and document, which the orphan sweep must remove."""
-        from homeassistant.helpers import entity_registry as er
-
         if self.rules.for_entity(entity_id).get("exclude"):
             return True
-        entry = er.async_get(self.hass).async_get(entity_id)
-        return bool(entry and entry.platform in self.config.exclude_integrations)
+        # like _group_by_device: an entity without a registry entry (YAML platform) belongs to the platform that added it
+        integration = platform_of(self.hass, entity_id)
+        return bool(integration and integration in self.config.exclude_integrations)
 
     def _reject_empty_call(self, rest: str) -> None:
         """A call needs a JSON object ({} without data); an empty payload is what clearing a retained call looks like."""
@@ -1065,13 +1128,14 @@ class MqttPublisher:
         if not _SERVICE_NAME.fullmatch(domain) or not _SERVICE_NAME.fullmatch(service):
             self._finish(self._remember("call", rest[:80], payload), "rejected", "domain and service must be names made of a-z, 0-9 and _")
             return
-        if domain in MQTT_CALL_DENY_DOMAINS or domain in self.config.exclude_integrations:
-            self._publish_result(domain, service, {"id": _call_id_of(payload), "service": f"{domain}.{service}", "ok": False,
-                                                   "error": f"domain {domain} is not callable over MQTT"})
-            self._finish(self._remember("call", f"{domain}.{service}", payload), "rejected", f"domain {domain} is not callable over MQTT")
+        denied = (f"domain {domain} is not callable over MQTT" if domain in MQTT_CALL_DENY_DOMAINS or domain in self.config.exclude_integrations
+                  else f"{domain}.{service} is not callable over MQTT" if (domain, service) in MQTT_CALL_DENY_SERVICES else None)
+        if denied:
+            self._publish_result(domain, service, {"id": _call_id_of(payload), "service": f"{domain}.{service}", "ok": False, "error": denied})
+            self._finish(self._remember("call", f"{domain}.{service}", payload), "rejected", denied)
             return
         try:
-            data = json.loads(payload, parse_constant=_no_constant) if payload.strip() else {}
+            data = _loads_call(payload) if payload.strip() else {}
             if not isinstance(data, dict):
                 raise ValueError("payload must be a JSON object")
         except (ValueError, RecursionError) as err:
@@ -1194,7 +1258,8 @@ class MqttPublisher:
 
     def _topic_for(self, entity_id: str, integration: str) -> str:
         domain, object_id = entity_id.split(".", 1)
-        return f"{self.base_topic}/{integration}/{domain}/{object_id}"
+        segment = f"{integration}-integration" if integration in RESERVED_TOPIC_SEGMENTS else integration
+        return f"{self.base_topic}/{segment}/{domain}/{object_id}"
 
     def _integration_of(self, entity_id: str) -> str | None:
         return platform_of(self.hass, entity_id)
@@ -1302,9 +1367,10 @@ class MqttPublisher:
         without a state (disabled) are included as enabled_by_default=false."""
         ent_reg = er.async_get(self.hass)
         groups: dict[str, tuple[dict[str, Any], dict[str, dict[str, Any]]]] = {}
-        counts = {"mirrored": 0, "disabled": 0, "collisions": 0}
+        counts = {"mirrored": 0, "disabled": 0, "collisions": 0, "default_id_duplicates": 0}
         seen: set[str] = set()
         keys: dict[tuple[str, str], str] = {}  # (discovery id, component key) -> the entity that has it
+        defaults: dict[str, str] = {}  # default_entity_id -> the first entity that asks for it
 
         def add(disc_id: str, block: dict[str, Any], entity_id: str, comp: dict[str, Any]) -> None:
             # The component key replaces the first "." with "_": image_processing.x and image.processing_x
@@ -1318,6 +1384,16 @@ class MqttPublisher:
                     _LOGGER.warning("MQTT discovery: %s skipped, its component key %s is already used by %s on the same device",
                                     entity_id, _comp_key(entity_id), owner)
                 return
+            # A mirror (camera.front -> sensor.camera_front) can ask for the id of a real entity: both are announced,
+            # the main HA gives the second one a _2 suffix, so say which
+            wanted = comp.get("default_entity_id")
+            first = defaults.setdefault(wanted, entity_id) if wanted else entity_id
+            if first != entity_id:
+                counts["default_id_duplicates"] += 1
+                if entity_id not in self._default_id_warned:
+                    self._default_id_warned.add(entity_id)
+                    _LOGGER.warning("MQTT discovery: %s asks for entity id %s like %s: the main Home Assistant will give one of them a _2 suffix",
+                                    entity_id, wanted, first)
             groups.setdefault(disc_id, (block, {}))[1][entity_id] = comp
         for state in self.hass.states.async_all():
             seen.add(state.entity_id)
@@ -1442,6 +1518,7 @@ class MqttPublisher:
         self.stats["discovery_components"] = sum(len(c) for _, c in groups.values())
         self.stats["discovery_mirrored"] = counts["mirrored"]
         self.stats["discovery_collisions"] = counts.get("collisions", 0)
+        self.stats["discovery_default_id_duplicates"] = counts.get("default_id_duplicates", 0)
         self.stats["discovery_disabled"] = counts["disabled"]
 
     def _clear_stale_docs(self) -> int:
@@ -1794,9 +1871,12 @@ class MqttPublisher:
         self._health_soon_handle = self.hass.loop.call_later(2, self.publish_health)
 
     async def _on_health_timer(self, _now) -> None:
+        self.publish_health()  # first: a resource sample that fails or hangs must not hold the verdict back
         if self.manager is not None:
-            await self.manager.async_sample()
-        self.publish_health()
+            try:
+                await self.manager.async_sample()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning("resource sample failed: %s", err)
         self.publish_manager()
         self._publish_manager_discovery()
 
@@ -1847,7 +1927,8 @@ class MqttPublisher:
         if not self._connected:
             return
         rows = await service_rows(self.hass)
-        rows = [r for r in rows if r["domain"] not in self.config.exclude_integrations and r["domain"] not in MQTT_CALL_DENY_DOMAINS]
+        rows = [{**r, "services": [s for s in r["services"] if (r["domain"], s["name"]) not in MQTT_CALL_DENY_SERVICES]} for r in rows
+                if r["domain"] not in self.config.exclude_integrations and r["domain"] not in MQTT_CALL_DENY_DOMAINS]
         base = f"{self.base_topic}/services"
         current = {r["domain"] for r in rows}
         for r in rows:
