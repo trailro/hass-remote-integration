@@ -59,7 +59,8 @@ those projects.
   the UI under its own host name (a reverse proxy) when other web apps share
   the machine; a report that relies on a hostile app on the same host name is
   not a vulnerability in this project.
-- **GitHub Actions are pinned to commit SHAs** and updated by Dependabot; the
+- **GitHub Actions are pinned to commit SHAs and the base image to a digest**,
+  both updated by Dependabot; the
   Python packages the manager adds next to Home Assistant are listed in
   `requirements.txt` with a lower bound, most with an upper bound too (`regex`
   is date-versioned and has only a floor), and resolved against Home
