@@ -181,6 +181,6 @@ $('#bkupload').onclick=async()=>{const f=$('#bkfile').files[0]; if(!f){$('#bkmsg
   const r=await (await fetch('api/backups/upload',{method:'POST',headers:{'X-Requested-With':'fetch'},body:fd})).json();
   $('#bkmsg').textContent=r.ok?`uploaded ${r.name} (${r.info.files} files)`:'ERROR: '+r.error; backups();};
 backups().catch(e=>log('backups: '+e));
-$('#restart').onclick=async()=>{if(!confirm('Restart the process?'))return;log('restarting…');await post('api/restart');setTimeout(()=>location.reload(),6000)};
+$('#restart').onclick=async()=>{if(!confirm('Restart the process?'))return;log('restarting…');const r=await post('api/restart');if(!r.ok){log('ERROR: restart refused: '+r.error);return;}setTimeout(()=>location.reload(),6000)};
 sysStatus().catch(e=>log('error: '+e)); ha().catch(e=>log('ha: '+e));
 setInterval(sysStatus,15000); setInterval(ha,60000);
