@@ -13,6 +13,7 @@ import importlib.metadata as md
 import os
 import json
 import logging
+import re
 from typing import Any
 
 from aiohttp import web
@@ -20,6 +21,7 @@ from aiohttp import web
 from .ui import load_template, render
 from homeassistant.core import HomeAssistant
 
+from .diagnostics import scrub
 from .http_util import ManagerView
 from homeassistant.loader import async_get_custom_components
 
@@ -29,6 +31,22 @@ except ImportError:  # pragma: no cover - running outside the container
     logbuffer = None  # type: ignore[assignment]
 
 LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+MAX_LIMIT = 2000
+# a logger that does not exist yet (a library imported later) may be set ahead, but every name
+# creates a permanent logger: dotted identifiers only, and a bounded number of them
+_LOGGER_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*")
+MAX_LOGGER_NAME = 200
+MAX_NEW_LOGGERS = 50
+_NEW_LOGGERS: set[str] = set()
+
+
+def _query_masked(handler, **kwargs: Any) -> tuple[list[dict[str, Any]], bool]:
+    """handler.query with message and traceback masked by the diagnostics scrubber."""
+    recs, truncated = handler.query(**kwargs)
+    for rec in recs:
+        rec["message"] = scrub(rec.get("message"))
+        rec["exc"] = scrub(rec.get("exc"))
+    return recs, truncated
 
 LOGS_HTML = load_template("logs")
 
@@ -120,12 +138,13 @@ class LogsApiView(ManagerView):
             return self.json_message("level must be one of " + ", ".join(LEVELS), status_code=400)
         try:
             since_id = int(q.get("since_id", 0) or 0)
-            limit = min(int(q.get("limit", 500) or 500), 2000)
+            limit = max(1, min(int(q.get("limit", 500) or 500), MAX_LIMIT))
         except ValueError:
             return self.json_message("since_id/limit must be integers", status_code=400)
         recs, truncated = await self.hass.async_add_executor_job(
             functools.partial(
-                handler.query,
+                _query_masked,
+                handler,
                 prefixes=tuple(q.getall("prefix", [])),
                 min_level=getattr(logging, level, logging.DEBUG),
                 text=q.get("q", ""),
@@ -164,6 +183,14 @@ class LogLevelView(ManagerView):
             return self.json_message("logger required", status_code=400)
         if level is not None and str(level).upper() not in LEVELS:
             return self.json_message("bad level", status_code=400)
+        handler = logbuffer.find() if logbuffer else None
+        known = name in logging.Logger.manager.loggerDict or name in _NEW_LOGGERS or (handler is not None and name in handler.loggers)
+        if not known:
+            if len(name) > MAX_LOGGER_NAME or not _LOGGER_NAME.fullmatch(name):
+                return self.json_message("logger must be a dotted Python name (letters, digits, _ and -)", status_code=400)
+            if len(_NEW_LOGGERS) >= MAX_NEW_LOGGERS:
+                return self.json_message(f"at most {MAX_NEW_LOGGERS} loggers that do not exist yet can be set", status_code=400)
+            _NEW_LOGGERS.add(name)
         logging.getLogger(name).setLevel(logging.NOTSET if level is None else getattr(logging, str(level).upper()))
         logging.getLogger(__name__).info("log level %s -> %s (from UI)", name, level or "inherited")
         return self.json({"ok": True, "logger": name, "level": level})

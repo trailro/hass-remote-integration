@@ -30,11 +30,7 @@ from custom_components.integration_manager.mqtt_publisher import MqttConfig, Mqt
 from custom_components.integration_manager.settings import Settings
 from custom_components.integration_manager.views import MqttRulesView
 from custom_components.integration_manager import http_util
-
-try:
-    from custom_components.integration_manager import writer
-except ImportError:  # before C5: every test that needs it errors on its own
-    writer = None
+from custom_components.integration_manager import writer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -306,8 +302,7 @@ class RoutedSavesTest(unittest.TestCase):
                 device.manager_latest = "2.0.0"
                 device._remember_latest()
                 await asyncio.sleep(1.2)
-                if writer is not None:
-                    await writer.async_drain(5)
+                await writer.async_drain(5)
 
         asyncio.run(main())
         self.assertEqual(_read(device._latest_file)["manager"], "2.0.0")

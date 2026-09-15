@@ -81,7 +81,7 @@ function imRender(){
    <table><tr><th>integration</th><th>entry</th><th>v</th><th>entities</th><th>devices</th><th>store files</th><th></th></tr>`;
   for(const [dom,d] of Object.entries(s.domains).sort()) for(const e of d.entries){
     const known=!!REG[dom], here=!!INSTALLED[dom];
-    h+=`<tr><td>${esc(dom)}${known?' <span class="tag ok">in registry</span>':''}${here?' <span class="tag">installed here</span>':''}</td><td>${esc(e.title||'')} <span class="mut">${esc(e.entry_id.slice(0,8))}</span></td><td>${esc(e.version)}.${esc(e.minor_version)}</td><td>${esc(d.entities)}</td><td>${esc(d.devices)}</td><td>${d.storage_files.map(esc).join(', ')||'—'}</td>
+    h+=`<tr><td>${esc(dom)}${known?' <span class="tag ok">in registry</span>':''}${here?' <span class="tag">installed here</span>':''}</td><td>${esc(e.title||'')} <span class="mut">${esc(String(e.entry_id).slice(0,8))}</span></td><td>${esc(e.version)}.${esc(e.minor_version)}</td><td>${esc(d.entities)}</td><td>${esc(d.devices)}</td><td>${d.storage_files.map(esc).join(', ')||'—'}</td>
       <td><button data-dom="${esc(dom)}" data-eid="${esc(e.entry_id)}" ${here&&d.importable?'':'disabled title="install the integration here first (registry)"'}>Prepare import</button></td></tr>`;
   }
   box.innerHTML=h+'</table>';

@@ -268,7 +268,7 @@ async def async_setup_auth(hass: HomeAssistant) -> Auth:
             await asyncio.sleep(1)
         if request.path.startswith("/api/"):
             return web.json_response({"message": "login required (session cookie from /login, or Authorization: Bearer <password>)"}, status=401)
-        return web.HTTPFound("/login?next=" + quote(request.path_qs, safe=""))
+        raise web.HTTPFound("/login?next=" + quote(request.path_qs, safe=""))
 
     try:
         hass.http.app.middlewares.append(password_guard)
@@ -287,7 +287,7 @@ class LoginPageView(ManagerView):
 
     async def get(self, request: web.Request) -> web.Response:
         if not self.auth.enabled:
-            return web.HTTPFound("/")
+            raise web.HTTPFound("/")
         return web.Response(text=LOGIN_HTML, content_type="text/html")
 
 
