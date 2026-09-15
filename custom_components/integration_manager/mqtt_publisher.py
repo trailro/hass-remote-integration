@@ -960,10 +960,13 @@ class MqttPublisher:
 
         ids = data.get("entity_id")
         named = [ids] if isinstance(ids, str) else ids if isinstance(ids, list) else []
-        if any(isinstance(x, str) and ENTITY_MATCH_ALL in (p.strip() for p in x.split(",")) for x in named):
+        # "a, b" is split by the service schema only after this check: split it the same way first
+        split = [p.strip() for x in named if isinstance(x, str) for p in x.split(",") if p.strip()]
+        if ENTITY_MATCH_ALL in split:
             return "entity_id all is not accepted over MQTT: name the entities"
         try:
-            selected = async_extract_referenced_entity_ids(self.hass, TargetSelection(data), expand_group=False)
+            selection = {**data, "entity_id": split} if "entity_id" in data else data
+            selected = async_extract_referenced_entity_ids(self.hass, TargetSelection(selection), expand_group=False)
         except Exception:  # noqa: BLE001 - a malformed target is the service schema's to reject
             return None
         outside = sorted(e for e in selected.referenced | selected.indirectly_referenced if e not in self._topics)

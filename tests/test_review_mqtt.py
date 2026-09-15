@@ -90,6 +90,12 @@ class CallScopeTest(unittest.TestCase):
     def test_area_resolving_outside_refused(self):
         self.assertIn("light.kitchen", self._problem({"area_id": "kitchen"}, _selected(indirect=["light.kitchen", "switch.published"])))
 
+    def test_comma_separated_ids_are_split_before_resolving(self):
+        with mock.patch("homeassistant.helpers.target.TargetSelection") as selection, \
+                mock.patch("homeassistant.helpers.target.async_extract_referenced_entity_ids", return_value=_selected(["switch.published"])):
+            self.assertIsNone(self.pub._call_target_problem({"entity_id": "switch.published , climate.zone"}))
+        self.assertEqual(selection.call_args.args[0]["entity_id"], ["switch.published", "climate.zone"])
+
     def test_all_refused(self):
         self.assertIn("all", self._problem({"entity_id": "all"}, _selected()))
         self.assertIn("all", self._problem({"entity_id": ["switch.published", "all"]}, _selected()))
