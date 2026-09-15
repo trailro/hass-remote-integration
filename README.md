@@ -266,6 +266,9 @@ docker compose pull && docker compose up -d
 Everything lives on the volume (Home Assistant, the integration, its
 configuration, backups), so replacing the container keeps it; the new manager
 is copied onto the volume at boot. With `HRI_VERSION` pinned, change it first.
+Home Assistant writes its registries last when it stops, so the compose file
+gives the container 120 s to stop (`stop_grace_period`) and runs an init
+process; with plain `docker run`, add `--init --stop-timeout 120`.
 
 ### Updating the integration
 
@@ -537,9 +540,9 @@ hass_<domain>/manager/result                        outcome of a manager action,
   entities with their customisations until the integration starts again.
   *Uninstall* clears everything retained under that identity, so the main Home
   Assistant removes the entities and devices. Entities that a restore, an
-  import or a rebuild took away before a restart are removed there once Home
-  Assistant in the container has started (only entities that exist neither as
-  a state nor in its entity registry). The timeline, the resource history and
+  import or a rebuild took away before a restart are removed there five
+  minutes after Home Assistant in the container has started (only entities
+  that exist neither as a state nor in its entity registry by then). The timeline, the resource history and
   the change reports are not part of backups, so a restore does not roll them
   back.
 - Before connecting, the container checks that no *foreign* retained data sits

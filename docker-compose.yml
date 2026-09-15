@@ -11,6 +11,8 @@ services:
     image: ghcr.io/trailro/hass-remote-integration:${HRI_VERSION:-latest}
     container_name: ${HRI_NAME:-hass-remote-integration}
     restart: unless-stopped
+    init: true                # signals reach the entrypoint and orphaned processes are reaped
+    stop_grace_period: 120s   # Home Assistant saves its registries last: Docker's default 10 s kills it first
     ports:
       - "${HRI_PORT:-8087}:${HRI_PORT:-8087}"
     volumes:

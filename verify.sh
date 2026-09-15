@@ -18,7 +18,7 @@ api_get() {  # $1 timeout, $2 url; with a password set, the API wants it as a be
 }
 
 start() {
-  docker run -d --name "$NAME" --restart unless-stopped \
+  docker run -d --name "$NAME" --restart unless-stopped --init --stop-timeout 120 \
     ${HRI_NETWORK:+--network "$HRI_NETWORK"} -p "$PORT:$PORT" \
     -v "$NAME:/config" \
     -e TZ="${TZ:-UTC}" -e HRI_PORT="$PORT" ${HRI_PASSWORD:+-e "HRI_PASSWORD=$HRI_PASSWORD"} \

@@ -7,7 +7,7 @@ name: Image
 # after a registry cleanup) and never moves :latest.
 on:
   release:
-    types: [published]
+    types: [published, released]  # released: a pre-release promoted to a full release
   workflow_dispatch:
     inputs:
       tag:

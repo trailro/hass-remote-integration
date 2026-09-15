@@ -543,33 +543,45 @@ def _forget_cached_stores(hass: HomeAssistant, names: list[str]) -> None:
         manager.async_invalidate(name)
 
 
-def _unmask(given: Any, stored: Any) -> Any:
+def _unmask(given: Any, stored: Any, misses: list[str] | None = None, path: str = "") -> Any:
     """The import form may come from the masked GET summary (diagnostics.scrub):
     whatever still equals the masked form of the backup's value at the same
     place (a "***" under a secret key, a secret inside a text, the same in
-    list items) gets the stored value back; edited values stay."""
+    list items) gets the stored value back; edited values stay.  A masked
+    value that cannot be matched (an ambiguous list, a changed place) is
+    added to ``misses``; a value that holds "***" in the backup itself is not."""
     from .diagnostics import scrub
 
-    if isinstance(given, dict) and isinstance(stored, dict):
-        return {k: (stored[k] if k in stored and given[k] != stored[k] and given[k] == scrub({k: stored[k]})[k] else _unmask(v, stored.get(k)))
-                for k, v in given.items()}
-    if isinstance(given, list) and isinstance(stored, list):
-        if len(given) == len(stored):
-            return [_unmask(g, s) for g, s in zip(given, stored)]
-        # items removed or added in the form: pair each with the stored item whose masked form it still is
-        masked = [scrub(s) for s in stored]
-        return [stored[masked.index(g)] if g in masked else g for g in given]
-    if isinstance(given, str) and isinstance(stored, str) and given != stored and given == scrub(stored):
-        return stored
+    misses = misses if misses is not None else []
+    if isinstance(given, dict):
+        st = stored if isinstance(stored, dict) else {}
+        out = {}
+        for k, v in given.items():
+            if k in st and v != st[k] and v == scrub({k: st[k]})[k]:
+                out[k] = st[k]
+            else:
+                out[k] = _unmask(v, st.get(k), misses, f"{path}.{k}" if path else str(k))
+        return out
+    if isinstance(given, list):
+        st = stored if isinstance(stored, list) else []
+        masked = [scrub(s) for s in st]
+        if len(given) == len(st) and all(g == m or g == s for g, m, s in zip(given, masked, st)):
+            return [s if g == m else g for g, m, s in zip(given, masked, st)]  # unchanged order
+        out_list = []
+        for i, g in enumerate(given):
+            if g in st:
+                out_list.append(g)
+            elif masked.count(g) == 1:
+                out_list.append(st[masked.index(g)])  # moved or its neighbours removed: paired by content
+            else:
+                out_list.append(_unmask(g, None, misses, f"{path}[{i}]"))
+        return out_list
+    if isinstance(given, str):
+        if isinstance(stored, str) and given != stored and given == scrub(stored):
+            return stored
+        if "***" in given and given != stored:
+            misses.append(path or "(value)")
     return given
-
-
-def _still_masked(value: Any) -> bool:
-    if isinstance(value, dict):
-        return any(_still_masked(v) for v in value.values())
-    if isinstance(value, list):
-        return any(_still_masked(v) for v in value)
-    return isinstance(value, str) and "***" in value
 
 
 # the entry is in and set up as far as the device allows now: a device offline
@@ -579,7 +591,7 @@ _KEEP_STATES = (ConfigEntryState.LOADED, ConfigEntryState.SETUP_RETRY, ConfigEnt
 
 def _reauth_pending(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return any(f.get("context", {}).get("source") == "reauth" and f.get("context", {}).get("entry_id") == entry.entry_id
-               for f in hass.config_entries.flow.async_progress_by_handler(entry.domain))
+               for f in hass.config_entries.flow.async_progress_by_handler(entry.domain, include_uninitialized=True))
 
 
 async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entry_id: str, data: dict[str, Any] | None,
@@ -610,12 +622,14 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
         if integration.is_built_in:
             raise ValueError(f"{domain} is a built-in integration, not something this container runs")
 
+    misses: list[str] = []
     if data is not None:
-        data = _unmask(data, src.get("data") or {})
+        data = _unmask(data, src.get("data") or {}, misses, "data")
     if options is not None:
-        options = _unmask(options, src.get("options") or {})
-    if _still_masked(data) or _still_masked(options):
-        raise ValueError("a masked value (***) could not be matched to the backup's value: enter it again, or leave that field as inspected")
+        options = _unmask(options, src.get("options") or {}, misses, "options")
+    if misses:
+        raise ValueError(f"a masked value (***) could not be matched to the backup's value ({', '.join(misses[:5])}): "
+                         "enter it again, or leave that part as inspected")
     # the original id: integrations name store files and other state after it
     # (<domain>.<entry_id>); only an id already taken here gets a new one
     original_id = src.get("entry_id")

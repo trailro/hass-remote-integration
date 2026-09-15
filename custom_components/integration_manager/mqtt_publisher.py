@@ -69,6 +69,7 @@ from .mqtt_rules import MqttRules
 from .services_catalog import service_rows
 
 _LOGGER = logging.getLogger(__name__)
+ORPHAN_SWEEP_DELAY_S = 300  # after HA started: integrations still adding entities (a device slow to answer) have had time
 HEALTH_INTERVAL_S = 60
 REPUBLISH_BATCH = 200          # documents per batch before yielding to the event loop
 REPUBLISH_BATCH_PAUSE_S = 0.02
@@ -237,6 +238,7 @@ class MqttPublisher:
         self.manager = None  # ManagerDevice (manager_device.py), set by __init__
         self._manager_absent_sent = False  # this connection already told the consumer there is no manager device
         self._resync_excluded = False  # integrations were excluded while disconnected: sweep the broker at the next connect
+        self._save_lock = threading.Lock()  # two saves (the MQTT form, a cutover) must not overwrite each other
         # once per process, after HA started: what this process never published (so the in-memory discovery
         # map cannot compute removal forms for it) but is still retained, e.g. entities a restore took away
         self._orphan_sweep_due = True
@@ -274,8 +276,21 @@ class MqttPublisher:
 
     def save(self, updates: dict[str, Any]) -> MqttConfig:
         """Validate types strictly: a null/NaN from the form would be stored
-        and crash async_start() on the next boot, before the UI exists."""
+        and crash async_start() on the next boot, before the UI exists.
+        Starts from what is on disk: a save not adopted yet (waiting for a
+        reconnect) must not be undone by the next one."""
+        with self._save_lock:
+            return self._save_locked(updates)
+
+    def _save_locked(self, updates: dict[str, Any]) -> MqttConfig:
         current = asdict(self.config)
+        try:
+            with open(self.path, encoding="utf-8") as fh:
+                on_disk = json.load(fh)
+            if isinstance(on_disk, dict):
+                current.update({k: v for k, v in on_disk.items() if k in current})
+        except (OSError, ValueError):
+            pass  # no file yet (or unreadable): the running config is the base
         for k, v in updates.items():
             if k not in current or k in ("base_topic", "client_id"):
                 continue  # derived from the running integration, never stored from the UI
@@ -1515,6 +1530,12 @@ class MqttPublisher:
     @callback
     def _on_started(self, _event: Event) -> None:
         self._health_soon()
+        self.hass.loop.call_later(ORPHAN_SWEEP_DELAY_S, lambda: self.hass.async_create_task(self._async_orphan_sweep_if_due()))
+
+    async def _async_orphan_sweep_if_due(self) -> None:
+        if self._orphan_sweep_due and self._connected and not self._moving:
+            self._orphan_sweep_due = False
+            await self._async_sweep_orphans()
 
     @callback
     def _on_entry_changed(self, _change: Any, entry: Any) -> None:
@@ -1758,8 +1779,8 @@ class MqttPublisher:
         if self._resync_excluded:
             self._resync_excluded = False
             await self._async_resync_excluded()
-        if self._orphan_sweep_due and self.hass.is_running:
-            self._orphan_sweep_due = False
+        if self._orphan_sweep_due and self.hass.is_running and time.time() - self._started_at > ORPHAN_SWEEP_DELAY_S:
+            self._orphan_sweep_due = False  # a connect after HA started: the timer from _on_started may have found it disconnected
             await self._async_sweep_orphans()
         await self._publish_services()
         _LOGGER.info(

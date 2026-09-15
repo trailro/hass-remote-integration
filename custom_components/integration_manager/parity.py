@@ -126,7 +126,7 @@ async def compute_parity(hass: HomeAssistant, installer: Installer, publisher: M
     def _ours_device(ident: str) -> bool:
         rest = ident[len(prefix):] if ident.startswith(prefix) else None
         return rest is not None and (bool(re.fullmatch(r"[0-9a-f]{32}", rest)) or rest == "manager"
-                                     or (rest.endswith("_nodevice") and rest[: -len("_nodevice")] in platforms | {installer.running, "unregistered"}))
+                                     or bool(re.fullmatch(r"[a-z0-9_]+_nodevice", rest)))  # <integration>_nodevice; the exact prefix scopes it
 
     parent_by_uid = {e["unique_id"]: e for e in p_entities if e.get("platform") == "mqtt" and _ours_uid(e.get("unique_id"))}
     p_state = {s["entity_id"]: s for s in p_states}

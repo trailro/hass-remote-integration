@@ -32,7 +32,7 @@ _SECRET_KEY = re.compile(
     r"|(api|access|private|local|encryption|device|client|master|app|user|shared|signing|session|auth|link)[_-]?key"
     r"|^(key|pin|auth|pass)$|[_-](pin|pass)$)", re.I)
 _SECRET_TEXT = re.compile(r"((?:password|passwd|passphrase|token|secret|api[_-]?key|local[_-]?key|psk)['\"]?\s*[=:]\s*['\"]?)([^'\",\s}]+)", re.I)
-_BEARER = re.compile(r"\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}", re.I)
+_BEARER = re.compile(r"\b(Bearer|Basic)\s+(?=[A-Za-z0-9._~+/=-]*[0-9._~+/=-])[A-Za-z0-9._~+/=-]{8,}")  # a token, not "Basic information"
 _URL_CRED = re.compile(r"(\b[a-z][a-z0-9+.-]*://[^/\s:@]*:)[^@\s/]+@", re.I)
 _GH_TOKEN = re.compile(r"\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
 LOG_FILE_TAIL = 500
@@ -42,7 +42,9 @@ DIAG_CACHE_S = 10  # a link any page can hit: one build at a time, repeats withi
 def scrub(value: Any) -> Any:
     if isinstance(value, dict):
         # any non-empty value under a secret key, whatever its type (a numeric pin, a list of tokens, an auth block)
-        return {k: ("***" if _SECRET_KEY.search(str(k)) and v not in (None, "", [], {}) and not isinstance(v, bool) else scrub(v))
+        # (a block whose own keys name its secrets, e.g. auth: {username, password}, is masked field by field)
+        return {k: ("***" if _SECRET_KEY.search(str(k)) and v not in (None, "", [], {}) and not isinstance(v, bool)
+                    and not (isinstance(v, dict) and any(_SECRET_KEY.search(str(k2)) for k2 in v)) else scrub(v))
                 for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [scrub(v) for v in value]
