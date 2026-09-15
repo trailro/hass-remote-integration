@@ -119,7 +119,7 @@ Put your settings in a `.env` file next to `docker-compose.yml`:
 ```bash
 TZ=Europe/Berlin          # your time zone
 HRI_PORT=8087             # port of the UI
-# HRI_VERSION=0.10.0      # optional: pin a release (default: latest)
+# HRI_VERSION=0.11.0      # optional: pin a release (default: latest)
 # HRI_PASSWORD=...        # optional: require a password for the UI and API
 ```
 
@@ -270,6 +270,12 @@ Home Assistant writes its registries last when it stops, so the compose file
 gives the container 120 s to stop (`stop_grace_period`) and runs an init
 process; with plain `docker run`, add `--init --stop-timeout 120`.
 
+With a password set, 0.11.0 changes the session cookie format: log in once
+after updating. Going back to an image older than 0.11.0 is possible (the
+volume stays readable), but that older image honours logouts only by time, so
+a session you logged out of since the update can work again there until it
+expires or you log out once more.
+
 ### Updating the integration
 
 Install the new release (Install or Integration page), optionally run
@@ -324,7 +330,12 @@ Home Assistant version change, before a restore and before replacing the
 integration; optionally daily. On **System**
 you can create, download, upload, delete and restore them. A restore is
 applied at the next restart, can be partial (only `.storage`, only the manager
-state, …), and is rolled back if it fails halfway.
+state, …), and is rolled back if it fails halfway. Restoring the YAML part also
+removes root `*.yaml` / `*.yml` files that are not in the backup, so a file
+created after it (a `secrets.yaml`, for example) does not survive the restore.
+A restore never rolls back the record of what happened: the timeline, the
+resource history, the change reports and the last known release versions are
+not part of backups, and neither are the login key and the logout record.
 
 Every backup records the Home Assistant version it was made on (the *HA* column),
 and Home Assistant only migrates a configuration forward. Restoring a backup
@@ -558,7 +569,9 @@ trusted LAN. Set `HRI_PASSWORD` (or `HRI_PASSWORD_FILE`, for example a Docker
 secret) to require a password:
 
 - the browser gets a session cookie from the login page, valid for 30 days,
-  and **log out** in the top bar ends every session of the UI, in all browsers;
+  and **log out** in the top bar ends every session of the UI, in all browsers,
+  including one opened a moment before (each logout starts a new session
+  generation, signed into the cookie and kept across restarts and restores);
 - scripts send the password as `Authorization: Bearer <password>`;
 - after 5 wrong attempts from one address, that address is refused for 15
   minutes;
@@ -605,7 +618,10 @@ What is in place:
   another origin cannot trigger them.
 - Secrets (MQTT password, GitHub token, parent HA token) are write-only in the
   UI, stored in files readable only by the owner, and never logged or included
-  in the diagnostics zip. Backups contain them; the login key and the logout
+  in the diagnostics zip. The diagnostics zip, the log tails and the inspection
+  of an imported Home Assistant backup mask passwords, tokens, device keys
+  (`local_key`, `noise_psk`, `encryption_key`, …), PINs, `Bearer` values and
+  credentials in URLs. Backups contain them; the login key and the logout
   record stay out of backups, so a restore never revives a logged-out session.
   The key of an encrypted Home Assistant backup you import is only used for
   that request.
@@ -626,7 +642,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 |---|---|---|
 | `HRI_PORT` | `8087` | Port of the UI and API |
 | `HRI_NAME` | `hass-remote-integration` | Container and volume name |
-| `HRI_VERSION` | `latest` | Image tag Compose pulls, for example `0.10.0` |
+| `HRI_VERSION` | `latest` | Image tag Compose pulls, for example `0.11.0` |
 | `TZ` | `UTC` | Time zone |
 | `HA_VERSION_LATEST` | `1` | `0` installs the image's baseline HA on a fresh volume instead of the newest |
 | `HRI_DEV_SRC` | `./dev-src` | Dev mode: directory mounted at `/dev-src` |
