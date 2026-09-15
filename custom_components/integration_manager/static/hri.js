@@ -10,10 +10,26 @@ const log=m=>{console.log(m); const el=$('#flash'); if(el){el.textContent=m; cle
 function chipBar(sel,counts,on,after){ $(sel).innerHTML=Object.keys(counts).sort().map(k=>`<span class="tag ${on.has(k)?'on':''}" data-k="${esc(k)}">${esc(k)} ${counts[k]}</span>`).join('');
  document.querySelectorAll(sel+' .tag').forEach(t=>t.onclick=()=>{const k=t.dataset.k;on.has(k)?on.delete(k):on.add(k);after();}); }
 
+// a newer hass-remote-integration: a banner under the top bar with the release notes of every newer release;
+// hidden until a release newer than the dismissed one appears
+function releaseBanner(mu){
+ const rel=(mu&&mu.releases)||[]; if(!rel.length||document.getElementById('hri-banner')) return;
+ const top=rel[0].tag; let dismissed=''; try{dismissed=localStorage.getItem('hri-banner-dismissed')||'';}catch(e){}
+ if(dismissed===top) return;
+ const nav=document.querySelector('nav.topbar'); if(!nav) return;
+ const notes=rel.map(r=>`<a href="${esc(r.url)}" target="_blank" rel="noopener" title="${esc(r.name)}${r.published_at?' · '+esc(r.published_at.slice(0,10)):''}">${esc(r.tag)}</a>`).join('');
+ nav.insertAdjacentHTML('afterend',`<div class="hri-banner" id="hri-banner" role="status"><span class="msg">hass-remote-integration <b>${esc(rel[0].version)}</b> is available`
+  +` (this container runs ${esc(mu.installed)}${rel.length>1?`, ${rel.length} newer releases`:''}).</span><span class="notes">Release notes: ${notes}</span>`
+  +`<a class="how" href="https://github.com/trailro/hass-remote-integration#updating-hass-remote-integration" target="_blank" rel="noopener">How to update</a>`
+  +`<button type="button" class="x" title="hide until a newer release is out" aria-label="hide">×</button></div>`);
+ document.querySelector('#hri-banner .x').onclick=()=>{try{localStorage.setItem('hri-banner-dismissed',top);}catch(e){} document.getElementById('hri-banner').remove();};
+}
+
 // top bar chips + the integration-specific log-files item
 document.addEventListener('DOMContentLoaded',()=>{
 (async()=>{try{
  const s=await fetch('/api/summary').then(r=>r.json());
+ try{releaseBanner(s.manager_update);}catch(e){}
  const r=s.running, h=s.health||'stopped', m=s.mqtt||{};
  const el=document.getElementById('tb-chips'); if(!el) return;
  el.innerHTML=(r?`<span class="chip ${r.loaded?'ok':'warn'}"><span class="dot"></span><b>${esc(r.domain)}</b> ${esc(r.running_tag||'')}</span>`:'<span class="chip"><span class="dot"></span>nothing running</span>')
