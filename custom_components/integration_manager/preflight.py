@@ -121,6 +121,20 @@ def _build_from_source(python: str, rows: list[dict[str, Any]], constraints: str
     return out
 
 
+def _pip_reason(stderr: str) -> str:
+    """The line of a failed pip run that says why: which package conflicts or needs another Python, not the help link."""
+    lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
+    for needle in ("requires a different python", "cannot install", "conflict is caused by", "no matching distribution", "could not find a version"):
+        hit = next((ln for ln in lines if needle in ln.lower()), None)
+        if hit:
+            return hit[:300]
+    return (lines[-1] if lines else "pip failed")[:300]
+
+
+# folders a Home Assistant integration ships but HA never imports: code there that does not compile is not a blocker
+_NOT_LOADED_DIRS = frozenset({"tests", "test", "scripts", "tools", "docs", "examples"})
+
+
 # modules the standard library dropped (PEP 594 in 3.13, distutils/imp/asyncore in 3.12, ...)
 _REMOVED_STDLIB = frozenset({
     "aifc", "asynchat", "asyncore", "audioop", "cgi", "cgitb", "chunk", "crypt", "distutils", "imghdr", "imp", "lib2to3",
@@ -150,7 +164,7 @@ def _code_checks(component_dir: str) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     removed: list[str] = []
     for root, dirs, files in os.walk(component_dir):
-        dirs[:] = sorted(d for d in dirs if d != "__pycache__")
+        dirs[:] = sorted(d for d in dirs if d != "__pycache__" and not (root == component_dir and d in _NOT_LOADED_DIRS))
         for name in sorted(files):
             if not name.endswith(".py"):
                 continue
@@ -260,7 +274,7 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
         installed_now = {_req_name(req): ver for req, ver in installer._requirement_versions(all_reqs).items()}
         pip = await hass.async_add_executor_job(_pip_dry_run, sys.executable, all_reqs, installer.constraints)
         if not pip["ok"]:
-            blockers.append("requirements cannot be resolved: " + (pip["stderr"].splitlines()[-1] if pip["stderr"] else "pip failed"))
+            blockers.append("requirements cannot be resolved: " + _pip_reason(pip["stderr"]))
         py = ".".join(str(x) for x in sys.version_info[:3])
         import platform
 
