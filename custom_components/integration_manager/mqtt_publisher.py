@@ -80,12 +80,29 @@ HEALTH_STALE_S = 900  # no state written by the integration's entities (last_rep
 CONFIG_FILE = "integration_manager/mqtt.json"
 # A generic service call always answers: a service that blocks (e.g. an RF
 # request that cannot be sent in read-only mode) is reported as a timeout.
-CALL_TIMEOUT_S = int(os.environ.get("HRI_CALL_TIMEOUT", "60"))
+def _call_timeout() -> int:
+    """HRI_CALL_TIMEOUT read at import: a typo ("60s") must not break the setup of this component on every boot,
+    and 0 or less would time every call out at once."""
+    raw = os.environ.get("HRI_CALL_TIMEOUT", "60")
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        _LOGGER.warning("HRI_CALL_TIMEOUT=%r is not a whole number of seconds: using 60", raw)
+        return 60
+    if value < 1:
+        _LOGGER.warning("HRI_CALL_TIMEOUT=%r is below 1 second: using 1", raw)
+        return 1
+    return value
+
+
+CALL_TIMEOUT_S = _call_timeout()
 # MQTT climate publishes the two bounds of a range change on separate topics, right after each other: the
 # first half waits this long for the second, so both go out as one set_temperature call
 RANGE_PAIR_WAIT_S = 1.0
 HISTORY_MAX = 200      # commands and calls remembered (in memory)
 DEDUP_WINDOW_S = 300   # a call repeating an _id seen this recently is answered from history, not run again
+CALLS_REMEMBERED = 1000  # _ids kept for that answer; beyond it the oldest is forgotten
+CALLS_IN_FLIGHT_MAX = 50  # service calls and commands whose service has not returned yet (timed-out ones included)
 # Never callable over MQTT (anyone with broker credentials could otherwise
 # stop this instance or run arbitrary commands); the catalog hides them too.
 CALL_DENY_DOMAINS = frozenset({"homeassistant", "shell_command", "python_script", "hassio", "integration_manager"})
@@ -102,13 +119,18 @@ CALL_MAX_DEPTH = 64
 # "<name>-integration" ("-" is never part of an integration domain), otherwise an integration called "call" would
 # publish its documents where live subscribers take them as service calls.
 RESERVED_TOPIC_SEGMENTS = frozenset({"call", "cmd", "result", "services", "manager", "health", "status"})
+# A key names a secret when it ends in one of these: code, pin and key as a word of their own (user_code, api_key, not
+# zipcode, spin or hotkey), the rest anywhere (access_token, apitoken, old_password).  Not: translation/sort/primary_key.
+_SECRET_NAME = (r"(?!(?:translation|sort|primary)_key\b)"
+                r"(?:(?:[A-Za-z0-9_-]*[_-])?(?:code|pin|key)"
+                r"|[A-Za-z0-9_-]*(?:usercode|passcode|password|passwd|secret|token|apikey|passkey|bindkey))")
 _CODE_VALUE = re.compile(
-    r"""((?<![A-Za-z0-9_])["']?(?:code|usercode|user_code|pin|passcode|password|secret|token)["']?\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'[^']*'|[^,}\s]+)""",
+    r"""((?<![A-Za-z0-9_-])["']?""" + _SECRET_NAME + r"""["']?\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'[^']*'|[^,}\s]+)""",
     re.IGNORECASE)
 _JSON_STRING = re.compile(r'"(?:[^"\\]+|\\.)*"?')
 _JSON_BRACKET = re.compile(r"[\[\]{}]")
-# service data fields that name entities besides the target (media_player.join, scene.apply/create, ...)
-_ENTITY_LIST_KEYS = frozenset({"group_members", "snapshot_entities", "entities"})
+# service data fields that name entities besides the target (media_player.join, scene.apply/create, group.set, ...)
+_ENTITY_LIST_KEYS = frozenset({"group_members", "snapshot_entities", "entities", "add_entities", "remove_entities"})
 
 
 def _mask_codes(text: str) -> str:
@@ -143,7 +165,7 @@ def _loads_call(payload: str) -> Any:
 
 def _entity_ids_in(value: Any) -> set[str]:
     """Entity ids named in service data outside the target: values of keys ending in entity_id/entity_ids, and of
-    group_members, snapshot_entities and entities (a list, a comma-separated string, or a mapping keyed by entity id),
+    group_members, snapshot_entities, entities, add_entities and remove_entities (a list, a comma-separated string, or a mapping keyed by entity id),
     at any depth.  Only what looks like an entity id counts; ids in other fields are not recognised."""
     found: set[str] = set()
     if isinstance(value, dict):
@@ -191,6 +213,11 @@ class MqttConfig:
     # lets that HA install updates, restart and back up through it.
     manager_discovery: bool = False
     manager_commands: bool = False
+    # TLS to the broker (usually port 8883): ca_certs is a CA file under the config directory, empty = the system CAs;
+    # tls_insecure skips the check that the certificate names the host (the certificate is still verified)
+    tls: bool = False
+    ca_certs: str = ""
+    tls_insecure: bool = False
 
 
 def _notification_count(hass: HomeAssistant) -> int:
@@ -263,6 +290,10 @@ _SERVICE_NAME = re.compile(r"[a-z0-9_]+")
 
 
 class MqttPublisher:
+    _stopping = False  # Home Assistant is stopping: no client may be created any more
+    _identity_sweep_due = False  # the sweep of an identity that changed while disconnected failed: retried after a connect
+    _in_flight = 0  # service calls and commands whose service task has not finished
+
     def __init__(self, hass: HomeAssistant, key_provider=None, health_provider=None, rules_provider=None) -> None:
         self._health_provider = health_provider
         # settings.health_for(domain): stale seconds, mode, unavailable share
@@ -410,9 +441,13 @@ class MqttPublisher:
                 continue  # derived from the running integration, never stored from the UI
             if k == "password" and v == "":
                 continue  # blank in the UI means "keep"
-            if k in ("enabled", "discovery_enabled", "force_base_topic", "manager_discovery", "manager_commands"):
+            if k in ("enabled", "discovery_enabled", "force_base_topic", "manager_discovery", "manager_commands", "tls", "tls_insecure"):
                 if not isinstance(v, bool):
                     raise ValueError(f"{k} must be true or false")
+            elif k == "ca_certs":
+                if not isinstance(v, str):
+                    raise ValueError("ca_certs must be a string")
+                v = self._ca_certs_path(v.strip())
             elif k in ("port", "republish_interval_s", "qos", "full_republish_interval_min"):
                 try:
                     v = int(v)
@@ -437,8 +472,35 @@ class MqttPublisher:
                 raise ValueError(f"{k} must not be empty")
             elif k in ("base_topic", "discovery_prefix") and any(ch in v for ch in "+#"):
                 raise ValueError(f"{k} must not contain MQTT wildcards")
+            if k in ("host", "discovery_prefix"):
+                v = v.strip()
             current[k] = v
         return MqttConfig(**current)
+
+    def _ca_certs_path(self, value: str) -> str:
+        """"" (the system CAs) or the absolute path of an existing file inside the config directory."""
+        if not value:
+            return ""
+        config_dir = self.hass.config.config_dir
+        path = os.path.normpath(value if os.path.isabs(value) else os.path.join(config_dir, value))
+        root = os.path.realpath(config_dir)
+        real = os.path.realpath(path)
+        if os.path.commonpath([root, real]) != root:
+            raise ValueError(f"ca_certs must be a file under {config_dir}")
+        if not os.path.isfile(real):
+            raise ValueError(f"ca_certs: {path} is not a file")
+        return path
+
+    def _new_client(self, client_id: str) -> mqtt.Client:
+        """A paho client with the configured credentials and TLS: the connection, and every scan, probe and cleanup."""
+        c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id, clean_session=True)
+        if self.config.username:
+            c.username_pw_set(self.config.username, self.config.password or None)
+        if self.config.tls:
+            c.tls_set(ca_certs=self.config.ca_certs or None)
+            if self.config.tls_insecure:
+                c.tls_insecure_set(True)
+        return c
 
     def public_config(self) -> dict[str, Any]:
         d = asdict(self.config)
@@ -571,8 +633,9 @@ class MqttPublisher:
             cleared = await self.hass.async_add_executor_job(self._clear_retained_under, self.base_topic, self.config.discovery_prefix)
             swept = cleared is not None
             _LOGGER.info("MQTT: cleared %s retained topics left under the old names by earlier runs", cleared)
-        if (moved or new.discovery_prefix != self.config.discovery_prefix) and swept:
-            # the live move handled it: the next connect must not sweep the old names a second time
+        if moved and swept:
+            # the live move handled it: the next connect must not sweep the old names a second time (a change
+            # while disconnected is left to _connect, which compares the recorded names with the new ones)
             await self.hass.async_add_executor_job(self._remember_identity, self.wanted_base_topic, new.discovery_prefix)
         if self.config.discovery_enabled and not new.discovery_enabled:
             # off means off: without this the consumer keeps every entity, and whatever changes here
@@ -630,9 +693,7 @@ class MqttPublisher:
         under `topics` until the burst goes quiet; returns {topic: payload}.
         The network thread is always stopped, whatever happens."""
         found: dict[str, bytes] = {}
-        c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"{self.client_id}-{suffix}-{secrets.token_hex(3)}", clean_session=True)
-        if self.config.username:
-            c.username_pw_set(self.config.username, self.config.password or None)
+        c = self._new_client(f"{self.client_id}-{suffix}-{secrets.token_hex(3)}")
         c.on_message = lambda cl, u, m: found.__setitem__(m.topic, m.payload) if m.retain and m.payload else None
         ack: dict[str, Any] = {"rc": None, "granted": None}
         c.on_connect = lambda cl, u, flags, rc, props=None: ack.__setitem__("rc", rc)
@@ -659,9 +720,7 @@ class MqttPublisher:
         client (QoS 1, awaited)."""
         if not topics:
             return
-        c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"{self.client_id}-{suffix}-clear-{secrets.token_hex(3)}", clean_session=True)
-        if self.config.username:
-            c.username_pw_set(self.config.username, self.config.password or None)
+        c = self._new_client(f"{self.client_id}-{suffix}-clear-{secrets.token_hex(3)}")
         ack: dict[str, Any] = {"rc": None}
         c.on_connect = lambda cl, u, flags, rc, props=None: ack.__setitem__("rc", rc)
         c.connect(self.config.host, self.config.port, keepalive=30)
@@ -732,6 +791,9 @@ class MqttPublisher:
         return len(ours)
 
     async def _on_stop(self, _: Event) -> None:
+        # first: a connect still probing or sweeping (it holds _conn_lock, which a stop does not wait for) must not
+        # create its client, publish "online" and start a republish after this disconnect
+        self._stopping = True
         await self.hass.async_add_executor_job(self._disconnect)
 
     # ----- paho ------------------------------------------------------------
@@ -739,7 +801,27 @@ class MqttPublisher:
     def _status_topic(self) -> str:
         return f"{self.base_topic}/status"
 
+    def _sweep_old_identity(self, base: str) -> bool:
+        """Blocking: what the names recorded last (base topic, discovery prefix) left retained, when they differ from
+        the current ones; records the current names once done.  False when the sweep failed (retried later)."""
+        last = read_json(self._identity_file(), {}) or {}
+        swept = True
+        if isinstance(last, dict) and last.get("base") and (last["base"], last.get("prefix")) != (base, self.config.discovery_prefix):
+            # changed while we were not connected (async_reconnect only moves a live
+            # connection): what the previous names left retained goes now; with the
+            # same identity only the discovery configs under the old prefix moved
+            same_base = last["base"] == base
+            n = self._clear_retained_under(last["base"], last.get("prefix") or self.config.discovery_prefix, docs=not same_base)
+            swept = n is not None
+            _LOGGER.info("MQTT: identity/prefix changed while disconnected (%s/%s -> %s/%s): cleared %s retained topics",
+                         last.get("base"), last.get("prefix"), base, self.config.discovery_prefix, n)
+        if swept:
+            self._remember_identity(base, self.config.discovery_prefix)
+        return swept
+
     def _connect(self) -> None:
+        if self._stopping:
+            return
         base = self.wanted_base_topic
         if not base:
             # nothing running -> no identity -> nothing to publish under
@@ -762,19 +844,10 @@ class MqttPublisher:
                 self._probed_ok.add(probe_key)  # this process owns the namespace now: no re-probe on reconnects
         elif self.config.force_base_topic:
             self.stats["foreign_topics"], self.stats["foreign_count"] = [], 0
-        last = read_json(self._identity_file(), {}) or {}
-        swept = True
-        if isinstance(last, dict) and last.get("base") and (last["base"], last.get("prefix")) != (base, self.config.discovery_prefix):
-            # changed while we were not connected (async_reconnect only moves a live
-            # connection): what the previous names left retained goes now; with the
-            # same identity only the discovery configs under the old prefix moved
-            same_base = last["base"] == base
-            n = self._clear_retained_under(last["base"], last.get("prefix") or self.config.discovery_prefix, docs=not same_base)
-            swept = n is not None
-            _LOGGER.info("MQTT: identity/prefix changed while disconnected (%s/%s -> %s/%s): cleared %s retained topics",
-                         last.get("base"), last.get("prefix"), base, self.config.discovery_prefix, n)
-        if swept:
-            self._remember_identity(base, self.config.discovery_prefix)
+        # a failed sweep (the broker unreachable right now) is retried by the full republish after paho connects
+        self._identity_sweep_due = not self._sweep_old_identity(base)
+        if self._stopping:
+            return
         self._live_base = base
         self._live_prefix = base + "_"
         old = self._client
@@ -785,21 +858,15 @@ class MqttPublisher:
                 old.disconnect()
             except Exception:  # noqa: BLE001
                 pass
-        c = mqtt.Client(
-            mqtt.CallbackAPIVersion.VERSION2,
-            client_id=self.client_id,
-            clean_session=True,
-        )
-        if self.config.username:
-            c.username_pw_set(self.config.username, self.config.password or None)
-        c.will_set(self._status_topic(), "offline", qos=1, retain=True)
-        c.on_connect = self._on_connect
-        c.on_connect_fail = self._on_connect_fail
-        c.on_disconnect = self._on_disconnect
-        c.on_message = self._on_message
-        c.suppress_exceptions = True  # a callback bug must not kill the network thread
-        c.reconnect_delay_set(min_delay=2, max_delay=60)
         try:
+            c = self._new_client(self.client_id)  # tls_set raises on an unreadable CA file
+            c.will_set(self._status_topic(), "offline", qos=1, retain=True)
+            c.on_connect = self._on_connect
+            c.on_connect_fail = self._on_connect_fail
+            c.on_disconnect = self._on_disconnect
+            c.on_message = self._on_message
+            c.suppress_exceptions = True  # a callback bug must not kill the network thread
+            c.reconnect_delay_set(min_delay=2, max_delay=60)
             c.connect_async(self.config.host, self.config.port, keepalive=60)
             c.loop_start()
             self._client = c
@@ -807,6 +874,9 @@ class MqttPublisher:
         except Exception as err:  # noqa: BLE001
             self.stats["connect_error"] = f"{type(err).__name__}: {err}"
             _LOGGER.error("MQTT connect failed: %s", err)
+            return
+        if self._stopping:
+            self._disconnect(publish_offline=False)  # the stop ran between the check above and the client existing
 
     def _disconnect(self, publish_offline: bool = True) -> None:
         c, self._client = self._client, None
@@ -841,6 +911,8 @@ class MqttPublisher:
             self.stats["connect_error"] = f"reason_code={reason_code}"
             _LOGGER.error("MQTT connect refused: %s", reason_code)
             return
+        if self._stopping:
+            return  # no "online" and no republish while Home Assistant stops
         self._connected = True
         self.stats["connected"] = True
         self.stats["connect_error"] = ""
@@ -970,9 +1042,13 @@ class MqttPublisher:
                 if low > high:
                     finish("rejected", f"low {data['target_temp_low']} is above high {data['target_temp_high']}: send both bounds of the range")
                     return
+            if self._in_flight >= CALLS_IN_FLIGHT_MAX:
+                finish("rejected", f"too many calls in progress ({CALLS_IN_FLIGHT_MAX}): try again later")
+                return
             # like a service call: the handler keeps running past the timeout, the
             # history shows "timeout" now and "late-ok"/"late-error" when it ends
             task = self.hass.async_create_task(self.hass.services.async_call(svc_domain, service, data, blocking=True))
+            self._call_started(task)
             done, _ = await asyncio.wait({task}, timeout=CALL_TIMEOUT_S)
             late = not done
             if late:
@@ -1057,13 +1133,21 @@ class MqttPublisher:
             rec["result"] = result
 
     def _seen_call(self, key: str | None) -> dict[str, Any] | None:
-        """The canonical record of a call with this id inside the dedup window."""
-        if key is None:
-            return None
+        """The canonical record of a call with this id inside the dedup window.  Expires old records on every call,
+        with an _id or without: a burst of ids followed by calls without one must not keep them all."""
         now = time.time()
         for k in [k for k, r in self._calls.items() if now - r["received"] >= DEDUP_WINDOW_S]:
             del self._calls[k]  # expired
-        return self._calls.get(key)
+        return self._calls.get(key) if key is not None else None
+
+    def _call_started(self, task: asyncio.Task) -> None:
+        """A service task counts against CALLS_IN_FLIGHT_MAX until it ends, a timed-out one included."""
+        self._in_flight += 1
+
+        def ended(_task: asyncio.Task) -> None:
+            self._in_flight -= 1
+
+        task.add_done_callback(ended)
 
     def recent_commands(self, limit: int = 30) -> list[dict[str, Any]]:
         iso = lambda t: time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t)) if t else None
@@ -1159,24 +1243,42 @@ class MqttPublisher:
             _LOGGER.info("MQTT call %s.%s id=%s repeated: answered from history (%s)", domain, service, call_id, prior["state"])
             return
         rec = self._remember("call", f"{domain}.{service}", data, call_id)
-        if call_id not in (None, ""):
-            self._calls[call_key] = rec  # the canonical record: duplicates never replace it
+        # the canonical record, duplicates never replace it: only what their answer needs (not the data)
+        seen: dict[str, Any] | None = None
+        if call_key is not None:
+            seen = {"received": rec["received"], "state": "running", "result": None}
+            self._calls[call_key] = seen
+            while len(self._calls) > CALLS_REMEMBERED:
+                del self._calls[next(iter(self._calls))]  # the oldest _id
         self.stats["calls"] += 1
         self.stats["last_call"] = _mask_codes(f"{domain}.{service} {json.dumps(data)}")[:140]
+
+        def done(state: str, error: str | None, res: dict[str, Any]) -> None:
+            self._finish(rec, state, error, res)
+            if seen is not None:
+                seen["state"], seen["result"] = state, res
 
         async def _call() -> None:
             base: dict[str, Any] = {"id": call_id, "service": f"{domain}.{service}"}
             if not self.hass.services.has_service(domain, service):
                 res = {**base, "ok": False, "error": f"unknown service {domain}.{service}"}
                 self._publish_result(domain, service, res)
-                self._finish(rec, "error", res["error"], res)
+                done("error", res["error"], res)
                 _LOGGER.warning("MQTT call %s.%s failed: unknown service", domain, service)
                 return
             if problem := self._call_target_problem(data):
                 res = {**base, "ok": False, "error": problem}
                 self._publish_result(domain, service, res)
-                self._finish(rec, "rejected", problem, res)
+                done("rejected", problem, res)
                 _LOGGER.warning("MQTT call %s.%s refused: %s", domain, service, problem)
+                return
+            if self._in_flight >= CALLS_IN_FLIGHT_MAX:
+                res = {**base, "ok": False, "error": f"too many calls in progress ({CALLS_IN_FLIGHT_MAX}): try again later"}
+                self._publish_result(domain, service, res)
+                done("rejected", res["error"], res)
+                if seen is not None and self._calls.get(call_key) is seen:
+                    del self._calls[call_key]  # never ran: a retry with the same _id runs once there is room
+                _LOGGER.warning("MQTT call %s.%s refused: %s calls in progress", domain, service, self._in_flight)
                 return
             wants = self.hass.services.supports_response(domain, service) != SupportsResponse.NONE
             _LOGGER.debug("MQTT call %s.%s start (response=%s) data=%s", domain, service, wants, _mask_codes(json.dumps(data, default=str)))
@@ -1187,13 +1289,14 @@ class MqttPublisher:
             task = self.hass.async_create_task(
                 self.hass.services.async_call(domain, service, data, blocking=True, return_response=wants)
             )
-            done, _ = await asyncio.wait({task}, timeout=CALL_TIMEOUT_S)
-            late = not done
-            _LOGGER.debug("MQTT call %s.%s wait returned, done=%s", domain, service, bool(done))
+            self._call_started(task)
+            finished, _ = await asyncio.wait({task}, timeout=CALL_TIMEOUT_S)
+            late = not finished
+            _LOGGER.debug("MQTT call %s.%s wait returned, done=%s", domain, service, bool(finished))
             if late:
                 res = {**base, "ok": False, "error": f"timeout after {CALL_TIMEOUT_S}s (service still running)"}
                 self._publish_result(domain, service, res)
-                self._finish(rec, "timeout", res["error"], res)
+                done("timeout", res["error"], res)
                 _LOGGER.warning("MQTT call %s.%s timed out after %ss", domain, service, CALL_TIMEOUT_S)
             try:
                 resp = await task
@@ -1214,8 +1317,8 @@ class MqttPublisher:
             if late:
                 result["late"] = True
             self._publish_result(domain, service, result)
-            self._finish(rec, ("late-ok" if result.get("ok") else "late-error") if late else ("ok" if result.get("ok") else "error"),
-                         result.get("error"), result)
+            done(("late-ok" if result.get("ok") else "late-error") if late else ("ok" if result.get("ok") else "error"),
+                 result.get("error"), result)
 
         self.hass.loop.call_soon_threadsafe(lambda: self.hass.async_create_task(_call()))
 
@@ -1981,7 +2084,17 @@ class MqttPublisher:
                 self._last_event[new.entity_id] = new.state
             self._publish_state(new, is_event=is_event)
         elif old is not None:
-            self._clear(old.entity_id)
+            entry = er.async_get(self.hass).async_get(old.entity_id)
+            if entry is not None and entry.disabled and entry.disabled_by is not er.RegistryEntryDisabler.CONFIG_ENTRY:
+                self._publish_disabled(old.entity_id, old)  # disabling removes the state: see _on_registry
+            else:
+                self._clear(old.entity_id)
+
+    def _publish_disabled(self, entity_id: str, old: State | None) -> None:
+        """An entity disabled here (by the user, its device or its integration) stays on the consumer with its
+        customisations, unavailable there: an empty document would leave its last value showing."""
+        attrs = dict(old.attributes) if old is not None else {}
+        self._publish_state(State(entity_id, "unavailable", attrs, validate_entity_id=False))
 
     @callback
     def _on_registry(self, event: Event) -> None:
@@ -1992,6 +2105,7 @@ class MqttPublisher:
                 self._remove_component(entity_id)
             self._clear(entity_id)
             return
+        disabled = False
         if action == "update" and "disabled_by" in (event.data.get("changes") or {}) and self._connected:
             entry = er.async_get(self.hass).async_get(entity_id)
             if entry is not None and entry.disabled_by is er.RegistryEntryDisabler.CONFIG_ENTRY:
@@ -1999,12 +2113,11 @@ class MqttPublisher:
                 # consumer, unavailable, with its customisations; nothing is removed
                 return
             if entry is not None and entry.disabled:
-                # the consumer would keep the last value forever (empty payloads are
-                # ignored by its templates): remove the entity there instead
-                if self.config.discovery_enabled:
-                    self._remove_component(entity_id)  # removal first: an empty document before it logs "Erroneous JSON" there
-                self._clear(entity_id)
-                return
+                # Not removed from the consumer: the full republish announces every registry entry without a state
+                # (enabled_by_default false) and would bring it back there, without its customisations.  It stays,
+                # unavailable (an empty document would leave its last value showing); deleting it removes it.
+                disabled = True
+                self._publish_disabled(entity_id, self.hass.states.get(entity_id))
         if action in ("create", "update") and self._connected:
             old_id = (event.data.get("changes") or {}).get("entity_id") or event.data.get("old_entity_id")
             if old_id and old_id != entity_id:
@@ -2012,7 +2125,7 @@ class MqttPublisher:
                     self._remove_component(old_id)  # removal first: an empty document before it logs "Erroneous JSON" there
                 self._clear(old_id)
             state = self.hass.states.get(entity_id)
-            if state is not None:
+            if state is not None and not disabled:
                 self._publish_state(state)
             # Registry metadata changed (name, device, class...): refresh
             # discovery once the burst is over (an integration adding 100
@@ -2104,6 +2217,9 @@ class MqttPublisher:
         self._last_full = time.time()
         self.stats["entities_last_run"] = n
         self.stats["last_full_republish"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        if self._identity_sweep_due:
+            # the identity changed while the broker was unreachable: what the old names left retained goes now
+            self._identity_sweep_due = not await self.hass.async_add_executor_job(self._sweep_old_identity, self.base_topic)
         if self.config.discovery_enabled and self._orphan_sweep_due and self._boot_components is None:
             await self._async_read_boot_components()
         if self.config.discovery_enabled:
@@ -2146,6 +2262,7 @@ class MqttPublisher:
             "has_identity": bool(self.wanted_base_topic),
             "prefix": self.prefix,
             "force_base_topic": self.config.force_base_topic,
+            "tls": self.config.tls,
             "entities_total": len(self.hass.states.async_all()),
             # registry entries with no state (disabled or not yet added): no
             # document to publish, only announced through discovery

@@ -68,7 +68,8 @@ def _num(value: Any, default: float) -> float:
 
 
 def _onoff(expr: str) -> str:
-    return _tpl(f"'ON' if {expr} == 'on' else 'OFF'")
+    """ON/OFF for the on/off platforms; 'None' (their "unknown") for unknown and unavailable, never a made-up OFF."""
+    return _tpl(f"'None' if {expr} in ['unavailable', 'unknown'] else ('ON' if {expr} == 'on' else 'OFF')")
 
 
 def _attr(name: str) -> str:
