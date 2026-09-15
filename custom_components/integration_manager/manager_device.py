@@ -486,8 +486,6 @@ class ManagerDevice:
     async def _do_backup(self) -> dict[str, Any]:
         import backupkit
 
-        if self.installer.busy:
-            raise ValueError("an install/start is running")
         rec = await self.installer.async_backup_exclusive("mqtt")
         await self.hass.async_add_executor_job(backupkit.prune, self.installer.config_dir, self.installer.settings.backup_keep,
                                                self.installer.protected_backups() | {rec["name"]})

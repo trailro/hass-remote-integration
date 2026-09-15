@@ -58,12 +58,12 @@ class BackupCreateView(ManagerView):
     @with_body
     async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
         cfg = self.hass.config.config_dir
-        if self.installer.busy:
-            return self.json({"ok": False, "error": "an install/start is running: try again in a moment"})
         try:
             rec = await self.installer.async_backup_exclusive(str(body.get("label") or ""))
             removed = await self.hass.async_add_executor_job(backupkit.prune, cfg, self.installer.settings.backup_keep,
                                                              self.installer.protected_backups())
+        except ValueError as err:
+            return self.json({"ok": False, "error": str(err)})
         except Exception as err:  # noqa: BLE001
             return self.json({"ok": False, "error": f"{type(err).__name__}: {err}"})
         return self.json({"ok": True, "backup": rec, "pruned": removed})

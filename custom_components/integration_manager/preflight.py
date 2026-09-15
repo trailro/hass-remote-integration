@@ -38,6 +38,15 @@ RAW = "https://raw.githubusercontent.com/{repo}/{ref}/{path}"
 GITHUB_API = "https://api.github.com/repos/{repo}"
 
 
+
+
+def _read_text(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
 def _pip_dry_run(python: str, requirements: list[str], constraints: str | None) -> dict[str, Any]:
     """Blocking: what pip would install for ``requirements`` in this venv.
     ``--dry-run --report`` resolves everything (wheels are downloaded to a
@@ -161,10 +170,7 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
         patch_rows = []
         for row in rows:
             path = patches.patch_path(installer.config_dir, domain, row["name"])
-            try:
-                text = open(path, encoding="utf-8", errors="replace").read()
-            except OSError:
-                text = ""
+            text = await hass.async_add_executor_job(_read_text, path)
             after = _patch_after_update(text, new_versions)
             patch_rows.append({**row, "after_update": after})
             st = str(row.get("status", ""))

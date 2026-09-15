@@ -40,6 +40,7 @@ def _version() -> str:
 
 
 ASSET_VERSION = _version()
+_ASSETS = frozenset(os.listdir(STATIC_DIR))  # no directory listing on the event loop per request
 
 
 class StaticView(ManagerView):
@@ -47,7 +48,7 @@ class StaticView(ManagerView):
 
     async def get(self, request: web.Request, name: str) -> web.Response:
         ext = os.path.splitext(name)[1]
-        if ext not in _TYPES or name not in os.listdir(STATIC_DIR):
+        if ext not in _TYPES or name not in _ASSETS:
             return web.Response(status=404, text="no such asset")
         headers = {"Cache-Control": "public, max-age=31536000, immutable"} if request.query.get("v") else {"Cache-Control": "no-cache"}
         return web.FileResponse(os.path.join(STATIC_DIR, name), headers={**headers, "Content-Type": _TYPES[ext]})

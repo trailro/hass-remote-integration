@@ -111,7 +111,8 @@ async def compute_parity(hass: HomeAssistant, installer: Installer, publisher: M
 
     from .discovery import manager_device
 
-    platforms = {p.value for p in Platform}
+    # the publisher announces every state, non-platform domains (zone, person, ...) mirrored as sensors
+    platforms = {p.value for p in Platform} | {eid.split(".", 1)[0] for eid in hass.states.async_entity_ids()}
     manager_uids = {c["unique_id"][len("k_"):] for c in manager_device("k", "k_", dict.fromkeys(("status", "health", "manager", "cmd"), "t"), "x", "", True)[2].values()}
 
     def _ours_uid(uid: Any) -> bool:
@@ -124,7 +125,8 @@ async def compute_parity(hass: HomeAssistant, installer: Installer, publisher: M
 
     def _ours_device(ident: str) -> bool:
         rest = ident[len(prefix):] if ident.startswith(prefix) else None
-        return rest is not None and (bool(re.fullmatch(r"[0-9a-f]{32}", rest)) or rest == "manager" or rest == f"{installer.running}_nodevice")
+        return rest is not None and (bool(re.fullmatch(r"[0-9a-f]{32}", rest)) or rest == "manager"
+                                     or (rest.endswith("_nodevice") and rest[: -len("_nodevice")] in platforms | {installer.running, "unregistered"}))
 
     parent_by_uid = {e["unique_id"]: e for e in p_entities if e.get("platform") == "mqtt" and _ours_uid(e.get("unique_id"))}
     p_state = {s["entity_id"]: s for s in p_states}

@@ -341,8 +341,13 @@ class FlowStartView(ManagerView):
             # only the running version's code is deployed and importable: a
             # flow always belongs to the version that runs
             return self.json_message(f"{domain} is not running: start it first, the config flow is the running version's", status_code=409)
+        source, entry_id = str(body.get("source") or "user"), str(body.get("entry_id") or "")
+        if source not in ("user", "reconfigure") or (source == "reconfigure" and not entry_id):
+            return self.json_message("source must be user, or reconfigure with an entry_id", status_code=400)
         try:
-            return self.json(await self.flows.start(domain))
+            return self.json(await self.flows.start(domain, source, entry_id or None))
+        except data_entry_flow.UnknownHandler:
+            return self.json_message(f"{domain} has no config flow", status_code=400)
         except Exception as err:  # noqa: BLE001 - surfaced to the UI
             return self.json_message(f"{type(err).__name__}: {err}", status_code=500)
 
@@ -367,6 +372,10 @@ class FlowResourceView(ManagerView):
     async def post(self, request: web.Request, body: dict[str, Any], flow_id: str) -> web.Response:
         try:
             return self.json(await self.flows.configure(flow_id, body.get("user_input")))
+        except data_entry_flow.UnknownFlow:
+            return self.json_message("unknown flow (finished or aborted)", status_code=404)
+        except data_entry_flow.InvalidData as err:  # per-field errors, as HA's own flow view answers
+            return self.json({"type": "invalid_data", "errors": err.schema_errors}, status_code=400)
         except Exception as err:  # noqa: BLE001
             return self.json_message(f"{type(err).__name__}: {err}", status_code=500)
 
