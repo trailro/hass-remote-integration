@@ -84,8 +84,10 @@ HISTORY_MAX = 200      # commands and calls remembered (in memory)
 DEDUP_WINDOW_S = 300   # a call repeating an _id seen this recently is answered from history, not run again
 # Never callable over MQTT (anyone with broker credentials could otherwise
 # stop this instance or run arbitrary commands); the catalog hides them too.
-# persistent_notification: dismiss_all would erase the manager's own smoke-test and HA-change notifications.
-CALL_DENY_DOMAINS = frozenset({"homeassistant", "shell_command", "python_script", "hassio", "integration_manager", "persistent_notification"})
+CALL_DENY_DOMAINS = frozenset({"homeassistant", "shell_command", "python_script", "hassio", "integration_manager"})
+# Over MQTT only (the Services page is the operator's): dismiss_all from anyone with broker credentials would erase
+# the manager's own smoke-test and HA-change notifications, and create could plant fake ones.
+MQTT_CALL_DENY_DOMAINS = CALL_DENY_DOMAINS | {"persistent_notification"}
 _CODE_VALUE = re.compile(r"""((?<![A-Za-z0-9_])["']?code["']?\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'[^']*'|[^,}\s]+)""")
 
 
@@ -1001,7 +1003,7 @@ class MqttPublisher:
         if not _SERVICE_NAME.fullmatch(domain) or not _SERVICE_NAME.fullmatch(service):
             self._finish(self._remember("call", rest[:80], payload), "rejected", "domain and service must be names made of a-z, 0-9 and _")
             return
-        if domain in CALL_DENY_DOMAINS or domain in self.config.exclude_integrations:
+        if domain in MQTT_CALL_DENY_DOMAINS or domain in self.config.exclude_integrations:
             self._publish_result(domain, service, {"id": _call_id_of(payload), "service": f"{domain}.{service}", "ok": False,
                                                    "error": f"domain {domain} is not callable over MQTT"})
             self._finish(self._remember("call", f"{domain}.{service}", payload), "rejected", f"domain {domain} is not callable over MQTT")
@@ -1767,7 +1769,7 @@ class MqttPublisher:
         if not self._connected:
             return
         rows = await service_rows(self.hass)
-        rows = [r for r in rows if r["domain"] not in self.config.exclude_integrations and r["domain"] not in CALL_DENY_DOMAINS]
+        rows = [r for r in rows if r["domain"] not in self.config.exclude_integrations and r["domain"] not in MQTT_CALL_DENY_DOMAINS]
         base = f"{self.base_topic}/services"
         current = {r["domain"] for r in rows}
         for r in rows:

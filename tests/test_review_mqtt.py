@@ -36,7 +36,9 @@ class CommandParsingTest(unittest.TestCase):
 
 class HelpersTest(unittest.TestCase):
     def test_deny_list(self):
-        self.assertIn("persistent_notification", mp.CALL_DENY_DOMAINS)
+        self.assertIn("persistent_notification", mp.MQTT_CALL_DENY_DOMAINS)
+        self.assertNotIn("persistent_notification", mp.CALL_DENY_DOMAINS)  # the operator's Services page keeps it
+        self.assertTrue(mp.CALL_DENY_DOMAINS <= mp.MQTT_CALL_DENY_DOMAINS)
 
     def test_dedup_key_keeps_the_id_type(self):
         self.assertNotEqual(mp._call_key("a", "b", 1), mp._call_key("a", "b", "1"))
