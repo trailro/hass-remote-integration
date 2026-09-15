@@ -306,7 +306,7 @@ class VersionOrderTest(unittest.TestCase):
 
     def test_gate_target_prefers_stable(self):
         installer = SimpleNamespace(LOCAL_TAG="local", state=SimpleNamespace(installed={"probe": {"running_tag": None, "versions": {"v1.0.0": {}, "v2.0.0b1": {}}}}),
-                                    spec=lambda dom: {"repo": "o/r"})
+                                    spec=lambda dom: {"repo": "o/r"}, _version_dir=lambda dom, tag: f"/v/{dom}/{tag}")
         preflight._REPORTS.clear()
         run = mock.AsyncMock(return_value={"ok": True})
         with mock.patch.object(preflight, "run", run):

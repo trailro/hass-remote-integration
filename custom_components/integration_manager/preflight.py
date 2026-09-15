@@ -35,9 +35,9 @@ _LOGGER = logging.getLogger(__name__)
 LOCK = asyncio.Lock()  # one pip resolution at a time (UI, builder, MQTT update)
 
 PIP_TIMEOUT_S = 300
-CACHE_S = 1800  # a preflight report stays good enough to gate a start for 30 min (same release, same Home Assistant)
+CACHE_S = 1800  # a preflight report stays good enough to gate a start for 30 min (same stored copy, same Home Assistant)
+MAX_CHECK_BYTES = 5 * 1024 * 1024  # a .py file above this is a blocker, not parsed
 _REPORTS: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
-RAW = "https://raw.githubusercontent.com/{repo}/{ref}/{path}"
 GITHUB_API = "https://api.github.com/repos/{repo}"
 
 
@@ -75,11 +75,14 @@ def _pip_dry_run(python: str, requirements: list[str], constraints: str | None) 
     rows = []
     for item in report.get("install", []):
         meta = item.get("metadata", {})
-        url = str((item.get("download_info") or {}).get("url") or "")
-        rows.append({"name": meta.get("name"), "version": meta.get("version"),
+        info = item.get("download_info") or {}
+        url = str(info.get("url") or "")
+        # a VCS checkout or a local directory is no archive to build from, and the project of that name on PyPI may be another one
+        archive = bool(url) and "vcs_info" not in info and "dir_info" not in info  # dir_info is often {}
+        rows.append({"name": meta.get("name"), "version": meta.get("version"), "url": url if archive else "",
                      "requested": bool(item.get("requested")), "requires_python": meta.get("requires_python"),
                      # no wheel for this Python / architecture: pip and uv build it at install time
-                     "source_only": bool(url) and not url.split("?", 1)[0].endswith(".whl")})
+                     "source_only": archive and not url.split("?", 1)[0].endswith(".whl")})
     return {"ok": True, "install": rows, "stderr": ""}
 
 
@@ -122,7 +125,8 @@ def _build_from_source(python: str, rows: list[dict[str, Any]], constraints: str
         if not row.get("source_only") or not row.get("name"):
             continue
         with tempfile.TemporaryDirectory(prefix="hri-build-") as tmp:
-            cmd = [python, "-m", "pip", "wheel", "--no-deps", "--quiet", "-w", tmp, f"{row['name']}=={row['version']}"]
+            # the archive pip resolved (a direct URL requirement is not on the index under that name)
+            cmd = [python, "-m", "pip", "wheel", "--no-deps", "--quiet", "-w", tmp, row.get("url") or f"{row['name']}=={row['version']}"]
             if constraints and os.path.isfile(constraints):
                 cmd += ["-c", constraints]
             try:
@@ -196,12 +200,19 @@ def _code_checks(component_dir: str) -> tuple[list[str], list[str]]:
             path = os.path.join(root, name)
             rel = os.path.relpath(path, component_dir)
             try:
+                size = os.path.getsize(path)
+                if size > MAX_CHECK_BYTES:
+                    errors.append(f"{rel}: too large to check ({size} bytes)")
+                    continue
                 with open(path, encoding="utf-8") as fh:
                     source = fh.read()
                 tree = ast.parse(source, filename=rel)
                 compile(source, rel, "exec", dont_inherit=True)  # what ast accepts but the compiler refuses
             except SyntaxError as err:
                 errors.append(f"{rel}:{err.lineno}: {err.msg}")
+                continue
+            except (MemoryError, RecursionError) as err:  # "Parser stack overflowed": Python refuses to load it too
+                errors.append(f"{rel}: too complex to parse ({type(err).__name__})")
                 continue
             except (OSError, UnicodeDecodeError, ValueError) as err:
                 errors.append(f"{rel}: {err}")
@@ -230,10 +241,13 @@ def _config_flow_version(component_dir: str) -> int | None:
     """Blocking: VERSION of the ConfigFlow class in <component>/config_flow.py, read with ast (never imported)."""
     import ast
 
+    path = os.path.join(component_dir, "config_flow.py")
     try:
-        with open(os.path.join(component_dir, "config_flow.py"), encoding="utf-8") as fh:
+        if os.path.getsize(path) > MAX_CHECK_BYTES:
+            return None
+        with open(path, encoding="utf-8") as fh:
             tree = ast.parse(fh.read())
-    except (OSError, SyntaxError, ValueError):
+    except (OSError, SyntaxError, ValueError, MemoryError, RecursionError):
         return None
     for node in ast.walk(tree):
         if not isinstance(node, ast.ClassDef) or not any(k.arg == "domain" for k in node.keywords):
@@ -259,7 +273,11 @@ async def gate(hass: HomeAssistant, installer, domain: str, tag: str | None) -> 
     """Whether a start of (domain, tag) from the UI or the API should wait for a confirmation:
     {"blocked", "report", "skipped"}.  Starting the version that already runs (or ran last), a dev
     build or a release without a GitHub repository is not gated; a preflight that cannot run
-    (GitHub unreachable, unknown ref) does not block either: the smoke test still guards the start."""
+    (the stored copy is gone, for example) does not block either: the smoke test still guards the start.
+    The check reads the stored copy start() deploys, not what the ref names on GitHub now (a moved tag or
+    branch, a commit installed under a name).  No busy flag while it runs (pip can take minutes, and an
+    install or a backup must not be refused for that): LOCK queues concurrent gates, start() refuses on its
+    own while another action runs, and a reinstall of the copy during the check blocks the start."""
     rec = installer.state.installed.get(domain) or {}
     versions = rec.get("versions") or {}
     target = tag or rec.get("running_tag") or (max(versions, key=tag_key) if versions else None)
@@ -270,46 +288,59 @@ async def gate(hass: HomeAssistant, installer, domain: str, tag: str | None) -> 
     spec = installer.spec(domain) or {}
     if not spec.get("repo"):
         return {"blocked": False, "report": None, "skipped": "no GitHub repository known"}
-    report = recent(domain, target)
+    def stamp() -> str:
+        versions_now = (installer.state.installed.get(domain) or {}).get("versions") or {}
+        return str((versions_now.get(target) or {}).get("installed_at") or "")
+
+    before = stamp()
+    key = f"stored:{target}\n{before}"  # a reinstalled copy (same tag, new installed_at) is checked again
+    report = recent(domain, key)
     if report is None:
         try:
             async with LOCK:
-                report = await run(hass, installer, domain, target)
+                report = await run(hass, installer, domain, target, source_dir=installer._version_dir(domain, target))
         except Exception as err:  # noqa: BLE001
             return {"blocked": False, "report": None, "skipped": f"preflight could not run: {err}"}
-        remember(domain, target, report)
+        if stamp() != before:
+            why = f"{domain} {target} was installed again while its preflight ran: start it again to check the new copy"
+            return {"blocked": True, "report": {**report, "ok": False, "blockers": [why]}, "skipped": None}
+        remember(domain, key, report)
     return {"blocked": not report.get("ok", True), "report": report, "skipped": None}
 
 
-async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: str | None = None) -> dict[str, Any]:
+async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: str | None = None,
+              archive_ref: str | None = None, source_dir: str | None = None) -> dict[str, Any]:
+    """``archive_ref``: the commit to download (``ref`` names it in the report); ``source_dir``: check that
+    stored copy instead of downloading anything (the start gate)."""
     t0 = time.monotonic()
     spec = installer.spec(domain)
     if not spec or not spec.get("repo"):
         raise ValueError(f"{domain}: no GitHub repository known (registry)")
     repo = spec["repo"]
-    session = async_get_clientsession(hass)
     blockers: list[str] = []
     warnings: list[str] = []
 
-    # 1. the release, into a scratch directory
-    async with session.get(GITHUB_API.format(repo=repo) + f"/zipball/{ref}", headers=installer.settings.github_headers()) as resp:
-        if resp.status != 200:
-            raise ValueError(f"{repo}@{ref}: GitHub answered {resp.status}")
-        blob = await read_capped(resp, f"{repo}@{ref}")
-    scratch = os.path.join(installer.versions_dir, domain, f".preflight-{int(time.time())}")
+    # 1. the release: the stored copy, or the archive (by its commit when known) into a scratch directory
+    if source_dir:
+        manifest = await hass.async_add_executor_job(installer._manifest_at, source_dir)
+        if not manifest or manifest.get("domain") != domain:
+            raise ValueError(f"{domain} {ref}: the stored copy has no manifest.json for {domain}")
+        scratch, blob, min_ha = source_dir, b"", installer.min_ha_of(domain, ref)
+    else:
+        fetch = archive_ref or ref
+        async with async_get_clientsession(hass).get(GITHUB_API.format(repo=repo) + f"/zipball/{fetch}", headers=installer.settings.github_headers()) as resp:
+            if resp.status != 200:
+                raise ValueError(f"{repo}@{fetch}: GitHub answered {resp.status}")
+            blob = await read_capped(resp, f"{repo}@{fetch}")
+        scratch, manifest = os.path.join(installer.versions_dir, domain, f".preflight-{int(time.time())}"), {}
+        min_ha = await hass.async_add_executor_job(installer._hacs_min_ha, blob)  # hacs.json of the same commit as the code
     try:
-        manifest = await hass.async_add_executor_job(installer._unpack, blob, domain, scratch)
+        if not source_dir:
+            manifest = await hass.async_add_executor_job(installer._unpack, blob, domain, scratch)
         new_reqs = list(manifest.get("requirements", []))
 
         # 2. minimum Home Assistant version (hacs.json) vs the target
         target = target_ha or ha_version
-        min_ha = None
-        try:
-            async with session.get(RAW.format(repo=repo, ref=ref, path="hacs.json"), headers=installer.settings.github_headers()) as r2:
-                if r2.status == 200:
-                    min_ha = (json.loads(await r2.text()) or {}).get("homeassistant")
-        except Exception as err:  # noqa: BLE001
-            warnings.append(f"hacs.json could not be read: {err}")
         if min_ha and ha_vkey(str(min_ha)) > ha_vkey(target):
             blockers.append(f"needs Home Assistant >= {min_ha}, target is {target}")
 
@@ -334,7 +365,7 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
         refused = [r for r in all_reqs if bad_requirement(r)]
         blockers += [str(bad_requirement(r)) for r in refused]
         all_reqs = [r for r in all_reqs if r not in refused]
-        installed_now = {_req_name(req): ver for req, ver in installer._requirement_versions(all_reqs).items()}
+        installed_now = {_req_name(req): ver for req, ver in (await hass.async_add_executor_job(installer._requirement_versions, all_reqs)).items()}
         pip = await hass.async_add_executor_job(_pip_dry_run, sys.executable, all_reqs, installer.constraints)
         if not pip["ok"]:
             blockers.append("requirements cannot be resolved: " + _pip_reason(pip["stderr"]))
@@ -428,4 +459,5 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
             except OSError:
                 pass
 
-        await hass.async_add_executor_job(_cleanup)
+        if not source_dir:  # the stored copy stays
+            await hass.async_add_executor_job(_cleanup)

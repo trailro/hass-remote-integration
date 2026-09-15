@@ -190,7 +190,7 @@ Nothing runs yet: the version sits in the version store.
 
 For more control use the **environment builder** on the same page: choose the
 integration, any release, branch or commit, and a Home Assistant version, then
-*Check*. Check downloads the release into a scratch directory, resolves its
+*Check*. Check resolves the ref to a commit, downloads that commit into a scratch directory, resolves its
 Python requirements with `pip --dry-run`, evaluates patches and dependencies
 and the minimum HA version, and tells you whether anything blocks the
 combination, without touching the running environment. *Prepare* installs
@@ -246,7 +246,9 @@ still in `setup_retry` (a device or broker not reachable yet) gets one more
 smoke interval first, and is rolled back only if it has not loaded by then.
 A `degraded` verdict (entities unavailable, silent, or without a state yet)
 is never rolled back: the version did set up, so it is kept, and the
-notification says it is degraded. A failed or degraded smoke test raises a
+notification says it is degraded. An integration with no config entry and no
+YAML stored here is not judged: the verdict is `unconfigured`, with no rollback
+and no notification. A failed or degraded smoke test raises a
 notification and stays in the last error until another version runs healthy,
 also across the rollback's restart.
 
@@ -326,16 +328,18 @@ expires or you log out once more.
 ### Updating the integration
 
 Install the new release (Install or Integration page), then *Switch to* it.
-The switch runs the **Preflight** of that release first, or reuses one run in
-the last 30 minutes (reports are kept in memory, per release and running Home
-Assistant version, so a restart forgets them). Blockers stop the switch and
+The switch runs the **Preflight** on the copy in the version store first (the
+files the switch deploys, not what the tag or branch names on GitHub now), or
+reuses one run on that same copy in the last 30 minutes (reports are kept in
+memory, per stored copy and running Home Assistant version, so a restart or a
+reinstall forgets them). Blockers stop the switch and
 are listed with a choice to start anyway; warnings do not stop it. An update
 started from your main HA over MQTT refuses on blockers, since nobody is there
 to confirm, and says why in its result. Through the API, `POST /api/run/start`
 answers `needs_force` with the report, and `force: true` starts anyway.
 Starting the version that is already deployed, a dev build, an integration
 without a GitHub repository, a rollback and a restore skip the preflight. A
-preflight that cannot run (GitHub unreachable, for example) does not stop the
+preflight that cannot run (the stored copy is gone, for example) does not stop the
 start; the API result then says why in `preflight_note`. The manager backs up,
 switches, restarts if needed, smoke-tests, and rolls back on its own if the new
 version does not set up; a degraded version is kept and reported. *Full
@@ -414,8 +418,11 @@ three have to support that Python:
   A package with no wheel for this Python and architecture has to be built from
   source during the install. The preflight builds it for real. The image has no
   compiler, so a pure-Python package builds and one with C code is a blocker.
+  A requirement given as an archive URL is built from that URL; one from a VCS
+  URL or a local directory is not built by the preflight.
 - **The integration's own code.** The preflight compiles every `.py` file with
-  the image's Python (a syntax error is a blocker naming the file and line),
+  the image's Python (a syntax error is a blocker naming the file and line, and
+  so is a file over 5 MB or one too deeply nested for the parser),
   except in the top-level folders `tests`, `test`, `scripts`, `tools`, `docs`
   and `examples`, which Home Assistant does not load. It also warns about
   imports of standard modules that Python has removed (`imp`, `distutils`,
