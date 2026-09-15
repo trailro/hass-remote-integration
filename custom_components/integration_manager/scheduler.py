@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 import time
 
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HassJob, HomeAssistant
 from homeassistant.helpers.event import async_call_later, async_track_time_change
 
 from .installer import Installer
@@ -21,11 +21,12 @@ class Scheduler:
         self.installer = installer
         self._unsub = None
         self._hour = None
+        self._retry = None  # the pending busy-retry of the daily backup
 
     def start(self) -> None:
         self.rearm()
         # boot: a release check if the last one is older than a week
-        async_call_later(self.hass, 120, self._boot_check)
+        async_call_later(self.hass, 120, HassJob(self._boot_check, "release check at boot", cancel_on_shutdown=True))
 
     def rearm(self) -> None:
         """(Re)arm the daily tick at the configured hour; called at boot and
@@ -48,9 +49,12 @@ class Scheduler:
 
     async def _daily(self, _now) -> None:
         st = self.installer.settings
+        if self._retry is not None:
+            self._retry()  # one pending retry at most: the daily tick and a retry both land here
+            self._retry = None
         if st.bool_("backup_daily") and self.installer.busy and not self.installer.backup_running:
             _LOGGER.info("daily backup skipped: an install/start is running; retrying in 30 min")
-            async_call_later(self.hass, 1800, self._daily)
+            self._retry = async_call_later(self.hass, 1800, HassJob(self._daily, "daily backup retry", cancel_on_shutdown=True))
             return
         if st.bool_("backup_daily"):
             try:
