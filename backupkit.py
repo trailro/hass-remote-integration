@@ -51,6 +51,8 @@ EXCLUDE_GLOBS = (
     f"{STATE_DIR}/staging-*", f"{STATE_DIR}/staging-*/*", f"{STATE_DIR}/backups", f"{STATE_DIR}/backups/*",
     f"{STATE_DIR}/import.tar", f"{STATE_DIR}/import.tar.tmp", f"{STATE_DIR}/import-extracted", f"{STATE_DIR}/import-extracted/*",
     ".storage/*.log", ".storage/core.uuid",
+    # the record of what happened (timeline, resource history, change reports) must survive a restore
+    f"{STATE_DIR}/events.jsonl*", f"{STATE_DIR}/resource_history.json*", f"{STATE_DIR}/change_reports.json*",
 )
 KEEP_DEFAULT = 5
 INFO_MAX = 64 * 1024  # backup-info.json is a few hundred bytes; a huge one is a zip bomb
@@ -410,7 +412,8 @@ def _wipe_trees(config_dir: str, names: list[str]) -> None:
 
 
 def _names(zf: zipfile.ZipFile) -> list[str]:
-    return [n for n in zf.namelist() if n != "backup-info.json" and n != f"{STATE_DIR}/ha.json"]
+    # a backup made before a file was excluded still carries it: never restored either
+    return [n for n in zf.namelist() if n != "backup-info.json" and n != f"{STATE_DIR}/ha.json" and not _excluded(n)]
 
 
 def apply_pending(config_dir: str, log=print, record=None) -> dict | None:

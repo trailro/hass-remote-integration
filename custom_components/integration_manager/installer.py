@@ -88,6 +88,8 @@ class State:
     rollback_backup: str | None = None           # the backup a full rollback restores: protected until that restore succeeded
     release_updates: dict[str, str] = field(default_factory=dict)  # last release check: domain -> newest stable tag not in the store
     pending_change: dict[str, Any] | None = None  # {domain, from_tag, to_tag, at, before}: compared once the new version runs
+    last_restore_reported: str | None = None      # "at" of the restore outcome already put on the timeline
+    latest_versions: dict[str, str] = field(default_factory=dict)  # manager / manager_tag / home_assistant: last known, so update entities do not flap after a restart
 
 
 def _gh_check(resp, what: str) -> None:
@@ -157,6 +159,7 @@ class Installer:
         self.updates: dict[str, str] = {}  # domain -> newest stable tag not yet in the store
         self.updates_checked_at: str | None = None
         self._loaded_tags: dict[str, str] = {}  # domain -> tag whose code this process imported
+        self._code_hash: dict[str, str] = {}  # domain -> content of that code (patched), kept across an uninstall
         self.busy = False
         self._backup_lock = asyncio.Lock()  # backups on their own queue up instead of refusing each other
         os.makedirs(self.versions_dir, exist_ok=True)
@@ -757,7 +760,10 @@ class Installer:
             # a module Python already imported (set up, or only its config flow) keeps its old code: files
             # deployed over it (a same-named local or branch build, another tag) only count after a restart
             imported = domain in self.hass.config.components or f"custom_components.{domain}" in sys.modules
-            needs_restart = imported and (deployed or (loaded is not None and loaded != tag))
+            code_hash = await self.hass.async_add_executor_job(self._tree_hash, domain)
+            # an uninstall + install of the tag this process imported deploys files again, byte for byte the same code
+            same_code = loaded == tag and code_hash is not None and self._code_hash.get(domain) == code_hash
+            needs_restart = imported and not same_code and (deployed or (loaded is not None and loaded != tag))
             if not needs_restart and not await self._loadable(domain):
                 # HA scanned custom_components at boot; a domain deployed since is
                 # invisible to its loader until a restart
@@ -765,6 +771,8 @@ class Installer:
             if not needs_restart:
                 changed["enabled"] = await self._enable_entries(domain)
                 self._loaded_tags[domain] = tag
+                if code_hash is not None:
+                    self._code_hash[domain] = code_hash
             yaml_pending = (not was_running) and os.path.isfile(self.yaml_path(domain)) and not needs_restart and not boot
             # YAML config is only read at boot: an integration started now runs without it until a restart
             self.state.restart_required = self.state.restart_required or needs_restart or yaml_pending
@@ -1385,6 +1393,9 @@ class Installer:
         # a start that ended in restart_required could not enable the entries
         # in the old process (see start()); this process can
         self._loaded_tags[domain] = tag  # before the entries import the code
+        code_hash = await self.hass.async_add_executor_job(self._tree_hash, domain)
+        if code_hash is not None:
+            self._code_hash[domain] = code_hash
         enabled = await self._enable_entries(domain)
         if enabled:
             _LOGGER.info("reconcile %s: enabled config entries %s", domain, enabled)
@@ -1572,6 +1583,28 @@ class Installer:
         shutil.copytree(src, tmp)
         shutil.rmtree(target, ignore_errors=True)
         os.replace(tmp, target)
+
+    def _tree_hash(self, domain: str) -> str | None:
+        """Blocking: the deployed code's content (bytecode caches and the tag marker left out)."""
+        import hashlib
+
+        root = self._component_dir(domain)
+        if not os.path.isdir(root):
+            return None
+        h = hashlib.sha256()
+        for dirpath, dirs, files in os.walk(root):
+            dirs[:] = sorted(d for d in dirs if d != "__pycache__")
+            for name in sorted(files):
+                if name == ".hri-tag" or name.endswith(".pyc"):
+                    continue
+                path = os.path.join(dirpath, name)
+                h.update(os.path.relpath(path, root).encode() + b"\0")
+                try:
+                    with open(path, "rb") as fh:
+                        h.update(fh.read())
+                except OSError:
+                    return None
+        return h.hexdigest()
 
     def _ensure_deployed(self, domain: str, tag: str) -> bool:
         """Deploy unless custom_components/<domain> already holds this tag's

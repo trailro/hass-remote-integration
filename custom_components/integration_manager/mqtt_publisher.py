@@ -31,6 +31,7 @@ import asyncio
 import collections
 import hashlib
 import json
+import secrets
 import re
 import math
 import logging
@@ -236,6 +237,9 @@ class MqttPublisher:
         self.manager = None  # ManagerDevice (manager_device.py), set by __init__
         self._manager_absent_sent = False  # this connection already told the consumer there is no manager device
         self._resync_excluded = False  # integrations were excluded while disconnected: sweep the broker at the next connect
+        # once per process, after HA started: what this process never published (so the in-memory discovery
+        # map cannot compute removal forms for it) but is still retained, e.g. entities a restore took away
+        self._orphan_sweep_due = True
         self._health_soon_handle: asyncio.TimerHandle | None = None
         self._health_announced: str | None = None  # the verdict last published (and put in the timeline)
 
@@ -466,7 +470,7 @@ class MqttPublisher:
         under `topics` until the burst goes quiet; returns {topic: payload}.
         The network thread is always stopped, whatever happens."""
         found: dict[str, bytes] = {}
-        c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"{self.client_id}-{suffix}", clean_session=True)
+        c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"{self.client_id}-{suffix}-{secrets.token_hex(3)}", clean_session=True)
         if self.config.username:
             c.username_pw_set(self.config.username, self.config.password or None)
         c.on_message = lambda cl, u, m: found.__setitem__(m.topic, m.payload) if m.retain and m.payload else None
@@ -495,7 +499,7 @@ class MqttPublisher:
         client (QoS 1, awaited)."""
         if not topics:
             return
-        c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"{self.client_id}-{suffix}-clear", clean_session=True)
+        c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"{self.client_id}-{suffix}-clear-{secrets.token_hex(3)}", clean_session=True)
         if self.config.username:
             c.username_pw_set(self.config.username, self.config.password or None)
         ack: dict[str, Any] = {"rc": None}
@@ -1151,7 +1155,8 @@ class MqttPublisher:
             for disc_id, (block, comps) in groups.items()
         ]
 
-    def _publish_device_discovery(self, discovery_id: str, block: dict[str, Any], comps: dict[str, dict[str, Any]]) -> None:
+    def _publish_device_discovery(self, discovery_id: str, block: dict[str, Any], comps: dict[str, dict[str, Any]],
+                                  removed: dict[str, str] | None = None) -> None:
         payload = {
             "device": block,
             "origin": disc.origin(self.prefix),
@@ -1166,6 +1171,8 @@ class MqttPublisher:
         for gone in set(self._discovery_map.get(discovery_id, {})) - set(comps):
             # the platform we PUBLISHED (a mirrored media_player is a "sensor"), or HA rejects the whole device
             payload["components"][_comp_key(gone)] = {"platform": self._discovery_map[discovery_id][gone].get("platform", gone.split(".", 1)[0])}
+        for key, platform in (removed or {}).items():  # retained by an earlier process, gone before this one started
+            payload["components"].setdefault(key, {"platform": platform})
         topic = self._discovery_topic(discovery_id)
         if self._publish_if_changed(topic, _dumps(payload), qos=1):
             self._discovery_map[discovery_id] = comps
@@ -1296,6 +1303,70 @@ class MqttPublisher:
     def _forget_hashes(self, topic_prefix: str) -> None:
         for t in [t for t in list(self._last_hash) if t.startswith(topic_prefix)]:
             del self._last_hash[t]
+
+    def _entity_gone(self, entity_id: str) -> bool:
+        """Neither a state nor a registry entry: an entity still setting up
+        (or of an entry retrying) is in the registry and must not be removed."""
+        from homeassistant.helpers import entity_registry as er
+
+        return self.hass.states.get(entity_id) is None and er.async_get(self.hass).async_get(entity_id) is None
+
+    async def _async_sweep_orphans(self) -> None:
+        """Retained discovery components and entity documents of ours whose
+        entity no longer exists here (a restore, an import or a rebuild took it
+        away before this process started): removal forms for the components,
+        empty retained payloads for the documents and for devices left with
+        nothing."""
+        base, prefix = self.base_topic, self.config.discovery_prefix
+        try:
+            found = await self.hass.async_add_executor_job(self._retained_scan, "orphans", [(f"{base}/#", 1), (f"{prefix}/device/+/config", 1)])
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("MQTT: orphan sweep failed, retried at the next connect: %s", err)
+            self._orphan_sweep_due = True
+            return
+        manager_topic = self._discovery_topic(f"{base}_manager")
+        groups, _ = self._group_by_device() if self.config.discovery_enabled else ({}, {})
+        removed_components, cleared_devices, docs = 0, 0, []
+        for topic, payload in found.items():
+            if not self._is_ours(topic, payload, base):
+                continue
+            try:
+                doc = json.loads(payload)
+            except ValueError:
+                continue
+            if not isinstance(doc, dict):
+                continue
+            if topic.startswith(f"{prefix}/device/"):
+                if topic == manager_topic or not self.config.discovery_enabled:
+                    continue
+                comps = doc.get("components") if isinstance(doc.get("components"), dict) else {}
+                gone = {key: c.get("platform") for key, c in comps.items()
+                        if isinstance(c, dict) and str(c.get("unique_id") or "").startswith(self.prefix)
+                        and self._entity_gone(str(c["unique_id"])[len(self.prefix):])}
+                live = {key for key, c in comps.items() if isinstance(c, dict) and c.get("unique_id") and key not in gone}
+                did = topic.split("/")[-2]
+                if did not in groups:
+                    if gone and not live and self._publish(topic, None, qos=1):
+                        cleared_devices += 1
+                    continue
+                current = {_comp_key(eid) for eid in groups[did][1]}
+                extra = {key: platform for key, platform in gone.items() if key not in current and platform}
+                if extra:
+                    self._last_hash.pop(topic, None)
+                    self._publish_device_discovery(did, groups[did][0], groups[did][1], removed=extra)
+                    removed_components += len(extra)
+            elif "published_at" in doc and topic not in set(self._topics.values()):
+                eid = doc.get("entity_id")
+                if isinstance(eid, str) and self._entity_gone(eid):
+                    docs.append(topic)
+        if docs:
+            try:
+                await self.hass.async_add_executor_job(self._clear_topics, "orphans", docs)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning("MQTT: clearing %s orphan documents failed: %s", len(docs), err)
+        if removed_components or cleared_devices or docs:
+            _LOGGER.info("MQTT: removed %s orphan components, %s empty devices and %s documents of entities that no longer exist",
+                         removed_components, cleared_devices, len(docs))
 
     async def _async_resync_excluded(self) -> None:
         """Retained documents of excluded integrations, and discovery configs of
@@ -1687,6 +1758,9 @@ class MqttPublisher:
         if self._resync_excluded:
             self._resync_excluded = False
             await self._async_resync_excluded()
+        if self._orphan_sweep_due and self.hass.is_running:
+            self._orphan_sweep_due = False
+            await self._async_sweep_orphans()
         await self._publish_services()
         _LOGGER.info(
             "MQTT full republish: %s entities, %s services, discovery: %s devices / %s components",

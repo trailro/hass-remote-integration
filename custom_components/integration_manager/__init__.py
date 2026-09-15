@@ -161,7 +161,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     if isinstance(last_restore, dict) and last_restore.get("ok") and installer.state.rollback_backup:
         installer.state.rollback_backup = None  # restored: the regular pruning applies to it again
         installer._save_state()
-    if isinstance(last_restore, dict) and last_restore.get("at") and _recent(last_restore["at"]):
+    if isinstance(last_restore, dict) and last_restore.get("at") and _recent(last_restore["at"]) \
+            and last_restore["at"] != installer.state.last_restore_reported:
+        installer.state.last_restore_reported = last_restore["at"]  # a later boot within the window must not report it again
+        installer._save_state()
         events.emit("restore", f"{'applied' if last_restore.get('ok') else 'FAILED'}: {last_restore.get('files', 0)} files"
                     + (f" ({last_restore.get('error')})" if not last_restore.get("ok") else "")
                     + (f", pre-restore copy {last_restore.get('pre_restore')}" if last_restore.get("pre_restore") else ""))
