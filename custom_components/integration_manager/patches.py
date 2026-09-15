@@ -71,8 +71,12 @@ def validate(name: str, text: str) -> str | None:
             return f"not valid Python: {err}"
         if "def apply(" not in text or "def status(" not in text:
             return "a .py patch must define apply(ctx) and status(ctx)"
-    elif not parse_unified(text):
-        return "no hunks found: not a unified diff"
+    else:
+        try:
+            if not parse_unified(text):
+                return "no hunks found: not a unified diff"
+        except ValueError as err:
+            return f"not a valid unified diff: {err}"
     return None
 
 
@@ -246,10 +250,9 @@ def _hunk_report(text: str, ctx: PatchContext) -> list[dict[str, Any]]:
         for h in fp.hunks:
             hint = h.old_start - 1
             hr: dict[str, Any] = {"header": f"@@ -{h.old_start},{h.old_n} @@", "state": "not applicable", "line": None}
-            if (at := _find(lines, h.new_lines, hint)) >= 0:
-                hr.update(state="applied", line=at + 1)
-            elif (at := _find(lines, h.old_lines, hint)) >= 0:
-                hr.update(state="pending", line=at + 1)
+            state, at = _locate(lines, h)
+            if state != "not applicable":
+                hr.update(state=state, line=at + 1)
             elif h.old_lines:
                 at = _closest(lines, h.old_lines, hint)
                 found = lines[at:at + len(h.old_lines)]
@@ -286,21 +289,31 @@ _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
 def parse_unified(text: str) -> list[_FilePatch]:
+    """Raises ValueError for a truncated hunk (fewer lines than its header
+    declares): a patch copied incompletely must not change anything."""
     files: list[_FilePatch] = []
     cur: _FilePatch | None = None
     hunk: _Hunk | None = None
+
+    def check(h: _Hunk | None) -> None:
+        if h is not None and (len(h.old_lines) != h.old_n or len(h.new_lines) != h.new_n):
+            raise ValueError(f"hunk @@ -{h.old_start},{h.old_n} @@ declares {h.old_n} old / {h.new_n} new lines "
+                             f"but carries {len(h.old_lines)} / {len(h.new_lines)} (truncated or edited diff)")
+
     for line in text.splitlines():
         in_hunk = hunk is not None and not hunk.complete
         if line.startswith("--- ") and not in_hunk:
             continue
         if line.startswith("+++ ") and not in_hunk:
+            check(hunk)
             path = line[4:].split("\t")[0].strip()
             cur = _FilePatch(path=path, hunks=[])
             files.append(cur)
             hunk = None
             continue
         m = _HUNK_RE.match(line)
-        if m and cur is not None:
+        if m and cur is not None and not in_hunk:
+            check(hunk)
             hunk = _Hunk(old_start=int(m.group(1)), old_lines=[], new_lines=[],
                          old_n=int(m.group(2) or 1), new_n=int(m.group(4) or 1))
             cur.hunks.append(hunk)
@@ -316,6 +329,10 @@ def parse_unified(text: str) -> list[_FilePatch]:
             hunk.new_lines.append(line[1:] if line else "")
         elif line.startswith("\\"):
             continue  # "\ No newline at end of file"
+        else:
+            check(hunk)  # any other line ends the hunk early
+            hunk = None
+    check(hunk)
     return [f for f in files if f.hunks]
 
 
@@ -350,6 +367,20 @@ def _find(lines: list[str], needle: list[str], hint: int) -> int:
     return best
 
 
+def _locate(lines: list[str], h: _Hunk) -> tuple[str, int]:
+    """("applied" | "pending" | "not applicable", index).  When both the
+    original block and the patched block occur, the one nearer the hunk's
+    own line decides: a matching line in another function is not this fix."""
+    hint = h.old_start - 1
+    new_at = _find(lines, h.new_lines, hint)
+    old_at = _find(lines, h.old_lines, hint) if h.old_lines != h.new_lines else -1
+    if old_at >= 0 and (new_at < 0 or abs(old_at - hint) < abs(new_at - hint)):
+        return "pending", old_at
+    if new_at >= 0:
+        return "applied", new_at
+    return "not applicable", -1
+
+
 def _diff_status(text: str, ctx: PatchContext) -> str:
     states = []
     for fp in parse_unified(text):
@@ -358,12 +389,7 @@ def _diff_status(text: str, ctx: PatchContext) -> str:
             return f"absent ({fp.path} not found)"
         lines = _read_text(target).split("\n")
         for h in fp.hunks:
-            if _find(lines, h.new_lines, h.old_start - 1) >= 0:
-                states.append("applied")
-            elif _find(lines, h.old_lines, h.old_start - 1) >= 0:
-                states.append("pending")
-            else:
-                states.append("not applicable")
+            states.append(_locate(lines, h)[0])
     if not states:
         return "empty"
     if all(s == "applied" for s in states):
@@ -377,19 +403,44 @@ def _diff_apply(text: str, ctx: PatchContext) -> str:
     st = _diff_status(text, ctx)
     if st != "pending":
         return "already applied" if st == "applied" else st
+    prepared: dict[str, tuple[str, str]] = {}  # target -> (original, patched)
     for fp in parse_unified(text):
         target = _resolve(fp.path, ctx)
-        lines = _read_text(target).split("\n")
+        if target is None:
+            return f"absent ({fp.path} not found)"
+        original = prepared[target][1] if target in prepared else _read_text(target)  # two sections for one file
+        lines = original.split("\n")
         for h in fp.hunks:
-            if _find(lines, h.new_lines, h.old_start - 1) >= 0:
+            state, i = _locate(lines, h)
+            if state == "applied":
                 continue
-            i = _find(lines, h.old_lines, h.old_start - 1)
-            if i < 0:
+            if state != "pending":
                 return f"not applicable (context changed in {fp.path})"
             lines[i:i + len(h.old_lines)] = h.new_lines
+        prepared[target] = (prepared[target][0] if target in prepared else original, "\n".join(lines))
+    for target, (_orig, patched) in prepared.items():
         if target.endswith(".py"):
-            compile("\n".join(lines), target, "exec")  # never leave broken Python behind
+            compile(patched, target, "exec")  # never leave broken Python behind, in any of the files
+    for target, (_orig, patched) in prepared.items():
         with open(target + ".tmp", "w", encoding="utf-8") as fh:
-            fh.write("\n".join(lines))
-        os.replace(target + ".tmp", target)
+            fh.write(patched)
+    done: list[str] = []
+    try:
+        for target in prepared:
+            os.replace(target + ".tmp", target)
+            done.append(target)
+    except OSError:
+        for target in done:  # all or nothing: files that depend on each other stay consistent
+            try:
+                with open(target, "w", encoding="utf-8") as fh:
+                    fh.write(prepared[target][0])
+            except OSError:
+                _LOGGER.error("patch rollback failed for %s", target)
+        raise
+    finally:
+        for target in prepared:
+            try:
+                os.remove(target + ".tmp")
+            except OSError:
+                pass
     return "applied"
