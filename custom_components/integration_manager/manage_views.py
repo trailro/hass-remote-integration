@@ -115,6 +115,9 @@ class ReleasePreviewView(ManagerView):
     async def get(self, request: web.Request) -> web.Response:
         domain = request.query.get("domain", "")
         tag = request.query.get("tag", "")
+        if request.headers.get("X-Requested-With") != "fetch":
+            # it fetches from GitHub with the stored token: not something any web page may trigger
+            return self.json_message("X-Requested-With: fetch required", status_code=400)
         if not _DOMAIN_RE.match(domain) or not _tag_ok(tag):
             return self.json({"ok": False, "error": "domain and tag required"})
         try:
@@ -417,6 +420,8 @@ class SettingsView(ManagerView):
             new["allowed_hosts"] = ah
         if "parent_ha_url" in body:
             url = str(body["parent_ha_url"] or "").strip().rstrip("/")
+            if "@" in url:  # user:password@host would be stored and shown in the clear, and sent along with the token
+                return self.json({"ok": False, "error": "parent_ha_url must not contain user@ or user:password@: the token authenticates"})
             if url and not re.match(r"^https?://[^\s/]+(:\d+)?$", url):
                 return self.json({"ok": False, "error": "parent_ha_url must look like http://host:8123 (no path)"})
             new["parent_ha_url"] = url
