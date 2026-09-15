@@ -5,11 +5,15 @@
 #   HRI_DEBUGPY  port on which the process waits for a debugger to attach (VS Code "attach",
 #                localhost:5678); debugpy is installed into the venv on first use.
 #                Never expose this port beyond localhost.
+#   HRI_DEBUGPY_HOST  address debugpy binds inside the container (default 127.0.0.1); the published
+#                port below only reaches 0.0.0.0, which also lets every container on the same Docker
+#                network attach, without authentication: use this overlay only on a network you trust.
 services:
   hass-remote-integration:
     volumes:
       - ${HRI_DEV_SRC:-./dev-src}:/dev-src:ro
     environment:
       HRI_DEBUGPY: "${HRI_DEBUGPY:-5678}"
+      HRI_DEBUGPY_HOST: "${HRI_DEBUGPY_HOST:-0.0.0.0}"
     ports:
       - "127.0.0.1:${HRI_DEBUGPY:-5678}:${HRI_DEBUGPY:-5678}"

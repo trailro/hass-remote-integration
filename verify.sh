@@ -5,7 +5,8 @@
 #   verify.sh status    status API + memory (container must be running)
 #   verify.sh test      discovery components against HA's MQTT schemas (after any discovery change)
 #   verify.sh unit      unit tests (tests/) in the container's HA venv, against the repo's copy of the code
-# Reads HRI_NAME, HRI_PORT, HRI_IMAGE, HRI_NETWORK, HRI_PASSWORD and TZ from the environment or a .env file.
+# Reads HRI_NAME, HRI_PORT, HRI_IMAGE, HRI_NETWORK, HRI_PASSWORD (or HRI_PASSWORD_FILE, which wins) and TZ
+# from the environment or a .env file.  start exits non-zero when the API does not come up (timeout, restart loop).
 set -u
 cd "$(dirname "$0")"
 [ -f .env ] && . ./.env
@@ -13,29 +14,47 @@ NAME=${HRI_NAME:-hass-remote-integration}
 PORT=${HRI_PORT:-8087}
 IMAGE=${HRI_IMAGE:-hass-remote-integration:local}
 URL=http://127.0.0.1:$PORT/api/status
-api_get() {  # $1 timeout, $2 url; with a password set, the API wants it as a bearer token
-  if [ -n "${HRI_PASSWORD:-}" ]; then curl -s --max-time "$1" -H "Authorization: Bearer $HRI_PASSWORD" "$2"; else curl -s --max-time "$1" "$2"; fi
+password() {  # what the container uses: the file's content (stripped), else HRI_PASSWORD
+  if [ -n "${HRI_PASSWORD_FILE:-}" ]; then tr -d '\r\n' < "$HRI_PASSWORD_FILE"; else printf '%s' "${HRI_PASSWORD:-}"; fi
+}
+api_get() {  # $1 timeout, $2 url; with a password set, the API wants it as a bearer token (passed on stdin, not in argv)
+  pw=$(password)
+  if [ -n "$pw" ]; then
+    printf 'header = "Authorization: Bearer %s"\n' "$(printf '%s' "$pw" | sed 's/\\/\\\\/g; s/"/\\"/g')" | curl -s --max-time "$1" -K - "$2"
+  else
+    curl -s --max-time "$1" "$2"
+  fi
 }
 
 start() {
+  rc=0
+  if [ -n "${HRI_PASSWORD_FILE:-}" ]; then
+    set -- -v "$(cd "$(dirname "$HRI_PASSWORD_FILE")" && pwd)/$(basename "$HRI_PASSWORD_FILE"):/run/secrets/hri_password:ro" -e HRI_PASSWORD_FILE=/run/secrets/hri_password
+  elif [ -n "${HRI_PASSWORD:-}" ]; then
+    export HRI_PASSWORD
+    set -- -e HRI_PASSWORD  # the value comes from this environment, not from docker's command line
+  else
+    set --
+  fi
   docker run -d --name "$NAME" --restart unless-stopped --init --stop-timeout 240 \
     ${HRI_NETWORK:+--network "$HRI_NETWORK"} -p "$PORT:$PORT" \
     -v "$NAME:/config" \
-    -e TZ="${TZ:-UTC}" -e HRI_PORT="$PORT" ${HRI_PASSWORD:+-e "HRI_PASSWORD=$HRI_PASSWORD"} \
+    -e TZ="${TZ:-UTC}" -e HRI_PORT="$PORT" "$@" \
     --add-host host.docker.internal:host-gateway \
     "$IMAGE" | cut -c1-12 | sed 's/^/  id: /'
   echo "=== waiting for the manager API on $URL (a fresh volume installs Home Assistant first) ==="
   t0=$(date +%s)
   until api_get 2 "$URL" | python3 -c "import json,sys; sys.exit(0 if 'ha_version' in json.load(sys.stdin) else 1)" 2>/dev/null; do
-    if [ $(( $(date +%s)-t0 )) -ge 900 ]; then echo "  TIMEOUT"; break; fi
+    if [ $(( $(date +%s)-t0 )) -ge 900 ]; then echo "  TIMEOUT"; rc=1; break; fi
     if [ "$(docker inspect -f '{{.State.Restarting}}' "$NAME" 2>/dev/null)" = "true" ]; then
-      echo "  RESTART LOOP detected, stopping"; docker stop "$NAME" >/dev/null; break
+      echo "  RESTART LOOP detected, stopping"; docker stop "$NAME" >/dev/null; rc=1; break
     fi
     sleep 3
   done
   echo "  after $(( $(date +%s)-t0 ))s: $(docker inspect -f '{{.State.Status}} (restarts={{.RestartCount}})' "$NAME")"
   echo "=== log (errors / ready) ==="
   docker logs "$NAME" 2>&1 | grep -E "ERROR|Traceback|ready" | tail -12 | sed 's/^/  /'
+  return $rc
 }
 
 status() {
@@ -60,6 +79,7 @@ recreate() {
   start
 }
 
+
 test() {
   echo "=== discovery schemas (test_components.py in the container's HA venv) ==="
   docker exec -i "$NAME" /config/venv-current/bin/python - < test_components.py
@@ -68,6 +88,8 @@ test() {
 unit() {
   echo "=== unit tests (tests/ in the container's HA venv) ==="
   dir=/tmp/hri-tests
+  # only the code under test: registry.json and patches/ are not copied (the tests do not read them; code that
+  # does falls back to the image's /app copies)
   docker exec "$NAME" sh -c "rm -rf $dir && mkdir -p $dir/custom_components" || return 1
   for f in tests jsonio.py backupkit.py logbuffer.py entrypoint.py run.py docker-compose.yml; do docker cp -q "$f" "$NAME:$dir/" || return 1; done
   docker cp -q custom_components/integration_manager "$NAME:$dir/custom_components/" || return 1
@@ -75,8 +97,8 @@ unit() {
 }
 
 case "${1:-}" in
-  start) start; status ;;
-  recreate) recreate; status ;;
+  start) start; rc=$?; status; exit $rc ;;
+  recreate) recreate; rc=$?; status; exit $rc ;;
   status) status ;;
   test) test ;;
   unit) unit ;;

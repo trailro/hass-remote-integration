@@ -13,6 +13,35 @@ import errno
 import faulthandler
 import logging
 import os
+import signal
+import sys
+
+
+def _early_stop(signum: int, _frame) -> None:
+    """SIGTERM/SIGINT before _boot installs its handlers: the Home Assistant imports below take seconds, and the
+    default action killed the process with this boot already counted as failed (entrypoint.py counts it before
+    exec).  Take the count back and exit 0.  Replaced by _install_boot_signal_handlers."""
+    try:
+        from jsonio import update_json
+
+        def undo(state):
+            if not isinstance(state, dict):
+                return None
+            try:
+                count = int(state.get("boot_failures") or 0)
+            except (TypeError, ValueError):
+                return None
+            return {**state, "boot_failures": max(0, count - 1)}
+
+        update_json(os.path.join(os.environ.get("HRI_CONFIG", "/config"), "integration_manager", "ha.json"), undo)
+    except Exception:  # noqa: BLE001 - the stop goes ahead whatever happens to the count
+        pass
+    os._exit(0)
+
+
+if __name__ == "__main__":  # the process run.py is, not a module that imports it
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(_sig, _early_stop)
 
 # HA's http component reads SETUP_PORT when it is imported: set it BEFORE any
 # homeassistant import.  A port passed as config would only become a pending
@@ -20,16 +49,20 @@ import os
 # built-in default, so the stored stable port equals ours on a fresh volume.
 os.environ["SETUP_PORT"] = os.environ.get("HRI_PORT", "8087")
 
-if os.environ.get("HRI_TRACEMALLOC"):  # before the heavy imports, so they are traced too
+TRACEMALLOC_DEFAULT_FRAMES = 25
+if os.environ.get("HRI_TRACEMALLOC", "").strip():  # before the heavy imports, so they are traced too
     import tracemalloc
 
-    tracemalloc.start(max(1, int(os.environ["HRI_TRACEMALLOC"])))
+    try:
+        _frames = max(1, int(os.environ["HRI_TRACEMALLOC"]))
+    except ValueError:
+        _frames = TRACEMALLOC_DEFAULT_FRAMES
+        print(f"HRI_TRACEMALLOC={os.environ['HRI_TRACEMALLOC']!r} is not a number of frames: tracing {_frames}", file=sys.stderr, flush=True)
+    tracemalloc.start(_frames)
 
 import logbuffer  # /app/logbuffer.py: the process log on disk, for the manager UI
 from jsonio import read_json, update_json
 import shutil
-import signal
-import sys
 import threading
 import time
 from collections.abc import Awaitable, Callable
@@ -89,7 +122,7 @@ async def _boot() -> int:
     hass = core.HomeAssistant(CONFIG_DIR)
     booted.append(hass)
     if os.environ.get("HRI_DEBUGPY"):
-        hass.data["hri_debugpy"] = _start_debugpy(os.environ["HRI_DEBUGPY"])
+        hass.data["hri_debugpy"] = await hass.async_add_executor_job(_start_debugpy, os.environ["HRI_DEBUGPY"])  # pip: not on the loop
     # First thing bootstrap.async_setup_hass does after creating hass:
     # initialises hass.data for the loader (components, integrations,
     # preload platforms). Without it condition/trigger platform
@@ -286,7 +319,7 @@ async def _mark_boot_ok_after(setup_done: asyncio.Event, cap: float = BOOT_OK_CA
         await asyncio.wait_for(setup_done.wait(), cap)
     except TimeoutError:
         _LOGGER.warning("integration setup still running %s s after start: this boot counts as good anyway", int(cap))
-    _mark_boot_ok()
+    await asyncio.get_running_loop().run_in_executor(None, _mark_boot_ok)  # fsynced write: not on the loop
 
 
 def _undo_boot_failure() -> None:
@@ -337,6 +370,7 @@ def _mark_boot_ok() -> None:
 
     def settle(state: dict) -> dict:
         state["boot_failures"] = 0
+        state["proven"] = HA_VERSION  # entrypoint.py never falls back automatically from a version that booted
         state.pop("fallback_from", None)
         change, recovery = state.get("change"), state.get("recovery")
         if not isinstance(change, dict) or change.get("to") == HA_VERSION:
@@ -458,7 +492,11 @@ def _quiet_loggers() -> list[str]:
         own = ((read_json(path, {}) or {}).get("integrations") or {}).get(domain)
         if isinstance(own, dict):
             spec.update(own)
-    return list(spec.get("quiet_loggers") or [f"custom_components.{domain}"])
+    raw = spec.get("quiet_loggers")
+    names = [x.strip() for x in raw if isinstance(x, str) and x.strip()] if isinstance(raw, list) else []
+    if raw and not names:
+        _LOGGER.warning("registry: quiet_loggers of %s must be a list of logger names, ignored: %r", domain, raw)
+    return names or [f"custom_components.{domain}"]
 
 
 CORE_INTEGRATIONS = ("homeassistant", "persistent_notification")  # bootstrap.CORE_INTEGRATIONS
@@ -534,7 +572,12 @@ async def _load_base_functionality(hass) -> bool:
 
 def _start_debugpy(port_s: str) -> dict:
     """HRI_DEBUGPY=<port>: listen for a debugger (VS Code "attach") on that
-    port; debugpy is installed into the venv on first use.  Dev mode only."""
+    port; debugpy is installed into the venv on first use.  Dev mode only.
+    Blocking (pip): run it in the executor.  Bound to 127.0.0.1 inside the
+    container unless HRI_DEBUGPY_HOST says otherwise: debugpy has no
+    authentication, so any address a published port can reach is also
+    reachable from every container on the same Docker network."""
+    host = os.environ.get("HRI_DEBUGPY_HOST", "").strip() or "127.0.0.1"
     try:
         port = int(port_s)
     except ValueError:
@@ -546,14 +589,14 @@ def _start_debugpy(port_s: str) -> dict:
             import subprocess
 
             _LOGGER.info("installing debugpy into the venv (HRI_DEBUGPY=%s)", port)
-            subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "debugpy"], check=True, timeout=300)
+            subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "debugpy==1.8.21"], check=True, timeout=300)
             import debugpy
-        debugpy.listen(("0.0.0.0", port))
-        _LOGGER.warning("debugpy listening on :%s (attach a debugger; never expose this port)", port)
-        return {"enabled": True, "listening": True, "port": port}
+        debugpy.listen((host, port))
+        _LOGGER.warning("debugpy listening on %s:%s (unauthenticated code execution for whoever reaches it)", host, port)
+        return {"enabled": True, "listening": True, "host": host, "port": port}
     except Exception as err:  # noqa: BLE001
         _LOGGER.error("debugpy could not start: %s", err)
-        return {"enabled": True, "listening": False, "port": port, "error": f"{type(err).__name__}: {err}"}
+        return {"enabled": True, "listening": False, "host": host, "port": port, "error": f"{type(err).__name__}: {err}"}
 
 
 def _malloc_trim() -> None:

@@ -347,7 +347,8 @@ class EntrypointTest(unittest.TestCase):
 
         resp = mock.MagicMock()
         resp.__enter__.return_value.read.return_value = b""
-        with mock.patch.object(ep.subprocess, "run", fake_run), mock.patch.object(ep.urllib.request, "urlopen", return_value=resp):
+        with mock.patch.object(ep.subprocess, "run", fake_run), mock.patch.object(ep.urllib.request, "urlopen", return_value=resp), \
+                mock.patch.object(ep, "_run_pip", side_effect=lambda cmd, out, timeout: fake_run(cmd, timeout=timeout)):  # pip runs in its own process group
             self.assertFalse(ep.install("2026.9.2"))
         self.assertGreaterEqual(calls[-1]["timeout"], 1800)
         self.assertFalse(os.path.exists(ep.venv_dir("2026.9.2")))

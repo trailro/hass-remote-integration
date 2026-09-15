@@ -2,6 +2,11 @@
 .gitignore
 README.md
 docker-compose.yml
+docker-compose.override.yml
+.env
+dev-src/
+tests/
+docs/
 __pycache__
 *.pyc
 .github

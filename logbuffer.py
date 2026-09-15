@@ -99,15 +99,16 @@ class FileLogHandler(logging.Handler):
         with self.lock:
             rec["id"] = next(self._ids)  # under the lock: ids grow in file order, also when a direct write at exit meets the listener
             data = json.dumps(rec, ensure_ascii=False, default=str) + "\n"
+            size = len(data.encode("utf-8"))  # max_bytes and _size are bytes; a non-ASCII message has more of them than characters
             self.loggers[record.name] = self.loggers.get(record.name, 0) + 1
             try:
-                if self._size + len(data) > self.max_bytes:
+                if self._size + size > self.max_bytes:
                     self._rotate()
                 if self._fh.closed:
                     self._fh = open(self.path, "a", encoding="utf-8")
                 self._fh.write(data)
                 self._fh.flush()
-                self._size += len(data.encode("utf-8"))
+                self._size += size
             except (OSError, ValueError):
                 pass  # a full disk or a failed reopen must never take the process (or a caller's log line) down
 

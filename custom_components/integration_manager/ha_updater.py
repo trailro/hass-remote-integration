@@ -167,9 +167,10 @@ class HaUpdater:
 
     async def async_set_desired(self, version: str) -> dict[str, Any]:
         """Like set_desired, but validated first (otherwise the entrypoint
-        spends minutes in pip and falls back)."""
+        spends minutes in pip and falls back), and written in the executor
+        (set_desired fsyncs the file and its directory)."""
         await self.validate(version)
-        return self.set_desired(version.strip())
+        return await self.hass.async_add_executor_job(self.set_desired, version.strip())
 
     def set_desired(self, version: str, change: dict[str, Any] | None = None) -> dict[str, Any]:
         version = version.strip()
