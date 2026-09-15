@@ -395,9 +395,16 @@ def _extract_to(zf: zipfile.ZipFile, names: list[str], root: str) -> int:
     return n
 
 
-def _wipe_trees(config_dir: str, names: list[str]) -> None:
+def _wipe_trees(config_dir: str, names: list[str], parts: list[str] | None = None) -> None:
     """Remove what the backup replaces so files it lacks do not linger;
-    ha.json, local backups, logs and restore artefacts are kept."""
+    ha.json, local backups, logs and restore artefacts are kept.  The root
+    YAML files go too when the yaml part is restored (a file created after
+    the backup, secrets.yaml included, must not survive a rollback)."""
+    if "yaml" in (parts if parts is not None else PARTS):
+        for entry in os.listdir(config_dir):
+            path = os.path.join(config_dir, entry)
+            if os.path.isfile(path) and any(fnmatch.fnmatch(entry, g) for g in INCLUDE_ROOT_GLOBS) and not _excluded(entry):
+                os.remove(path)
     for top in INCLUDE_DIRS:
         if not any(n.startswith(top + "/") for n in names):
             continue
@@ -449,7 +456,7 @@ def apply_pending(config_dir: str, log=print, record=None) -> dict | None:
             os.makedirs(staging)
             count = _extract_to(zf, names, staging)  # fails here -> nothing touched yet
             wiped = True  # before: a failure halfway through the wipe must still roll back
-            _wipe_trees(config_dir, names)
+            _wipe_trees(config_dir, names, parts)
             for name in sorted(os.listdir(staging)):
                 s_path, d_path = os.path.join(staging, name), os.path.join(config_dir, name)
                 if os.path.isdir(s_path):
@@ -476,7 +483,7 @@ def apply_pending(config_dir: str, log=print, record=None) -> dict | None:
                     # an overlay would keep files the failed restore had already
                     # placed: clear the same trees first, then put back exactly
                     # what was there
-                    _wipe_trees(config_dir, names)
+                    _wipe_trees(config_dir, names, result.get("parts"))
                     _extract_to(zf, before, config_dir)
                 result["rolled_back_to"] = pre["name"]
                 log(f"restore: put back {pre['name']}")

@@ -727,7 +727,10 @@ async def apply_all(hass: HomeAssistant, aligner: RegistryAligner, domains: list
                     running: str | None, installed: set[str], keep_failed: bool = True) -> dict[str, Any]:
     """Import every config entry of every installed integration found in the
     inspected backup (or of ``domains`` only), data/options as they are.
-    Domains that already have a config entry here are skipped."""
+    Tracked per entry: an entry already brought in from this backup (same
+    entry id or unique_id) is skipped and the others of its domain are still
+    imported, so a retry after a partial import completes it.  A domain that
+    had entries of its own before any of this backup's is skipped whole."""
     cfg = hass.config.config_dir
     summary = load_summary(cfg)
     if not summary:
@@ -735,11 +738,24 @@ async def apply_all(hass: HomeAssistant, aligner: RegistryAligner, domains: list
     todo = [(d, e) for d, info in sorted(summary["domains"].items()) if d in installed and (not domains or d in domains)
             for e in info.get("entries", [])]
     results: list[dict[str, Any]] = []
-    preexisting = {d for d, _ in todo if hass.config_entries.async_entries(d)}
+    backup_ids = {e["entry_id"] for _d, e in todo}
+    backup_uids = {(d, e.get("unique_id")) for d, e in todo if e.get("unique_id")}
+
+    def _from_backup(e: ConfigEntry) -> bool:
+        return e.entry_id in backup_ids or (e.domain, e.unique_id) in backup_uids
+
+    # entries of its own (none of them this backup's): importing next to them could duplicate a device
+    preexisting = {d for d, _ in todo if hass.config_entries.async_entries(d)
+                   and not any(_from_backup(e) for e in hass.config_entries.async_entries(d))}
     try:
         for domain, entry in todo:
             if domain in preexisting:
                 results.append({"domain": domain, "entry_id": entry["entry_id"], "skipped": "already has a config entry here"})
+                continue
+            here = hass.config_entries.async_get_entry(entry["entry_id"])
+            if (here is not None and here.domain == domain) or any(
+                    entry.get("unique_id") and e.unique_id == entry.get("unique_id") for e in hass.config_entries.async_entries(domain)):
+                results.append({"domain": domain, "entry_id": entry["entry_id"], "skipped": "already imported"})
                 continue
             try:
                 # several entries of one domain (e.g. two hubs) are all imported
@@ -856,7 +872,7 @@ async def async_finish_rebuild(hass: HomeAssistant, aligner: RegistryAligner, in
             res = await _locked(apply_all(hass, aligner, [domain], True, True, domain, set(installer.state.installed)))
             ok, failed = res["imported"], res["failed"]
             attempts = int(plan.get("attempts") or 0) + 1
-            retry = bool(failed) and not ok and attempts < REBUILD_ATTEMPTS
+            retry = bool(failed) and attempts < REBUILD_ATTEMPTS
             if retry:
                 await hass.async_add_executor_job(write_json, os.path.join(cfg, REBUILD_FILE), {**plan, "attempts": attempts})
                 tail = f" It is tried again at the next start ({attempts} of {REBUILD_ATTEMPTS}).{tail}"
