@@ -357,6 +357,31 @@ therefore asks what the older version starts with:
 
 The integration version and the manager state stay as they are in every case.
 
+### Python versions
+
+The container has one Python interpreter, the image's (`python:3.14`). Home
+Assistant, the integration and every package it requires run on it, so all
+three have to support that Python:
+
+- **Home Assistant.** Only versions whose PyPI `requires_python` accepts the
+  image's Python are offered on **System** or installed. A version that would
+  need another Python is refused before the restart.
+- **The integration's requirements.** The preflight resolves them with pip
+  against the running venv. A package whose `requires_python` excludes the
+  image's Python, or that conflicts with Home Assistant's pins, is a blocker.
+  A package with no wheel for this Python and architecture has to be built from
+  source during the install. The preflight builds it for real. The image has no
+  compiler, so a pure-Python package builds and one with C code is a blocker.
+- **The integration's own code.** The preflight compiles every `.py` file with
+  the image's Python (a syntax error is a blocker naming the file and line). It
+  also warns about imports of standard modules that Python has removed
+  (`imp`, `distutils`, `asyncore`, `telnetlib` and the rest of PEP 594), unless
+  the import is guarded by `try/except ImportError` or something installed
+  provides the module.
+
+What the preflight cannot see is caught by the smoke test after the switch:
+an unhealthy version is rolled back automatically.
+
 ### Backups
 
 Taken automatically before every start that changes something, before every
@@ -826,6 +851,22 @@ A few things that shaped the code, useful if you read it:
   renamed or disabled in the registry.
 - Cutover does not disable the integration in your main HA for you: do that
   yourself before enabling discovery.
+- The Python version is fixed by the image. Home Assistant versions or
+  integrations that need another Python cannot run until a release moves the
+  image to that Python. An image with a newer Python is tested against Home
+  Assistant and the manager before release, not against every integration: after
+  updating hass-remote-integration, run the preflight on the integration you
+  use.
+- Packages without a wheel for your architecture that need a compiler (C, Rust)
+  cannot be installed. Wheels differ between amd64 and arm64, so an integration
+  can install on one and not the other.
+- Packages that load native system libraries (`libusb`, `bluez`, codecs) need
+  those libraries in the image. The preflight does not check them. A missing
+  library shows up when the integration loads.
+- The code checks read the source only. Modules imported dynamically
+  (`importlib`, `__import__`), code that behaves differently on this Python at
+  run time, and incompatibilities inside requirements are caught by the smoke
+  test and the automatic rollback, not by the preflight.
 
 ## License
 
