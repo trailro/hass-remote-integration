@@ -28,14 +28,18 @@ from .logfiles_page import _entry_paths, _log_files
 from .memdiag import snapshot as memory_snapshot
 
 _SECRET_KEY = re.compile(
-    r"(password|passwd|passphrase|token|secret|credential|bearer|cookie|psk"
-    r"|(api|access|private|local|encryption|device|client|master|app|user|shared|signing|session|auth|link)[_-]?key"
+    r"(password|passwd|passphrase|token|secret|credential|bearer|cookie|psk|hmac|passkey|bindkey|authorization|webhook_id|cloudhook_url|pin_code"
+    r"|(api|access|private|local|encryption|device|client|master|app|user|shared|signing|session|auth|link|network|aes|ssl)[_-]?key"
+    r"|^s[0-2]_\w*key$|(^|[_-])otp([_-]|$)"  # Z-Wave s0_legacy_key / s2_access_control_key, one-time codes
     r"|^(key|pin|auth|pass)$|[_-](pin|pass)$)", re.I)
 _SECRET_TEXT = re.compile(
-    r"((?:password|passwd|passphrase|token|secret|credential|psk|\bpin|\bcode"
-    r"|(?:api|access|private|local|encryption|device|client|master|app|shared|signing|session|auth|link)[_-]?key)['\"]?\s*[=:]\s*)"
+    r"((?:password|passwd|passphrase|token|secret|credential|psk|hmac|passkey|bindkey|webhook_id|cloudhook_url|pin_code|\bpin|\bcode|\botp"
+    r"|\bs[0-2]_\w*key|(?:api|access|private|local|encryption|device|client|master|app|shared|signing|session|auth|link|network|aes|ssl)[_-]?key)"
+    r"['\"]?\s*[=:]\s*)"
     r"(\"[^\"]*\"|'[^']*'|[^'\",\s}]+)", re.I)
-_BEARER = re.compile(r"\b(Bearer|Basic)\s+(?=[A-Za-z0-9._~+/=-]*[0-9._~+/=-])[A-Za-z0-9._~+/=-]{8,}")  # a token, not "Basic information"
+# the whole value of an Authorization header, scheme included (Digest, a custom scheme, a bare token)
+_AUTH_TEXT = re.compile(r"(authorization['\"]?\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|(?:[A-Za-z-]+\s+)?[^'\",\s}]+)", re.I)
+_BEARER = re.compile(r"\b(Bearer|Basic)\s+([A-Za-z0-9._~+/=-]{8,})")
 _URL_CRED = re.compile(r"(\b[a-z][a-z0-9+.-]*://[^/\s:@]*:)[^@\s/]+@", re.I)
 _GH_TOKEN = re.compile(r"\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
 LOG_FILE_TAIL = 500
@@ -53,7 +57,9 @@ def scrub(value: Any) -> Any:
         return [scrub(v) for v in value]
     if isinstance(value, str):
         value = _SECRET_TEXT.sub(lambda m: m.group(1) + (m.group(2)[0] + "***" + m.group(2)[0] if m.group(2)[:1] in ('"', "'") else "***"), value)
-        value = _BEARER.sub(lambda m: f"{m.group(1)} ***", value)
+        value = _AUTH_TEXT.sub(lambda m: m.group(1) + (m.group(2)[0] + "***" + m.group(2)[0] if m.group(2)[:1] in ('"', "'") else "***"), value)
+        # a token, not "Basic information": anything but a plain word (base64 without padding is often letters only)
+        value = _BEARER.sub(lambda m: m.group(0) if re.fullmatch(r"[A-Z]?[a-z]+", m.group(2)) else f"{m.group(1)} ***", value)
         return _GH_TOKEN.sub("***", _URL_CRED.sub(r"\1***@", value))
     return value
 
@@ -74,6 +80,9 @@ class DiagnosticsView(ManagerView):
         self._cache: tuple[float, bytes] | None = None
 
     async def get(self, request: web.Request) -> web.Response:
+        if request.headers.get("X-Requested-With") != "fetch":
+            # a heavy build that packs logs and statuses: not something a link on any web page may trigger
+            return self.json_message("X-Requested-With: fetch required", status_code=400)
         if self._cache and time.monotonic() - self._cache[0] < DIAG_CACHE_S:
             body = self._cache[1]
         elif self._lock.locked():
