@@ -531,6 +531,17 @@ hass_<domain>/manager/result                        outcome of a manager action,
   configuration and restarts. Anyone who can publish under the base topic can use them, so
   turn this on only on a broker with credentials. hass-remote-integration
   itself is updated by pulling a new image.
+- **Stop, uninstall, restore**: the identity (`hass_<domain>`) belongs to the
+  running integration. *Stop* is not a removal: the whole device, the manager
+  device included, goes unavailable on the main Home Assistant and keeps its
+  entities with their customisations until the integration starts again.
+  *Uninstall* clears everything retained under that identity, so the main Home
+  Assistant removes the entities and devices. Entities that a restore, an
+  import or a rebuild took away before a restart are removed there once Home
+  Assistant in the container has started (only entities that exist neither as
+  a state nor in its entity registry). The timeline, the resource history and
+  the change reports are not part of backups, so a restore does not roll them
+  back.
 - Before connecting, the container checks that no *foreign* retained data sits
   under its base topic, and refuses to connect if there is (override with
   `force_base_topic`).

@@ -103,3 +103,25 @@ class ServiceSectionsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HistoryOutOfBackupsTest(unittest.TestCase):
+    def test_timeline_history_and_reports_not_backed_up_nor_restored(self):
+        import zipfile
+
+        cfg = tempfile.mkdtemp()
+        for rel in (".storage/core.config_entries", "integration_manager/state.json", "integration_manager/events.jsonl",
+                    "integration_manager/events.jsonl.1", "integration_manager/resource_history.json",
+                    "integration_manager/change_reports.json"):
+            os.makedirs(os.path.dirname(os.path.join(cfg, rel)), exist_ok=True)
+            with open(os.path.join(cfg, rel), "w", encoding="utf-8") as fh:
+                fh.write("{}")
+        rels = {rel for _p, rel in backupkit.iter_files(cfg)}
+        self.assertEqual(rels & {"integration_manager/events.jsonl", "integration_manager/events.jsonl.1",
+                                 "integration_manager/resource_history.json", "integration_manager/change_reports.json"}, set())
+        old = os.path.join(cfg, "old.zip")  # made before these files were excluded
+        with zipfile.ZipFile(old, "w") as zf:
+            zf.writestr("integration_manager/events.jsonl", "old")
+            zf.writestr("integration_manager/state.json", "{}")
+        with zipfile.ZipFile(old) as zf:
+            self.assertEqual(backupkit._names(zf), ["integration_manager/state.json"])

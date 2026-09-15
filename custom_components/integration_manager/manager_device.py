@@ -192,9 +192,11 @@ class ManagerDevice:
         self.updater = updater
         self.publisher = publisher
         self.resources: dict[str, Any] = dict.fromkeys(RESOURCE_KEYS)
-        self.manager_latest: str | None = None
-        self.manager_tag: str | None = None
-        self._ha_latest: str | None = None
+        known = getattr(installer.state, "latest_versions", None)
+        known = known if isinstance(known, dict) else {}
+        self.manager_latest: str | None = known.get("manager")
+        self.manager_tag: str | None = known.get("manager_tag")
+        self._ha_latest: str | None = known.get("home_assistant")
         self._last_run: dict[str, float] = {}
         self.last_action: dict[str, Any] | None = None
         self._ha_desired: str | None = None
@@ -223,6 +225,15 @@ class ManagerDevice:
             unsub()
         self._unsub.clear()
 
+    def _remember_latest(self) -> None:
+        known = {"manager": self.manager_latest, "manager_tag": self.manager_tag, "home_assistant": self._ha_latest}
+        known = {k: v for k, v in known.items() if v}
+        if known != getattr(self.installer.state, "latest_versions", None):
+            self.installer.state.latest_versions = known
+            save = getattr(self.installer, "_save_state", None)
+            if callable(save):
+                save()
+
     async def _first_sample(self, _now: Any) -> None:
         await self.async_sample()
         self.publisher.publish_manager()
@@ -244,6 +255,7 @@ class ManagerDevice:
                     if tag:
                         self.manager_tag = tag
                         self.manager_latest = tag[1:] if tag.startswith(("v", "V")) else tag
+                        self._remember_latest()
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("hass-remote-integration release check failed: %s", err)
         await self.updater.available(force=force)  # records its own error
@@ -375,7 +387,9 @@ class ManagerDevice:
         integ_latest = self.integration_latest()
         ha_info = self.updater._cache[1] if self.updater._cache else {}  # noqa: SLF001 - what the last PyPI check found, no request here
         if ha_info.get("latest_stable"):
-            self._ha_latest = ha_info["latest_stable"]  # a failed check (latest_stable None) keeps what was known
+            if ha_info["latest_stable"] != self._ha_latest:
+                self._ha_latest = ha_info["latest_stable"]  # a failed check (latest_stable None) keeps what was known
+                self._remember_latest()
         ha_latest = self._ha_latest
         return {
             "manager_version": self.version,
