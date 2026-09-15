@@ -48,7 +48,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import package as pkg_util
 
 import jsonio
-from jsonio import vkey, write_json
+from jsonio import is_stable_tag, vkey, write_json
 
 from . import change_report, events, patches
 from .settings import Settings
@@ -632,7 +632,7 @@ class Installer:
             self._save_state()
             events.emit("install", f"{domain} {tag} (version {manifest.get('version')}) into the version store", domain=domain, tag=tag)
             self._releases_cache.pop(domain, None)
-            if domain in self.updates and vkey(tag) >= vkey(self.updates[domain]):
+            if domain in self.updates and is_stable_tag(tag) and vkey(tag) >= vkey(self.updates[domain]):
                 self.updates.pop(domain)  # the newer release is in the store now
                 self.state.release_updates = dict(self.updates)
                 self._save_state()
@@ -1012,10 +1012,13 @@ class Installer:
                 if domain in self.updates:
                     out[domain] = self.updates[domain]  # a failed check keeps what was known
                 continue
-            stable = [r["tag"] for r in rels if not r.get("prerelease")]
+            stable = [r["tag"] for r in rels if not r.get("prerelease") and is_stable_tag(r["tag"])]
             have = list(rec.get("versions") or {})
-            if stable and have and vkey(max(stable, key=vkey)) > vkey(max(have, key=vkey)):
-                out[domain] = max(stable, key=vkey)
+            # a branch, a beta or a commit kept for testing must not hide a newer stable release
+            have_stable = [t for t in have if is_stable_tag(t)]
+            newest = max(stable, key=vkey) if stable else None
+            if newest and have and (not have_stable or vkey(newest) > vkey(max(have_stable, key=vkey))):
+                out[domain] = newest
         self.updates = out
         self.updates_checked_at = time.strftime("%Y-%m-%dT%H:%M:%S")
         self.state.release_updates = dict(out)

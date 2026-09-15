@@ -594,6 +594,22 @@ def _reauth_pending(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                for f in hass.config_entries.flow.async_progress_by_handler(entry.domain, include_uninitialized=True))
 
 
+def storage_for_entry(files: list[str], entry_id: str | None, other_ids: list[str], first_of_domain: bool) -> list[str]:
+    """The domain's store files one entry's import may write.  Files named
+    after another entry of the backup come with that entry; files named after
+    none (domain-wide) come with the domain's first imported entry only, so
+    importing a second hub (or retrying it) never puts back tokens, caches or
+    migrations the first one has saved since."""
+    out = []
+    for f in files:
+        if any(o and o in f for o in other_ids):
+            continue
+        if not (entry_id and entry_id in f) and not first_of_domain:
+            continue
+        out.append(f)
+    return out
+
+
 async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entry_id: str, data: dict[str, Any] | None,
                 options: dict[str, Any] | None, align: bool, copy_storage: bool, running: bool = True,
                 installed: bool = True, cleanup: bool = True, allow_existing: bool = False) -> dict[str, Any]:
@@ -656,8 +672,12 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
     moved: list[str] = []    # originals set aside as .pre-import (recorded BEFORE the move: a failed copy must still restore them)
     merged: dict[str, Any] = {"entities": {}, "devices": {}}
 
+    to_copy = storage_for_entry(dom.get("storage_files", []), original_id,
+                                [e["entry_id"] for e in dom.get("entries", []) if e.get("entry_id") and e["entry_id"] != original_id],
+                                first_of_domain=not hass.config_entries.async_entries(domain))
+
     def _copy() -> None:
-        for f in dom.get("storage_files", []):
+        for f in to_copy:
             s = os.path.join(out_dir, ".storage", f)
             # a store named after the old id follows the entry to its new one
             name = f.replace(original_id, entry.entry_id) if original_id and not keep_id else f

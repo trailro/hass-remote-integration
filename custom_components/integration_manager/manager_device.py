@@ -61,7 +61,7 @@ from homeassistant.const import __version__ as HA_VERSION
 from homeassistant.core import Event, HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
-from jsonio import ha_vkey, read_json, vkey, write_json
+from jsonio import ha_vkey, is_stable_tag, read_json, vkey, write_json
 
 from . import events, preflight
 from .discovery import MANAGER_ACTIONS
@@ -80,8 +80,7 @@ VERSION_CHECK_S = 12 * 3600
 MIN_INTERVAL_S = {"backup": 600, "check_updates": 300}  # a flood of presses must not rotate every backup away
 LAG_TICK_S = 1.0
 HISTORY_FILE = "resource_history.json"
-LATEST_FILE = "latest_versions.json"
-STABLE_TAG = re.compile(r"[vV]?\d+(?:\.\d+){0,3}")  # 1.2, v1.2.3; not 1.2.0b1, 1.3.0rc1, feature/x or a SHA  # last known releases: update entities do not flap after a restart or a restore
+LATEST_FILE = "latest_versions.json"  # last known releases: update entities do not flap after a restart or a restore
 HISTORY_SAVE_S = 600
 HISTORY_POINTS = 360         # at most this many points per series in an answer
 LEAK_MIN_SPAN_H = 6          # memory growth is judged over at least this much history
@@ -380,7 +379,7 @@ class ManagerDevice:
             return None
         # store tags count only when they are plain release numbers: a beta, a branch or a commit kept
         # for testing must never be what the update button installs (the release check is stable-only)
-        known = [t for t in (inst.state.installed.get(domain) or {}).get("versions", {}) if STABLE_TAG.fullmatch(t)]
+        known = [t for t in (inst.state.installed.get(domain) or {}).get("versions", {}) if is_stable_tag(t)]
         if inst.updates.get(domain):
             known.append(inst.updates[domain])
         return max(known, key=vkey) if known else None

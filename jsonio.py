@@ -49,6 +49,14 @@ def vkey(v: str | None) -> tuple[int, ...]:
     return tuple(int(x) for x in re.findall(r"\d+", v or "0")[:4])
 
 
+_STABLE_TAG = re.compile(r"[vV]?\d+(?:\.\d+){0,3}")
+
+
+def is_stable_tag(tag: str | None) -> bool:
+    """A plain release number (1.2, v1.2.3); not a beta, an rc, a branch, a commit or "local"."""
+    return bool(tag) and bool(_STABLE_TAG.fullmatch(str(tag)))
+
+
 def ha_vkey(v: str | None) -> tuple[int, ...]:
     """Sort key for Home Assistant versions: a beta (2026.9.0b2) sorts before
     its release (2026.9.0), unlike vkey."""
