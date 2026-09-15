@@ -69,7 +69,7 @@ unit() {
   echo "=== unit tests (tests/ in the container's HA venv) ==="
   dir=/tmp/hri-tests
   docker exec "$NAME" sh -c "rm -rf $dir && mkdir -p $dir/custom_components" || return 1
-  for f in tests jsonio.py backupkit.py logbuffer.py entrypoint.py; do docker cp -q "$f" "$NAME:$dir/" || return 1; done
+  for f in tests jsonio.py backupkit.py logbuffer.py entrypoint.py run.py; do docker cp -q "$f" "$NAME:$dir/" || return 1; done
   docker cp -q custom_components/integration_manager "$NAME:$dir/custom_components/" || return 1
   docker exec -w "$dir" -e PYTHONPATH="$dir" -e PYTHONDONTWRITEBYTECODE=1 "$NAME" /config/venv-current/bin/python -m unittest discover -s tests -t .
 }
