@@ -19,6 +19,7 @@ import json
 import re
 import threading
 import os
+import posixpath
 
 from jsonio import fsync_dir, ha_vkey, write_json
 import shutil
@@ -63,6 +64,8 @@ EXCLUDE_GLOBS = (
     f"{STATE_DIR}/staging-*", f"{STATE_DIR}/staging-*/*", f"{STATE_DIR}/backups", f"{STATE_DIR}/backups/*",
     f"{STATE_DIR}/import.tar", f"{STATE_DIR}/import.tar.tmp", f"{STATE_DIR}/import-extracted", f"{STATE_DIR}/import-extracted/*",
     ".storage/*.log", ".storage/core.uuid",
+    # a store being written (HA's temporary file: tmp + 8 random characters) and an import's set-aside original
+    ".storage/tmp" + "[a-z0-9_]" * 8, ".storage/*.pre-import",
     # the record of what happened (timeline, resource history, change reports) must survive a restore
     f"{STATE_DIR}/events.jsonl*", f"{STATE_DIR}/resource_history.json*", f"{STATE_DIR}/change_reports.json*",
     f"{STATE_DIR}/latest_versions.json*", f"{STATE_DIR}/mqtt_undiscover.json",  # a restore must not bring back older "latest" versions
@@ -291,7 +294,9 @@ def validate(path: str) -> dict:
         with zipfile.ZipFile(path) as zf:
             names = zf.namelist()
             for n in names:
-                if n.startswith("/") or ".." in n.split("/") or "\\" in n:
+                member = n[:-1] if n.endswith("/") else n
+                # only the normal spelling: "a/./auth_key" or "a//auth_key" would pass the exclusions and still land on a/auth_key
+                if n.startswith("/") or "\\" in n or posixpath.normpath(member) != member or any(p in ("", ".", "..") for p in member.split("/")):
                     raise ValueError(f"unsafe path in archive: {n}")
             if MARKER not in names or not any(n.startswith(".storage/") and not n.endswith("/") for n in names):
                 # a restore wipes whole trees before extracting: a zip that

@@ -81,6 +81,9 @@ class ImportUploadView(ManagerView):
                     pass
         if size == 0:
             return self.json({"ok": False, "error": "empty upload"})
+        if _rebuild_staged(self.hass.config.config_dir):  # staged while this streamed: clearing the import area would drop it
+            await self.hass.async_add_executor_job(os.remove, dest + ".tmp")
+            return self.json({"ok": False, "error": _REBUILD_MSG})
         await self.hass.async_add_executor_job(os.replace, dest + ".tmp", dest)
         await self.hass.async_add_executor_job(ha_import.clear_extracted, self.hass.config.config_dir)
         return self.json({"ok": True, "bytes": size, "name": os.path.basename(field.filename or "backup.tar")})

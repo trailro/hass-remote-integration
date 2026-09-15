@@ -100,6 +100,9 @@ def build(pending: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     before = pending.get("before") or {}
     b, a = before.get("entities") or {}, after.get("entities") or {}
     b = {_current_key(k, v, a): v for k, v in b.items()}
+    # an entity that only gained a unique id is the same entity, not one removed and one added
+    gained = {v.get("entity_id"): k for k, v in a.items() if k.startswith("uid:") and k not in b and isinstance(v, dict)}
+    b = {(gained.get(v.get("entity_id"), k) if k.startswith("eid:") and k not in a and isinstance(v, dict) else k): v for k, v in b.items()}
     bs, as_ = before.get("services") or {}, after.get("services") or {}
     both = sorted(set(a) & set(b))
     changed = []

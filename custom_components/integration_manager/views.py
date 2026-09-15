@@ -216,6 +216,10 @@ async def async_change_ha_version(installer: Installer, updater: HaUpdater, targ
                 if restore is None:
                     raise ValueError(f"no backup made on Home Assistant {target} or older: choose rebuild or keep")
             if mode == "rebuild":
+                from .import_views import _IMPORT_LOCK
+
+                if _IMPORT_LOCK.locked():  # an upload or import writes the same area (no summary yet while an upload streams)
+                    raise ValueError("an import or upload from a Home Assistant backup is running: wait for it to finish")
                 pending_import = await hass.async_add_executor_job(ha_import.load_summary, cfg)
                 if pending_import and pending_import.get("type") != ha_import.REBUILD_TYPE:
                     raise ValueError("an import from a Home Assistant backup is waiting on System: apply or clear it first")
@@ -226,10 +230,14 @@ async def async_change_ha_version(installer: Installer, updater: HaUpdater, targ
                 # scheduled (and validated) before anything of an older change is dropped
                 await hass.async_add_executor_job(backupkit.schedule_restore, cfg, restore["name"], restore_parts, target)
                 await hass.async_add_executor_job(ha_import.drop_rebuild, cfg)
+            elif mode == "rebuild":
+                if _IMPORT_LOCK.locked():  # started during the backup; checked and taken with no await in between
+                    raise ValueError("an import or upload from a Home Assistant backup is running: wait for it to finish")
+                async with _IMPORT_LOCK:
+                    await hass.async_add_executor_job(updater.cancel_config_change)  # an older change's preparations
+                    rebuild = await hass.async_add_executor_job(ha_import.stage_rebuild, cfg, backup["name"], installer.running, HA_VERSION, target)
             else:
                 await hass.async_add_executor_job(updater.cancel_config_change)  # an older change's preparations
-                if mode == "rebuild":
-                    rebuild = await hass.async_add_executor_job(ha_import.stage_rebuild, cfg, backup["name"], installer.running, HA_VERSION, target)
             state = updater.set_desired(target, change={"to": target, "mode": mode, "backup": backup["name"],
                                                         "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                                                         **({"parts": restore_parts} if restore is not None else {})})
