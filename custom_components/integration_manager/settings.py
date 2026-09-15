@@ -73,7 +73,16 @@ class Settings:
             return int(DEFAULTS[key])
 
     def bool_(self, key: str) -> bool:
-        return bool(self.data.get(key, DEFAULTS[key]))
+        """A hand-edited settings.json may say "false": that is False, not a non-empty string."""
+        value = self.data.get(key, DEFAULTS[key])
+        if isinstance(value, str):
+            word = value.strip().lower()
+            if word in ("1", "true", "yes", "on"):
+                return True
+            if word in ("", "0", "false", "no", "off"):
+                return False
+            return bool(DEFAULTS[key])
+        return bool(value)
 
     def health_for(self, domain: str | None) -> dict[str, Any]:
         """The effective health rules of one integration: its overrides on

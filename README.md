@@ -375,10 +375,14 @@ notification. The last ten reports are kept.
 On **System**, choose a version and install it. The process restarts, the new
 Home Assistant is installed into a new venv (the page shows progress), and the
 integration's requirements are reinstalled there. If the new version fails to
-boot three times in a row, the container falls back to the previous one. A
+boot three times in a row before it ever booted, the container falls back to
+the previous one (the new version's venv is removed only once the previous one
+has booted). A version that has booted once is never left automatically: when
+it later crashes three times in a row (a changed setting or port, too little
+memory), the container keeps retrying it and **System** and the log say so. A
 boot counts as good once the integration has set up, or 10 minutes after Home
-Assistant started; stopping or restarting the container during a boot does not
-count as a failure. What
+Assistant started; stopping or restarting the container during a boot, also
+while Home Assistant is still being imported, does not count as a failure. What
 happened (a fallback, a failed install) stays on **System** until the next
 version change and is announced once as a notification. Before restarting,
 the page warns when the target is older than the minimum Home Assistant the
@@ -645,8 +649,14 @@ the directory are skipped, never followed, and the limits of a release archive
 apply (300 MB, 20000 files); `__pycache__`, `.git`, `.mypy_cache` and
 `.pytest_cache` are left out.
 
-`HRI_DEBUGPY=5678` (set by the dev overlay, bound to `127.0.0.1` only) makes
-the process listen for a debugger: attach VS Code to `localhost:5678`.
+`HRI_DEBUGPY=5678` (set by the dev overlay) makes the process listen for a
+debugger: attach VS Code to `localhost:5678`. debugpy binds `127.0.0.1` inside
+the container unless `HRI_DEBUGPY_HOST` says otherwise; the dev overlay sets it
+to `0.0.0.0`, because a published port cannot reach the container's loopback.
+The overlay publishes the port on the host's `127.0.0.1` only, but inside
+Docker every container on the same network can reach it, and debugpy has no
+authentication: whoever connects runs code in the container. Use the dev
+overlay only on a Docker network you trust.
 Exceptions show up on the **Logs** page.
 
 `HRI_DEBUG=1` also turns on Home Assistant's blocking-call detection (off
@@ -888,8 +898,9 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | `HA_VERSION_LATEST` | `1` | `0` installs the image's baseline HA on a fresh volume instead of the newest |
 | `HRI_DEV_SRC` | `./dev-src` | Dev mode: directory mounted at `/dev-src` |
 | `HRI_DEBUGPY` | unset | Dev mode: debugger port |
+| `HRI_DEBUGPY_HOST` | `127.0.0.1` | Dev mode: address debugpy binds inside the container (the dev overlay sets `0.0.0.0`) |
 | `HRI_CALL_TIMEOUT` | `60` | Seconds a service call or command may take before it is reported as a timeout |
-| `HRI_TRACEMALLOC` | unset | Diagnostics: allocation tracing frames (costs memory) |
+| `HRI_TRACEMALLOC` | unset | Diagnostics: allocation tracing frames (costs memory); a value that is not a number traces 25 |
 | `HRI_TRACE_IMPORT` | unset | Diagnostics: log who imports the given packages |
 | `HRI_DEBUG` | unset | Debug logging for the manager, and blocking-call detection on the event loop |
 | `HRI_PASSWORD` | unset | Password for the web UI and API; unset or empty means no login |

@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -32,7 +33,7 @@ import time
 import urllib.request
 
 import backupkit  # /app/backupkit.py: apply a restore scheduled from the UI
-from jsonio import ha_vkey, vkey, write_json
+from jsonio import fsync_dir, ha_vkey, vkey, write_json
 
 CONFIG_DIR = os.environ.get("HRI_CONFIG", "/config")
 PORT = int(os.environ.get("HRI_PORT", "8087"))
@@ -115,7 +116,10 @@ def load_state() -> dict:
     ``_corrupt`` (never saved: save_state strips it)."""
     try:
         with open(HA_FILE, encoding="utf-8") as fh:
-            return json.load(fh)
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            raise ValueError("not a JSON object")
+        return data
     except FileNotFoundError:
         return {}
     except (OSError, ValueError):
@@ -127,6 +131,37 @@ def load_state() -> dict:
             current = next(iter(reversed(installed_versions())), None)
         log(f"ha.json is unreadable; recovered current={current} from the volume, pruning disabled this boot")
         return {"current": current, "desired": current, "last_error": "ha.json was corrupt and has been rebuilt", "_corrupt": True}
+
+
+def _count(value) -> int:
+    """boot_failures as written by hand or by an older version: anything that is not a number counts as 0."""
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+TMP_SWEEP_AGE_S = 600
+_JSON_TMP = re.compile(r".+\.json\.[^.]+\.tmp")  # jsonio.write_json's mkstemp names
+
+
+def sweep_json_tmp_files() -> None:
+    """A kill between jsonio.write_json's mkstemp and its replace leaves the tmp file behind for good (nothing else
+    ever matches its random name).  Only on the volume's top level and integration_manager/, only old ones."""
+    now = time.time()
+    for d in (CONFIG_DIR, STATE_DIR):
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for name in names:
+            path = os.path.join(d, name)
+            try:
+                if _JSON_TMP.fullmatch(name) and os.path.isfile(path) and not os.path.islink(path) and now - os.path.getmtime(path) > TMP_SWEEP_AGE_S:
+                    os.remove(path)
+                    log(f"removed leftover {os.path.relpath(path, CONFIG_DIR)}")
+            except OSError:
+                pass
 
 
 def save_state(state: dict) -> bool:
@@ -235,6 +270,30 @@ def start_status_server() -> http.server.ThreadingHTTPServer | None:
     return srv
 
 
+def stop_status_server(srv: http.server.ThreadingHTTPServer) -> None:
+    """shutdown() only ends serve_forever: the listening socket stays bound until server_close(), and the next
+    status page on the same port (the hold after a failed rollback) could not start."""
+    srv.shutdown()
+    srv.server_close()
+
+
+def _run_pip(cmd: list[str], out, timeout: float) -> None:
+    """subprocess.run(check=True, timeout=...), with pip in its own process group: a timeout kills the whole group,
+    also the build backends pip started (a kill of pip alone left those running)."""
+    with subprocess.Popen(cmd, stdout=out, stderr=subprocess.STDOUT, start_new_session=True) as proc:
+        try:
+            rc = proc.wait(timeout=timeout)
+        except BaseException:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            proc.wait()
+            raise
+    if rc:
+        raise subprocess.CalledProcessError(rc, cmd)
+
+
 def install(version: str) -> bool:
     d = venv_dir(version)
     _status.update(phase="preparing venv", version=version)
@@ -255,14 +314,15 @@ def install(version: str) -> bool:
         _status["phase"] = f"pip install homeassistant=={version} (a few minutes)"
         log(f"pip install homeassistant=={version} -r {EXTRA_REQUIREMENTS}")
         with open(LOG_FILE, "a", encoding="utf-8") as fh:
-            subprocess.run(
-                [*pip, f"homeassistant=={version}", "-r", EXTRA_REQUIREMENTS, "-c", constraints],
-                check=True, stdout=fh, stderr=subprocess.STDOUT,
-                timeout=30 * 60,  # a hung download must not keep the boot on the status page forever: fails like any failed install
-
-            )
+            # a hung download must not keep the boot on the status page forever: fails like any failed install
+            _run_pip([*pip, f"homeassistant=={version}", "-r", EXTRA_REQUIREMENTS, "-c", constraints], fh, timeout=30 * 60)
+        # .ok makes the venv count as good (boot, fallback, prune): durable only after everything pip wrote is
+        os.sync()
         with open(os.path.join(d, ".ok"), "w", encoding="utf-8") as fh:
             fh.write(version)
+            fh.flush()
+            os.fsync(fh.fileno())
+        fsync_dir(d)
         _write_requirements_stamp(d)
         log(f"installed homeassistant=={version}")
         return True
@@ -309,7 +369,7 @@ def ensure_extra_requirements(version: str) -> None:
     log(f"installing the manager's requirements into the venv of Home Assistant {version}")
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as fh:
-            subprocess.run(cmd, check=True, stdout=fh, stderr=subprocess.STDOUT, timeout=900)
+            _run_pip(cmd, fh, timeout=900)  # killed half-way: the stamp is not written, the next boot runs it again
     except Exception as err:  # noqa: BLE001
         log(f"requirements install FAILED ({err}); booting with the venv as it is")
         return
@@ -514,8 +574,7 @@ def hold_after_failed_rollback(result: dict | None, apply) -> dict | None:
             result = apply()
     finally:
         if srv:
-            srv.shutdown()
-            srv.server_close()
+            stop_status_server(srv)
     return result
 
 
@@ -642,6 +701,7 @@ def restrict_umask() -> int:
 def main() -> None:
     restrict_umask()  # first: inherited by everything created from here on, and by the exec'd Home Assistant
     os.makedirs(STATE_DIR, exist_ok=True)  # before the first log() call
+    sweep_json_tmp_files()
     clean_import_leftovers()
     state = load_state()
     merge_applied_restore(state)
@@ -657,13 +717,20 @@ def main() -> None:
 
     # A venv can install fine and still fail to boot (a package HA dropped,
     # an incompatible integration).  run.py resets boot_failures once HA is
-    # ready; after MAX_BOOT_FAILURES consecutive crashes on a version that is
-    # not the previous one, go back to the previous venv and say why.
-    failures = int(state.get("boot_failures") or 0)
+    # ready and records the version as "proven"; after MAX_BOOT_FAILURES
+    # consecutive crashes on a version that never booted, go back to the
+    # previous venv and say why.  A version that booted before is not the
+    # cause (a changed setting, the port, memory): it is never left automatically.
+    failures = _count(state.get("boot_failures"))
     previous = state.get("previous")
     fallback_from = state.get("fallback_from")
     recovery = state.get("recovery") if isinstance(state.get("recovery"), dict) else {}
     fallback_to = previous or recovery.get("for")  # a stopped fallback keeps its target for the retry
+    change = state.get("change") if isinstance(state.get("change"), dict) else {}
+    if "proven" not in state and current and change.get("to") != current:
+        # a volume from before "proven" was recorded: the version it ran booted, unless a change to it is still pending
+        state["proven"] = current
+    fell_back = False
     if failures >= MAX_BOOT_FAILURES and fallback_from and fallback_from != wanted:
         # We already fell back once and the previous version fails too:
         # the problem is not the HA version (port clash, broken manager,
@@ -671,12 +738,21 @@ def main() -> None:
         log(f"{wanted} fails to boot as well as {fallback_from}: not a Home Assistant version problem; retrying")
         state["last_error"] = f"both {fallback_from} and {wanted} crash at boot: not a HA version problem (see container log)"
         save_state(state)
+    elif failures >= MAX_BOOT_FAILURES and wanted == state.get("proven"):
+        # counting goes on (the UI and the log show it), but no downgrade: an older version on this version's
+        # storage, for a cause that is not the version, would only crash too
+        log(f"{wanted} failed to boot {failures} times, but it booted before: not a Home Assistant version problem "
+            "(a setting, the port, memory, the configuration); retrying it, no fallback")
+        state["last_error"] = (f"Home Assistant {wanted} crashed at boot {failures} times in a row; it booted fine before, "
+                               "so it is not rolled back automatically (see the container log)")
+        save_state(state)
     elif failures >= MAX_BOOT_FAILURES and fallback_to and fallback_to != wanted and venv_ok(fallback_to):
         if restore_after_failed_change(state, wanted, fallback_to):
             log(f"{wanted} failed to boot {failures} times; falling back to {fallback_to}")
             state["last_error"] = f"{wanted} crashed at boot {failures} times; rolled back to {fallback_to} (see container log)"
             state["fallback_from"] = wanted
             state["desired"] = wanted = fallback_to
+            fell_back = True
         else:
             log(f"{wanted} failed to boot {failures} times, but its configuration cannot be brought back for {fallback_to}: staying on {wanted}")
             state["last_error"] = (f"{wanted} crashed at boot {failures} times; no fallback to {fallback_to}, because the configuration "
@@ -697,7 +773,7 @@ def main() -> None:
         srv = start_status_server()
         ok = install(wanted)
         if srv:
-            srv.shutdown()
+            stop_status_server(srv)
         if not ok:
             fallback = current if current and venv_ok(current) else next(iter(reversed(installed_versions())), None)
             state["last_error"] = f"install of {wanted} failed; running {fallback}"
@@ -711,32 +787,35 @@ def main() -> None:
     ensure_extra_requirements(wanted)
     wanted = apply_config_changes(state, wanted, current)
 
-    if current and current != wanted and venv_ok(current) and failures < MAX_BOOT_FAILURES:
+    if current and current != wanted and venv_ok(current) and not fell_back and failures < MAX_BOOT_FAILURES:
         # (a version that just crashed its way into a fallback is not a rollback target)
         state["previous"] = current
-    if failures >= MAX_BOOT_FAILURES:
-        # after an automatic fallback the venv that crashed is pruned below:
-        # do not offer it as a rollback target
+    if fell_back:
+        # the venv that crashed goes once the fallback booted: do not offer it as a rollback target
         state.pop("previous", None)
-    # fallback_from is cleared by run.py once HA actually reaches STARTED
+    # fallback_from is cleared by run.py once HA actually reaches STARTED; until then its venv is kept
     state["current"] = wanted
     state.setdefault("desired", wanted)
     save_state(state)
     if not state.get("_corrupt"):
-        prune({wanted, state.get("previous") or wanted} | ({state["recovery"]["for"]} if isinstance(state.get("recovery"), dict) and state["recovery"].get("for") else set()))
+        keep = {wanted, state.get("previous") or wanted, state.get("fallback_from") or wanted}
+        prune(keep | ({state["recovery"]["for"]} if isinstance(state.get("recovery"), dict) and state["recovery"].get("for") else set()))
 
-    # Stable path for humans and scripts (docker exec ... /config/venv-current/bin/python)
+    # Stable path for humans and scripts (docker exec ... /config/venv-current/bin/python); replaced in one
+    # rename, never missing (the temporary name does not start with venv-: prune would take it for a version)
     link = os.path.join(CONFIG_DIR, "venv-current")
+    tmp_link = os.path.join(CONFIG_DIR, ".venv-current.tmp")
     try:
-        if os.path.islink(link) or os.path.exists(link):
-            os.remove(link)
-        os.symlink(venv_dir(wanted), link)
+        if os.path.lexists(tmp_link):
+            os.remove(tmp_link)
+        os.symlink(venv_dir(wanted), tmp_link)
+        os.replace(tmp_link, link)
     except OSError as err:
         log(f"venv-current symlink not updated: {err}")
     python = os.path.join(venv_dir(wanted), "bin", "python")
     os.environ["SETUP_PORT"] = str(PORT)  # HA http default port, read at import time
     # counted only now: a stop during the slow work above (pruning venvs) is not a failed boot
-    state["boot_failures"] = int(state.get("boot_failures") or 0) + 1  # run.py zeroes it when ready
+    state["boot_failures"] = _count(state.get("boot_failures")) + 1  # run.py zeroes it when ready
     save_state(state)
     log(f"starting Home Assistant {wanted} via {python}")
     os.execv(python, [python, "/app/run.py"])

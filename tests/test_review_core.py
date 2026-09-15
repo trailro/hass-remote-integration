@@ -129,7 +129,7 @@ class BootAccountingTest(unittest.IsolatedAsyncioTestCase):
         run._mark_boot_ok()
         write_ha(self.cfg, {**read_ha(self.cfg), "boot_failures": 1})  # the next boot's count, say
         run._undo_boot_failure()
-        self.assertEqual(read_ha(self.cfg), {"boot_failures": 1, "desired": "y"})
+        self.assertEqual(read_ha(self.cfg), {"boot_failures": 1, "desired": "y", "proven": run.HA_VERSION})  # proven: HRI-01
 
     def test_unreadable_ha_json_is_left_alone(self):
         path = os.path.join(self.cfg, "integration_manager", "ha.json")
