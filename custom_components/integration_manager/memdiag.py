@@ -125,6 +125,7 @@ async def snapshot(hass: HomeAssistant) -> dict[str, Any]:
 
 
 _T0 = time.monotonic()
+_PROBE = {"busy": False}  # read and set on the event loop only
 
 
 class MemoryDiagView(ManagerView):
@@ -138,8 +139,14 @@ class MemoryDiagView(ManagerView):
         if request.headers.get("X-Requested-With") != "fetch":
             return self.json_message("the memory probe walks the whole heap: send the header X-Requested-With: fetch", status_code=400)
         name = request.query.get("refs", "").strip()
-        if name:
-            if not name.replace(".", "").replace("_", "").isalnum():
-                return self.json_message("refs must be a type name", status_code=400)
-            return self.json(await self.hass.async_add_executor_job(referrers, name))
-        return self.json(await snapshot(self.hass))
+        if name and not name.replace(".", "").replace("_", "").isalnum():
+            return self.json_message("refs must be a type name", status_code=400)
+        if _PROBE["busy"]:  # each holds the GIL for a heap walk: requests in parallel only multiply the stall
+            return self.json_message("a memory probe is already running: try again when it has finished", status_code=429)
+        _PROBE["busy"] = True
+        try:
+            if name:
+                return self.json(await self.hass.async_add_executor_job(referrers, name))
+            return self.json(await snapshot(self.hass))
+        finally:
+            _PROBE["busy"] = False

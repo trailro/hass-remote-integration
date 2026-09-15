@@ -136,6 +136,8 @@ def _log_files(config_dir: str, installer, entry_paths: list[str]) -> list[dict[
     seen: dict[str, dict[str, Any]] = {}
 
     def add(path: str, source: str) -> None:
+        if os.path.islink(path):
+            return  # a link could name any file under the config dir (secrets.yaml) as a log
         real = os.path.realpath(path)
         if not real.startswith(os.path.realpath(config_dir) + os.sep) or not os.path.isfile(real):
             return  # only files under the config dir
@@ -164,7 +166,8 @@ def _log_files(config_dir: str, installer, entry_paths: list[str]) -> list[dict[
     if isinstance(sub_dir, str) and sub_dir and not sub_dir.startswith("/") and ".." not in sub_dir:
         try:
             for name in os.listdir(os.path.join(config_dir, sub_dir)):
-                add(os.path.join(config_dir, sub_dir, name), "registry log_dir")
+                if name.endswith(".log") or ".log." in name:
+                    add(os.path.join(config_dir, sub_dir, name), "registry log_dir")
         except OSError:
             pass
     try:
@@ -216,6 +219,14 @@ def _tail(path: str, lines: int, needle: str) -> tuple[list[str], int]:
                 found.append(text)
     found.reverse()
     return found, scanned
+
+
+def _tail_masked(path: str, lines: int, needle: str) -> tuple[list[str], int]:
+    """_tail with secrets masked by the diagnostics scrubber (the rules of the zip)."""
+    from .diagnostics import scrub  # diagnostics imports this module
+
+    found, scanned = _tail(path, lines, needle)
+    return [scrub(text) for text in found], scanned
 
 
 def _format_lines(fmt: dict[str, Any], raw_lines: list[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
@@ -296,7 +307,7 @@ class LogFileTailView(ManagerView):
         if chosen is None:  # never open arbitrary paths
             return self.json_message("unknown file", status_code=404)
         try:
-            raw_lines, scanned = await self.hass.async_add_executor_job(_tail, chosen["path"], lines, q.get("q", ""))
+            raw_lines, scanned = await self.hass.async_add_executor_job(_tail_masked, chosen["path"], lines, q.get("q", ""))
         except OSError as err:
             return self.json_message(f"cannot read the file (rotated away?): {err}", status_code=404)
         columns, rows, slow = await self.hass.async_add_executor_job(_format_lines, fmt, raw_lines)

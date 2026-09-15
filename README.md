@@ -797,6 +797,12 @@ secret) to require a password:
   logged in keep working;
 - changing the password logs every browser out.
 
+The password covers every path on the port, Home Assistant's own included:
+anything under `/api/` without a session or `Bearer` header gets `401`. That
+includes webhooks (`/api/webhook/<id>`) and other callbacks that a cloud
+service or a device on the LAN sends to Home Assistant, and there is no
+allowlist. An integration that receives webhooks only works without a password.
+
 The session cookie is named `hri_session_<port>` (a session from an older
 version under `hri_session` moves to the new name by itself). Browsers send
 cookies to every port of a host name, so any other service on the same IP
@@ -847,13 +853,19 @@ What is in place:
 - State-changing requests need JSON or an explicit header, so a web page on
   another origin cannot trigger them; neither can it trigger the expensive
   reads (see *API*).
+- Home Assistant's onboarding API (`/api/onboarding…`) answers `403`. An
+  integration that depends on `frontend` or `panel_custom` loads it, and while
+  no Home Assistant user exists it would let any page create the owner account.
+- The Logs page lists regular `*.log` files only; symbolic links are skipped, so
+  a link cannot put another file of the volume (`secrets.yaml`) on the page.
 - A `Content-Security-Policy` on every response: scripts only from the
   manager's own static files (no inline script), no plugins, no framing by
   other pages, no `<base>` rewrites. Inline style attributes are allowed.
 - Secrets (MQTT password, GitHub token, parent HA token) are write-only in the
   UI, stored in files readable only by the owner, and never logged or included
-  in the diagnostics zip. The diagnostics zip, the log tails and the inspection
-  of an imported Home Assistant backup mask passwords (also `pwd`, `*_pw`),
+  in the diagnostics zip. The diagnostics zip, the log file tails, the records on
+  the Logs page (message and traceback) and the inspection of an imported Home
+  Assistant backup mask passwords (also `pwd`, `*_pw`),
   tokens, session ids, signatures, every value named `…key` (`local_key`,
   `noise_psk`, `encryption_key`, Z-Wave `network_key`, `s0`/`s2_*_key` and
   `lr_s2_*_key`, `security_key`, `bindkey`, `aes_key`, `ssl_key`, `?key=` in
@@ -939,7 +951,11 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
     change_reports.json         what the last version switches changed
     resource_history.json       resource samples of the Overview
     hacs_catalog.json           cached HACS list for the Install page search
-  backups/                      backups (zip)
+    ha-install.log              pip output of the last Home Assistant version install
+    import.tar                  an uploaded Home Assistant backup, until it is inspected
+    import-extracted/           what the inspection unpacked from it, until the import or Clear
+  .storage.pre-rebuild-<time>/  .storage set aside by a clean start, removed once the rebuild finished
+  backups/                      backups (zip); <time>-pre-restore.zip is the copy taken before a restore
 ```
 
 Settings, the MQTT configuration and the MQTT rules are written in the order
@@ -990,16 +1006,24 @@ points:
 
 | Area | Endpoints |
 |---|---|
-| Status | `GET /api/status`, `GET /api/summary`, `GET /api/manager`, `GET /api/manager/history?hours=`, `GET /api/mqtt/status`, `GET /api/events`, `GET /api/notifications`, `POST /api/notifications/dismiss_all` |
-| Integration | `POST /api/install`, `GET /api/change_reports`, `POST /api/run/{start,stop}`, `GET /api/releases`, `GET /api/releases/preview?domain=&tag=`, `POST /api/releases/preflight`, `POST /api/installed/<domain>/{uninstall,rollback_full,remove_version}` |
-| Builder / dev | `GET /api/catalog?q=`, `POST /api/build/{check,prepare}`, `GET /api/dev`, `POST /api/dev/install` |
-| Configuration | `POST /api/flow/start`, `POST /api/flow/<id>`, `GET/POST /api/yaml/<domain>`, `GET /api/patches/<domain>`, `GET /api/patch_editor/<domain>?name=`, `POST /api/patch_editor/<domain>/{check,save}`, `GET /api/entries` |
-| MQTT | `GET/POST /api/mqtt/config`, `POST /api/mqtt/{reconnect,republish}`, `GET /api/mqtt/discovery`, `GET /api/mqtt/commands` |
-| Entities | `GET /api/entities`, `GET /api/devices`, `GET /api/services`, `POST /api/services/call` |
-| System | `GET /api/ha`, `POST /api/ha/{update,rollback}`, `POST /api/restart`, `GET /api/backups`, `POST /api/backups/create`, `POST /api/backups/<name>/restore`, `POST /api/import/{upload,inspect,apply}` |
-| Cutover | `GET /api/parity`, `POST /api/cutover/{status,enable,undo}` |
-| Logs | `GET /api/logs`, `GET /api/log_files`, `GET /api/log_files/tail?file=&lines=&q=`, `GET/POST /api/settings` (`log_format`) |
-| Diagnostics | `GET /api/diagnostics` (zip, secrets removed), `GET /api/diag/memory` |
+| Status | `GET /api/status`, `GET /api/summary`, `GET /api/manager`, `GET /api/manager/history?hours=`, `GET /api/mqtt/status`, `GET /api/events`, `GET /api/notifications`, `POST /api/notifications/dismiss_all`, `POST /api/notifications/<id>/dismiss` |
+| Login | `POST /api/login` (`{"password": …}`, sets the session cookie), `POST /api/logout` (ends every session) |
+| Integration | `POST /api/install`, `GET /api/change_reports`, `POST /api/run/{start,stop,cancel_pending_start}`, `GET /api/releases`, `GET /api/releases/preview?domain=&tag=`, `POST /api/releases/preflight`, `POST /api/updates/check`, `POST /api/installed/<domain>/{uninstall,rollback_full,remove_version}`, `GET/POST /api/registry` |
+| Builder / dev | `GET /api/catalog?q=`, `GET /api/build/options`, `POST /api/build/{check,prepare}`, `GET /api/dev`, `POST /api/dev/install` |
+| Configuration | `POST /api/flow/start`, `GET /api/flow/progress`, `POST /api/flow/<id>`, `POST/DELETE /api/options/<flow_id>`, `GET/POST /api/yaml/<domain>`, `GET /api/entries`, `POST /api/entries/<entry_id>/{options,reload,delete}` |
+| Patches | `GET /api/patches/<domain>`, `POST /api/patches/<domain>/upload`, `POST /api/patches/<domain>/<name>/{apply,delete}`, `GET /api/patch_editor/<domain>?name=`, `POST /api/patch_editor/<domain>/{check,save}` |
+| MQTT | `GET/POST /api/mqtt/config`, `GET/POST /api/mqtt/rules`, `POST /api/mqtt/{reconnect,republish}`, `GET /api/mqtt/discovery`, `GET /api/mqtt/commands` |
+| Entities | `GET /api/entities`, `POST /api/entities/<entity_id>/{rename,name,disable,enable,delete,mqtt_exclude,mqtt_include,mqtt_name}`, `GET /api/devices`, `POST /api/devices/<device_id>/{name,delete}`, `GET /api/services`, `POST /api/services/call` |
+| System | `GET /api/ha`, `POST /api/ha/{update,rollback}`, `POST /api/restart`, `GET/POST /api/settings` |
+| Backups | `GET /api/backups`, `POST /api/backups/create`, `POST /api/backups/upload`, `GET /api/backups/<name>/download`, `POST /api/backups/<name>/{restore,delete}`, `POST /api/backups/restore/cancel` |
+| Import | `POST /api/import/upload`, `GET/POST /api/import/inspect`, `POST /api/import/{apply,apply_all,clear}` |
+| Cutover | `GET /api/parity`, `POST /api/parity/{test,remove_orphans}`, `POST /api/cutover/{status,enable,undo}` |
+| Logs | `GET /api/logs?level=&prefix=&q=&since_id=&limit=` (`limit` 1 to 2000), `GET /api/logs/loggers`, `POST /api/logs/level` (`{"logger": …, "level": …}`), `GET /api/log_files`, `GET /api/log_files/tail?file=&lines=&q=`, `GET/POST /api/settings` (`log_format`) |
+| Diagnostics | `GET /api/diagnostics` (zip, secrets removed), `GET /api/diag/memory[?refs=<type>]` (one probe at a time: a second one meanwhile answers `429`) |
+
+`POST /api/logs/level` accepts any existing logger; a logger that does not
+exist yet (a library imported later) needs a dotted Python name, and at most
+50 of those can be created.
 
 `GET /api/summary` includes `manager_update`: the running release and the
 newer ones the banner shows. `POST /api/run/start` takes `force`; without it, a
@@ -1086,6 +1110,8 @@ A few things that shaped the code, useful if you read it:
 
 - The web UI password is optional and travels unencrypted over plain HTTP: use a
   reverse proxy with TLS on networks you do not trust.
+- With a password set, Home Assistant's webhooks and other unauthenticated
+  callbacks on the port are refused too (`401`); there is no allowlist for them.
 - One integration per container; two versions of the same integration cannot
   run at the same time.
 - No Home Assistant frontend: integration features that exist only as frontend

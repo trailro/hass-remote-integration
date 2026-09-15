@@ -14,9 +14,20 @@ import backupkit
 from custom_components.integration_manager import patches
 
 
-def _entrypoint(cfg):
-    os.environ["HRI_CONFIG"] = cfg
-    sys.modules.pop("entrypoint", None)
+def _entrypoint(test, cfg):
+    """entrypoint imported for ``cfg``; the environment and the module other tests imported come back after the test."""
+    env = mock.patch.dict(os.environ, {"HRI_CONFIG": cfg})
+    env.start()
+    test.addCleanup(env.stop)
+    previous = sys.modules.pop("entrypoint", None)
+
+    def restore():
+        if previous is None:
+            sys.modules.pop("entrypoint", None)
+        else:
+            sys.modules["entrypoint"] = previous
+
+    test.addCleanup(restore)
     return importlib.import_module("entrypoint")
 
 
@@ -31,7 +42,7 @@ def _backup(cfg, name, created, ha="2026.8.3"):
 
 class StatusPageTest(unittest.TestCase):
     def test_host_rule_matches_the_manager(self):
-        ep = _entrypoint(tempfile.mkdtemp())
+        ep = _entrypoint(self, tempfile.mkdtemp())
         for host in ("192.168.1.9:8087", "localhost", "[::1]:8087", "hass.lan", "box.home.arpa"):
             self.assertTrue(ep.status_host_ok(host), host)
         for host in ("attacker.example", "", "local.evil.com"):
@@ -39,7 +50,7 @@ class StatusPageTest(unittest.TestCase):
 
     def test_allowed_hosts_from_settings(self):
         cfg = tempfile.mkdtemp()
-        ep = _entrypoint(cfg)
+        ep = _entrypoint(self, cfg)
         os.makedirs(ep.STATE_DIR, exist_ok=True)
         with open(os.path.join(ep.STATE_DIR, "settings.json"), "w", encoding="utf-8") as fh:
             json.dump({"allowed_hosts": "hri.example.com:443"}, fh)
@@ -104,7 +115,7 @@ class RestoreRetryTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertFalse(backupkit.pending(self.cfg))
         self.assertTrue(os.path.isfile(os.path.join(self.cfg, backupkit.APPLIED_META)))
-        ep = _entrypoint(self.cfg)
+        ep = _entrypoint(self, self.cfg)
         state = {}
         ep.merge_applied_restore(state)
         self.assertTrue(state["last_restore"]["ok"])

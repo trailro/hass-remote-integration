@@ -9,6 +9,10 @@ from unittest import mock
 
 class VersionInfoTest(unittest.TestCase):
     def _ui(self, build):
+        from custom_components.integration_manager import ui
+
+        # runs after the environment below is restored: the module reads HRI_BUILD as the process has it again
+        self.addCleanup(importlib.reload, ui)
         with mock.patch.dict(os.environ, {"HRI_BUILD": build} if build is not None else {}, clear=False):
             if build is None:
                 os.environ.pop("HRI_BUILD", None)

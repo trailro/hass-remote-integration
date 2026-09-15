@@ -15,8 +15,7 @@ on:
         required: true
 
 permissions:
-  contents: write   # attach docker-compose.yml to the release
-  packages: write
+  contents: read
 
 concurrency:
   group: image-${{ github.event.release.tag_name || inputs.tag }}
@@ -25,8 +24,14 @@ concurrency:
 jobs:
   image:
     name: Build and push
+    # a stable release fires both published and released: it is built once, on released; a pre-release is
+    # built on published, and again (then possibly as :latest) on released when it is promoted
+    if: github.event_name != 'release' || github.event.action == 'released' || github.event.release.prerelease
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
     steps:
@@ -34,6 +39,11 @@ jobs:
         with:
           ref: ${{ env.TAG }}
           fetch-depth: 0   # the tags, to tell whether this is the newest stable release
+          persist-credentials: false
+      - id: commit
+        name: Commit of the tag
+        # github.sha is the dispatching branch's head on a manual run, not the tag that is built
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - id: latest
         name: Is this the newest stable release?
         env:
@@ -70,12 +80,27 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: HRI_BUILD=${{ github.sha }}
+          build-args: HRI_BUILD=${{ steps.commit.outputs.sha }}
           cache-from: type=gha,scope=image
           cache-to: type=gha,mode=max,scope=image
-      # releases/latest/download/docker-compose.yml then always serves the compose
-      # file of the newest release (the README and install instructions use it)
-      - name: Attach docker-compose.yml to the release
+
+  compose:
+    # releases/latest/download/docker-compose.yml then always serves the compose
+    # file of the newest release (the README and install instructions use it)
+    name: Attach docker-compose.yml to the release
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+      - name: Upload
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$TAG" docker-compose.yml --clobber --repo "$GITHUB_REPOSITORY"
