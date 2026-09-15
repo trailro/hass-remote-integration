@@ -33,6 +33,8 @@ import collections
 import hashlib
 import json
 import secrets
+import socket
+import ssl
 import re
 import math
 import logging
@@ -68,6 +70,8 @@ from jsonio import read_json, write_json
 
 from .mqtt_rules import MqttRules
 from .services_catalog import service_rows
+
+TLS_CHECK_INTERVAL_S = 60  # at most one diagnostic handshake per minute while paho keeps failing to connect
 
 _LOGGER = logging.getLogger(__name__)
 ORPHAN_SWEEP_DELAY_S = 300  # after HA started: integrations still adding entities (a device slow to answer) have had time
@@ -301,6 +305,8 @@ class MqttPublisher:
         self._pending_clears: set[str] = set()  # topics we could not clear while disconnected
         self._blocks: dict[str, dict[str, Any]] = {}  # discovery_id -> last published device block
         self._probed_ok: set[str] = set()  # "host:port/base" namespaces probed clean by this process
+        self._tls_checked_at, self._tls_error = 0.0, ""  # the last diagnostic handshake after a failed connect
+        self._last_disconnect = ""  # the reason already logged: paho retries forever
         self._last_hash: dict[str, str] = {}  # topic -> content hash of the last published document (minus timestamps)
         self._last_full = 0.0
         self._moving = False  # identity move in progress: nothing may be published under the old names
@@ -828,7 +834,8 @@ class MqttPublisher:
             self.stats["connect_error"] = "no integration is running: MQTT has no identity (hass_<domain>) yet"
             _LOGGER.info("MQTT: %s", self.stats["connect_error"])
             return
-        probe_key = f"{self.config.host}:{self.config.port}/{base}"  # a different broker is a different namespace
+        # a different broker is a different namespace; other TLS settings may not reach the same one
+        probe_key = f"{self.config.host}:{self.config.port}/{base}/{self.config.tls}/{self.config.ca_certs}/{self.config.tls_insecure}"
         if not self.config.force_base_topic and probe_key not in self._probed_ok:
             probe = self.probe_foreign(base)
             self.stats["foreign_topics"] = probe.get("foreign", [])
@@ -850,6 +857,7 @@ class MqttPublisher:
             return
         self._live_base = base
         self._live_prefix = base + "_"
+        self._tls_checked_at, self._tls_error, self._last_disconnect = 0.0, "", ""  # new settings: report afresh
         old = self._client
         if old is not None:  # belt and braces next to the lock: never leave a second client running
             self._client = None
@@ -916,6 +924,7 @@ class MqttPublisher:
         self._connected = True
         self.stats["connected"] = True
         self.stats["connect_error"] = ""
+        self._tls_checked_at, self._tls_error, self._last_disconnect = 0.0, "", ""
         client.publish(self._status_topic(), "online", qos=1, retain=True)
         # Commands from the consuming HA: <base>/cmd/<domain>/<object_id>/<field>
         # and generic service calls: <base>/call/<domain>/<service>
@@ -936,15 +945,48 @@ class MqttPublisher:
 
     def _on_connect_fail(self, client, userdata) -> None:
         """Paho thread: the broker could not be reached (paho keeps retrying)."""
-        self.stats["connect_error"] = f"cannot reach the broker at {self.config.host}:{self.config.port} (retrying)"
+        where = f"{self.config.host}:{self.config.port}"
+        message = f"cannot reach the broker at {where} (retrying)"
+        if self.config.tls:
+            now = time.monotonic()
+            if not self._tls_checked_at or now - self._tls_checked_at >= TLS_CHECK_INTERVAL_S:
+                self._tls_checked_at = now
+                error = self._tls_handshake_error()
+                if error and error != self._tls_error:
+                    _LOGGER.warning("MQTT %s: %s", where, error)
+                    events.emit("mqtt", f"{where}: {error}")
+                self._tls_error = error
+            if self._tls_error:
+                message = f"{self._tls_error} ({where}, retrying)"
+        self.stats["connect_error"] = message
+
+    def _tls_handshake_error(self) -> str:
+        """Blocking (paho thread): paho reports a failed TLS handshake as a plain connect failure, without the reason.
+        One handshake of our own, with the same CA and host name check, names it: a wrong CA, a host name mismatch."""
+        try:
+            ctx = ssl.create_default_context(cafile=self.config.ca_certs or None)
+            if self.config.tls_insecure:
+                ctx.check_hostname = False
+            with socket.create_connection((self.config.host, self.config.port), timeout=5) as sock, \
+                    ctx.wrap_socket(sock, server_hostname=self.config.host):
+                return ""
+        except ssl.SSLError as err:  # before OSError, its base class
+            return f"TLS handshake failed: {getattr(err, 'verify_message', None) or err.reason or err}"
+        except OSError:
+            return ""  # not a TLS problem: the broker is unreachable, which the generic message says
 
     def _on_disconnect(self, client, userdata, flags, reason_code, properties=None) -> None:
         self._connected = False
         self.stats["connected"] = False
         if reason_code != 0:
-            self.stats["connect_error"] = f"disconnected ({reason_code}); reconnecting"
-            _LOGGER.warning("MQTT disconnected (%s); paho will retry", reason_code)
-            events.emit("mqtt", f"disconnected ({reason_code}); reconnecting")
+            reason = str(reason_code)
+            # a plain connection to a TLS listener ends like this, with no better reason from paho
+            hint = "; if the port is a TLS listener, turn TLS on" if not self.config.tls and reason == "Unspecified error" else ""
+            self.stats["connect_error"] = f"disconnected ({reason}){hint}; reconnecting"
+            if reason != self._last_disconnect:  # one warning and one event per reason, not one per retry
+                self._last_disconnect = reason
+                _LOGGER.warning("MQTT disconnected (%s)%s; paho will retry", reason, hint)
+                events.emit("mqtt", f"disconnected ({reason}); reconnecting")
 
     def _cmd_base(self) -> str:
         return f"{self.base_topic}/cmd"

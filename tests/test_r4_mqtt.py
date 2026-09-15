@@ -167,6 +167,7 @@ def _connect_publisher(loop=None):
     pub._key_provider = lambda: "hass_demo"
     pub._live_base = pub._live_prefix = None
     pub._client, pub._connected, pub._probed_ok = None, False, set()
+    pub._tls_checked_at, pub._tls_error, pub._last_disconnect = 0.0, "", ""
     pub.stats, pub._last_hash = {}, {}
     pub._conn_lock = asyncio.Lock() if loop else None
     if loop:
@@ -433,6 +434,74 @@ class TlsConfigTest(unittest.TestCase):
             pub._connect()
         self.assertIsNone(pub._client)
         self.assertTrue(pub.stats["connect_error"])
+
+
+class TlsErrorReportTest(unittest.TestCase):
+    """Found by the TLS end-to-end test against a real broker."""
+
+    def _pub(self, **config):
+        pub = _connect_publisher()
+        pub.config = mp.MqttConfig(enabled=True, host="broker", port=8883, **config)
+        return pub
+
+    def test_changed_tls_settings_probe_again(self):
+        pub = self._pub(tls=True, ca_certs="/config/a.pem")
+        with mock.patch.object(mp, "read_json", return_value={}), mock.patch.object(mp.MqttPublisher, "_remember_identity"), \
+                mock.patch.object(mp.MqttPublisher, "probe_foreign", return_value={}) as probe, mock.patch.object(mp.mqtt, "Client"):
+            pub._connect()
+            pub._connect()
+            pub.config.ca_certs = "/config/b.pem"
+            pub._connect()
+        self.assertEqual(probe.call_count, 2)
+
+    def test_certificate_error_reaches_the_status_once_a_minute(self):
+        pub = self._pub(tls=True, ca_certs="/config/a.pem")
+        ctx = mock.MagicMock()
+        err = mp.ssl.SSLCertVerificationError(1, "certificate verify failed")
+        err.verify_message = "unable to get local issuer certificate"
+        ctx.wrap_socket.side_effect = err
+        with mock.patch.object(mp.ssl, "create_default_context", return_value=ctx) as create, \
+                mock.patch.object(mp.socket, "create_connection", return_value=mock.MagicMock()) as conn, \
+                mock.patch.object(mp.events, "emit") as emit, self.assertLogs(mp._LOGGER, "WARNING") as logs:
+            pub._on_connect_fail(None, None)
+            pub._on_connect_fail(None, None)
+        self.assertIn("unable to get local issuer certificate", pub.stats["connect_error"])
+        create.assert_called_once_with(cafile="/config/a.pem")
+        self.assertEqual(conn.call_count, 1)
+        self.assertEqual((len(logs.output), emit.call_count), (1, 1))
+
+    def test_tls_insecure_skips_only_the_host_name_check(self):
+        pub = self._pub(tls=True, tls_insecure=True)
+        ctx = mock.MagicMock()
+        with mock.patch.object(mp.ssl, "create_default_context", return_value=ctx), \
+                mock.patch.object(mp.socket, "create_connection", return_value=mock.MagicMock()):
+            self.assertEqual(pub._tls_handshake_error(), "")
+        self.assertFalse(ctx.check_hostname)
+
+    def test_unreachable_broker_keeps_the_generic_message(self):
+        pub = self._pub(tls=True)
+        with mock.patch.object(mp.socket, "create_connection", side_effect=ConnectionRefusedError()):
+            pub._on_connect_fail(None, None)
+        self.assertEqual(pub.stats["connect_error"], "cannot reach the broker at broker:8883 (retrying)")
+
+    def test_without_tls_no_handshake(self):
+        pub = self._pub()
+        with mock.patch.object(mp.socket, "create_connection") as conn:
+            pub._on_connect_fail(None, None)
+        conn.assert_not_called()
+        self.assertIn("cannot reach the broker", pub.stats["connect_error"])
+
+    def test_repeated_disconnect_logged_once_with_a_tls_hint(self):
+        pub = self._pub()
+        with mock.patch.object(mp.events, "emit") as emit, self.assertLogs(mp._LOGGER, "WARNING") as logs:
+            for _ in range(3):
+                pub._on_disconnect(None, None, None, "Unspecified error")
+        self.assertEqual((len(logs.output), emit.call_count), (1, 1))
+        self.assertIn("TLS listener", pub.stats["connect_error"])
+        pub._on_connect(mock.Mock(), None, None, 0)
+        with mock.patch.object(mp.events, "emit") as emit, self.assertLogs(mp._LOGGER, "WARNING"):
+            pub._on_disconnect(None, None, None, "Unspecified error")  # after a real connection it is news again
+        emit.assert_called_once()
 
 
 class CleanupTest(unittest.TestCase):
