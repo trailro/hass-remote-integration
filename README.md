@@ -330,9 +330,11 @@ expires or you log out once more.
 Install the new release (Install or Integration page), then *Switch to* it.
 The switch runs the **Preflight** on the copy in the version store first (the
 files the switch deploys, not what the tag or branch names on GitHub now), or
-reuses one run on that same copy in the last 30 minutes (reports are kept in
+reuses its own check of that same copy from the last 30 minutes (kept in
 memory, per stored copy and running Home Assistant version, so a restart or a
-reinstall forgets them). Blockers stop the switch and
+reinstall forgets them; the *Preflight* button checks the release on GitHub and
+is not reused). If the version is installed again while its check runs, the
+start is refused: start it again. Blockers stop the switch and
 are listed with a choice to start anyway; warnings do not stop it. An update
 started from your main HA over MQTT refuses on blockers, since nobody is there
 to confirm, and says why in its result. Through the API, `POST /api/run/start`
@@ -459,8 +461,8 @@ pruning and cannot be deleted. Deleting `integration_manager/restore-pending.jso
 ends the wait and starts Home Assistant on the configuration as it is. A
 restore replaces symbolic links inside the trees it restores with real files
 and directories instead of writing through them, and does not start when
-`.storage`, `custom_components` or `integration_manager` itself is a symbolic
-link. Backups, restored files and
+`.storage`, `custom_components` or `integration_manager`, of the parts being
+restored, is itself a symbolic link. Backups, restored files and
 uploads are created readable by the container user only (umask 077).
 Automatic pruning keeps the newest backups by the date they were made (never
 later than the file's own date), never removes the backup it runs after, and
@@ -506,6 +508,8 @@ integration.
 log, with filters and a live follow. Each line carries its date and time, and
 the list holds the newest 200 lines (following live drops the oldest). Loggers listed in the registry's
 `quiet_loggers` start at WARNING; raise one at runtime while you investigate.
+When more than 50000 lines wait to be written (a blocked output), newer lines
+are dropped and a warning says how many.
 
 **Log files** shows files the integration writes itself, such as traffic dumps
 or debug logs. It appears in the menu only when there are any. The files are
@@ -715,8 +719,10 @@ hass_<domain>/manager/result                        outcome of a manager action,
   and sensors for memory, CPU, event-loop lag (the worst delay of a
   one-second timer in the last minute, which is how an integration that blocks
   the loop shows up), volume usage and the patch status. Health is published
-  every minute; the two health entities go unavailable when three minutes pass
-  without one, so a stuck container never keeps showing an old `ok`.
+  every minute once Home Assistant in the container has started; the two health
+  entities go unavailable when three minutes pass without one, so a stuck
+  container never keeps showing an old `ok`. They also stay unavailable during a
+  restart until Home Assistant in the container has started again.
 - **Manager actions** (`manager_commands`, off by default): *Install* on the
   integration and Home Assistant update entities, plus *Restart*, *Back up now*
   (at most every 10 minutes) and *Check for updates* (every 5 minutes) buttons. Installing the integration runs the
@@ -724,7 +730,8 @@ hass_<domain>/manager/result                        outcome of a manager action,
   smoke test, automatic rollback) and restarts when the loaded code has to be
   replaced; installing Home Assistant (upgrades only) takes a backup, keeps the
   configuration and restarts. The limits of *Back up now* and *Check for
-  updates* survive a restart. A restart asked for over MQTT, on its own or
+  updates* survive a restart (if they cannot be saved, the action still runs
+  and the limit holds until the restart). A restart asked for over MQTT, on its own or
   after an install, waits up to five minutes for a running install, start,
   backup or other action to finish; if it is still running then, the restart
   is skipped and the result says so. Anyone who can publish under the base topic can use
@@ -775,9 +782,11 @@ the UI from other web apps on the same machine, serve it under its own host
 name (a reverse proxy with its own name, see below).
 
 Over plain HTTP the password and the session travel unencrypted, so on a
-network you do not trust put the UI behind a reverse proxy with TLS. The
-installation progress page of the very first start, served before Home
-Assistant runs, is not protected; it only shows the progress.
+network you do not trust put the UI behind a reverse proxy with TLS. The status
+page served before Home Assistant runs (while a Home Assistant version
+installs, or while a failed restore waits for a retry) is not protected; it
+shows only the phase and, for a failed restore, the name of the backup to
+restore from.
 
 Behind a reverse proxy, note that Home Assistant's HTTP server in the container
 is not set up for proxies: it answers `400 Bad Request` to any request that
@@ -890,6 +899,8 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
     mqtt_undiscover.json        a discovery cleanup the broker has not confirmed yet
     ha.json                     Home Assistant version, version changes, boot failures, last restore
     restore-pending.json        a restore scheduled for the next restart (with its zip)
+    restore-applied.json        outcome of a restore that could not be recorded (a full volume), recorded at the next boot
+    restore-failed.json         the same for a failed restore: recorded at the next boot, never applied again
     rebuild-pending.json        a clean-start rebuild still to run after a Home Assistant downgrade
     import-map.json             entity and device ids an import aligns at boot
     latest_versions.json        last known releases (update entities, the banner)
@@ -979,7 +990,16 @@ when `.storage` is restored.
 
 - **The page keeps showing the installation progress.** The first start
   downloads Home Assistant; a slow connection can take several minutes. The
-  container log (`docker logs <name>`) shows pip's progress.
+  container log (`docker logs <name>`) shows pip's progress. An install that
+  has not finished after 30 minutes fails: the container starts the Home
+  Assistant version it already had, or, on a first start, exits and Docker
+  starts it again.
+- **The page says Home Assistant is not started: a restore failed and could not
+  be put back.** The configuration is half restored and the page names the
+  backup that holds the configuration from before. Free space or fix the error
+  shown in `docker logs <name>`; the restore is retried every 5 minutes. To
+  start on the configuration as it is, delete
+  `integration_manager/restore-pending.json` on the volume.
 - **"restart required" does not go away.** Click *Restart process* on the
   Overview; some changes (a new version of a loaded integration, YAML) only take
   effect at a restart.
@@ -987,7 +1007,9 @@ when `.storage` is restored.
   busy: an install, start, stop or uninstall, a backup, a patch being applied,
   a Home Assistant version change, the self-check right after boot, or a
   restart already under way. The page shows the error. Wait for it to finish
-  and restart again.
+  and restart again. A restart that fails before anything stops (the state
+  file cannot be written on a full volume, for example) is refused the same
+  way, with the reason.
 - **MQTT says the base topic is in use.** Something else left retained messages
   under `hass_<domain>/`. Remove them, or tick `force_base_topic` if they are
   yours from an earlier setup.
