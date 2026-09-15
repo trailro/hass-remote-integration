@@ -9,7 +9,7 @@ import unittest
 import backupkit
 from custom_components.integration_manager import change_report as cr
 from custom_components.integration_manager.diagnostics import scrub
-from custom_components.integration_manager.ha_import import _still_masked, _unmask
+from custom_components.integration_manager.ha_import import _unmask
 from custom_components.integration_manager.services_catalog import _flat_fields
 
 
@@ -17,8 +17,9 @@ class ScrubTest(unittest.TestCase):
     def test_device_keys_and_non_string_secrets(self):
         out = scrub({"local_key": "abc", "noise_psk": "x", "encryption_key": "k", "api-key": "k", "pin": 1234,
                      "password": 123456, "tokens": ["a"], "auth": {"bearer": "t"}, "host": "10.0.0.2", "translation_key": "t"})
-        for k in ("local_key", "noise_psk", "encryption_key", "api-key", "pin", "password", "tokens", "auth"):
+        for k in ("local_key", "noise_psk", "encryption_key", "api-key", "pin", "password", "tokens"):
             self.assertEqual(out[k], "***", k)
+        self.assertEqual(out["auth"], {"bearer": "***"})
         self.assertEqual(out["host"], "10.0.0.2")
         self.assertEqual(out["translation_key"], "t")
 
@@ -39,16 +40,41 @@ class UnmaskTest(unittest.TestCase):
         stored = {"hosts": [{"host": "a", "password": "p1"}, {"host": "b", "password": "p2"}]}
         given = scrub(stored)
         given["hosts"].pop(0)
-        out = _unmask(given, stored)
+        misses = []
+        out = _unmask(given, stored, misses)
         self.assertEqual(out["hosts"], [{"host": "b", "password": "p2"}])
-        self.assertFalse(_still_masked(out))
+        self.assertEqual(misses, [])
+
+    def test_reordered_list_pairs_by_content(self):
+        stored = {"hosts": [{"host": "a", "password": "p1"}, {"host": "b", "password": "p3"}]}
+        given = scrub(stored)
+        given["hosts"].reverse()
+        misses = []
+        self.assertEqual(_unmask(given, stored, misses)["hosts"], [{"host": "b", "password": "p3"}, {"host": "a", "password": "p1"}])
+        self.assertEqual(misses, [])
+
+    def test_ambiguous_duplicates_are_refused(self):
+        stored = {"hosts": [{"host": "a", "password": "p1"}, {"host": "a", "password": "p2"}, {"host": "c", "password": "p3"}]}
+        given = scrub(stored)
+        given["hosts"].pop(0)
+        misses = []
+        _unmask(given, stored, misses)
+        self.assertTrue(misses)
 
     def test_non_string_secret_comes_back(self):
         stored = {"pin": 1234}
         self.assertEqual(_unmask(scrub(stored), stored), stored)
 
-    def test_unmatched_mask_is_detected(self):
-        self.assertTrue(_still_masked({"a": [{"password": "***"}]}))
+    def test_a_value_that_really_holds_stars(self):
+        stored = {"note": "***Important***", "mask_placeholder": "********"}
+        misses = []
+        self.assertEqual(_unmask(dict(stored), stored, misses), stored)
+        self.assertEqual(misses, [])
+
+    def test_auth_block_masked_field_by_field(self):
+        out = scrub({"auth": {"username": "u", "password": "p"}})
+        self.assertEqual(out, {"auth": {"username": "u", "password": "***"}})
+        self.assertEqual(scrub("Basic information about it"), "Basic information about it")
 
 
 class ChangeReportOldKeysTest(unittest.TestCase):
