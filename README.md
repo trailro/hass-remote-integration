@@ -288,8 +288,11 @@ Everything lives on the volume (Home Assistant, the integration, its
 configuration, backups), so replacing the container keeps it; the new manager
 is copied onto the volume at boot. With `HRI_VERSION` pinned, change it first.
 Home Assistant writes its registries last when it stops, so the compose file
-gives the container 120 s to stop (`stop_grace_period`) and runs an init
-process; with plain `docker run`, add `--init --stop-timeout 120`.
+gives the container 240 s to stop (`stop_grace_period`; a stop that hangs
+longer ends the process anyway) and runs an init process; with plain
+`docker run`, add `--init --stop-timeout 240 --restart unless-stopped`. The
+restart policy is required: a restart from the UI or MQTT exits the process
+and relies on Docker to start it again.
 
 The top bar shows the version that runs and the commit its image was built
 from (`v0.13.0 · 1a2b3c4`), linking to that release. When GitHub has newer

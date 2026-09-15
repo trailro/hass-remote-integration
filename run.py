@@ -26,7 +26,13 @@ if os.environ.get("HRI_TRACEMALLOC"):  # before the heavy imports, so they are t
 import logbuffer  # /app/logbuffer.py: the process log on disk, for the manager UI
 from jsonio import read_json, write_json
 import shutil
+import signal
 import sys
+import threading
+import time
+from collections.abc import Awaitable, Callable
+from datetime import timedelta
+import zoneinfo
 
 from homeassistant import config_entries, core, loader
 from homeassistant import config as conf_util
@@ -40,6 +46,12 @@ MANAGER_SRC = "/app/manager_src/integration_manager"
 
 
 _LOGGER = logging.getLogger("hass_remote_integration")
+
+TASK_CANCEL_TIMEOUT_S = 5  # homeassistant.runner.TASK_CANCELATION_TIMEOUT
+# HA's own stop stages add up to 210 s; the compose file's stop_grace_period is the same 240 s
+STOP_WATCHDOG_S = 240
+BOOT_OK_CAP_S = 600
+_boot_settled = False  # this boot's boot_failures count is resolved: marked ok, or taken back after a stop
 
 
 def _sync_manager_component() -> None:
@@ -55,6 +67,8 @@ def _sync_manager_component() -> None:
 
 
 async def _boot() -> int:
+    booted: list = []  # the HomeAssistant object, once it exists
+    _install_boot_signal_handlers(asyncio.current_task(), lambda: booted[0] if booted else None)
     os.makedirs(os.path.join(CONFIG_DIR, "custom_components"), exist_ok=True)
     _sync_manager_component()
     # Like the stock image (WORKDIR /config): the loader imports the
@@ -63,6 +77,7 @@ async def _boot() -> int:
     os.chdir(CONFIG_DIR)
 
     hass = core.HomeAssistant(CONFIG_DIR)
+    booted.append(hass)
     if os.environ.get("HRI_DEBUGPY"):
         hass.data["hri_debugpy"] = _start_debugpy(os.environ["HRI_DEBUGPY"])
     # First thing bootstrap.async_setup_hass does after creating hass:
@@ -92,7 +107,7 @@ async def _boot() -> int:
     config = {
         "homeassistant": {
             "name": "hass-remote-integration",
-            "time_zone": os.environ.get("TZ", "UTC"),
+            "time_zone": _time_zone(),
             "unit_system": "metric",
         },
         # No "http" section on purpose: it would be migrated into the http
@@ -160,42 +175,53 @@ async def _boot() -> int:
     # integration once its entry exists).  It runs once HA starts, when http
     # already listens: an integration whose setup hangs must not keep the
     # manager UI down.  Failures are logged, not fatal.
-    from homeassistant.const import EVENT_HOMEASSISTANT_START, EVENT_HOMEASSISTANT_STARTED
-    from homeassistant.core import callback
+    from homeassistant.const import EVENT_HOMEASSISTANT_START, EVENT_HOMEASSISTANT_STARTED, EVENT_HOMEASSISTANT_STOP
+    from homeassistant.core import HassJob, callback
+    from homeassistant.helpers.event import async_call_later, async_track_time_interval
+
+    setup_done = asyncio.Event()
 
     async def _setup_domains() -> None:
-        ready = hass.data.get("integration_manager_ready")
-        if ready is not None:
-            await ready  # the manager's boot reconcile (requirements, entries) comes first
-        domains = set(hass.config_entries.async_domains())
-        if running and (yaml_cfg is not None or running not in domains):
-            domains.add(running)  # a YAML-only integration has no config entry yet
-        for domain in sorted(domains):
-            if domain in hass.config.components:
-                continue
-            try:
-                if not await async_setup_component(hass, domain, config):
-                    _LOGGER.error("Integration %s failed to set up", domain)
-            except Exception:  # noqa: BLE001
-                _LOGGER.exception("Integration %s failed to set up", domain)
+        try:
+            ready = hass.data.get("integration_manager_ready")
+            if ready is not None:
+                await ready  # the manager's boot reconcile (requirements, entries) comes first
+            domains = set(hass.config_entries.async_domains())
+            if running and (yaml_cfg is not None or running not in domains):
+                domains.add(running)  # a YAML-only integration has no config entry yet
+            for domain in sorted(domains):
+                if domain in hass.config.components:
+                    continue
+                try:
+                    if not await async_setup_component(hass, domain, config):
+                        _LOGGER.error("Integration %s failed to set up", domain)
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception("Integration %s failed to set up", domain)
+        finally:
+            setup_done.set()
 
     @callback
     def _on_start(_event) -> None:
-        hass.async_create_task(_setup_domains(), "hass-remote-integration setup")  # tracked: STARTED waits for it
+        hass.async_create_task(_setup_domains(), "hass-remote-integration setup")  # tracked, but STARTED only waits so long for it
 
     hass.bus.async_listen_once(EVENT_HOMEASSISTANT_START, _on_start)
 
-    # "boots fine" is only true once HA is actually started (platforms up,
-    # serial port opened, MQTT connected): mark it from the STARTED event,
-    # so a crash in the start phase still counts towards the fallback.
-    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, lambda _e: _mark_boot_ok())
+    @callback
+    def _on_started(_event) -> None:
+        # background: a stop cancels it, and the boot is then not marked ok (the STOP listener takes the count back instead)
+        hass.async_create_background_task(_mark_boot_ok_after(setup_done), "hass-remote-integration boot ok")
+        trim = HassJob(lambda _now: _malloc_trim(), "malloc_trim", cancel_on_shutdown=True)  # a plain function: runs in the executor
+        async_call_later(hass, 30, trim)
+        async_track_time_interval(hass, trim.target, timedelta(hours=1), name="malloc_trim", cancel_on_shutdown=True)
+
+    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_started)
 
     @callback
-    def _trim_later(_e=None) -> None:  # on the loop: call_later is not thread-safe
-        hass.loop.call_later(30, lambda: hass.async_add_executor_job(_malloc_trim))
-        hass.loop.call_later(3600, _trim_later)
+    def _on_stop(_event) -> None:
+        _undo_boot_failure()  # a stop is not a crash, also once HA's own signal handlers took over
+        _arm_stop_watchdog()
 
-    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _trim_later)
+    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _on_stop)
     _LOGGER.info(
         "hass-remote-integration ready: HA %s, http on :%s, components=%s",
         HA_VERSION,
@@ -205,12 +231,87 @@ async def _boot() -> int:
     return await hass.async_run()
 
 
+def _time_zone() -> str:
+    """TZ, if Python knows the zone: HA raises on an unknown one, and a typo in
+    TZ would then crash every boot and count towards the fallback."""
+    tz = os.environ.get("TZ") or "UTC"
+    try:
+        zoneinfo.ZoneInfo(tz)
+    except (zoneinfo.ZoneInfoNotFoundError, ValueError) as err:
+        _LOGGER.error("TZ=%r is not a known time zone (%s): using UTC", tz, err)
+        return "UTC"
+    return tz
+
+
+def _update_ha_json(change: Callable[[dict], dict]) -> None:
+    """One read-modify-write of ha.json, on the loop: ha_updater writes it
+    on the loop too (fsync=False, no await in between), so the two never
+    interleave and neither loses the other's update."""
+    path = os.path.join(CONFIG_DIR, "integration_manager", "ha.json")
+    state = read_json(path)
+    if not isinstance(state, dict):
+        return
+    try:
+        write_json(path, change(state), fsync=False)
+    except OSError:
+        pass
+
+
+async def _mark_boot_ok_after(setup_done: asyncio.Event, cap: float = BOOT_OK_CAP_S) -> None:
+    """From STARTED: the boot is good once the config entries are set up too
+    (STARTED only waits a while for that setup, and a process crash in it
+    must still count towards the fallback), but never later than `cap`: one
+    integration hanging in its setup must not look like a crash loop."""
+    try:
+        await asyncio.wait_for(setup_done.wait(), cap)
+    except TimeoutError:
+        _LOGGER.warning("integration setup still running %s s after start: this boot counts as good anyway", int(cap))
+    _mark_boot_ok()
+
+
+def _undo_boot_failure() -> None:
+    """entrypoint.py counts every boot as failed until it is marked ok; a
+    stop before that (docker stop/restart, SIGTERM) is not a crash: take
+    this boot's count back, once."""
+    global _boot_settled
+    if _boot_settled:
+        return
+    _boot_settled = True
+
+    def undo(state: dict) -> dict:
+        state["boot_failures"] = max(0, int(state.get("boot_failures") or 0) - 1)
+        return state
+
+    _update_ha_json(undo)
+
+
+def _install_boot_signal_handlers(boot_task: asyncio.Task, get_hass: Callable[[], core.HomeAssistant | None]) -> None:
+    """HA installs its SIGTERM/SIGINT handlers only after async_start (they
+    then replace these); before that a signal killed the process outright and
+    the stop counted as a failed boot.  Take the count back and stop cleanly."""
+    loop = boot_task.get_loop()
+
+    def on_signal(signum: int) -> None:
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.remove_signal_handler(sig)  # a second signal kills, like HA's own handler
+        _LOGGER.warning("%s during boot: stopping; not counted as a failed boot", signal.Signals(signum).name)
+        _undo_boot_failure()
+        hass = get_hass()
+        if hass is not None and hass.state is not core.CoreState.not_running:
+            hass.data["hri_boot_stop"] = loop.create_task(hass.async_stop(0))
+        else:
+            boot_task.cancel()  # nothing runs yet: _run_loop returns 0
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, on_signal, sig)
+
+
 def _mark_boot_ok() -> None:
     """Tell entrypoint.py this venv boots (it counts consecutive failures).
-    Runs in an executor thread while the UI may already schedule a version
-    change: only the records of THIS version go, and the file is read again
-    right before the write so the window for a lost update stays tiny."""
-    path = os.path.join(CONFIG_DIR, "integration_manager", "ha.json")
+    The UI may already have scheduled a version change: only the records of
+    THIS version go."""
+    global _boot_settled
+    _boot_settled = True
 
     def settle(state: dict) -> dict:
         state["boot_failures"] = 0
@@ -222,15 +323,89 @@ def _mark_boot_ok() -> None:
             state.pop("recovery", None)  # done: the version it went back to boots, or the one it went away from boots after all
         return state
 
-    if not isinstance(read_json(path), dict):
+    _update_ha_json(settle)
+
+
+def _loop_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+    exc = context.get("exception")
+    _LOGGER.error("Error doing job: %s (task: %s)", context["message"], context.get("task"),
+                  exc_info=(type(exc), exc, exc.__traceback__) if exc else None)
+
+
+def _cancel_all_tasks(loop: asyncio.AbstractEventLoop, timeout: float) -> None:
+    """runner._cancel_all_tasks_with_timeout: a task that ignores its
+    cancellation is logged and left behind."""
+    tasks = asyncio.all_tasks(loop)
+    if not tasks:
         return
-    state = read_json(path)
-    if not isinstance(state, dict):
-        return
+    for task in tasks:
+        task.cancel("Final process shutdown")
+    loop.run_until_complete(asyncio.wait(tasks, timeout=timeout))
+    for task in tasks:
+        if not task.done():
+            _LOGGER.warning("Task could not be canceled and was still running after shutdown: %s", task)
+        elif not task.cancelled() and task.exception() is not None:
+            loop.call_exception_handler({"message": "unhandled exception during shutdown", "exception": task.exception(), "task": task})
+
+
+def _run_loop(boot: Callable[[], Awaitable[int]]) -> int:
+    """asyncio.run, but with homeassistant.runner.run's bounded shutdown (not
+    imported: it pulls in bootstrap).  asyncio.run joins executor threads
+    without a timeout, so one job that never returned kept an in-app restart
+    from ever exiting, with the http server already gone."""
+    from homeassistant.util import thread as ha_thread
+    from homeassistant.util.executor import InterruptibleThreadPoolExecutor
+
+    loop = asyncio.new_event_loop()
+    loop.set_exception_handler(_loop_exception_handler)
+    loop.set_default_executor(InterruptibleThreadPoolExecutor(max_workers=64, thread_name_prefix="SyncWorker"))
+    asyncio.set_event_loop(loop)
     try:
-        write_json(path, settle(state))
-    except OSError:
-        pass
+        return loop.run_until_complete(boot())
+    except asyncio.CancelledError:
+        return 0  # only the boot signal handler cancels it: a stop before HA ran
+    finally:
+        try:
+            _cancel_all_tasks(loop, TASK_CANCEL_TIMEOUT_S)
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            # interruptible: joins with a timeout, raises SystemExit into threads still running, then gives up
+            loop.run_until_complete(loop.shutdown_default_executor())
+        finally:
+            # the stock threading._shutdown joins every thread without a timeout (main() skips it with
+            # os._exit; this covers any other way out)
+            if (safe_shutdown := getattr(ha_thread, "deadlock_safe_shutdown", None)) is not None:
+                threading._shutdown = safe_shutdown  # noqa: SLF001
+            asyncio.set_event_loop(None)
+            loop.close()
+
+
+def _arm_stop_watchdog(timeout: float = STOP_WATCHDOG_S) -> threading.Thread:
+    """HA's stop stages are bounded, but a hang outside them would leave the
+    process up and unreachable, and Docker's restart policy only acts once it
+    exits: exit hard after `timeout`."""
+
+    def watch() -> None:
+        time.sleep(timeout)
+        _LOGGER.critical("still not stopped %s s after the stop began: exiting hard", int(timeout))
+        os._exit(1)
+
+    thread = threading.Thread(target=watch, name="stop-watchdog", daemon=True)
+    thread.start()
+    return thread
+
+
+def _install_excepthooks() -> None:
+    """Like bootstrap.async_enable_logging: uncaught exceptions, in threads
+    too, go through logging, so they reach process.log and not only stderr."""
+    sys.excepthook = lambda *args: _LOGGER.critical("Uncaught exception", exc_info=args)
+
+    def thread_hook(args: threading.ExceptHookArgs) -> None:
+        if args.exc_type is SystemExit:
+            return  # threading's own hook ignores it too: the executor's shutdown interrupt
+        _LOGGER.critical("Uncaught thread exception in %s", args.thread.name if args.thread else "a thread",
+                         exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+
+    threading.excepthook = thread_hook
 
 
 def _quiet_loggers() -> list[str]:
@@ -420,6 +595,7 @@ def main() -> int:
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     )
     logbuffer.install(os.path.join(CONFIG_DIR, "integration_manager", "process.log"))  # before HA boots: /logs shows the boot too
+    _install_excepthooks()
     _install_import_tracer()
     # chatty loggers (the registry's quiet_loggers) would flood the
     # container log at INFO; it gets only their problems.
@@ -438,8 +614,16 @@ def main() -> int:
     logging.getLogger("homeassistant.loader").addFilter(_OwnLoaderNoise())
     if os.environ.get("HRI_DEBUG"):
         logging.getLogger("custom_components.integration_manager").setLevel(logging.DEBUG)
-    return asyncio.run(_boot())
+    rc = 1
+    try:
+        rc = _run_loop(_boot)
+    except BaseException:  # noqa: BLE001
+        _LOGGER.critical("hass-remote-integration crashed", exc_info=True)
+    logging.shutdown()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(rc)  # a thread stuck in C code would otherwise still block interpreter exit
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
