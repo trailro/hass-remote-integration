@@ -120,12 +120,15 @@ class DeviceActionView(ManagerView):
                 name = body.get("name")
                 if name is not None and not isinstance(name, str):
                     raise ValueError("name must be a string or null")
-                reg.async_update_device(device_id, name_by_user=(name.strip() or None) if name else None)
+                update = reg.async_update_child_device if disc.is_child_device(reg.async_get(device_id)) else reg.async_update_device
+                update(device_id, name_by_user=(name.strip() or None) if name else None)
                 return self.json({"ok": True})
             if action == "delete":
                 dev = reg.async_get(device_id)
                 removed = 0
-                for entry_id in list(dev.config_entries):
+                child = disc.is_child_device(dev)
+                entry_ids = [dev.config_entry_id] if child and getattr(dev, "config_entry_id", None) else list(getattr(dev, "config_entries", None) or [])
+                for entry_id in entry_ids:
                     entry = self.hass.config_entries.async_get_entry(entry_id)
                     if entry is None:
                         continue
@@ -139,6 +142,10 @@ class DeviceActionView(ManagerView):
                         return self.json({"ok": False, "error": f"{entry.domain} does not allow removing devices (no async_remove_config_entry_device), like in HA"})
                     if not await hook(self.hass, entry, dev):
                         return self.json({"ok": False, "error": f"{entry.domain} refused to remove this device"})
+                    if child:
+                        reg.async_remove_device(device_id)  # a child device belongs to one entry: removed as a whole
+                        removed += 1
+                        break
                     reg.async_update_device(device_id, remove_config_entry_id=entry_id)
                     removed += 1
                 if reg.async_get(device_id) is not None and removed == 0:

@@ -278,6 +278,33 @@ class CutoverView(ManagerView):
         }
 
     @with_body
+    async def _parent_blockers(self, domain: str, components: list[str]) -> list[str]:
+        """The main Home Assistant must not hold the integration any more: a config entry (enabled or disabled)
+        keeps its entities in the registry, and an entity id still registered there sends the MQTT entity to <id>_2."""
+        out: list[str] = []
+        client = _parent_client(self.hass, self.installer)
+        try:
+            (entries,) = await client.commands([{"type": "config_entries/get", "domain": domain}])
+            if entries:
+                out.append(f"the main Home Assistant still has {len(entries)} config entr{'y' if len(entries) == 1 else 'ies'} of {domain}: "
+                           "remove the integration there first (disabling keeps its entity ids, and the MQTT entities would get _2 ids)")
+        except Exception:  # noqa: BLE001 - an older parent without the command: the loaded components tell less, but something
+            if domain in components:
+                out.append(f"the main Home Assistant still runs {domain}: remove it there first, or every entity exists twice")
+        try:
+            (registry,) = await client.commands([{"type": "config/entity_registry/list"}])
+        except Exception:  # noqa: BLE001
+            return out
+        held = {e.get("entity_id"): e.get("platform") for e in registry if e.get("platform") != "mqtt"}
+        announced = sorted({c.get("default_entity_id") for dev in self.publisher.discovery_preview() for c in dev["components"].values()
+                            if c.get("default_entity_id")})
+        taken = [eid for eid in announced if eid in held]
+        if taken:
+            out.append(f"{len(taken)} entity id{'s' if len(taken) > 1 else ''} the container announces {'are' if len(taken) > 1 else 'is'} still registered "
+                       f"on the main Home Assistant ({', '.join(taken[:3])}{'…' if len(taken) > 3 else ''}): the MQTT entities would get _2 ids; "
+                       "remove the integration there first")
+        return out
+
     async def post(self, request: web.Request, body: dict[str, Any], action: str) -> web.Response:
         if action == "status":
             return self.json({"ok": True, **self._status()})
@@ -297,10 +324,10 @@ class CutoverView(ManagerView):
                     problems.append(f"the main Home Assistant could not be checked ({err})")
                 else:
                     components = cfg.get("components") or []
-                    if s["running"] and s["running"] in components:
-                        problems.append(f"the main Home Assistant still runs {s['running']}: disable it there first, or every entity exists twice")
                     if "mqtt" not in components:
                         problems.append("the main Home Assistant has no MQTT integration loaded")
+                    if s["running"]:
+                        problems += await self._parent_blockers(s["running"], components)
             if problems:
                 return self.json({"ok": False, "error": "; ".join(problems)})
             if not s["discovery_enabled"]:
@@ -316,7 +343,9 @@ class CutoverView(ManagerView):
             try:
                 cleared = await self.publisher.async_clear_discovery()
             except RuntimeError as err:
-                return self.json({"ok": False, "error": f"discovery disabled, but the retained configs could not be cleared: {err}", **self._status()})
+                return self.json({"ok": False, "error": f"discovery disabled, but the retained configs could not be cleared: {err}; "
+                                                    "retried at the next MQTT connection", **self._status()})
+            self.publisher.undiscover_done()
             events.emit("cutover", f"undo: discovery disabled, {cleared} retained configs cleared")
             return self.json({"ok": True, "cleared_discovery_configs": cleared, **self._status()})
         return self.json_message("unknown action", status_code=400)

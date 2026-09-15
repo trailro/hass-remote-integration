@@ -56,7 +56,7 @@ EXCLUDE_GLOBS = (
     ".storage/*.log", ".storage/core.uuid",
     # the record of what happened (timeline, resource history, change reports) must survive a restore
     f"{STATE_DIR}/events.jsonl*", f"{STATE_DIR}/resource_history.json*", f"{STATE_DIR}/change_reports.json*",
-    f"{STATE_DIR}/latest_versions.json*",  # a restore must not bring back older "latest" versions
+    f"{STATE_DIR}/latest_versions.json*", f"{STATE_DIR}/mqtt_undiscover.json",  # a restore must not bring back older "latest" versions
 )
 KEEP_DEFAULT = 5
 INFO_MAX = 64 * 1024  # backup-info.json is a few hundred bytes; a huge one is a zip bomb
@@ -254,6 +254,8 @@ def validate(path: str) -> dict:
                 # covers only a marker would empty .storage / integration_manager
                 # (core.config_entries itself only exists after a first config entry)
                 raise ValueError("not a full backup of this tool (needs integration_manager/state.json and files under .storage/)")
+            if sum(i.file_size for i in zf.infolist()) > MAX_UNCOMPRESSED:  # before testzip decompresses everything
+                raise ValueError(f"the archive unpacks to more than {MAX_UNCOMPRESSED // 1024**3} GB: not a backup of this tool")
             try:
                 bad = zf.testzip()
             except Exception as err:  # noqa: BLE001 - zlib/CRC errors surface as assorted exceptions
@@ -262,8 +264,6 @@ def validate(path: str) -> dict:
                 raise ValueError(f"corrupt member in archive: {bad}")
             if "backup-info.json" in names and zf.getinfo("backup-info.json").file_size > INFO_MAX:
                 raise ValueError("backup-info.json is implausibly large")
-            if sum(i.file_size for i in zf.infolist()) > MAX_UNCOMPRESSED:
-                raise ValueError(f"the archive unpacks to more than {MAX_UNCOMPRESSED // 1024**3} GB: not a backup of this tool")
             info = json.loads(zf.read("backup-info.json")) if "backup-info.json" in names else {}
             if not isinstance(info, dict):
                 info = {}

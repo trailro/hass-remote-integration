@@ -73,12 +73,19 @@ connections on unload.
   entity ids your automations use.
 - The Cutover page compares both sides entity by entity, by discovery unique
   id, and needs only read access to the main HA (URL and a long-lived token).
+  It compares the MQTT entities this container announces with the MQTT
+  entities on the main HA; the main HA's own entities of the integration are
+  not part of it, so compare those (entity ids, states) by hand before the cutover.
 
 ## Cutover checklist
 
 1. **Cutover page**: the main HA is configured, the comparison shows the
    expected entities as missing on the main HA and no orphans, health is `ok`.
-2. **Main HA**: disable or remove the integration.
+2. **Main HA**: remove the integration (delete its config entries). Disabling is
+   not enough: a disabled entry keeps its entity ids in the registry, so the
+   MQTT entities would get `_2` ids (the Cutover page refuses then). Removed
+   entities stay in Home Assistant's deleted-entity list for 30 days, so adding
+   the integration there again after an *Undo* brings their ids and settings back.
 3. **Container**: turn off the passive options of the integration (for
    example re-enable sending) and reload its entry.
 4. **Cutover page**: *Enable discovery*, then watch until every entity exists
@@ -87,5 +94,5 @@ connections on unload.
    Commands reach the container over `hass_<domain>/cmd/...`, service calls
    over `hass_<domain>/call/...`.
 6. Something wrong? *Undo* on the Cutover page (discovery off, configs
-   removed), make the container passive again, and re-enable the integration
+   removed), make the container passive again, and add the integration again
    on the main HA.

@@ -42,8 +42,28 @@ INSTALL_HTML = load_template("install")
 CHECK_TTL_S = 3600
 
 
-def _check_token(domain: str, ref: str, ha: str) -> str:
-    return hashlib.sha1(f"{domain}|{ref}|{ha}".encode()).hexdigest()[:16]
+def _check_token(domain: str, ref: str, ha: str, commit: str = "") -> str:
+    return hashlib.sha1(f"{domain}|{ref}|{ha}|{commit}".encode()).hexdigest()[:16]
+
+
+async def _commit_of(hass: HomeAssistant, installer: Installer, domain: str, ref: str) -> str:
+    """The commit a tag, branch or SHA points at now ("" when GitHub cannot say): a branch that moves
+    between Check and Prepare must not install code the check never saw."""
+    import aiohttp
+    from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+    repo = (installer.spec(domain) or {}).get("repo")
+    if not repo:
+        return ""
+    try:
+        async with async_get_clientsession(hass).get(f"https://api.github.com/repos/{repo}/commits/{ref}",
+                                                     headers=installer.settings.github_headers(),
+                                                     timeout=aiohttp.ClientTimeout(total=20)) as resp:
+            if resp.status != 200:
+                return ""
+            return str((await resp.json()).get("sha") or "")
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _ok_ref(ref: str) -> bool:
@@ -144,8 +164,8 @@ class BuildCheckView(ManagerView):
         self._pf = preflight_view
         self._checks: dict[str, float] = {}  # check_id -> when it passed (Prepare needs one for its exact combination)
 
-    def checked(self, domain: str, ref: str, ha: str, check_id: str) -> bool:
-        token = _check_token(domain, ref, ha)
+    def checked(self, domain: str, ref: str, ha: str, check_id: str, commit: str = "") -> bool:
+        token = _check_token(domain, ref, ha, commit)
         at = self._checks.get(token)
         return check_id == token and at is not None and time.monotonic() - at < CHECK_TTL_S
 
@@ -197,7 +217,7 @@ class BuildCheckView(ManagerView):
         if cur and cur != domain:
             report["replaces"] = cur
             report["warnings"].append(f"this container holds {cur}: preparing {domain} replaces it (config entries, patches, YAML, MQTT identity), after a backup")
-        check_id = _check_token(domain, ref, ha)
+        check_id = _check_token(domain, ref, ha, await _commit_of(self.hass, self.installer, domain, ref))
         if report["ok"]:
             self._checks[check_id] = time.monotonic()
         else:
@@ -226,8 +246,8 @@ class BuildPrepareView(ManagerView):
             domain, ref, ha = await self._check._resolve(body)
         except ValueError as err:
             return self.json({"ok": False, "error": str(err)})
-        if not self._check.checked(domain, ref, ha, str(body.get("check_id") or "")):
-            return self.json({"ok": False, "error": "run Check for exactly this integration, version and Home Assistant version first (the report on screen belongs to another combination, is older than an hour, or was made before the manager restarted: passed checks are kept in memory)"})
+        if not self._check.checked(domain, ref, ha, str(body.get("check_id") or ""), await _commit_of(self.hass, self.installer, domain, ref)):
+            return self.json({"ok": False, "error": "run Check for exactly this integration, version and Home Assistant version first (the report on screen belongs to another combination or commit (a branch that moved), is older than an hour, or was made before the manager restarted: passed checks are kept in memory)"})
         steps: list[dict[str, Any]] = []
         ha_state = await self.updater.status()
         ha_changes = bool(ha) and ha != ha_state.get("current")

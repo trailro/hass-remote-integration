@@ -51,6 +51,8 @@ CASES = {
     "humidifier.h": ("on", {"humidity": 50, "current_humidity": 45, "min_humidity": 30, "max_humidity": 70, "available_modes": ["auto"],
                             "device_class": "humidifier"}),
     "alarm_control_panel.a": ("disarmed", {}),
+    # a panel that wants a code: the consuming side sends action + code through the command template
+    "alarm_control_panel.coded": ("armed_away", {"code_format": "number", "code_arm_required": True}),
     "update.u": ("off", {"installed_version": "1", "latest_version": "1", "title": "x", "release_url": None}),
     "device_tracker.d": ("home", {"source_type": "gps", "latitude": 1.0, "longitude": 2.0}),
     "vacuum.v": ("docked", {"battery_level": 90, "fan_speed": "max", "fan_speed_list": ["min", "max"]}),

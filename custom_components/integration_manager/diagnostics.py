@@ -31,7 +31,10 @@ _SECRET_KEY = re.compile(
     r"(password|passwd|passphrase|token|secret|credential|bearer|cookie|psk"
     r"|(api|access|private|local|encryption|device|client|master|app|user|shared|signing|session|auth|link)[_-]?key"
     r"|^(key|pin|auth|pass)$|[_-](pin|pass)$)", re.I)
-_SECRET_TEXT = re.compile(r"((?:password|passwd|passphrase|token|secret|api[_-]?key|local[_-]?key|psk)['\"]?\s*[=:]\s*['\"]?)([^'\",\s}]+)", re.I)
+_SECRET_TEXT = re.compile(
+    r"((?:password|passwd|passphrase|token|secret|credential|psk|\bpin|\bcode"
+    r"|(?:api|access|private|local|encryption|device|client|master|app|shared|signing|session|auth|link)[_-]?key)['\"]?\s*[=:]\s*)"
+    r"(\"[^\"]*\"|'[^']*'|[^'\",\s}]+)", re.I)
 _BEARER = re.compile(r"\b(Bearer|Basic)\s+(?=[A-Za-z0-9._~+/=-]*[0-9._~+/=-])[A-Za-z0-9._~+/=-]{8,}")  # a token, not "Basic information"
 _URL_CRED = re.compile(r"(\b[a-z][a-z0-9+.-]*://[^/\s:@]*:)[^@\s/]+@", re.I)
 _GH_TOKEN = re.compile(r"\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
@@ -49,7 +52,7 @@ def scrub(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [scrub(v) for v in value]
     if isinstance(value, str):
-        value = _SECRET_TEXT.sub(r"\1***", value)
+        value = _SECRET_TEXT.sub(lambda m: m.group(1) + (m.group(2)[0] + "***" + m.group(2)[0] if m.group(2)[:1] in ('"', "'") else "***"), value)
         value = _BEARER.sub(lambda m: f"{m.group(1)} ***", value)
         return _GH_TOKEN.sub("***", _URL_CRED.sub(r"\1***@", value))
     return value

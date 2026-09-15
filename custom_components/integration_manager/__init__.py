@@ -129,6 +129,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
         try:
             await hass.config_entries.async_set_disabled_by(entry.entry_id, ConfigEntryDisabler.USER)
+            installer.mark_suspended(entry.entry_id)  # enabled when that integration is started
         except HomeAssistantError as err:  # UnknownEntry, OperationNotAllowed
             return f"entry created but could not be disabled ({err}); stop/start will sort it out"
         return f"entry created DISABLED: this container runs {installer.running or 'nothing'}; {domain} is not the integration installed here"
