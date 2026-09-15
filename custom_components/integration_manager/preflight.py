@@ -101,8 +101,9 @@ def _patch_after_update(text: str, new_versions: dict[str, str]) -> str:
 def _build_reason(stderr: str) -> str:
     """Why a wheel did not build: the missing compiler or header when pip says so, not its closing summary."""
     lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
-    for needle in ("error: command", "compiler", "gcc", "no such file or directory", "cargo", "rust"):
-        hit = next((ln for ln in lines if needle in ln.lower()), None)
+    errors = [ln for ln in lines if ln.lower().startswith("error")]  # not the compiler invocation itself
+    for needle in ("no such file or directory", "error: command", "compiler", "cargo", "rust"):
+        hit = next((ln for ln in errors if needle in ln.lower()), None)
         if hit:
             return hit
     return next((ln for ln in reversed(lines) if "error" in ln.lower()), lines[-1] if lines else "build failed")

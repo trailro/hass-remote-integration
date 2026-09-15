@@ -69,6 +69,13 @@ class PipReasonTest(unittest.TestCase):
 
 
 class BuildReasonTest(unittest.TestCase):
+    def test_real_netifaces_output(self):
+        err = ("  error: subprocess-exited-with-error\n"
+               "      gcc -fno-strict-overflow -Wsign-compare -DNDEBUG -g -O3 -Wall -fPIC -c netifaces.c -o build/netifaces.o\n"
+               "      error: [Errno 2] No such file or directory: 'gcc'\n"
+               "  ERROR: Failed building wheel for netifaces\nERROR: Failed to build one or more wheels\n")
+        self.assertEqual(preflight._build_reason(err), "error: [Errno 2] No such file or directory: 'gcc'")
+
     def test_compiler_line_before_the_summary(self):
         err = ("building 'netifaces' extension\nerror: command 'gcc' failed: No such file or directory\n"
                "ERROR: Failed building wheel for netifaces\nERROR: Failed to build one or more wheels\n")
