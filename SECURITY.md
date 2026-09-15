@@ -22,7 +22,7 @@ from plain HTTP traffic. These are:
 
 - with a password set: any way to use the UI or the API without it, such as a
   path the check misses, a forged or replayed session after the password
-  changed, or guessing faster than the lockout allows;
+  changed or after a logout, or guessing faster than the lockout allows;
 
 - a way around the protections that do exist: the Host header guard against
   DNS rebinding, the JSON requirement for state-changing requests, the absence
