@@ -31,11 +31,11 @@ from .http_util import ManagerView, with_body
 from .installer import Installer
 from .ui import load_template, render
 
-_DOMAIN_RE = re.compile(r"^[a-z0-9_]{1,64}$")
-_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+@-]{0,100}$")
-_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-_HA_RE = re.compile(r"^\d{4}\.\d{1,2}\.\d+(b\d+)?$")
-_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
+_DOMAIN_RE = re.compile(r"^[a-z0-9_]{1,64}\Z")
+_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+@-]{0,100}\Z")
+_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
+_HA_RE = re.compile(r"^\d{4}\.\d{1,2}\.\d+(b\d+)?\Z")
+_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}\Z")
 
 INSTALL_HTML = load_template("install")
 
@@ -90,7 +90,6 @@ class PreflightView(ManagerView):
         async with self._lock:
             try:
                 report = await preflight.run(self.hass, self.installer, domain, ref, ha or None)
-                preflight.remember(domain, ref, report, ha or None)  # a Switch right after it does not run it again
                 return self.json({"ok": True, "report": report})
             except Exception as err:  # noqa: BLE001
                 return self.json({"ok": False, "error": f"{type(err).__name__}: {err}"})
@@ -208,9 +207,12 @@ class BuildCheckView(ManagerView):
             if ha_check["ok"] and ha != HA_VERSION and ha_vkey(ha) < ha_vkey(HA_VERSION):
                 ha_check = {"version": ha, "ok": False,
                             "error": f"older than the running {HA_VERSION}: switch Home Assistant down on the System page first (it asks what the older version starts with)"}
+        # the commit first, the download by that commit: a branch that moves during the check must not
+        # leave a check id naming a commit whose code was never looked at
+        commit = await _commit_of(self.hass, self.installer, domain, ref)
         async with self._pf._lock:
             try:
-                report = await preflight.run(self.hass, self.installer, domain, ref, ha or None)
+                report = await preflight.run(self.hass, self.installer, domain, ref, ha or None, archive_ref=commit or None)
             except Exception as err:  # noqa: BLE001
                 return self.json({"ok": False, "error": f"{type(err).__name__}: {err}", "ha_check": ha_check})
         if not ha_check["ok"]:
@@ -220,7 +222,7 @@ class BuildCheckView(ManagerView):
         if cur and cur != domain:
             report["replaces"] = cur
             report["warnings"].append(f"this container holds {cur}: preparing {domain} replaces it (config entries, patches, YAML, MQTT identity), after a backup")
-        check_id = _check_token(domain, ref, ha, await _commit_of(self.hass, self.installer, domain, ref))
+        check_id = _check_token(domain, ref, ha, commit)
         if report["ok"]:
             self._checks[check_id] = time.monotonic()
         else:

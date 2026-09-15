@@ -17,6 +17,9 @@ class FakeInstaller:
     def spec(self, domain):
         return {"repo": self._repo} if self._repo else {}
 
+    def _version_dir(self, domain, tag):
+        return f"/versions/{domain}/{tag}"
+
 
 def _gate(installer, tag, report=None, error=None):
     preflight._REPORTS.clear()
@@ -61,7 +64,7 @@ class GateTest(unittest.TestCase):
 
     def test_a_recent_report_is_reused(self):
         preflight._REPORTS.clear()
-        preflight.remember("probe", "v2.0.0", {"ok": False, "blockers": ["cached"]})
+        preflight.remember("probe", "stored:v2.0.0\n", {"ok": False, "blockers": ["cached"]})  # the stored copy's key (no installed_at here)
         run = mock.AsyncMock()
         with mock.patch.object(preflight, "run", run):
             res = asyncio.run(preflight.gate(None, FakeInstaller(), "probe", "v2.0.0"))
