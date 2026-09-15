@@ -17,6 +17,9 @@ from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
 SAFE_SUFFIXES = (".local", ".lan", ".home", ".internal", ".home.arpa", ".localdomain")
+# every script is a static file (no inline script or handler); inline style attributes remain, hence 'unsafe-inline' for styles
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+       "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
 
 
 def _host_ok(host: str, extra: set[str]) -> bool:
@@ -45,7 +48,10 @@ def install_host_guard(hass: HomeAssistant, installer) -> None:
             return web.Response(status=403, content_type="text/plain",
                                 text=f"Host {request.headers.get('Host', '')!r} is not allowed (DNS rebinding guard). "
                                      "Use the IP address, a .local/.lan name, or add the name to allowed_hosts in the settings.")
-        return await handler(request)
+        response = await handler(request)
+        if isinstance(response, web.StreamResponse) and not response.prepared:
+            response.headers.setdefault("Content-Security-Policy", CSP)
+        return response
 
     try:
         hass.http.app.middlewares.append(host_guard)

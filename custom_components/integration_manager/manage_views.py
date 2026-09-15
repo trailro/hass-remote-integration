@@ -172,6 +172,9 @@ class PatchesView(ManagerView):
         self.installer = installer
 
     async def get(self, request: web.Request, domain: str) -> web.Response:
+        if request.headers.get("X-Requested-With") != "fetch":
+            # runs the status(ctx) of every .py patch: not something a link on any web page may trigger
+            return self.json_message("X-Requested-With: fetch required", status_code=400)
         if not _DOMAIN_RE.match(domain):
             return self.json({"ok": False, "error": "bad domain"})
         cfg = self.hass.config.config_dir

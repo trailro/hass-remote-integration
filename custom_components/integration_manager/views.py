@@ -62,18 +62,36 @@ class MqttPageView(ManagerView):
         return web.Response(text=render(_MQTT_HTML, "/mqtt"), content_type="text/html")
 
 
+STATUS_CACHE_S = 10
+
+
 class StatusView(ManagerView):
+    """GET /api/status.  Building it runs the status(ctx) of .py patches and reads files: the UI
+    (X-Requested-With: fetch) gets a fresh one; any other caller (a monitor, verify.sh, a link on any
+    web page) gets one built at most every STATUS_CACHE_S seconds, one build at a time."""
+
     url = "/api/status"
 
     def __init__(self, installer: Installer) -> None:
         self.installer = installer
+        self._lock = asyncio.Lock()
+        self._cache: tuple[float, dict[str, Any]] | None = None
 
-    async def get(self, request: web.Request) -> web.Response:
+    async def _build(self) -> dict[str, Any]:
         data = await self.installer.status()
         data["components"] = sorted(self.installer.hass.config.components)
         v = version_info()
         data["manager_version"], data["manager_build"] = v["version"], v["build"]
-        return self.json(data)
+        self._cache = (time.monotonic(), data)
+        return data
+
+    async def get(self, request: web.Request) -> web.Response:
+        if request.headers.get("X-Requested-With") == "fetch":
+            return self.json(await self._build())
+        async with self._lock:
+            if self._cache is None or time.monotonic() - self._cache[0] >= STATUS_CACHE_S:
+                await self._build()
+            return self.json(self._cache[1])
 
 
 class SummaryView(ManagerView):

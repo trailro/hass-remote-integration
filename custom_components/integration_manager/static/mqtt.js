@@ -28,6 +28,7 @@ $('#mqsave').onclick=async()=>{
   for(const [k,d] of Object.entries(MQ_INT)) body[k]=parseInt($('#mq_'+k).value,10)||d; body.discovery_prefix=body.discovery_prefix||'homeassistant';
   const r=await post('api/mqtt/config',body); log(r.ok?'MQTT config saved':'ERROR: '+JSON.stringify(r)); $('#mq_password').value=''; await mqtt();
 };
+$('#mqform').addEventListener('submit',e=>e.preventDefault());  // Enter in a field must not reload the page (no inline handler: CSP)
 $('#mqrepub').onclick=async()=>{const r=await post('api/mqtt/republish');log(`republished ${r.published} entities`);await mqtt()};
 $('#mqreconn').onclick=async()=>{await post('api/mqtt/reconnect');log('MQTT reconnecting');await mqtt()};
 setInterval(mqtt,15000); mqtt().catch(e=>log('mqtt: '+e)); mqttConfigLoad().catch(e=>log('mqtt config: '+e));
@@ -35,7 +36,7 @@ setInterval(mqtt,15000); mqtt().catch(e=>log('mqtt: '+e)); mqttConfigLoad().catc
 async function healthRules(){
   const r=await (await fetch('api/settings')).json(); if(document.activeElement!==$('#hstale')&&document.activeElement!==$('#hunav')){$('#hstale').value=r.health_stale_s; $('#hunav').value=r.health_unavailable_pct;}
   const t=$('#hrules'); if(t.contains(document.activeElement)) return; t.querySelectorAll('tr:not(:first-child)').forEach(e=>e.remove());
-  const st=await (await fetch('api/status')).json(); const INSTALLED=st.installed||{}, RUN=st.running;
+  const st=await (await fetch('api/status',{headers:{'X-Requested-With':'fetch'}})).json(); const INSTALLED=st.installed||{}, RUN=st.running;
   for(const d of Object.keys(INSTALLED)){ const own=(r.health||{})[d]||{}; const tr=document.createElement('tr');
     tr.innerHTML=`<td><b>${esc(d)}</b>${RUN&&RUN.domain===d?' <span class="tag ok">running</span>':''}</td><td><select data-h="mode" data-d="${esc(d)}"><option value="">periodic (default)</option><option value="periodic" ${own.mode==='periodic'?'selected':''}>periodic</option><option value="event" ${own.mode==='event'?'selected':''}>event</option></select></td>
      <td><input type="number" min="60" max="86400" data-h="stale_s" data-d="${esc(d)}" value="${esc(own.stale_s??'')}" placeholder="${esc(r.health_stale_s)}" style="width:90px"></td><td><input type="number" min="1" max="100" data-h="unavailable_pct" data-d="${esc(d)}" value="${esc(own.unavailable_pct??'')}" placeholder="${esc(r.health_unavailable_pct)}" style="width:70px"></td><td><button data-hs="${esc(d)}">Save</button></td>`;

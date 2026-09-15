@@ -4,7 +4,7 @@ function replaceOk(d){
   return confirm(`This container holds ${CUR}. Installing ${d} REPLACES it: its config entries, patches, YAML and retained MQTT documents are removed after a backup (pre-replace-${CUR}); coming back means restoring that backup. Continue?`);
 }
 async function regLoad(){
-  const s=await (await fetch('api/status')).json(); REG=s.registry||{}; CUR=s.integration||null; $('#curdom').textContent=CUR||'(none)';
+  const s=await (await fetch('api/status',{headers:{'X-Requested-With':'fetch'}})).json(); REG=s.registry||{}; CUR=s.integration||null; $('#curdom').textContent=CUR||'(none)';
   if(!$('#regsel').options.length||[...$('#regsel').options].map(o=>o.value).join()!==Object.keys(REG).join()){
     $('#regsel').innerHTML=Object.entries(REG).filter(([d,x])=>x.repo).map(([d,x])=>`<option value="${esc(d)}" ${d===SEL?'selected':''}>${esc(d)} — ${esc(x.name||'')}</option>`).join('');
   }
@@ -101,7 +101,7 @@ async function loadDev(){
   $('#devdir').innerHTML=r.exists?`<code>${esc(r.dir)}</code> mounted`:`<code>${esc(r.dir)}</code> <span class="warn">not mounted</span>`;
   const d=r.debugpy||{}; $('#devdbg').innerHTML=d.enabled?(d.listening?`· debugpy <span class="ok">listening on :${esc(d.port)}</span>`:`· debugpy <span class="bad">${esc(d.error||'not listening')}</span>`):'· debugpy off (HRI_DEBUGPY unset)';
   const t=$('#devlist'); t.querySelectorAll('tr:not(:first-child)').forEach(e=>e.remove());
-  const ST=await (await fetch('api/status')).json();
+  const ST=await (await fetch('api/status',{headers:{'X-Requested-With':'fetch'}})).json();
   for(const c of (r.candidates||[])){ const tr=document.createElement('tr'); const running=ST.running&&ST.running.domain===c.domain&&ST.running.running_tag===r.local_tag;
     tr.innerHTML=`<td><code>${esc(c.path)}</code></td><td><b>${esc(c.domain)}</b>${c.in_registry?'':' <span class="tag">new</span>'}</td><td>${esc(c.version||'')}</td><td class="mut">${c.config_flow?'yes':'no'}</td><td>${running?'<span class="ok">running as local</span>':c.installed?'<span class="mut">in store as local</span>':''}</td>
      <td><button data-dev="${esc(c.domain)}" data-path="${esc(c.path)}">${running?'Reinstall'+($('#devrestart').checked?' + restart':''):c.installed?'Reinstall as local':'Install as local'}</button></td>`; t.appendChild(tr); }

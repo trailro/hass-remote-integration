@@ -17,7 +17,8 @@ function releaseBanner(mu){
  const top=rel[0].tag; let dismissed=''; try{dismissed=localStorage.getItem('hri-banner-dismissed')||'';}catch(e){}
  if(dismissed===top) return;
  const nav=document.querySelector('nav.topbar'); if(!nav) return;
- const notes=rel.map(r=>`<a href="${esc(r.url)}" target="_blank" rel="noopener" title="${esc(r.name)}${r.published_at?' · '+esc(r.published_at.slice(0,10)):''}">${esc(r.tag)}</a>`).join('');
+ // only http(s): a javascript: or data: URL in the release data must not become a link that runs in this origin
+ const notes=rel.map(r=>`<a href="${esc(/^https?:\/\//i.test(r.url||'')?r.url:'#')}" target="_blank" rel="noopener" title="${esc(r.name)}${r.published_at?' · '+esc(r.published_at.slice(0,10)):''}">${esc(r.tag)}</a>`).join('');
  nav.insertAdjacentHTML('afterend',`<div class="hri-banner" id="hri-banner" role="status"><span class="msg">hass-remote-integration <b>${esc(rel[0].version)}</b> is available`
   +` (this container runs ${esc(mu.installed)}${rel.length>1?`, ${rel.length} newer releases`:''}).</span><span class="notes">Release notes: ${notes}</span>`
   +`<a class="how" href="https://github.com/trailro/hass-remote-integration#updating-hass-remote-integration" target="_blank" rel="noopener">How to update</a>`

@@ -8,7 +8,7 @@ async function fetchLogs(reset){
  const mine=gen; if(!reset) following=true;
  const p=new URLSearchParams({level:$('#level').value,q:$('#q').value,limit:MAX_ROWS,since_id:reset?0:lastId});
  prefixes().forEach(x=>p.append('prefix',x));
- let r; try{ r=await (await fetch('/api/logs?'+p)).json(); } finally { if(reset) resetting--; else following=false; }
+ let r; try{ r=await (await fetch('/api/logs?'+p,{headers:{'X-Requested-With':'fetch'}})).json(); } finally { if(reset) resetting--; else following=false; }
  if(mine!==gen) return;
  if(reset) lastId=0;
  $('#cap').textContent=r.capacity; $('#path').textContent=r.path||''; $('#ts').textContent=new Date().toLocaleTimeString();

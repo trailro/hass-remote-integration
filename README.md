@@ -759,8 +759,20 @@ secret) to require a password:
   generation, signed into the cookie and kept across restarts and restores);
 - scripts send the password as `Authorization: Bearer <password>`;
 - after 5 wrong attempts from one address, that address is refused for 15
-  minutes (for IPv6, the whole /64 it belongs to);
+  minutes (for IPv6, the whole /64 it belongs to); after 30 wrong attempts
+  within 5 minutes from all addresses together (for example from a whole IPv6
+  range), every password attempt is refused, also the right one, until the
+  count drops (at most 5 minutes; logged and in the timeline). Browsers already
+  logged in keep working;
 - changing the password logs every browser out.
+
+The session cookie is named `hri_session_<port>` (a session from an older
+version under `hri_session` moves to the new name by itself). Browsers send
+cookies to every port of a host name, so any other service on the same IP
+address or name receives the cookie and can overwrite it; the port in the name
+only keeps two instances on one host from logging each other out. To isolate
+the UI from other web apps on the same machine, serve it under its own host
+name (a reverse proxy with its own name, see below).
 
 Over plain HTTP the password and the session travel unencrypted, so on a
 network you do not trust put the UI behind a reverse proxy with TLS. The
@@ -800,15 +812,24 @@ What is in place:
   `.internal`, `.localdomain`, `.home.arpa`); add other names under *allowed host names* on
   **System**.
 - State-changing requests need JSON or an explicit header, so a web page on
-  another origin cannot trigger them.
+  another origin cannot trigger them; neither can it trigger the expensive
+  reads (see *API*).
+- A `Content-Security-Policy` on every response: scripts only from the
+  manager's own static files (no inline script), no plugins, no framing by
+  other pages, no `<base>` rewrites. Inline style attributes are allowed.
 - Secrets (MQTT password, GitHub token, parent HA token) are write-only in the
   UI, stored in files readable only by the owner, and never logged or included
   in the diagnostics zip. The diagnostics zip, the log tails and the inspection
-  of an imported Home Assistant backup mask passwords, tokens, device keys
-  (`local_key`, `noise_psk`, `encryption_key`, Z-Wave `network_key` and
-  `s0`/`s2_*_key`, `bindkey`, `aes_key`, `ssl_key`, …), PINs, one-time codes,
-  HMAC keys, webhook ids and cloudhook URLs, `Authorization` values (`Bearer`,
-  `Basic` and any other scheme) and credentials in URLs. Backups contain
+  of an imported Home Assistant backup mask passwords (also `pwd`, `*_pw`),
+  tokens, session ids, signatures, every value named `…key` (`local_key`,
+  `noise_psk`, `encryption_key`, Z-Wave `network_key`, `s0`/`s2_*_key` and
+  `lr_s2_*_key`, `security_key`, `bindkey`, `aes_key`, `ssl_key`, `?key=` in
+  URLs, …) except `translation_key`, `sort_key` and `primary_key`, Bluetooth
+  `irk`/`ltk`, whole PEM blocks, PINs, one-time codes, HMAC keys, webhook ids
+  and cloudhook URLs, `Authorization` values (`Bearer`, `Basic` and any other
+  scheme), `Cookie`/`Set-Cookie` values and credentials in URLs (also a
+  password holding `/` or `@`). Masking errs on the side of hiding too much.
+  Backups contain
   them; the login key and the logout record stay out of backups, so a restore
   never revives a logged-out session. The key of an encrypted Home Assistant
   backup you import is only used for that request.
@@ -920,11 +941,15 @@ Every page is backed by a JSON API on the same port, so everything can be
 scripted. With a password set, send it as `Authorization: Bearer <password>`. POST
 bodies are JSON (`Content-Type: application/json`). Requests that reach out to
 the internet or another server, upload files, or return patches, log file
-tails or diagnostics also need `X-Requested-With: fetch`: `/api/catalog`,
-`/api/patch_editor`, `/api/patches/<domain>/upload`, `/api/backups/upload`,
+tails, logs or diagnostics, or run patch code, also need `X-Requested-With: fetch`: `/api/catalog`,
+`/api/patch_editor`, `/api/patches/<domain>` (and its `/upload`), `/api/backups/upload`,
 `/api/import/upload`, `/api/parity`, `/api/releases/preview`,
-`/api/diagnostics`, `/api/diag/memory?refs=` and `/api/log_files/tail`.
-`?refresh=1` on `/api/releases` and `/api/ha` is ignored without it. The main entry
+`/api/diagnostics`, `/api/diag/memory` (also without `refs`), `/api/logs` and
+`/api/log_files/tail`; without it they answer `400`.
+`?refresh=1` on `/api/releases` and `/api/ha` is ignored without it.
+`GET /api/status` answers without the header too (for monitors and
+`verify.sh`), but then from a copy at most 10 seconds old, since building it
+runs the `status(ctx)` of `.py` patches; send the header for a fresh one. The main entry
 points:
 
 | Area | Endpoints |
