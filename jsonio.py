@@ -28,12 +28,27 @@ def write_json(path: str, data: Any, *, indent: int = 2, fsync: bool = True, mod
         if mode is not None:
             os.chmod(tmp, mode)
         os.replace(tmp, path)
+        if fsync:
+            fsync_dir(d)  # the rename itself: without it a power loss can bring back the old file, or none
     except BaseException:
         try:
             os.remove(tmp)
         except OSError:
             pass
         raise
+
+
+def fsync_dir(path: str) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass  # not every filesystem syncs a directory; the data itself was synced
+    finally:
+        os.close(fd)
 
 
 def read_json(path: str, default: Any = None) -> Any:

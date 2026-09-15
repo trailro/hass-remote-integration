@@ -400,6 +400,15 @@ applied at the next restart, can be partial (only `.storage`, only the manager
 state, …), and is rolled back if it fails halfway. Restoring the YAML part also
 removes root `*.yaml` / `*.yml` files that are not in the backup, so a file
 created after it (a `secrets.yaml`, for example) does not survive the restore.
+A restore interrupted halfway (a stop, a full disk) puts the previous
+configuration back and stays scheduled, so the next boot tries again; if even
+putting it back fails, the restore still stays scheduled and the pre-restore
+backup named in the error is kept from pruning. Backups, restored files and
+uploads are created readable by the container user only (umask 077).
+Automatic pruning keeps the newest backups by the date they were made (never
+later than the file's own date), never removes the backup it runs after, and
+leaves uploaded backups alone for their first 7 days. An upload never replaces
+an existing backup: a name already taken gets a `-2`, `-3`, … suffix.
 A restore never rolls back the record of what happened: the timeline, the
 resource history, the change reports and the last known release versions are
 not part of backups, and neither are the login key and the logout record.
@@ -410,7 +419,9 @@ made on an older version asks what to do: keep the running Home Assistant (the
 default: the configuration is migrated forward when it starts) or go back to the
 version the backup was made on, for exactly the state of the backup. A backup
 made on a newer version can only be restored together with a switch to that
-version. The version only matters when `.storage` is restored: a partial restore
+version. A backup that does not record its version is only restored with
+`.storage` after a confirmation ("restore anyway", `"force": true` in the API
+body), since it may come from a newer version. The version only matters when `.storage` is restored: a partial restore
 without it never changes Home Assistant. A switch installs the version at the restart if its venv is no longer
 on the volume (only the current and the previous one are kept), takes a backup
 of the current configuration first, and brings it back if that version does

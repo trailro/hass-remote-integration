@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import tarfile
 import tempfile
@@ -93,21 +94,34 @@ def inspect_backup(config_dir: str, password: str | None, domains: set[str]) -> 
 
 
 MAX_EXTRACT_BYTES = 2 * 1024**3  # what an import may unpack onto the volume (registries and the integration's stores)
+MAX_INNER_BYTES = 2 * 1024**3  # the inner homeassistant.tar(.gz) copied out of the upload: never more than an upload may be
+MAX_META_BYTES = 1024**2  # backup.json is a few KB
+ENTRY_ID_RE = re.compile(r"[A-Za-z0-9]+")  # as ImportApplyView: an entry id is matched against and substituted into store file names
 
 
 def _inspect(config_dir: str, tar_path: str, out_dir: str, password: str | None, domains: set[str]) -> dict[str, Any]:
-    with tarfile.open(tar_path) as outer:
+    try:
+        outer = tarfile.open(tar_path, "r:")  # a plain tar, as Home Assistant writes it: no xz/bz2 bomb unpacked on the fly
+    except tarfile.ReadError as err:
+        raise ValueError(f"not a Home Assistant backup (an uncompressed .tar is expected): {err}") from None
+    with outer:
         names = outer.getnames()
         meta_name = next((n for n in names if _strip(n) == "backup.json"), None)
         if meta_name is None:
             raise ValueError("not a Home Assistant backup (no backup.json)")
+        if outer.getmember(meta_name).size > MAX_META_BYTES:
+            raise ValueError("not a Home Assistant backup (backup.json is implausibly large)")
         meta = json.load(outer.extractfile(meta_name))
+        if not isinstance(meta, dict):
+            raise ValueError("not a Home Assistant backup (backup.json is not a JSON object)")
         compressed = bool(meta.get("compressed", True))
         inner_name = next((n for n in names if _strip(n) == f"homeassistant.tar{'.gz' if compressed else ''}"), None)
         if inner_name is None:
             raise ValueError("backup has no homeassistant.tar.gz (add-on only / partial without HA config?)")
         if meta.get("protected") and not password:
             raise ValueError("this backup is encrypted: enter the backup encryption key (emergency kit)")
+        if outer.getmember(inner_name).size > MAX_INNER_BYTES:
+            raise ValueError(f"the Home Assistant configuration archive in this backup is larger than {MAX_INNER_BYTES // 1024**3} GB: not imported")
         with tempfile.NamedTemporaryFile(dir=out_dir, suffix=".inner", delete=False) as tmp:
             shutil.copyfileobj(outer.extractfile(inner_name), tmp)
             inner_path = tmp.name
@@ -758,9 +772,17 @@ async def apply_all(hass: HomeAssistant, aligner: RegistryAligner, domains: list
     summary = load_summary(cfg)
     if not summary:
         raise ValueError("no inspected backup: upload and inspect one first")
-    todo = [(d, e) for d, info in sorted(summary["domains"].items()) if d in installed and (not domains or d in domains)
-            for e in info.get("entries", [])]
-    results: list[dict[str, Any]] = []
+    todo, results, warnings = [], [], []
+    for d, info in sorted(summary["domains"].items()):
+        if d not in installed or (domains and d not in domains):
+            continue
+        for e in info.get("entries", []):
+            if isinstance(e.get("entry_id"), str) and ENTRY_ID_RE.fullmatch(e["entry_id"]):
+                todo.append((d, e))
+                continue
+            # an id like "" or "." would match (and be substituted into) every store file name
+            warnings.append(f"{d}: config entry with an invalid id {str(e.get('entry_id'))[:40]!r} skipped")
+            results.append({"domain": d, "entry_id": str(e.get("entry_id")), "skipped": "invalid entry id"})
     backup_ids = {e["entry_id"] for _d, e in todo}
     backup_uids = {(d, e.get("unique_id")) for d, e in todo if e.get("unique_id")}
 
@@ -791,8 +813,10 @@ async def apply_all(hass: HomeAssistant, aligner: RegistryAligner, domains: list
         failed = [r for r in results if "error" in r]
         if not failed or not keep_failed:
             await hass.async_add_executor_job(clear, cfg)
+    for w in warnings:
+        _LOGGER.warning("import: %s", w)
     return {"imported": [r for r in results if "state" in r], "skipped": [r for r in results if "skipped" in r],
-            "failed": failed, "cleaned_up": not failed or not keep_failed}
+            "failed": failed, "cleaned_up": not failed or not keep_failed, "warnings": warnings}
 
 
 # ----- clean start on a Home Assistant downgrade -----------------------------
@@ -915,6 +939,8 @@ async def async_finish_rebuild(hass: HomeAssistant, aligner: RegistryAligner, in
             else:
                 msg = (f"{head}; {domain}: {len(ok)} config entr{'y' if len(ok) == 1 else 'ies'} rebuilt"
                        + (f", {len(failed)} failed ({'; '.join(f['error'] for f in failed)})" if failed else "") + f".{tail}")
+            if res.get("warnings"):
+                msg += f" {'; '.join(res['warnings'])}."
     except Exception as err:  # noqa: BLE001 - reported, the plan must not run again
         msg = f"{head}; rebuilding {domain} failed: {type(err).__name__}: {err}.{tail}"
     finally:

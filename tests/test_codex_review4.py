@@ -49,7 +49,7 @@ class PendingArchiveNameTest(unittest.TestCase):
         with zipfile.ZipFile(os.path.join(bdir, "b.zip"), "w") as zf:
             zf.writestr(backupkit.MARKER, json.dumps({"installed": {}}))
             zf.writestr(".storage/core.config_entries", "{}")
-            zf.writestr("backup-info.json", json.dumps({}))
+            zf.writestr("backup-info.json", json.dumps({"ha_version": "2026.8.3"}))
 
     def test_a_failed_schedule_keeps_the_confirmed_one(self):
         with mock.patch("time.time", return_value=1_800_000_000.0):

@@ -99,8 +99,10 @@ $('#imapply').onclick=async()=>{ if(!IMSEL) return; let data,options; try{data=J
 imLoad().catch(e=>log('import: '+e));
 const fmtB=b=>b>1048576?(b/1048576).toFixed(1)+' MB':(b/1024).toFixed(0)+' KB';
 let BK={};
-async function doRestore(n,parts,ha){
-  const r=await post(`api/backups/${encodeURIComponent(n)}/restore`,{parts,ha}); if(!r.ok){$('#bkmsg').textContent='ERROR: '+r.error;return;}
+async function doRestore(n,parts,ha,force){
+  const r=await post(`api/backups/${encodeURIComponent(n)}/restore`,{parts,ha,force:!!force});
+  if(!r.ok&&r.needs_force&&!force){ if(confirm(`${r.error}\n\nRestore anyway?`)) return doRestore(n,parts,ha,true); $('#bkmsg').textContent='restore not scheduled'; return; }
+  if(!r.ok){$('#bkmsg').textContent='ERROR: '+r.error;return;}
   const rr=await post('api/restart'); if(!rr.ok){$('#bkmsg').textContent='restore scheduled, but the restart was refused: '+rr.error;return;}
   log(r.ha?`restore with Home Assistant ${r.ha} scheduled (backup ${r.pre_change_backup} taken first); restarting…`:'restore scheduled; restarting…');
   setTimeout(()=>location.reload(),r.ha?20000:10000);
@@ -149,10 +151,13 @@ async function backups(){
       if(bk.ha_version&&boot&&vcmp(bk.ha_version,boot)!==0&&(!parts||parts.includes('storage'))) return restorePlan(n,parts,bk.ha_version,boot);
       const sw=pendingConfigSwitch();
       if(sw){ $('#bkmsg').textContent=`ERROR: a switch to Home Assistant ${sw.to} with a ${sw.mode==='restore'?'configuration restore':'clean start'} is scheduled: cancel it under Home Assistant first`; return; }
-      if(!confirm(`Restore ${n}${parts?' ('+parts.join(' + ')+' only)':''}?
+      const unknown=!bk.ha_version&&(!parts||parts.includes('storage'));
+      if(!confirm(`Restore ${n}${parts?' ('+parts.join(' + ')+' only)':''}?${unknown?`
+
+This backup does not record the Home Assistant version it was made on. If it was made on a version newer than ${boot}, Home Assistant cannot read the restored .storage. Restore anyway only if it was made on ${boot} or older.`:''}
 
 The process restarts now; the entrypoint replaces ${parts?parts.join(', '):'.storage, custom_components and integration_manager'} from the backup (a pre-restore backup is taken first) and boots HA again.`)) return;
-      doRestore(n,parts,'keep'); }
+      doRestore(n,parts,'keep',unknown); }
   });
   $('#bkcancel').hidden=!r.pending_restore;
   const lr=r.last_restore; $('#bkpending').textContent=r.pending_restore?`a restore is scheduled for the next restart (${(r.pending_parts||[]).join(', ')})`:(lr?`last restore ${lr.at}: ${lr.ok?'ok, '+lr.files+' files (pre-restore copy '+lr.pre_restore+')':'FAILED: '+lr.error}`:'');

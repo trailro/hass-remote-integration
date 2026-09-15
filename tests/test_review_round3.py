@@ -63,7 +63,7 @@ class BackupContentTest(unittest.TestCase):
 
     def test_unrecorded_restore_is_marked_applied_not_applied_again(self):
         rec = backupkit.create(self.cfg, "x")
-        backupkit.schedule_restore(self.cfg, rec["name"], ["storage"])
+        backupkit.schedule_restore(self.cfg, rec["name"], ["storage"], force=True)  # no ha.json here: no recorded version
         result = backupkit.apply_pending(self.cfg, log=lambda _m: None, record=lambda _r: False)
         self.assertTrue(result["ok"])
         # applied: renamed to the applied marker instead of staying scheduled, so the next boot records it but never re-applies

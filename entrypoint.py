@@ -354,10 +354,17 @@ def reset_storage_for_rebuild(wanted: str, restored: bool) -> bool:
         return False
     if not isinstance(plan, dict):
         return False
+    stage = plan.get("stage")
+    aside_name = str(plan.get("aside") or "")
+    aside = os.path.join(CONFIG_DIR, aside_name) if re.fullmatch(r"\.storage\.pre-rebuild-[0-9-]+", aside_name) else ""
+    storage = os.path.join(CONFIG_DIR, ".storage")
+    # "renaming" with the set-aside copy present: the boot that renamed .storage was killed before it
+    # recorded the switch; .storage is (nearly) empty and the real configuration is in the copy
+    switched = stage == "renaming" and bool(aside) and os.path.isdir(aside)
     why = ""
     if restored:
         why = "a restore was applied at this boot"
-    elif plan.get("stage") != "reset":
+    elif stage not in ("reset", "renaming"):
         return False
     elif wanted != plan.get("to"):
         why = f"Home Assistant {wanted} boots, not {plan.get('to')}"
@@ -376,43 +383,68 @@ def reset_storage_for_rebuild(wanted: str, restored: bool) -> bool:
                 why = f"backup {plan.get('backup')} is not usable ({err})"
     if why:
         log(f"clean start dropped, the configuration is kept: {why}")
+        if switched:
+            _put_aside_back(storage, aside)
         try:
             os.remove(REBUILD_FILE)
         except OSError:
             pass
         return False
-    # the pre-change backup and the import source were taken when the switch was scheduled: anything
-    # configured since exists only on the volume, so this boot backs it up before .storage goes
-    try:
-        plan["boot_backup"] = backupkit.create(CONFIG_DIR, f"pre-clean-start-{plan.get('to')}")["name"]
-        write_json(REBUILD_FILE, plan)
-    except Exception as err:  # noqa: BLE001 - no backup of the current state: the clean start does not happen
-        log(f"clean start for Home Assistant {plan.get('to')} cancelled: the backup of the current configuration failed ({err}); the configuration is kept")
-        return False
-    storage = os.path.join(CONFIG_DIR, ".storage")
-    # set aside in one rename: a delete that fails half-way would boot the older version
-    # on part of the newer configuration; a failed rename leaves everything as it was
-    aside = f"{storage}.pre-rebuild-{time.strftime('%Y%m%d-%H%M%S')}"
-    try:
-        if os.path.isdir(storage):
-            os.rename(storage, aside)
-        os.makedirs(storage, exist_ok=False)
-    except OSError as err:
-        log(f"clean start for Home Assistant {plan.get('to')} failed: .storage could not be set aside ({err}); the configuration is kept")
-        if os.path.isdir(aside) and not os.path.exists(storage):
+    if not switched:
+        # the pre-change backup and the import source were taken when the switch was scheduled: anything
+        # configured since exists only on the volume, so this boot backs it up before .storage goes (once:
+        # a retry after an interrupted boot keeps that backup, never one of an already emptied .storage)
+        if not plan.get("boot_backup"):
             try:
-                os.rename(aside, storage)
-            except OSError as back:
-                log(f"putting .storage back failed too ({back}): it is in {aside}")
-        return False
+                plan["boot_backup"] = backupkit.create(CONFIG_DIR, f"pre-clean-start-{plan.get('to')}")["name"]
+                write_json(REBUILD_FILE, plan)
+            except Exception as err:  # noqa: BLE001 - no backup of the current state: the clean start does not happen
+                log(f"clean start for Home Assistant {plan.get('to')} cancelled: the backup of the current configuration failed ({err}); the configuration is kept")
+                return False
+        # set aside in one rename: a delete that fails half-way would boot the older version
+        # on part of the newer configuration; a failed rename leaves everything as it was.
+        # The name is recorded first: a kill right after the rename must find the copy again
+        aside_name = f".storage.pre-rebuild-{time.strftime('%Y%m%d-%H%M%S')}"
+        aside = os.path.join(CONFIG_DIR, aside_name)
+        try:
+            write_json(REBUILD_FILE, {**plan, "stage": "renaming", "aside": aside_name})
+        except OSError as err:
+            log(f"clean start for Home Assistant {plan.get('to')} cancelled: its plan could not be written ({err}); the configuration is kept")
+            return False
+        try:
+            if os.path.isdir(storage):
+                os.rename(storage, aside)
+            os.makedirs(storage, exist_ok=False)
+        except OSError as err:
+            log(f"clean start for Home Assistant {plan.get('to')} failed: .storage could not be set aside ({err}); the configuration is kept")
+            if os.path.isdir(aside):
+                _put_aside_back(storage, aside)
+            try:
+                write_json(REBUILD_FILE, {**plan, "stage": "reset"})
+            except OSError:
+                pass  # "renaming" without its copy is retried from the start
+            return False
+    else:
+        os.makedirs(storage, exist_ok=True)
+        log(f"clean start for Home Assistant {plan.get('to')}: finishing the switch an interrupted boot began ({aside_name})")
+    # the set-aside copy stays until the manager finished the rebuild (ha_import.drop_rebuild removes it)
+    plan.update(stage="import", aside=aside_name)
+    write_json(REBUILD_FILE, plan)
     for old in glob.glob(f"{storage}.pre-rebuild-*"):
         if old != aside:
-            shutil.rmtree(old, ignore_errors=True)  # an earlier clean start's copy
-    # the set-aside copy stays until the manager finished the rebuild (ha_import.drop_rebuild removes it)
-    plan["stage"] = "import"
-    write_json(REBUILD_FILE, plan)
+            shutil.rmtree(old, ignore_errors=True)  # an earlier clean start's copy, only once this one is recorded
     log(f"clean start for Home Assistant {plan.get('to')}: .storage emptied, the integration is rebuilt after the boot (backup {plan.get('backup')})")
     return True
+
+
+def _put_aside_back(storage: str, aside: str) -> None:
+    """Undo the set-aside of .storage when the clean start does not go ahead (only over an empty .storage)."""
+    try:
+        if os.path.isdir(storage):
+            os.rmdir(storage)  # fails when not empty: then nothing is overwritten
+        os.rename(aside, storage)
+    except OSError as err:
+        log(f"putting .storage back failed ({err}): the configuration from before the clean start is in {aside}")
 
 
 def _rebuild_stage(wanted: str) -> str | None:
@@ -443,7 +475,7 @@ def restore_after_failed_change(state: dict, failed: str, fallback: str) -> bool
     recovery = {**recovery, "for": fallback}
     state["recovery"] = recovery
     try:
-        backupkit.schedule_restore(CONFIG_DIR, str(recovery["backup"]), recovery.get("parts") or ["storage"], for_version=fallback)
+        backupkit.schedule_restore(CONFIG_DIR, str(recovery["backup"]), recovery.get("parts") or ["storage"], for_version=fallback, force=True)
     except Exception as err:  # noqa: BLE001
         log(f"could not schedule the configuration from {recovery['backup']} for {fallback}: {err}")
         return False
@@ -465,6 +497,11 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
         log(f"restore scheduled for Home Assistant {for_version} dropped: {wanted} boots instead")
     made_on = backupkit.pending_ha_version(CONFIG_DIR)
     restore_parts = backupkit.pending_parts(CONFIG_DIR)
+    if backupkit.pending(CONFIG_DIR) and not made_on and "storage" in restore_parts and not backupkit.pending_forced(CONFIG_DIR):
+        # schedule_restore refuses these unless forced; a schedule that got here another way (an edited file) is not applied
+        backupkit.cancel_restore(CONFIG_DIR)
+        log("restore of a backup without a recorded Home Assistant version dropped: it was not confirmed (force)")
+        state["last_error"] = "the scheduled restore was dropped: its backup does not record the Home Assistant version it was made on and the restore was not forced"
     if backupkit.pending(CONFIG_DIR) and made_on and "storage" in restore_parts and ha_vkey(made_on) > ha_vkey(wanted):
         # checked when it was scheduled, against the version wanted then; a cancelled switch or a failed
         # install boots another one, which cannot read a configuration made on a newer version
@@ -554,7 +591,14 @@ def merge_applied_restore(state: dict) -> None:
             pass
 
 
+def restrict_umask() -> int:
+    """Files this process and the Home Assistant it execs create (restored and imported .storage with
+    tokens, backups, uploads, venvs) are private to the container user: 0600 / 0700."""
+    return os.umask(0o077)
+
+
 def main() -> None:
+    restrict_umask()  # first: inherited by everything created from here on, and by the exec'd Home Assistant
     os.makedirs(STATE_DIR, exist_ok=True)  # before the first log() call
     clean_import_leftovers()
     state = load_state()

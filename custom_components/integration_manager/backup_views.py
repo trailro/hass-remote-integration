@@ -61,7 +61,7 @@ class BackupCreateView(ManagerView):
         try:
             rec = await self.installer.async_backup_exclusive(str(body.get("label") or ""))
             removed = await self.hass.async_add_executor_job(backupkit.prune, cfg, self.installer.settings.backup_keep,
-                                                             self.installer.protected_backups())
+                                                             self.installer.protected_backups() | {rec["name"]})
         except ValueError as err:
             return self.json({"ok": False, "error": str(err)})
         except Exception as err:  # noqa: BLE001
@@ -94,7 +94,6 @@ class BackupUploadView(ManagerView):
             return self.json({"ok": False, "error": "bad file name"})
         bdir = os.path.join(self.hass.config.config_dir, backupkit.BACKUP_DIR)
         os.makedirs(bdir, exist_ok=True)
-        dest = os.path.join(bdir, name)
         size = 0
         ok = False
         fd, tmp = await self.hass.async_add_executor_job(lambda: tempfile.mkstemp(dir=bdir, prefix=".upload-", suffix=".zip.tmp"))
@@ -110,7 +109,12 @@ class BackupUploadView(ManagerView):
                 info = await self.hass.async_add_executor_job(backupkit.validate, tmp)
             except ValueError as err:
                 return self.json({"ok": False, "error": str(err)})
-            await self.hass.async_add_executor_job(os.replace, tmp, dest)
+            # a free name (upload-x-2.zip ...): an existing backup, a protected one included, is never replaced
+            name = await self.hass.async_add_executor_job(backupkit.reserve_name, bdir, name[:-len(".zip")])
+            if not _name_ok(name):
+                await self.hass.async_add_executor_job(os.remove, os.path.join(bdir, name))
+                return self.json({"ok": False, "error": "bad file name"})
+            await self.hass.async_add_executor_job(os.replace, tmp, os.path.join(bdir, name))
             ok = True
         finally:
             await self.hass.async_add_executor_job(fh.close)
@@ -148,7 +152,7 @@ class BackupActionView(ManagerView):
             return self.json({"ok": False, "error": "no such backup"})
         try:
             if action == "delete":
-                if name in self.installer.protected_backups():
+                if name in self.installer.protected_backups() | await self.hass.async_add_executor_job(backupkit.restore_needs, cfg):
                     return self.json({"ok": False, "error": "a scheduled Home Assistant version change or a full rollback needs this backup"})
                 os.remove(path)
                 return self.json({"ok": True})
@@ -167,6 +171,11 @@ class BackupActionView(ManagerView):
                 made_on = (await self.hass.async_add_executor_job(backupkit.describe, cfg, name)).get("ha_version")
                 boot = await self.hass.async_add_executor_job(backupkit.boot_version, cfg) or HA_VERSION
                 touches_storage = parts is None or "storage" in parts
+                force = body.get("force") is True
+                if not made_on and touches_storage and not force:
+                    return self.json({"ok": False, "needs_force": True,
+                                      "error": "this backup does not record the Home Assistant version it was made on: if that was a newer version than "
+                                               f"{boot}, its .storage cannot be read after the restore. Restore anyway only if you know it was made on {boot} or older"})
                 if choice == "keep" and made_on and touches_storage and ha_vkey(made_on) > ha_vkey(boot):
                     return self.json({"ok": False, "needs_ha": made_on,
                                       "error": f"backup was made on Home Assistant {made_on}, newer than {boot}: Home Assistant cannot read a newer "
@@ -198,7 +207,7 @@ class BackupActionView(ManagerView):
                             await self.hass.async_add_executor_job(backupkit.validate, path)
                             await self.hass.async_add_executor_job(self.updater.cancel_config_change)
                             self.updater.set_desired(HA_VERSION)
-                            await self.hass.async_add_executor_job(backupkit.schedule_restore, cfg, name, parts)
+                            await self.hass.async_add_executor_job(backupkit.schedule_restore, cfg, name, parts, None, force)
                             await self.hass.async_add_executor_job(ha_import.drop_rebuild, cfg)
                         finally:
                             self.installer.busy = False
@@ -212,7 +221,7 @@ class BackupActionView(ManagerView):
                     if isinstance(change, dict) and change.get("mode") in ("restore", "rebuild") and change.get("to") != HA_VERSION:
                         return self.json({"ok": False, "error": f"a switch to Home Assistant {change.get('to')} with a {'configuration restore' if change.get('mode') == 'restore' else 'clean start'} "
                                                                 "is scheduled: cancel it on System (choose the running version) before restoring a backup"})
-                await self.hass.async_add_executor_job(backupkit.schedule_restore, cfg, name, parts)
+                await self.hass.async_add_executor_job(backupkit.schedule_restore, cfg, name, parts, None, force)
                 await self.hass.async_add_executor_job(ha_import.drop_rebuild, cfg)  # the restore replaces a scheduled clean start
                 events.emit("restore", f"{name} scheduled for the next restart ({', '.join(parts) if parts else 'everything'})", backup=name)
                 return self.json({"ok": True, "parts": parts or list(backupkit.PARTS),
