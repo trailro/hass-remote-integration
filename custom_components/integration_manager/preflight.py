@@ -98,6 +98,16 @@ def _patch_after_update(text: str, new_versions: dict[str, str]) -> str:
     return "applies" if (not r.specifier or r.specifier.contains(ver, prereleases=True)) else "skipped"
 
 
+def _build_reason(stderr: str) -> str:
+    """Why a wheel did not build: the missing compiler or header when pip says so, not its closing summary."""
+    lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
+    for needle in ("error: command", "compiler", "gcc", "no such file or directory", "cargo", "rust"):
+        hit = next((ln for ln in lines if needle in ln.lower()), None)
+        if hit:
+            return hit
+    return next((ln for ln in reversed(lines) if "error" in ln.lower()), lines[-1] if lines else "build failed")
+
+
 def _build_from_source(python: str, rows: list[dict[str, Any]], constraints: str | None) -> list[dict[str, Any]]:
     """Blocking: build every package pip would take from a source archive, the way the install will.
     The image has no compiler: a pure-Python package builds, one with C code does not."""
@@ -115,8 +125,7 @@ def _build_from_source(python: str, rows: list[dict[str, Any]], constraints: str
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=PIP_TIMEOUT_S, cwd="/tmp")
                 ok, err = proc.returncode == 0, ""
                 if not ok:
-                    lines = [ln for ln in proc.stderr.strip().splitlines() if ln.strip()]
-                    err = next((ln.strip() for ln in reversed(lines) if "error" in ln.lower()), lines[-1].strip() if lines else "build failed")
+                    err = _build_reason(proc.stderr)
             except subprocess.TimeoutExpired:
                 ok, err = False, f"not built within {PIP_TIMEOUT_S}s"
         out.append({"name": row["name"], "version": row["version"], "built": ok, "error": err[:300]})
