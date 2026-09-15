@@ -277,7 +277,6 @@ class CutoverView(ManagerView):
             "smoke_pending": bool(self.installer.smoke.get("pending")),
         }
 
-    @with_body
     async def _parent_blockers(self, domain: str, components: list[str]) -> list[str]:
         """The main Home Assistant must not hold the integration any more: a config entry (enabled or disabled)
         keeps its entities in the registry, and an entity id still registered there sends the MQTT entity to <id>_2."""
@@ -305,6 +304,7 @@ class CutoverView(ManagerView):
                        "remove the integration there first")
         return out
 
+    @with_body
     async def post(self, request: web.Request, body: dict[str, Any], action: str) -> web.Response:
         if action == "status":
             return self.json({"ok": True, **self._status()})

@@ -90,7 +90,10 @@ connections on unload.
    example re-enable sending) and reload its entry.
 4. **Cutover page**: *Enable discovery*, then watch until every entity exists
    on the main HA.
-5. Automations on the main HA keep working: same entity ids and unique ids.
+5. Automations on the main HA keep working: the entity ids are the same (the
+   MQTT entities announce them). The unique ids are new (`hass_<domain>_<entity id>`),
+   so registry settings made on the removed entities (areas, labels, custom
+   names) have to be set again.
    Commands reach the container over `hass_<domain>/cmd/...`, service calls
    over `hass_<domain>/call/...`.
 6. Something wrong? *Undo* on the Cutover page (discovery off, configs

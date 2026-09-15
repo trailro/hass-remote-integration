@@ -257,8 +257,9 @@ HA for a while, with MQTT enabled and discovery off, and compare.
 2. On **Cutover**, give your main HA's URL and a long-lived access token
    (optional; used only to compare). The page lists entities missing on either
    side and differences in state, names and flags.
-3. When you are happy: **disable the integration in your main HA**, then click
-   *Enable discovery* on **Cutover**. Your main HA creates the entities from
+3. When you are happy: **remove the integration from your main HA** (delete
+   its config entries; disabling keeps its entity ids registered, and the
+   Cutover page refuses then), then click *Enable discovery* on **Cutover**. Your main HA creates the entities from
    MQTT; the page watches until all of them exist.
 4. Changed your mind? *Undo* removes every discovery config again, so your
    main HA drops the entities.
@@ -803,8 +804,8 @@ to the internet or another server (`/api/catalog`, `/api/patch_editor`,
   under `hass_<domain>/`. Remove them, or tick `force_base_topic` if they are
   yours from an earlier setup.
 - **Entities appear twice in my main HA.** Discovery is on while the main HA
-  still runs the same integration. Undo on **Cutover**, disable the
-  integration in the main HA, enable again.
+  still runs the same integration. Undo on **Cutover**, remove the
+  integration from the main HA, enable again.
 - **Health says degraded although everything works.** An integration that only
   writes states on events looks silent; set its health mode to `event` on the
   **MQTT** page.
@@ -856,8 +857,9 @@ A few things that shaped the code, useful if you read it:
   panels are not available.
 - Discovery of entities without a `unique_id` works, but they cannot be
   renamed or disabled in the registry.
-- Cutover does not disable the integration in your main HA for you: do that
-  yourself before enabling discovery.
+- Cutover does not remove the integration from your main HA for you: do that
+  yourself before enabling discovery (the Cutover page checks it when the main
+  HA is configured).
 - The Python version is fixed by the image. Home Assistant versions or
   integrations that need another Python cannot run until a release moves the
   image to that Python. An image with a newer Python is tested against Home
