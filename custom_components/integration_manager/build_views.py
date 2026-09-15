@@ -88,7 +88,9 @@ class PreflightView(ManagerView):
             return self.json({"ok": False, "error": "bad ha version"})
         async with self._lock:
             try:
-                return self.json({"ok": True, "report": await preflight.run(self.hass, self.installer, domain, ref, ha or None)})
+                report = await preflight.run(self.hass, self.installer, domain, ref, ha or None)
+                preflight.remember(domain, ref, report, ha or None)  # a Switch right after it does not run it again
+                return self.json({"ok": True, "report": report})
             except Exception as err:  # noqa: BLE001
                 return self.json({"ok": False, "error": f"{type(err).__name__}: {err}"})
 

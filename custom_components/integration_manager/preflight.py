@@ -34,6 +34,8 @@ _LOGGER = logging.getLogger(__name__)
 LOCK = asyncio.Lock()  # one pip resolution at a time (UI, builder, MQTT update)
 
 PIP_TIMEOUT_S = 300
+CACHE_S = 1800  # a preflight report stays good enough to gate a start for 30 min (same release, same Home Assistant)
+_REPORTS: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
 RAW = "https://raw.githubusercontent.com/{repo}/{ref}/{path}"
 GITHUB_API = "https://api.github.com/repos/{repo}"
 
@@ -219,6 +221,41 @@ def _config_flow_version(component_dir: str) -> int | None:
                     return item.value.value
         return 1  # a config flow without VERSION is version 1
     return None
+
+
+def remember(domain: str, ref: str, report: dict[str, Any], target_ha: str | None = None) -> None:
+    _REPORTS[(domain, ref, target_ha or ha_version)] = (time.monotonic(), report)
+
+
+def recent(domain: str, ref: str) -> dict[str, Any] | None:
+    hit = _REPORTS.get((domain, ref, ha_version))
+    return hit[1] if hit and time.monotonic() - hit[0] < CACHE_S else None
+
+
+async def gate(hass: HomeAssistant, installer, domain: str, tag: str | None) -> dict[str, Any]:
+    """Whether a start of (domain, tag) from the UI or the API should wait for a confirmation:
+    {"blocked", "report", "skipped"}.  Starting the version that already runs (or ran last), a dev
+    build or a release without a GitHub repository is not gated; a preflight that cannot run
+    (GitHub unreachable, unknown ref) does not block either: the smoke test still guards the start."""
+    rec = installer.state.installed.get(domain) or {}
+    versions = rec.get("versions") or {}
+    target = tag or rec.get("running_tag") or (max(versions, key=vkey) if versions else None)
+    if not target or target == rec.get("running_tag"):
+        return {"blocked": False, "report": None, "skipped": "same version as the one deployed"}
+    if target == getattr(installer, "LOCAL_TAG", "local"):
+        return {"blocked": False, "report": None, "skipped": "dev build"}
+    spec = installer.spec(domain) or {}
+    if not spec.get("repo"):
+        return {"blocked": False, "report": None, "skipped": "no GitHub repository known"}
+    report = recent(domain, target)
+    if report is None:
+        try:
+            async with LOCK:
+                report = await run(hass, installer, domain, target)
+        except Exception as err:  # noqa: BLE001
+            return {"blocked": False, "report": None, "skipped": f"preflight could not run: {err}"}
+        remember(domain, target, report)
+    return {"blocked": not report.get("ok", True), "report": report, "skipped": None}
 
 
 async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: str | None = None) -> dict[str, Any]:
