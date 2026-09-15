@@ -320,8 +320,11 @@ class Installer:
         return state
 
     def _save_state(self) -> None:
-        # on the loop, where the state changes: saves land in the order of the changes.  Fsynced: a power
-        # cut must not bring back a state from before an install or a switch (a sync costs ms, not loop lag)
+        # on the loop, where the state changes: saves land in the order of the changes, and the file on disk is
+        # current as soon as this returns (backups and a restart read it).  Fsynced: a power cut must not bring
+        # back a state from before an install or a switch.  Measured on an Unraid user share (shfs), a ~5 KB
+        # write + file fsync + directory fsync: p50 1.6 ms, p95 2.2 ms, p99 10 ms, max 14 ms (200 writes), and
+        # a save happens a few times per user action, not per event: not worth an async writer with flushes.
         write_json(self.state_file, asdict(self.state))
 
     def _dom(self, domain: str) -> dict[str, Any]:
@@ -1561,13 +1564,24 @@ class Installer:
         if self.busy:
             return {"ok": False, "error": "another action is running (install/start): wait for it"}
         self.busy = True  # before the first await: no install/start may begin while the process goes down
-        self.state.restart_required = False
-        self.state.last_action = "restart requested"
-        self._save_state()
-        events.emit("restart", "process restart requested")
-        await self.hass.async_add_executor_job(self._reset_boot_failures)
-        if not await writer.async_drain(10):  # the final write drains it too, but a stop stage could time out first
-            _LOGGER.warning("restart: JSON saves still pending after 10 s")
+        before = (self.state.restart_required, self.state.last_action)
+        try:
+            self.state.restart_required = False
+            self.state.last_action = "restart requested"
+            self._save_state()
+            events.emit("restart", "process restart requested")
+            await self.hass.async_add_executor_job(self._reset_boot_failures)
+            if not await writer.async_drain(10):  # the final write drains it too, but a stop stage could time out first
+                _LOGGER.warning("restart: JSON saves still pending after 10 s")
+        except BaseException as err:
+            # nothing stops yet: busy must not stay set (every install/start/restart would be refused until
+            # the container restarts), and the state in memory goes back to what was last saved
+            self.busy = False
+            self.state.restart_required, self.state.last_action = before
+            if not isinstance(err, Exception):
+                raise
+            _LOGGER.error("restart failed before stopping: %s", err)
+            return {"ok": False, "error": f"restart failed before stopping: {err}"}
         self.hass.async_create_task(self.hass.async_stop())
         return {"ok": True}
 

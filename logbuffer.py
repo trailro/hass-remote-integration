@@ -29,6 +29,9 @@ from typing import Any
 
 MAX_BYTES = 2_000_000
 KEEP = 2  # process.log.1, process.log.2
+# records waiting for the listener: bounded, so a listener stuck on a blocked stderr cannot grow memory without
+# limit; a full queue drops new records and counts them, and the count is logged once the listener runs again
+QUEUE_MAX = 50_000
 _TAIL = 8192  # bytes read from the end of a file to find the last id
 
 
@@ -195,17 +198,27 @@ def find() -> FileLogHandler | None:
 
 
 class _QueueListener(logging.handlers.QueueListener):
+    source: "_QueueHandler | None" = None
+
     def handle(self, record: Any) -> None:
         if isinstance(record, threading.Event):
             record.set()  # a flush marker: everything queued before it is written
             return
         super().handle(record)
+        if self.source is not None and (dropped := self.source.dropped):
+            self.source.dropped -= dropped
+            note = logging.LogRecord(__name__, logging.WARNING, __file__, 0,
+                                     "%s log records were dropped: the log queue was full (a blocked stderr?)", (dropped,), None)
+            super().handle(note)
 
     def stop(self, timeout: float | None = None) -> bool:  # the stock stop joins without a timeout
         thread = self._thread
         if thread is None:
             return True
-        self.enqueue_sentinel()
+        try:
+            self.queue.put(self._sentinel, timeout=timeout)  # a full queue: waits for room, bounded
+        except queue.Full:
+            return False
         thread.join(timeout)
         if thread.is_alive():
             return False
@@ -220,6 +233,13 @@ class _QueueHandler(logging.handlers.QueueHandler):
     fields."""
 
     listener: _QueueListener
+    dropped = 0  # records not queued because the queue was full (approximate across threads; reset when reported)
+
+    def enqueue(self, record: logging.LogRecord) -> None:
+        try:
+            self.queue.put_nowait(record)
+        except queue.Full:
+            self.dropped += 1  # never block or raise in the thread that logs (the event loop among them)
 
     def prepare(self, record: logging.LogRecord) -> logging.LogRecord:
         record = copy.copy(record)
@@ -247,7 +267,7 @@ def _queue_handler(logger: logging.Logger) -> _QueueHandler | None:
     return next((h for h in logger.handlers if isinstance(h, _QueueHandler)), None)
 
 
-def activate_queue(logger: logging.Logger | None = None) -> None:
+def activate_queue(logger: logging.Logger | None = None, maxsize: int = QUEUE_MAX) -> None:
     """Move the logger's handlers (root: stderr and process.log) behind a
     queue.  The swap is one assignment, not atomic against another thread
     logging at that moment: call it while one thread logs (run.py, before HA
@@ -255,9 +275,10 @@ def activate_queue(logger: logging.Logger | None = None) -> None:
     logger = logger or logging.getLogger()
     if _queue_handler(logger) is not None:
         return
-    q: queue.SimpleQueue = queue.SimpleQueue()
+    q: queue.Queue = queue.Queue(maxsize)
     handler = _QueueHandler(q)
     handler.listener = _QueueListener(q, *logger.handlers, respect_handler_level=True)
+    handler.listener.source = handler
     handler.listener.start()
     logger.handlers = [handler]
 
@@ -268,8 +289,12 @@ def flush_queue(timeout: float = 5.0, logger: logging.Logger | None = None) -> b
     if handler is None:
         return True
     done = threading.Event()
-    handler.queue.put_nowait(done)
-    return done.wait(timeout)
+    deadline = time.monotonic() + timeout
+    try:
+        handler.queue.put(done, timeout=timeout)  # never dropped like a record: waits for room, bounded
+    except queue.Full:
+        return False
+    return done.wait(max(0.0, deadline - time.monotonic()))
 
 
 def stop_queue(timeout: float = 5.0, logger: logging.Logger | None = None) -> bool:

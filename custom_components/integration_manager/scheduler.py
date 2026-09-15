@@ -6,7 +6,8 @@ from __future__ import annotations
 import logging
 import time
 
-from homeassistant.core import HassJob, HomeAssistant
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.core import Event, HassJob, HomeAssistant, callback
 from homeassistant.helpers.event import async_call_later, async_track_time_change
 
 from .installer import Installer
@@ -22,11 +23,22 @@ class Scheduler:
         self._unsub = None
         self._hour = None
         self._retry = None  # the pending busy-retry of the daily backup
+        self._boot = None  # the pending release check at boot
 
     def start(self) -> None:
         self.rearm()
         # boot: a release check if the last one is older than a week
-        async_call_later(self.hass, 120, HassJob(self._boot_check, "release check at boot", cancel_on_shutdown=True))
+        self._boot = async_call_later(self.hass, 120, HassJob(self._boot_check, "release check at boot"))
+        # HassJob(cancel_on_shutdown=True) does not reach async_call_later's timer (HA only cancels handles whose
+        # first argument is the job; call_later passes hass first): cancel the timers ourselves
+        self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, self._on_stop)
+
+    @callback
+    def _on_stop(self, _event: Event | None = None) -> None:
+        for unsub in (self._boot, self._retry, self._unsub):
+            if unsub is not None:
+                unsub()
+        self._boot = self._retry = self._unsub = None
 
     def rearm(self) -> None:
         """(Re)arm the daily tick at the configured hour; called at boot and
@@ -54,7 +66,7 @@ class Scheduler:
             self._retry = None
         if st.bool_("backup_daily") and self.installer.busy and not self.installer.backup_running:
             _LOGGER.info("daily backup skipped: an install/start is running; retrying in 30 min")
-            self._retry = async_call_later(self.hass, 1800, HassJob(self._daily, "daily backup retry", cancel_on_shutdown=True))
+            self._retry = async_call_later(self.hass, 1800, HassJob(self._daily, "daily backup retry"))
             return
         if st.bool_("backup_daily"):
             try:
