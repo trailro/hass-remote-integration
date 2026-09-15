@@ -543,6 +543,11 @@ class ManagerDevice:
             res = await inst.install(tag, domain=domain)
             if not res.get("ok"):
                 raise ValueError(f"install of {domain} {tag} failed: {res.get('error')}")
+        # start() deploys the stored copy, which a moved tag can make differ from what was just checked on GitHub:
+        # the same gate as a start from the UI (no confirmation here, so blockers refuse)
+        gate = await preflight.gate(self.hass, inst, domain, tag)
+        if gate["blocked"]:
+            raise ValueError(f"preflight of the stored {domain} {tag} blocked: {'; '.join((gate['report'] or {}).get('blockers') or [])}")
         res = await inst.start(domain, tag)
         if not res.get("ok"):
             raise ValueError(f"start of {domain} {tag} failed: {res.get('error')}")
