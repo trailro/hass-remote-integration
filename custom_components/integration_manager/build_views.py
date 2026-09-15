@@ -35,6 +35,7 @@ _DOMAIN_RE = re.compile(r"^[a-z0-9_]{1,64}$")
 _REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+@-]{0,100}$")
 _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _HA_RE = re.compile(r"^\d{4}\.\d{1,2}\.\d+(b\d+)?$")
+_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 
 INSTALL_HTML = load_template("install")
 
@@ -248,7 +249,11 @@ class BuildPrepareView(ManagerView):
             domain, ref, ha = await self._check._resolve(body)
         except ValueError as err:
             return self.json({"ok": False, "error": str(err)})
-        if not self._check.checked(domain, ref, ha, str(body.get("check_id") or ""), await _commit_of(self.hass, self.installer, domain, ref)):
+        commit = await _commit_of(self.hass, self.installer, domain, ref)
+        if not commit and not _SHA_RE.match(ref):
+            # the download must be the commit Check verified, and a tag or branch can move in between
+            return self.json({"ok": False, "error": f"GitHub did not say which commit {ref} points at now, so Prepare cannot install exactly what Check verified: try again in a moment"})
+        if not self._check.checked(domain, ref, ha, str(body.get("check_id") or ""), commit):
             return self.json({"ok": False, "error": "run Check for exactly this integration, version and Home Assistant version first (the report on screen belongs to another combination or commit (a branch that moved), is older than an hour, or was made before the manager restarted: passed checks are kept in memory)"})
         steps: list[dict[str, Any]] = []
         ha_state = await self.updater.status()
@@ -258,7 +263,7 @@ class BuildPrepareView(ManagerView):
                 await self.updater.validate(ha)  # before anything is installed, let alone replaced
             except ValueError as err:
                 return self.json({"ok": False, "error": f"Home Assistant {ha}: {err}", "steps": steps})
-        res = await self.installer.install(ref, domain=domain, replace=bool(body.get("replace")))
+        res = await self.installer.install(ref, domain=domain, replace=bool(body.get("replace")), archive_ref=commit or ref)
         steps.append({"step": "install", **res})
         if not res.get("ok"):
             return self.json({"ok": False, "error": f"install: {res.get('error')}", "steps": steps})

@@ -26,10 +26,10 @@ from homeassistant.const import __version__ as ha_version
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from jsonio import vkey
+from jsonio import ha_vkey, tag_key
 
 from . import patches
-from .installer import _req_name
+from .installer import _req_name, bad_requirement, read_capped
 
 _LOGGER = logging.getLogger(__name__)
 LOCK = asyncio.Lock()  # one pip resolution at a time (UI, builder, MQTT update)
@@ -56,6 +56,8 @@ def _pip_dry_run(python: str, requirements: list[str], constraints: str | None) 
     temporary place, nothing is installed)."""
     if not requirements:
         return {"ok": True, "install": [], "stderr": ""}
+    if (why := next((w for w in map(bad_requirement, requirements) if w), None)):
+        return {"ok": False, "install": [], "stderr": why}  # "--index-url ..." from a manifest is an option to pip, not a package
     cmd = [python, "-m", "pip", "install", "--dry-run", "--quiet", "--report", "-", *requirements]
     if constraints and os.path.isfile(constraints):
         cmd += ["-c", constraints]
@@ -260,7 +262,7 @@ async def gate(hass: HomeAssistant, installer, domain: str, tag: str | None) -> 
     (GitHub unreachable, unknown ref) does not block either: the smoke test still guards the start."""
     rec = installer.state.installed.get(domain) or {}
     versions = rec.get("versions") or {}
-    target = tag or rec.get("running_tag") or (max(versions, key=vkey) if versions else None)
+    target = tag or rec.get("running_tag") or (max(versions, key=tag_key) if versions else None)
     if not target or target == rec.get("running_tag"):
         return {"blocked": False, "report": None, "skipped": "same version as the one deployed"}
     if target == getattr(installer, "LOCAL_TAG", "local"):
@@ -293,7 +295,7 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
     async with session.get(GITHUB_API.format(repo=repo) + f"/zipball/{ref}", headers=installer.settings.github_headers()) as resp:
         if resp.status != 200:
             raise ValueError(f"{repo}@{ref}: GitHub answered {resp.status}")
-        blob = await resp.read()
+        blob = await read_capped(resp, f"{repo}@{ref}")
     scratch = os.path.join(installer.versions_dir, domain, f".preflight-{int(time.time())}")
     try:
         manifest = await hass.async_add_executor_job(installer._unpack, blob, domain, scratch)
@@ -308,7 +310,7 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
                     min_ha = (json.loads(await r2.text()) or {}).get("homeassistant")
         except Exception as err:  # noqa: BLE001
             warnings.append(f"hacs.json could not be read: {err}")
-        if min_ha and vkey(min_ha) > vkey(target):
+        if min_ha and ha_vkey(str(min_ha)) > ha_vkey(target):
             blockers.append(f"needs Home Assistant >= {min_ha}, target is {target}")
 
         # 3. dependencies: every domain the manifest names must be loadable here
@@ -329,6 +331,9 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
 
         # 4. requirements: pip dry-run against this venv
         all_reqs = list(dict.fromkeys(new_reqs + dep_reqs))
+        refused = [r for r in all_reqs if bad_requirement(r)]
+        blockers += [str(bad_requirement(r)) for r in refused]
+        all_reqs = [r for r in all_reqs if r not in refused]
         installed_now = {_req_name(req): ver for req, ver in installer._requirement_versions(all_reqs).items()}
         pip = await hass.async_add_executor_job(_pip_dry_run, sys.executable, all_reqs, installer.constraints)
         if not pip["ok"]:
