@@ -280,15 +280,26 @@ class SchedulerTimerTest(unittest.IsolatedAsyncioTestCase):
             armed.append((delay, job, unsub))
             return unsub
 
-        inst = SimpleNamespace(settings=SimpleNamespace(bool_=lambda _k: True), busy=True, backup_running=False)
-        sch = sched_mod.Scheduler(SimpleNamespace(), inst)
-        with mock.patch.object(sched_mod, "async_call_later", call_later):
+        listeners = {}
+        hass = SimpleNamespace(bus=SimpleNamespace(async_listen_once=lambda ev, cb: listeners.__setitem__(ev, cb)))
+        inst = SimpleNamespace(settings=SimpleNamespace(bool_=lambda _k: True, int_=lambda *_a: 3), busy=True, backup_running=False)
+        sch = sched_mod.Scheduler(hass, inst)
+        daily = mock.Mock()
+        with mock.patch.object(sched_mod, "async_call_later", call_later), \
+                mock.patch.object(sched_mod, "async_track_time_change", return_value=daily):
+            sch.start()
             await sch._daily(None)
             await sch._daily(None)
-        self.assertEqual(len(armed), 2)
-        armed[0][2].assert_called_once()  # the first retry was cancelled when the second was armed
-        armed[1][2].assert_not_called()
-        self.assertTrue(all(job.cancel_on_shutdown for _d, job, _u in armed))
+        self.assertEqual([d for d, _j, _u in armed], [120, 1800, 1800])
+        armed[1][2].assert_called_once()  # the first retry was cancelled when the second was armed
+        armed[2][2].assert_not_called()
+        armed[0][2].assert_not_called()
+        from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+
+        listeners[EVENT_HOMEASSISTANT_STOP](None)  # the stop cancels what is still pending: boot check, retry, daily tick
+        armed[0][2].assert_called_once()
+        armed[2][2].assert_called_once()
+        daily.assert_called_once()
 
 
 if __name__ == "__main__":

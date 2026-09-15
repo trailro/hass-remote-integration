@@ -9,6 +9,8 @@ default integrations.
 from __future__ import annotations
 
 import asyncio
+import errno
+import faulthandler
 import logging
 import os
 
@@ -48,12 +50,18 @@ MANAGER_SRC = "/app/manager_src/integration_manager"
 _LOGGER = logging.getLogger("hass_remote_integration")
 
 TASK_CANCEL_TIMEOUT_S = 5  # homeassistant.runner.TASK_CANCELATION_TIMEOUT
-# HA's own stop stages add up to 210 s; the compose file's stop_grace_period is the same 240 s
-STOP_WATCHDOG_S = 240
 BOOT_OK_CAP_S = 600
 WRITER_DRAIN_S = 10  # at exit: the manager's JSON saves still queued
 LOG_FLUSH_S = 5  # at exit: log lines still queued
+# Docker's stop_grace_period (compose file, README) is 240 s from SIGTERM.  The watchdog is armed at
+# EVENT_HOMEASSISTANT_STOP, which HA fires after its first stop stage (shutdown jobs, up to 20 s); when it
+# fires it drains the JSON writer and the log queue (5 s each) before exiting: 20 + 205 + 5 + 5 = 235 s.
+# HA's remaining stages (100 + 60 + 30 s) plus run.py's own exit (task cancel 5, executor 10, writer 10,
+# log queue 10) could reach ~245 s in the worst case: the watchdog cuts that before Docker's SIGKILL.
+STOP_WATCHDOG_S = 205
+WATCHDOG_DRAIN_S = 5
 _boot_settled = False  # this boot's boot_failures count is resolved: marked ok, or taken back after a stop
+_boot_signalled = False  # the boot signal handler stopped this boot (a cancelled boot task is then a clean stop)
 
 
 def _sync_manager_component() -> None:
@@ -182,6 +190,7 @@ async def _boot() -> int:
     from homeassistant.helpers.event import async_call_later, async_track_time_interval
 
     setup_done = asyncio.Event()
+    timers: list[Callable[[], None]] = []  # async_call_later handles: HA's cancel_on_shutdown does not reach them
 
     async def _setup_domains() -> None:
         try:
@@ -210,16 +219,26 @@ async def _boot() -> int:
 
     @callback
     def _on_started(_event) -> None:
+        # HA's own SIGTERM/SIGINT/SIGHUP handlers, which async_run would attach right after async_start: attached
+        # here instead (async_run(attach_signals=False)), and only when no signal stopped the boot, so that a
+        # second signal after an interrupted start still kills the process (async_start returns without STARTED)
+        if not _boot_signalled:
+            from homeassistant.helpers.signal import async_register_signal_handling
+
+            async_register_signal_handling(hass)
         # background: a stop cancels it, and the boot is then not marked ok (the STOP listener takes the count back instead)
         hass.async_create_background_task(_mark_boot_ok_after(setup_done), "hass-remote-integration boot ok")
         trim = HassJob(lambda _now: _malloc_trim(), "malloc_trim", cancel_on_shutdown=True)  # a plain function: runs in the executor
-        async_call_later(hass, 30, trim)
-        async_track_time_interval(hass, trim.target, timedelta(hours=1), name="malloc_trim", cancel_on_shutdown=True)
+        timers.append(async_call_later(hass, 30, trim))
+        async_track_time_interval(hass, trim.target, timedelta(hours=1), name="malloc_trim", cancel_on_shutdown=True)  # this one HA cancels
 
     hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_started)
 
     @callback
     def _on_stop(_event) -> None:
+        for unsub in timers:
+            unsub()
+        timers.clear()
         _undo_boot_failure()  # a stop is not a crash, also once HA's own signal handlers took over
         _arm_stop_watchdog()
 
@@ -230,7 +249,7 @@ async def _boot() -> int:
         HTTP_PORT,
         sorted(hass.config.components),
     )
-    return await hass.async_run()
+    return await hass.async_run(attach_signals=False)  # _on_started attaches them
 
 
 def _time_zone() -> str:
@@ -293,6 +312,8 @@ def _install_boot_signal_handlers(boot_task: asyncio.Task, get_hass: Callable[[]
     loop = boot_task.get_loop()
 
     def on_signal(signum: int) -> None:
+        global _boot_signalled
+        _boot_signalled = True
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.remove_signal_handler(sig)  # a second signal kills, like HA's own handler
         _LOGGER.warning("%s during boot: stopping; not counted as a failed boot", signal.Signals(signum).name)
@@ -331,6 +352,12 @@ def _loop_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> N
     exc = context.get("exception")
     _LOGGER.error("Error doing job: %s (task: %s)", context["message"], context.get("task"),
                   exc_info=(type(exc), exc, exc.__traceback__) if exc else None)
+    if isinstance(exc, OSError) and exc.errno == errno.EMFILE:
+        # homeassistant.runner._async_loop_exception_handler: out of file descriptors, the loop cannot accept
+        # sockets any more; stop it (the process exits non-zero and Docker restarts it).  HA also calls
+        # loop.close() here, which raises on a running loop; _run_loop closes it once it stopped.
+        _LOGGER.error("Fatal error '%s' raised in event loop, shutting it down", exc)
+        loop.stop()
 
 
 def _cancel_all_tasks(loop: asyncio.AbstractEventLoop, timeout: float) -> None:
@@ -364,7 +391,10 @@ def _run_loop(boot: Callable[[], Awaitable[int]]) -> int:
     try:
         return loop.run_until_complete(boot())
     except asyncio.CancelledError:
-        return 0  # only the boot signal handler cancels it: a stop before HA ran
+        if _boot_signalled:
+            return 0  # the boot signal handler cancelled it: a stop before HA ran
+        _LOGGER.critical("the boot was cancelled without a stop signal", exc_info=True)
+        return 1
     finally:
         try:
             _cancel_all_tasks(loop, TASK_CANCEL_TIMEOUT_S)
@@ -389,6 +419,9 @@ def _arm_stop_watchdog(timeout: float = STOP_WATCHDOG_S) -> threading.Thread:
         time.sleep(timeout)
         msg = f"still not stopped {int(timeout)} s after the stop began: exiting hard"
         _LOGGER.critical(msg)
+        writer = sys.modules.get("custom_components.integration_manager.writer")
+        if writer is not None and not writer.drain(WATCHDOG_DRAIN_S):
+            _LOGGER.critical("JSON saves still pending: exiting without them")
         # the line waits in the log queue behind whatever holds the listener up (a blocked stderr):
         # give it a moment, then write it to process.log directly
         if not logbuffer.flush_queue(LOG_FLUSH_S) and (handler := logbuffer.find()) is not None:
@@ -600,6 +633,7 @@ def main() -> int:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     )
+    faulthandler.enable(file=sys.stderr)  # a crash in C code (segfault, abort) still leaves the Python stacks in the container log
     logbuffer.install(os.path.join(CONFIG_DIR, "integration_manager", "process.log"))  # before HA boots: /logs shows the boot too
     logbuffer.activate_queue()  # stderr and process.log written by one thread, not by whoever logs; only this thread logs yet
     _install_excepthooks()
@@ -621,6 +655,12 @@ def main() -> int:
     logging.getLogger("homeassistant.loader").addFilter(_OwnLoaderNoise())
     if os.environ.get("HRI_DEBUG"):
         logging.getLogger("custom_components.integration_manager").setLevel(logging.DEBUG)
+        # what bootstrap.async_setup_hass always does: log file/listdir/import calls on the event loop, raise on
+        # time.sleep and blocking HTTP.  Dev only: it wraps open() and friends, and a strict hit in an
+        # integration's code raises instead of only slowing the loop down
+        from homeassistant import block_async_io
+
+        block_async_io.enable()
     rc = 1
     try:
         rc = _run_loop(_boot)
@@ -637,8 +677,8 @@ def _exit(rc: int) -> None:
         _LOGGER.error("JSON saves still pending %s s after the loop ended: exiting without them", WRITER_DRAIN_S)
     if logbuffer.stop_queue(LOG_FLUSH_S):
         logging.shutdown()  # skipped when a handler is stuck (a blocked stderr): flushing it would hang the exit
-    sys.stdout.flush()
-    sys.stderr.flush()
+        sys.stdout.flush()
+        sys.stderr.flush()  # the same stuck stderr would hang here too
     os._exit(rc)  # a thread stuck in C code would otherwise still block interpreter exit
 
 

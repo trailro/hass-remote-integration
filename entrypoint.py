@@ -257,6 +257,8 @@ def install(version: str) -> bool:
             subprocess.run(
                 [*pip, f"homeassistant=={version}", "-r", EXTRA_REQUIREMENTS, "-c", constraints],
                 check=True, stdout=fh, stderr=subprocess.STDOUT,
+                timeout=30 * 60,  # a hung download must not keep the boot on the status page forever: fails like any failed install
+
             )
         with open(os.path.join(d, ".ok"), "w", encoding="utf-8") as fh:
             fh.write(version)
@@ -679,7 +681,6 @@ def main() -> None:
     # fallback_from is cleared by run.py once HA actually reaches STARTED
     state["current"] = wanted
     state.setdefault("desired", wanted)
-    state["boot_failures"] = int(state.get("boot_failures") or 0) + 1  # run.py zeroes it when ready
     save_state(state)
     if not state.get("_corrupt"):
         prune({wanted, state.get("previous") or wanted} | ({state["recovery"]["for"]} if isinstance(state.get("recovery"), dict) and state["recovery"].get("for") else set()))
@@ -694,6 +695,9 @@ def main() -> None:
         log(f"venv-current symlink not updated: {err}")
     python = os.path.join(venv_dir(wanted), "bin", "python")
     os.environ["SETUP_PORT"] = str(PORT)  # HA http default port, read at import time
+    # counted only now: a stop during the slow work above (pruning venvs) is not a failed boot
+    state["boot_failures"] = int(state.get("boot_failures") or 0) + 1  # run.py zeroes it when ready
+    save_state(state)
     log(f"starting Home Assistant {wanted} via {python}")
     os.execv(python, [python, "/app/run.py"])
 

@@ -303,7 +303,7 @@ configuration, backups), so replacing the container keeps it; the new manager
 is copied onto the volume at boot. With `HRI_VERSION` pinned, change it first.
 Home Assistant writes its registries last when it stops, so the compose file
 gives the container 240 s to stop (`stop_grace_period`; a stop that hangs
-longer ends the process anyway) and runs an init process; with plain
+ends the process on its own after about 235 s, before Docker kills it) and runs an init process; with plain
 `docker run`, add `--init --stop-timeout 240 --restart unless-stopped`. The
 restart policy is required: a restart from the UI or MQTT exits the process
 and relies on Docker to start it again. A `docker-compose.yml` downloaded before 0.14.0
@@ -613,6 +613,11 @@ restart* refreshes the running copy after you edit the code.
 the process listen for a debugger: attach VS Code to `localhost:5678`.
 Exceptions show up on the **Logs** page.
 
+`HRI_DEBUG=1` also turns on Home Assistant's blocking-call detection (off
+otherwise): file, directory and import calls on the event loop are logged
+with the line that made them, and `time.sleep` or a blocking HTTP request on
+the loop raises, as in a regular Home Assistant.
+
 ---
 
 ## MQTT reference
@@ -804,7 +809,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | `HRI_CALL_TIMEOUT` | `60` | Seconds a service call or command may take before it is reported as a timeout |
 | `HRI_TRACEMALLOC` | unset | Diagnostics: allocation tracing frames (costs memory) |
 | `HRI_TRACE_IMPORT` | unset | Diagnostics: log who imports the given packages |
-| `HRI_DEBUG` | unset | Debug logging for the manager |
+| `HRI_DEBUG` | unset | Debug logging for the manager, and blocking-call detection on the event loop |
 | `HRI_PASSWORD` | unset | Password for the web UI and API; unset or empty means no login |
 | `HRI_PASSWORD_FILE` | unset | File holding the password, for example a Docker secret; wins over `HRI_PASSWORD` |
 | `HRI_COOKIE_SECURE` | unset | `1` marks the session cookie `Secure` (behind a reverse proxy with TLS) |
