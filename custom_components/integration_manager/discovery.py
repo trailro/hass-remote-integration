@@ -667,7 +667,7 @@ def _pick(field: str, table: dict[str, Any]) -> tuple[str, str, dict[str, Any]] 
 def command_to_service(domain: str, object_id: str, field: str, payload: str) -> tuple[str, str, dict[str, Any]] | None:
     """Map an incoming entity command topic to (domain, service, data)."""
     entity_id = f"{domain}.{object_id}"
-    p = payload.strip()
+    p = payload.strip()  # protocol tokens and numbers; literal values (text, message, option) use the payload as sent
     on = p.upper() in ("ON", "TRUE", "1")
     t = {"entity_id": entity_id}
 
@@ -689,7 +689,7 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
     if domain == "switch" and field == "state":
         return "switch", "turn_on" if on else "turn_off", t
     if domain == "select" and field == "option":
-        return "select", "select_option", {**t, "option": p}
+        return "select", "select_option", {**t, "option": payload}  # options match exactly: "eco " is not "eco"
     if domain == "number" and field == "value":
         return "number", "set_value", {**t, "value": _finite(p)}
     if domain == "light":
@@ -731,9 +731,9 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
     if domain == "scene" and field == "activate":
         return "scene", "turn_on", t
     if domain == "notify" and field == "message":
-        return "notify", "send_message", {**t, "message": p}
+        return "notify", "send_message", {**t, "message": payload}
     if domain == "text" and field == "value":
-        return "text", "set_value", {**t, "value": p}
+        return "text", "set_value", {**t, "value": payload}  # leading/trailing spaces are part of the text
     if domain in ("date", "time", "datetime") and field == "value":
         return domain, "set_value", {**t, domain: p}
     if domain == "siren" and field == "state":

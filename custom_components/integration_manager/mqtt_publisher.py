@@ -80,6 +80,9 @@ CONFIG_FILE = "integration_manager/mqtt.json"
 # A generic service call always answers: a service that blocks (e.g. an RF
 # request that cannot be sent in read-only mode) is reported as a timeout.
 CALL_TIMEOUT_S = int(os.environ.get("HRI_CALL_TIMEOUT", "60"))
+# MQTT climate publishes the two bounds of a range change on separate topics, right after each other: the
+# first half waits this long for the second, so both go out as one set_temperature call
+RANGE_PAIR_WAIT_S = 1.0
 HISTORY_MAX = 200      # commands and calls remembered (in memory)
 DEDUP_WINDOW_S = 300   # a call repeating an _id seen this recently is answered from history, not run again
 # Never callable over MQTT (anyone with broker credentials could otherwise
@@ -258,6 +261,7 @@ class MqttPublisher:
         # idempotency: _id -> the canonical call record (state, result) for DEDUP_WINDOW_S,
         # independent of the visual history (which commands can push out)
         self._calls: dict[str, dict[str, Any]] = {}
+        self._range_pending: dict[str, dict[str, Any]] = {}  # entity_id -> the first half of a range change, waiting for the second
         self._registry_timer: asyncio.TimerHandle | None = None
         # entity_id -> document topic last published (the registry entry is
         # already gone when the remove event fires, so recompute is wrong)
@@ -864,35 +868,78 @@ class MqttPublisher:
         self.stats["last_command"] = _mask_codes(f"{msg.topic} = {payload}")
 
         async def _call() -> None:
+            recs = [rec]
+
+            def finish(state: str, error: str | None = None) -> None:
+                for r in recs:
+                    self._finish(r, state, error)
+
             if svc_domain == "climate" and service == "set_temperature" and ("target_temp_high" in data) != ("target_temp_low" in data):
-                # MQTT climate sends each bound on its own topic; HA's schema wants both
-                other = "target_temp_low" if "target_temp_high" in data else "target_temp_high"
-                st = self.hass.states.get(data["entity_id"])
-                val = st.attributes.get(other) if st else None
-                if val is None:
-                    self._finish(rec, "rejected", f"{other} is unknown: a range setpoint needs both bounds")
+                # Pairing the first half with the old other bound would turn 20-24 -> 26-28 into 26-24 (rejected)
+                # and then 20-28: wait for the second half of the same change first.
+                pending = await self._pair_range(data, rec)
+                if pending is None:
+                    return  # completed the half that was waiting: its call answers this record too
+                recs = pending["recs"]
+                data.update(pending["data"])
+                for other in ("target_temp_low", "target_temp_high"):
+                    if other not in data:  # only one bound changed: the other stays as it is
+                        st = self.hass.states.get(data["entity_id"])
+                        val = st.attributes.get(other) if st else None
+                        if val is None:
+                            finish("rejected", f"{other} is unknown: a range setpoint needs both bounds")
+                            return
+                        data[other] = val
+                try:
+                    low, high = float(data["target_temp_low"]), float(data["target_temp_high"])
+                except (TypeError, ValueError):
+                    low, high = 0.0, 0.0
+                if low > high:
+                    finish("rejected", f"low {data['target_temp_low']} is above high {data['target_temp_high']}: send both bounds of the range")
                     return
-                data[other] = val
             # like a service call: the handler keeps running past the timeout, the
             # history shows "timeout" now and "late-ok"/"late-error" when it ends
             task = self.hass.async_create_task(self.hass.services.async_call(svc_domain, service, data, blocking=True))
             done, _ = await asyncio.wait({task}, timeout=CALL_TIMEOUT_S)
             late = not done
             if late:
-                self._finish(rec, "timeout", f"no answer after {CALL_TIMEOUT_S}s (service still running)")
+                finish("timeout", f"no answer after {CALL_TIMEOUT_S}s (service still running)")
                 _LOGGER.warning("MQTT command %s -> %s.%s: no answer after %ss", msg.topic, svc_domain, service, CALL_TIMEOUT_S)
             try:
                 await task
-                self._finish(rec, "late-ok" if late else "ok")
+                finish("late-ok" if late else "ok")
             except asyncio.CancelledError:
                 if asyncio.current_task().cancelling():
                     raise
-                self._finish(rec, "late-error" if late else "error", "cancelled by the service handler")
+                finish("late-error" if late else "error", "cancelled by the service handler")
             except Exception as err:  # noqa: BLE001 - logged, never crashes the loop
                 _LOGGER.error("MQTT command %s -> %s.%s failed: %s", msg.topic, svc_domain, service, err)
-                self._finish(rec, "late-error" if late else "error", f"{type(err).__name__}: {err}")
+                finish("late-error" if late else "error", f"{type(err).__name__}: {err}")
 
         self.hass.loop.call_soon_threadsafe(lambda: self.hass.async_create_task(_call()))
+
+    async def _pair_range(self, data: dict[str, Any], rec: dict[str, Any]) -> dict[str, Any] | None:
+        """One half of a climate range change: None when it completed a half already waiting (that call
+        answers both records), otherwise the pending change after the second half came or the wait ended."""
+        eid = data["entity_id"]
+        half = {k: v for k, v in data.items() if k in ("target_temp_low", "target_temp_high")}
+        waiting = self._range_pending.get(eid)
+        if waiting is not None and not waiting["event"].is_set():
+            waiting["data"].update(half)  # the same bound twice: the newer value wins
+            waiting["recs"].append(rec)
+            if "target_temp_low" in waiting["data"] and "target_temp_high" in waiting["data"]:
+                waiting["event"].set()
+            return None
+        pending = {"data": dict(data), "recs": [rec], "event": asyncio.Event()}
+        self._range_pending[eid] = pending
+        try:
+            await asyncio.wait_for(pending["event"].wait(), RANGE_PAIR_WAIT_S)
+        except TimeoutError:
+            pass
+        finally:
+            if self._range_pending.get(eid) is pending:
+                del self._range_pending[eid]
+        return pending
 
     def _on_manager_command(self, action: str, payload: str) -> None:
         """<base>/manager/cmd/<action> (paho thread): see manager_device.py."""
