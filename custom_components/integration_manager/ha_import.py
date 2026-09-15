@@ -848,6 +848,10 @@ def drop_rebuild(config_dir: str) -> bool:
     summary = load_summary(config_dir)
     if summary and summary.get("type") == REBUILD_TYPE:
         clear_extracted(config_dir)
+    import glob as _glob
+
+    for old in _glob.glob(os.path.join(config_dir, ".storage.pre-rebuild-*")):  # the entrypoint's set-aside .storage
+        shutil.rmtree(old, ignore_errors=True)
     return had
 
 
@@ -881,7 +885,7 @@ async def async_finish_rebuild(hass: HomeAssistant, aligner: RegistryAligner, in
 
     domain, backup, to = plan.get("domain"), plan.get("backup"), plan.get("to")
     head = f"Home Assistant {to} started with a clean configuration"
-    tail = f" The previous configuration is in backup {backup}."
+    tail = f" The previous configuration is in backup {plan.get('boot_backup') or backup}."
     retry = False
     try:
         if not domain:
@@ -889,12 +893,15 @@ async def async_finish_rebuild(hass: HomeAssistant, aligner: RegistryAligner, in
         elif domain != installer.running:
             msg = f"{head}; {domain} is not running now, so it was not rebuilt.{tail}"
         else:
+            attempts = int(plan.get("attempts") or 0) + 1
+            if attempts > REBUILD_ATTEMPTS:
+                raise ValueError(f"stopped after {REBUILD_ATTEMPTS} attempts (a start that ended during the import counts as one)")
+            # counted before the import: a process killed or out of memory during it must not retry forever
+            await hass.async_add_executor_job(write_json, os.path.join(cfg, REBUILD_FILE), {**plan, "attempts": attempts})
             res = await _locked(apply_all(hass, aligner, [domain], True, True, domain, set(installer.state.installed)))
             ok, failed = res["imported"], res["failed"]
-            attempts = int(plan.get("attempts") or 0) + 1
             retry = bool(failed) and attempts < REBUILD_ATTEMPTS
             if retry:
-                await hass.async_add_executor_job(write_json, os.path.join(cfg, REBUILD_FILE), {**plan, "attempts": attempts})
                 tail = f" It is tried again at the next start ({attempts} of {REBUILD_ATTEMPTS}).{tail}"
             if not ok and not failed:
                 msg = f"{head}; {domain} had no config entry to rebuild.{tail}"

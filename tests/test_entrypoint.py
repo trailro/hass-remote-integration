@@ -130,4 +130,7 @@ class CleanStartAtomicTest(unittest.TestCase):
         with mock.patch.object(backupkit, "validate", return_value={}):
             self.assertTrue(ep.reset_storage_for_rebuild("2026.8.3", False))
         self.assertEqual(os.listdir(os.path.join(cfg, ".storage")), [])
-        self.assertEqual([n for n in os.listdir(cfg) if n.startswith(".storage.pre-rebuild")], [])
+        # the set-aside copy stays until the manager finished the rebuild, and a backup of it was taken at this boot
+        self.assertEqual(len([n for n in os.listdir(cfg) if n.startswith(".storage.pre-rebuild")]), 1)
+        with open(ep.REBUILD_FILE, encoding="utf-8") as fh:
+            self.assertTrue(json.load(fh).get("boot_backup"))

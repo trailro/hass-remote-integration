@@ -403,6 +403,10 @@ class OptionsResourceView(ManagerView):
             return self.json(
                 await self.flows.options_configure(flow_id, body.get("user_input"))
             )
+        except data_entry_flow.UnknownFlow:
+            return self.json_message("unknown flow (finished or aborted)", status_code=404)
+        except data_entry_flow.InvalidData as err:  # per-field errors, as the config flow answers
+            return self.json({"type": "invalid_data", "errors": err.schema_errors}, status_code=400)
         except Exception as err:  # noqa: BLE001
             return self.json_message(f"{type(err).__name__}: {err}", status_code=500)
 

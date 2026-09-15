@@ -50,32 +50,35 @@ def run_scheduled(pub):
 
 
 class ManagerCommandTest(unittest.TestCase):
-    def assert_rejected(self, pub, error):
+    def assert_rejected(self, pub, error, answered):
         self.assertEqual(len(pub.history), 1)
         self.assertEqual(pub.history[0]["state"], "rejected")
         self.assertIn(error, pub.history[0]["error"])
-        self.assertEqual(pub.hass.loop.calls, [])
+        # a refusal with a payload is answered once on manager/result; the action itself never runs
+        self.assertEqual(len(pub.hass.loop.calls), 1 if answered else 0)
+        self.assertEqual(pub.manager.actions if pub.manager else [], [])
 
     def test_wrong_or_empty_payload(self):
         for payload in ("", "install", "RESTART"):
             pub = publisher()
             pub._on_manager_command("restart", payload)
-            self.assert_rejected(pub, "payload must be 'restart'")
+            # an empty payload is what clearing a retained command looks like: no answer
+            self.assert_rejected(pub, "payload must be 'restart'", answered=bool(payload))
 
     def test_unknown_action(self):
         pub = publisher()
         pub._on_manager_command("reboot", "restart")
-        self.assert_rejected(pub, "unknown action 'reboot'")
+        self.assert_rejected(pub, "unknown action 'reboot'", answered=True)
 
     def test_commands_off(self):
         pub = publisher(commands=False)
         pub._on_manager_command("backup", "backup")
-        self.assert_rejected(pub, "manager_commands is off")
+        self.assert_rejected(pub, "manager_commands is off", answered=True)
 
     def test_no_manager(self):
         pub = publisher(manager=False)
         pub._on_manager_command("backup", "backup")
-        self.assert_rejected(pub, "not set up")
+        self.assert_rejected(pub, "not set up", answered=False)
 
     def test_accepted(self):
         pub = publisher()

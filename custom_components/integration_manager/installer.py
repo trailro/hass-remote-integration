@@ -152,6 +152,7 @@ class Installer:
         self.settings = Settings(self.state_dir)
         self.health_source = None  # set by __init__: publisher.build_health(grace=...)
         self.on_domain_removed = None  # set by __init__: async (base_topic) -> clears the old MQTT identity
+        self.last_identity_cleared = 0  # retained topics that clearing removed at the last uninstall
         self._smoke_pending: dict[str, Any] | None = None
         self._smoke_handle = None
         self._smoke_waiting: dict[tuple[str, str], float] = {}  # (domain, tag) -> when the smoke test first had to wait
@@ -159,7 +160,10 @@ class Installer:
         self.updates_checked_at: str | None = None
         self._loaded_tags: dict[str, str] = {}  # domain -> tag whose code this process imported
         self._code_hash: dict[str, str] = {}  # domain -> content of that code (patched), kept across an uninstall
-        self._restart_before_uninstall: dict[str, bool] = {}  # domain -> restart_required before its uninstall asked for one
+        self._restart_before_uninstall: dict[str, bool] = {}
+        # domain -> bookkeeping before a switch that is waiting for a restart: starting the loaded version
+        # again abandons that switch, and the records must not say the other version ever ran
+        self._abandoned_switch: dict[str, dict[str, Any]] = {}  # domain -> restart_required before its uninstall asked for one
         self.busy = False
         self._backup_lock = asyncio.Lock()  # backups on their own queue up instead of refusing each other
         os.makedirs(self.versions_dir, exist_ok=True)
@@ -390,8 +394,10 @@ class Installer:
         if isinstance(recovery, dict) and recovery.get("backup"):
             out.add(str(recovery["backup"]))  # a failed switch comes back from it, retried at every fallback
         plan = jsonio.read_json(os.path.join(self.state_dir, "rebuild-pending.json"), {}) or {}
-        if isinstance(plan, dict) and plan.get("backup"):
-            out.add(str(plan["backup"]))
+        if isinstance(plan, dict):
+            for key in ("backup", "boot_backup"):  # boot_backup: taken by the entrypoint right before the clean start
+                if plan.get(key):
+                    out.add(str(plan[key]))
         return out
 
     def _patch_summary(self, rows: list[dict[str, Any]] | None) -> str | None:
@@ -742,6 +748,10 @@ class Installer:
                 return {"ok": False, "error": self.state.last_error, "pip_failed": failed}
             if failed:
                 self.state.last_error = f"pip failed for: {', '.join(failed)}"
+            had_previous = bool(rec.get("running_tag"))  # a first start has nothing a rollback could go back to
+            leaving_tag = rec.get("running_tag")
+            before_switch = {"previous_tag": rec.get("previous_tag"), "pre_update_backup": rec.get("pre_update_backup"),
+                             "restart_required": self.state.restart_required}
             if switching:
                 rec["previous_tag"] = rec.get("running_tag")
                 if backup:
@@ -768,6 +778,15 @@ class Installer:
                 # HA scanned custom_components at boot; a domain deployed since is
                 # invisible to its loader until a restart
                 needs_restart = True
+            abandoned = self._abandoned_switch.pop(domain, None) if same_code else None
+            if abandoned is not None:
+                # back to the code this process runs: the switch in between never ran
+                rec["previous_tag"], rec["pre_update_backup"] = abandoned["previous_tag"], abandoned["pre_update_backup"]
+                self.state.restart_required = abandoned["restart_required"]
+                if isinstance(self.state.pending_change, dict) and self.state.pending_change.get("domain") == domain:
+                    self.state.pending_change = None
+            elif switching and needs_restart and loaded is not None and loaded != tag:
+                self._abandoned_switch.setdefault(domain, before_switch)
             if same_code and domain in self._restart_before_uninstall:
                 # the code the uninstall wanted gone by a restart runs again, unchanged
                 self.state.restart_required = self._restart_before_uninstall.pop(domain)
@@ -783,11 +802,13 @@ class Installer:
                 + ("; restart required for its YAML config" if yaml_pending else "")
             self._save_state()
             events.emit("switch" if (switching and was_running) else "start",
-                        f"{domain} {tag}" + (f" (from {rec.get('previous_tag')})" if switching and was_running else "")
+                        f"{domain} {tag}" + ((f" (back to the loaded version: the switch to {leaving_tag} is abandoned)" if abandoned is not None
+                                              else f" (from {rec.get('previous_tag')})") if switching and was_running else "")
                         + (f"; stopped {prev_domain}" if prev_domain else "") + ("; restart required" if needs_restart or yaml_pending else ""),
                         domain=domain, tag=tag, patches=patch_outcome, pip_failed=failed)
+            can_rollback = switching and had_previous and bool(backup) and abandoned is None
             if effective and not needs_restart and not yaml_pending:
-                self._schedule_smoke(domain, tag, switching and bool(backup))
+                self._schedule_smoke(domain, tag, can_rollback)
             elif effective:
                 # entries get enabled by the reconcile of the next boot; the
                 # smoke test runs there too.  An older timer must not fire in
@@ -795,7 +816,7 @@ class Installer:
                 if self._smoke_handle is not None:
                     self._smoke_handle.cancel()
                     self._smoke_handle = None
-                self.state.pending_smoke = {"domain": domain, "tag": tag, "can_rollback": switching and bool(backup)}
+                self.state.pending_smoke = {"domain": domain, "tag": tag, "can_rollback": can_rollback}
                 self._save_state()
             return {"ok": True, "domain": domain, "tag": tag, "deployed": deployed, "restart_required": needs_restart or yaml_pending,
                     "pre_update_backup": backup, "patches": patch_outcome, "pip_failed": failed, **changed}
@@ -1164,7 +1185,7 @@ class Installer:
         self._save_state()
         if self.on_domain_removed is not None:
             try:
-                await self.on_domain_removed(instance_key(domain) or "")
+                self.last_identity_cleared = await self.on_domain_removed(instance_key(domain) or "") or 0
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("retained MQTT documents of %s not cleared: %s", domain, err)
 

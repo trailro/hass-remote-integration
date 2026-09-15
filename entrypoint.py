@@ -19,6 +19,8 @@ import html
 import http.server
 import hashlib
 import glob
+import ipaddress
+import socket
 import json
 import os
 import re
@@ -159,8 +161,42 @@ def installed_versions() -> list[str]:
     return sorted(out, key=vkey)
 
 
+SAFE_HOST_SUFFIXES = (".local", ".lan", ".home", ".internal", ".home.arpa", ".localdomain")  # as hostguard.py
+
+
+def status_host_ok(host: str) -> bool:
+    """The manager's DNS-rebinding rule (hostguard._host_ok) for the page served while HA installs."""
+    try:
+        with open(os.path.join(STATE_DIR, "settings.json"), encoding="utf-8") as fh:
+            extra_raw = str((json.load(fh) or {}).get("allowed_hosts") or "")
+    except (OSError, ValueError, AttributeError):
+        extra_raw = ""
+    extra = {re.sub(r":\d+$", "", x.strip().lower()) for x in extra_raw.split(",") if x.strip()}
+    h = (host or "").strip().lower()
+    if h.startswith("["):
+        h = h[1:].split("]", 1)[0]
+    elif h.count(":") == 1:
+        h = h.split(":", 1)[0]
+    if not h:
+        return False
+    if h in ("localhost", socket.gethostname().lower()) or h in extra:
+        return True
+    try:
+        ipaddress.ip_address(h)
+        return True
+    except ValueError:
+        return h.endswith(SAFE_HOST_SUFFIXES)
+
+
+def password_configured() -> bool:
+    return bool(os.environ.get("HRI_PASSWORD", "").strip() or os.environ.get("HRI_PASSWORD_FILE", "").strip())
+
+
 class _StatusHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
+        if not status_host_ok(self.headers.get("Host", "")):
+            self.send_error(403, "Host not allowed (DNS rebinding guard)")
+            return
         try:
             with open(LOG_FILE, "rb") as fh:  # last 64 KB only, the file may be long
                 fh.seek(0, os.SEEK_END)
@@ -168,6 +204,8 @@ class _StatusHandler(http.server.BaseHTTPRequestHandler):
                 tail = "\n".join(fh.read().decode("utf-8", errors="replace").splitlines()[-40:])
         except OSError:
             tail = ""
+        if password_configured():
+            tail = "(the install log is shown after login, on the System page)"  # no login exists yet: show only the phase
         body = (
             "<!doctype html><meta charset=utf-8><meta http-equiv=refresh content=5>"
             "<title>hass-remote-integration · installing HA</title>"
@@ -343,6 +381,14 @@ def reset_storage_for_rebuild(wanted: str, restored: bool) -> bool:
         except OSError:
             pass
         return False
+    # the pre-change backup and the import source were taken when the switch was scheduled: anything
+    # configured since exists only on the volume, so this boot backs it up before .storage goes
+    try:
+        plan["boot_backup"] = backupkit.create(CONFIG_DIR, f"pre-clean-start-{plan.get('to')}")["name"]
+        write_json(REBUILD_FILE, plan)
+    except Exception as err:  # noqa: BLE001 - no backup of the current state: the clean start does not happen
+        log(f"clean start for Home Assistant {plan.get('to')} cancelled: the backup of the current configuration failed ({err}); the configuration is kept")
+        return False
     storage = os.path.join(CONFIG_DIR, ".storage")
     # set aside in one rename: a delete that fails half-way would boot the older version
     # on part of the newer configuration; a failed rename leaves everything as it was
@@ -359,9 +405,10 @@ def reset_storage_for_rebuild(wanted: str, restored: bool) -> bool:
             except OSError as back:
                 log(f"putting .storage back failed too ({back}): it is in {aside}")
         return False
-    shutil.rmtree(aside, ignore_errors=True)  # the pre-change backup holds it; leftovers are removed at the next clean start
     for old in glob.glob(f"{storage}.pre-rebuild-*"):
-        shutil.rmtree(old, ignore_errors=True)
+        if old != aside:
+            shutil.rmtree(old, ignore_errors=True)  # an earlier clean start's copy
+    # the set-aside copy stays until the manager finished the rebuild (ha_import.drop_rebuild removes it)
     plan["stage"] = "import"
     write_json(REBUILD_FILE, plan)
     log(f"clean start for Home Assistant {plan.get('to')}: .storage emptied, the integration is rebuilt after the boot (backup {plan.get('backup')})")
@@ -480,10 +527,32 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
     return wanted
 
 
+def merge_applied_restore(state: dict) -> None:
+    """A restore applied at an earlier boot whose outcome could not be written (a full disk)."""
+    marker = os.path.join(CONFIG_DIR, backupkit.APPLIED_META)
+    if not os.path.isfile(marker):
+        return
+    try:
+        with open(marker, encoding="utf-8") as fh:
+            meta = json.load(fh)
+        at = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(os.path.getmtime(marker)))
+    except (OSError, ValueError):
+        meta, at = {}, time.strftime("%Y-%m-%dT%H:%M:%S")
+    meta = meta if isinstance(meta, dict) else {}
+    state["last_restore"] = {"at": at, "ok": True, "parts": meta.get("parts"), "error": "", "pre_restore": meta.get("pre_restore"),
+                             "for_version": meta.get("for_version"), "note": "applied at an earlier boot; recorded late (the volume was full)"}
+    if save_state(state):
+        try:
+            os.remove(marker)
+        except OSError:
+            pass
+
+
 def main() -> None:
     os.makedirs(STATE_DIR, exist_ok=True)  # before the first log() call
     clean_import_leftovers()
     state = load_state()
+    merge_applied_restore(state)
     wanted = state.get("desired") or state.get("current")
     if not wanted:
         # Fresh volume: start from the newest stable HA, not the version the
