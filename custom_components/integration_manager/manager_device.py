@@ -379,7 +379,9 @@ class ManagerDevice:
             return None
         # store tags count only when they are plain release numbers: a beta, a branch or a commit kept
         # for testing must never be what the update button installs (the release check is stable-only)
-        known = [t for t in (inst.state.installed.get(domain) or {}).get("versions", {}) if is_stable_tag(t)]
+        min_ha_of = getattr(inst, "min_ha_of", lambda _d, _t: None)
+        known = [t for t in (inst.state.installed.get(domain) or {}).get("versions", {})
+                 if is_stable_tag(t) and not ((m := min_ha_of(domain, t)) and vkey(m) > vkey(HA_VERSION))]
         if inst.updates.get(domain):
             known.append(inst.updates[domain])
         return max(known, key=vkey) if known else None

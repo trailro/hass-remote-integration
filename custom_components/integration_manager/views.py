@@ -216,12 +216,20 @@ async def async_change_ha_version(installer: Installer, updater: HaUpdater, targ
                                               installer.protected_backups() | {backup["name"]})
         finally:
             installer.busy = False
+    warnings: list[str] = []
+    running_min = installer.min_ha_of(installer.running, installer.running_tag) if installer.running else None
+    if running_min and ha_vkey(target) < ha_vkey(running_min):
+        warnings.append(f"{installer.running} {installer.running_tag} declares Home Assistant {running_min} or newer (hacs.json); "
+                        f"{target} is older: it may not load. Switch the integration to a version that supports {target} first")
+    if mode == "keep" and ha_vkey(target) < ha_vkey(HA_VERSION):
+        warnings.append(f"Home Assistant only migrates its configuration forward: if {HA_VERSION} changed a storage format, {target} "
+                        "cannot start and the container falls back after 3 attempts (restore or rebuild avoid that)")
     note = {"keep": "", "restore": f"; configuration restored from {restore['name'] if restore else ''}",
             "rebuild": f"; clean start, {installer.running or 'no integration'} rebuilt after the boot"}[mode]
     events.emit("ha", f"Home Assistant {target} wanted ({source}), backup {backup['name']}{note}; applied at the next restart",
                 version=target, backup=backup["name"], config=mode)
     return {"desired": state.get("desired"), "backup": backup["name"], "config": mode,
-            "restore": restore["name"] if restore else None, "rebuild": rebuild}
+            "restore": restore["name"] if restore else None, "rebuild": rebuild, "warnings": warnings}
 
 
 class HaActionView(ManagerView):
@@ -348,6 +356,9 @@ class FlowStartView(ManagerView):
         source, entry_id = str(body.get("source") or "user"), str(body.get("entry_id") or "")
         if source not in ("user", "reconfigure") or (source == "reconfigure" and not entry_id):
             return self.json_message("source must be user, or reconfigure with an entry_id", status_code=400)
+        manifest = installer.installed_manifest(domain) if domain == installer.running else None
+        if manifest is not None and not manifest.get("config_flow"):
+            return self.json_message(f"{domain} {installer.running_tag or ''} has no config flow: it is configured in YAML (Integration page)".replace("  ", " "), status_code=400)
         try:
             return self.json(await self.flows.start(domain, source, entry_id or None))
         except data_entry_flow.UnknownHandler:
@@ -440,7 +451,12 @@ class EntryActionView(ManagerView):
             return self.json_message("Content-Type must be application/json", status_code=400)
         try:
             if action == "options":
-                return self.json(await self.flows.options_start(entry_id))
+                try:
+                    return self.json(await self.flows.options_start(entry_id))
+                except data_entry_flow.UnknownHandler:
+                    entry = self.flows.hass.config_entries.async_get_entry(entry_id)
+                    state = entry.state.value if entry else "unknown entry"
+                    return self.json_message(f"this entry has no options flow right now ({state})", status_code=409)
             if action == "reload":
                 return self.json({"ok": await self.flows.reload_entry(entry_id)})
             if action == "delete":
