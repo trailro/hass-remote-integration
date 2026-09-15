@@ -63,6 +63,23 @@ class PipReasonTest(unittest.TestCase):
         err = "ERROR: Package 'scipy' requires a different Python: 3.14.7 not in '<3.13,>=3.9'\n"
         self.assertIn("requires a different Python", preflight._pip_reason(err))
 
+    def test_real_scipy_output(self):
+        err = ("  error: subprocess-exited-with-error\n  × Preparing metadata (pyproject.toml) did not run successfully.\n"
+               "      ../meson.build:1:0: ERROR: Unknown compiler(s): [['cc'], ['gcc'], ['clang']]\n"
+               "error: metadata-generation-failed\n× Encountered error while generating package metadata.\n╰─> scipy\n"
+               "note: This is an issue with the package mentioned above, not pip.\nhint: See above for details.\n")
+        self.assertEqual(preflight._pip_reason(err), "scipy: ERROR: Unknown compiler(s): [['cc'], ['gcc'], ['clang']]")
+
+    def test_real_numba_output(self):
+        err = ("      RuntimeError: Cannot install on Python version 3.14.7; only versions >=3.8,<3.12 are supported.\n"
+               "      [end of output]\nERROR: Failed to build 'numba' when getting requirements to build wheel\n")
+        self.assertEqual(preflight._pip_reason(err),
+                         "numba: RuntimeError: Cannot install on Python version 3.14.7; only versions >=3.8,<3.12 are supported.")
+
+    def test_never_the_see_above_hint(self):
+        self.assertEqual(preflight._pip_reason("error: metadata-generation-failed\nhint: See above for details.\n"),
+                         "error: metadata-generation-failed")
+
     def test_unknown_error_keeps_the_last_line(self):
         self.assertEqual(preflight._pip_reason("something\nERROR: boom\n"), "ERROR: boom")
         self.assertEqual(preflight._pip_reason(""), "pip failed")

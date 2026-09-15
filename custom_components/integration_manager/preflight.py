@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -134,13 +135,23 @@ def _build_from_source(python: str, rows: list[dict[str, Any]], constraints: str
 
 
 def _pip_reason(stderr: str) -> str:
-    """The line of a failed pip run that says why: which package conflicts or needs another Python, not the help link."""
+    """The line of a failed pip run that says why (a Python version guard, a missing compiler, a conflict),
+    prefixed with the package when pip names it elsewhere; not the closing "see above" hint."""
     lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
-    for needle in ("requires a different python", "cannot install", "conflict is caused by", "no matching distribution", "could not find a version"):
+    pkg = None
+    for ln in lines:
+        m = re.search(r"Failed to build '([^']+)'", ln) or re.match(r"^╰─>\s*([A-Za-z0-9_.\-]+)\s*$", ln)
+        if m:
+            pkg = m.group(1)
+    for needle in ("python version", "a different python", "unknown compiler", "no such file or directory: 'gcc'",
+                   "no such file or directory: 'cc'", "cannot install", "conflict is caused by", "no matching distribution",
+                   "could not find a version"):
         hit = next((ln for ln in lines if needle in ln.lower()), None)
         if hit:
-            return hit[:300]
-    return (lines[-1] if lines else "pip failed")[:300]
+            hit = re.sub(r"^(\S+:\d+:\d+:\s*)", "", hit)  # meson's file:line:col prefix
+            return (f"{pkg}: {hit}" if pkg and pkg.lower() not in hit.lower() else hit)[:300]
+    last = next((ln for ln in reversed(lines) if ln.lower().startswith("error") and "see above" not in ln.lower()), None)
+    return ((f"{pkg}: " if pkg and last and pkg.lower() not in last.lower() else "") + (last or (lines[-1] if lines else "pip failed")))[:300]
 
 
 # folders a Home Assistant integration ships but HA never imports: code there that does not compile is not a blocker
