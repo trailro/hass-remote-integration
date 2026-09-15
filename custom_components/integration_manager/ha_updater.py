@@ -101,10 +101,11 @@ class HaUpdater:
         Home Assistant only migrates storage forward."""
         import backupkit
 
-        for b in backups if backups is not None else backupkit.list_backups(self.hass.config.config_dir):  # newest first
-            if b.get("ha_version") and _key(b["ha_version"]) <= _key(version):
-                return b
-        return None
+        listed = backups if backups is not None else backupkit.list_backups(self.hass.config.config_dir)  # newest first
+        fits = [b for b in listed if b.get("ha_version") and _key(b["ha_version"]) <= _key(version)]
+        # this volume's own backups first: an uploaded one comes from somewhere else
+        own = [b for b in fits if not str(b.get("name") or "").startswith("upload-")]
+        return (own or fits or [None])[0]
 
     def _config_backups(self, versions: list[str], current: str) -> dict[str, dict[str, Any]]:
         import backupkit

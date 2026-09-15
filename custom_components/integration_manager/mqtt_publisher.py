@@ -138,6 +138,15 @@ def platform_of(hass: HomeAssistant, entity_id: str) -> str | None:
     return None
 
 
+def _call_id_of(payload: str) -> Any:
+    """The "_id" of a call payload when it can be read (echoed in a refusal), else None."""
+    try:
+        data = json.loads(payload)
+    except ValueError:
+        return None
+    return data.get("_id") if isinstance(data, dict) else None
+
+
 def _comp_key(entity_id: str) -> str:
     return entity_id.replace(".", "_", 1)
 
@@ -238,10 +247,15 @@ class MqttPublisher:
         self.manager = None  # ManagerDevice (manager_device.py), set by __init__
         self._manager_absent_sent = False  # this connection already told the consumer there is no manager device
         self._resync_excluded = False  # integrations were excluded while disconnected: sweep the broker at the next connect
+        self._undiscover_due = False  # discovery was turned off: remove the announced entities at the next full republish
         self._save_lock = threading.Lock()  # two saves (the MQTT form, a cutover) must not overwrite each other
         # once per process, after HA started: what this process never published (so the in-memory discovery
         # map cannot compute removal forms for it) but is still retained, e.g. entities a restore took away
         self._orphan_sweep_due = True
+        # discovery_id -> {component key: component} announced by an earlier process, read before this one
+        # publishes: a new process knows only the entities it has, and its first config would silently drop
+        # the others from the retained config, leaving the orphan sweep nothing to send removal forms for
+        self._boot_components: dict[str, dict[str, dict[str, Any]]] | None = None
         self._health_soon_handle: asyncio.TimerHandle | None = None
         self._health_announced: str | None = None  # the verdict last published (and put in the timeline)
 
@@ -407,6 +421,8 @@ class MqttPublisher:
                 if (self._integration_of(eid) or "unregistered") not in newly_excluded:
                     continue
                 if self._connected:
+                    if self.config.discovery_enabled:
+                        self._remove_component(eid)  # removal first, then the empty document
                     self._clear(eid)
                 else:
                     # cleared at the next connect: _publish_state never touches an excluded entity again
@@ -436,6 +452,13 @@ class MqttPublisher:
         if (moved or new.discovery_prefix != self.config.discovery_prefix) and swept:
             # the live move handled it: the next connect must not sweep the old names a second time
             await self.hass.async_add_executor_job(self._remember_identity, self.wanted_base_topic, new.discovery_prefix)
+        if self.config.discovery_enabled and not new.discovery_enabled:
+            # off means off: without this the consumer keeps every entity, and whatever changes here
+            # meanwhile (a disabled or deleted entity) stays there as a zombie; like Undo on Cutover
+            self._undiscover_due = True
+        if self._connected and self.wanted_base_topic is None and not moved:
+            # a stop: the retained verdict must not keep saying "ok" for an integration that no longer runs
+            self._publish(self._health_topic(), _dumps(self.build_health()), qos=1)
         # no retained "offline" on a status topic we just cleared
         await self.hass.async_add_executor_job(self._disconnect, not moved)
         self._moving = False
@@ -612,7 +635,7 @@ class MqttPublisher:
                 _LOGGER.error("MQTT: %s", self.stats["connect_error"])
                 return
             if probe.get("error"):
-                _LOGGER.warning("MQTT: could not verify that %s is free (%s); connecting, verifying again at the next connect", base, probe["error"])
+                _LOGGER.warning("MQTT: could not verify that %s is free (%s); connecting; verified again when the manager reconnects (a restart or saving the MQTT settings), not on a broker reconnect", base, probe["error"])
             else:
                 self._probed_ok.add(probe_key)  # this process owns the namespace now: no re-probe on reconnects
         elif self.config.force_base_topic:
@@ -649,6 +672,7 @@ class MqttPublisher:
             c.username_pw_set(self.config.username, self.config.password or None)
         c.will_set(self._status_topic(), "offline", qos=1, retain=True)
         c.on_connect = self._on_connect
+        c.on_connect_fail = self._on_connect_fail
         c.on_disconnect = self._on_disconnect
         c.on_message = self._on_message
         c.suppress_exceptions = True  # a callback bug must not kill the network thread
@@ -716,10 +740,15 @@ class MqttPublisher:
 
         self.hass.loop.call_soon_threadsafe(_resume)
 
+    def _on_connect_fail(self, client, userdata) -> None:
+        """Paho thread: the broker could not be reached (paho keeps retrying)."""
+        self.stats["connect_error"] = f"cannot reach the broker at {self.config.host}:{self.config.port} (retrying)"
+
     def _on_disconnect(self, client, userdata, flags, reason_code, properties=None) -> None:
         self._connected = False
         self.stats["connected"] = False
         if reason_code != 0:
+            self.stats["connect_error"] = f"disconnected ({reason_code}); reconnecting"
             _LOGGER.warning("MQTT disconnected (%s); paho will retry", reason_code)
             events.emit("mqtt", f"disconnected ({reason_code}); reconnecting")
 
@@ -825,16 +854,26 @@ class MqttPublisher:
         rec = self._remember("manager", action[:40], payload)
         expected = disc.MANAGER_ACTIONS.get(action)
         if expected is None or payload.strip() != expected:
-            # an empty payload clearing a retained command reaches live subscribers too: never an action
-            self._finish(rec, "rejected", f"unknown action {action!r}" if expected is None else f"payload must be {expected!r}")
+            # an empty payload clearing a retained command reaches live subscribers too: never an action, and no answer
+            error = f"unknown action {action!r}" if expected is None else f"payload must be {expected!r}"
+            self._finish(rec, "rejected", error)
+            if payload.strip():
+                self._answer_rejected(action, error)
             return
         if not self.config.manager_commands:
             self._finish(rec, "rejected", "manager_commands is off")
+            if payload.strip():
+                self._answer_rejected(action, "manager_commands is off")
             return
         if self.manager is None:
             self._finish(rec, "rejected", "the manager device is not set up")
             return
         self.hass.loop.call_soon_threadsafe(lambda: self.hass.async_create_task(self.manager.async_action(action, rec)))
+
+    def _answer_rejected(self, action: str, error: str) -> None:
+        """Paho thread: the sender of a refused manager command gets told why on <base>/manager/result."""
+        result = {"ok": False, "action": action[:40], "error": error}
+        self.hass.loop.call_soon_threadsafe(lambda: self.hass.async_create_task(self.async_publish_manager_result(result)))
 
     def _remember(self, kind: str, what: str, data: Any, call_id: Any = None) -> dict[str, Any]:
         rec = {"id": call_id, "kind": kind, "what": what, "data": (json.dumps(data, default=str) if not isinstance(data, str) else data)[:200],
@@ -880,13 +919,16 @@ class MqttPublisher:
         <base>/result/<domain>/<service>, not retained."""
         parts = rest.split("/")
         if len(parts) != 2:
+            self._finish(self._remember("call", rest[:80], payload), "rejected", "topic must be <base>/call/<domain>/<service>")
+            _LOGGER.warning("MQTT call on %r ignored: the topic must be <base>/call/<domain>/<service>", rest[:80])
             return
         domain, service = parts[0].lower(), parts[1].lower()  # HA looks services up in lower case, so the deny list must too
         if not _SERVICE_NAME.fullmatch(domain) or not _SERVICE_NAME.fullmatch(service):
             self._finish(self._remember("call", rest[:80], payload), "rejected", "domain and service must be names made of a-z, 0-9 and _")
             return
         if domain in CALL_DENY_DOMAINS or domain in self.config.exclude_integrations:
-            self._publish_result(domain, service, {"ok": False, "error": f"domain {domain} is not callable over MQTT"})
+            self._publish_result(domain, service, {"id": _call_id_of(payload), "service": f"{domain}.{service}", "ok": False,
+                                                   "error": f"domain {domain} is not callable over MQTT"})
             self._finish(self._remember("call", f"{domain}.{service}", payload), "rejected", f"domain {domain} is not callable over MQTT")
             return
         try:
@@ -894,7 +936,7 @@ class MqttPublisher:
             if not isinstance(data, dict):
                 raise ValueError("payload must be a JSON object")
         except ValueError as err:
-            self._publish_result(domain, service, {"ok": False, "error": f"bad payload: {err}"})
+            self._publish_result(domain, service, {"id": _call_id_of(payload), "service": f"{domain}.{service}", "ok": False, "error": f"bad payload: {err}"})
             self._finish(self._remember("call", f"{domain}.{service}", payload), "rejected", f"bad payload: {err}")
             return
         call_id = data.pop("_id", None)
@@ -1181,6 +1223,11 @@ class MqttPublisher:
             # domains (switch.x + light.x on one device)
             "components": {_comp_key(eid): comp for eid, comp in comps.items()},
         }
+        if self._orphan_sweep_due and self._boot_components:
+            # announced before this start and not (yet) here: kept until the orphan sweep decides
+            # (an entity still setting up comes back; one a restore took away gets its removal form)
+            for key, comp in self._boot_components.get(discovery_id, {}).items():
+                payload["components"].setdefault(key, comp)
         # Entities that were in this device last time and are gone now must
         # be sent once in HA's removal form, otherwise the consumer keeps them.
         for gone in set(self._discovery_map.get(discovery_id, {})) - set(comps):
@@ -1287,6 +1334,8 @@ class MqttPublisher:
             keep = {self._discovery_topic(f"{base}_manager")} if self.config.manager_discovery else set()
             ours = [t for t, p in found.items() if self._is_ours(t, p, base) and t not in keep]
             self._clear_topics("undisc", ours)
+            self.stats["discovery_devices"] = len(keep)
+            self.stats["discovery_components"] = 0
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning("discovery cleanup failed: %s", err)
             raise RuntimeError(f"discovery cleanup failed: {err}") from err  # never report "cleared 0" for a cleanup that did not run
@@ -1318,6 +1367,30 @@ class MqttPublisher:
     def _forget_hashes(self, topic_prefix: str) -> None:
         for t in [t for t in list(self._last_hash) if t.startswith(topic_prefix)]:
             del self._last_hash[t]
+
+    async def _async_read_boot_components(self) -> None:
+        """What earlier processes announced, before this process's first discovery publish."""
+        base, prefix = self.base_topic, self.config.discovery_prefix
+        try:
+            found = await self.hass.async_add_executor_job(self._retained_scan, "boot", [(f"{prefix}/device/+/config", 1)])
+        except Exception as err:  # noqa: BLE001 - without it the sweep still clears documents; nothing is carried
+            _LOGGER.warning("MQTT: could not read the discovery configs announced before this start: %s", err)
+            self._boot_components = {}
+            return
+        manager_topic = self._discovery_topic(f"{base}_manager")
+        out: dict[str, dict[str, dict[str, Any]]] = {}
+        for topic, payload in found.items():
+            if topic == manager_topic or not self._is_ours(topic, payload, base):
+                continue
+            try:
+                doc = json.loads(payload)
+            except ValueError:
+                continue
+            comps = doc.get("components") if isinstance(doc, dict) and isinstance(doc.get("components"), dict) else {}
+            full = {k: c for k, c in comps.items() if isinstance(c, dict) and c.get("unique_id")}  # removal forms are not carried
+            if full:
+                out[topic.split("/")[-2]] = full
+        self._boot_components = out
 
     def _entity_gone(self, entity_id: str) -> bool:
         """Neither a state nor a registry entry: an entity still setting up
@@ -1374,7 +1447,10 @@ class MqttPublisher:
                 eid = doc.get("entity_id")
                 if isinstance(eid, str) and self._entity_gone(eid):
                     docs.append(topic)
+        self._boot_components = {}  # decided: from here on configs carry only what exists
         if docs:
+            if removed_components or cleared_devices:
+                await asyncio.sleep(2)  # the removal forms reach the consumer before the documents empty (no "Erroneous JSON")
             try:
                 await self.hass.async_add_executor_job(self._clear_topics, "orphans", docs)
             except Exception as err:  # noqa: BLE001
@@ -1441,7 +1517,9 @@ class MqttPublisher:
         cleared = 0
         for entity_id in list(self._topics):
             if self.rules.for_entity(entity_id).get("exclude"):
-                self._clear(entity_id)  # discovery removal forms come from the full republish's diff
+                if self.config.discovery_enabled:
+                    self._remove_component(entity_id)  # removal first: an empty document before it logs "Erroneous JSON" there
+                self._clear(entity_id)
                 cleared += 1
         n = await self.async_republish_all()
         return {"cleared": cleared, "republished": n}
@@ -1680,9 +1758,9 @@ class MqttPublisher:
         if action in ("create", "update") and self._connected:
             old_id = (event.data.get("changes") or {}).get("entity_id") or event.data.get("old_entity_id")
             if old_id and old_id != entity_id:
-                self._clear(old_id)
                 if self.config.discovery_enabled:
-                    self._remove_component(old_id)
+                    self._remove_component(old_id)  # removal first: an empty document before it logs "Erroneous JSON" there
+                self._clear(old_id)
             state = self.hass.states.get(entity_id)
             if state is not None:
                 self._publish_state(state)
@@ -1776,6 +1854,8 @@ class MqttPublisher:
         self._last_full = time.time()
         self.stats["entities_last_run"] = n
         self.stats["last_full_republish"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        if self.config.discovery_enabled and self._orphan_sweep_due and self._boot_components is None:
+            await self._async_read_boot_components()
         if self.config.discovery_enabled:
             self._publish_discovery_all()
         self._publish_manager_discovery()
@@ -1783,6 +1863,17 @@ class MqttPublisher:
         if self._resync_excluded:
             self._resync_excluded = False
             await self._async_resync_excluded()
+        if self._undiscover_due and not self.config.discovery_enabled:
+            try:
+                n = await self.hass.async_add_executor_job(self._clear_discovery_retained)
+                self._undiscover_due = False
+                keep = f"{self.base_topic}_manager"
+                for did in [d for d in self._discovery_map if d != keep]:
+                    self._discovery_map.pop(did, None)
+                    self._blocks.pop(did, None)
+                _LOGGER.info("MQTT: discovery turned off: removed %s announced devices from the consumer", n)
+            except RuntimeError as err:
+                _LOGGER.warning("MQTT: removing the announced entities after discovery was turned off failed, retried: %s", err)
         if self._orphan_sweep_due and self.hass.is_running and time.time() - self._started_at > ORPHAN_SWEEP_DELAY_S:
             self._orphan_sweep_due = False  # a connect after HA started: the timer from _on_started may have found it disconnected
             await self._async_sweep_orphans()

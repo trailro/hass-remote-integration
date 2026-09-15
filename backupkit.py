@@ -34,6 +34,9 @@ STATE_DIR = "integration_manager"
 PENDING = os.path.join(STATE_DIR, "restore-pending.zip")  # legacy archive name, still honoured
 PENDING_META = os.path.join(STATE_DIR, "restore-pending.json")
 PENDING_GLOB = "restore-pending*.zip"
+# a restore that was applied but whose outcome could not be recorded (a full disk): the meta is renamed
+# to this (a rename needs no free space), so the next boot does not apply the same restore again
+APPLIED_META = os.path.join(STATE_DIR, "restore-applied.json")
 _PENDING_LOCK = threading.Lock()  # schedule, cancel and apply never interleave (two schedules would drop each other's archive)
 PARTS = ("storage", "custom_components", "manager", "yaml")  # selectable restore parts
 MARKER = "integration_manager/state.json"  # every backup must carry it
@@ -47,7 +50,7 @@ EXCLUDE_GLOBS = (
     f"{STATE_DIR}/auth_key", f"{STATE_DIR}/auth_key.tmp", f"{STATE_DIR}/auth_revoked", f"{STATE_DIR}/auth_revoked.tmp",  # a restore must not revive logged-out sessions
     "venv-*", "venv-current", "backups", "backups/*", "*.log",
     "*.log.*", "__pycache__", "*/__pycache__", "*/__pycache__/*", "*.pyc", "deps", "deps/*", "tts", "tts/*",
-    f"{STATE_DIR}/restore-pending*.zip", f"{STATE_DIR}/restore-pending.json", f"{STATE_DIR}/pre-restore-*", f"{STATE_DIR}/ha-install.log",
+    f"{STATE_DIR}/restore-pending*.zip", f"{STATE_DIR}/restore-pending.json", f"{STATE_DIR}/restore-applied.json", f"{STATE_DIR}/*.tmp", f"{STATE_DIR}/pre-restore-*", f"{STATE_DIR}/ha-install.log",
     f"{STATE_DIR}/staging-*", f"{STATE_DIR}/staging-*/*", f"{STATE_DIR}/backups", f"{STATE_DIR}/backups/*",
     f"{STATE_DIR}/import.tar", f"{STATE_DIR}/import.tar.tmp", f"{STATE_DIR}/import-extracted", f"{STATE_DIR}/import-extracted/*",
     ".storage/*.log", ".storage/core.uuid",
@@ -179,7 +182,7 @@ def _drop_dead_partials(bdir: str) -> None:
         path = os.path.join(bdir, n)
         try:
             st = os.stat(path)
-            if now - st.st_mtime > PARTIAL_STALE_S and ((n.startswith(".") and n.endswith(".tmp")) or (n.endswith(".zip") and st.st_size == 0)):
+            if now - st.st_mtime > PARTIAL_STALE_S and (n.endswith(".tmp") or (n.endswith(".zip") and st.st_size == 0)):  # also an upload a kill cut off
                 os.remove(path)
         except OSError:
             continue
@@ -199,7 +202,16 @@ def list_backups(config_dir: str) -> list[dict]:
             out.append(describe(config_dir, n))
         except FileNotFoundError:
             continue  # pruned by a concurrent request between listdir and stat
-    return sorted(out, key=lambda b: b["mtime"], reverse=True)
+    return sorted(out, key=_made_at, reverse=True)
+
+
+def _made_at(b: dict) -> float:
+    """When the backup was made (backup-info.json), not when its file last changed: an older backup
+    uploaded today is not the newest one.  The file time for backups without that record."""
+    try:
+        return time.mktime(time.strptime(str(b.get("created") or ""), "%Y%m%d-%H%M%S"))
+    except (TypeError, ValueError, OverflowError):
+        return float(b.get("mtime") or 0)
 
 
 def prune(config_dir: str, keep: int = KEEP_DEFAULT, protect: set[str] | None = None) -> list[str]:
@@ -298,13 +310,14 @@ def schedule_restore(config_dir: str, name: str, parts: list[str] | None = None,
         os.close(fd)
         zip_name = os.path.basename(dst)
         try:
-            shutil.copyfile(src, dst + ".tmp")
-            os.replace(dst + ".tmp", dst)
+            tmp = os.path.join(os.path.dirname(dst), f".{zip_name}.tmp")  # hidden: never mistaken for an archive, cleaned below
+            shutil.copyfile(src, tmp)
+            os.replace(tmp, dst)
             # the meta file is the commit point: archive AND parts change together
             write_json(os.path.join(config_dir, PENDING_META), {"name": name, "parts": parts or list(PARTS), "zip": zip_name, "for_version": for_version,
                                                                "ha_version": info.get("ha_version")})
         except BaseException:
-            for leftover in (dst + ".tmp", dst):
+            for leftover in (os.path.join(os.path.dirname(dst), f".{zip_name}.tmp"), dst):
                 try:
                     os.remove(leftover)
                 except OSError:
@@ -335,6 +348,13 @@ def pending_archive(config_dir: str) -> str | None:
 def _drop_stale_pending(config_dir: str, keep: str | None = None) -> None:
     import glob as _glob
 
+    leftovers = _glob.glob(os.path.join(config_dir, STATE_DIR, ".restore-pending*.zip.tmp")) \
+        + _glob.glob(os.path.join(config_dir, STATE_DIR, "restore-pending*.zip.tmp"))  # copies a kill interrupted (also 0.11.0's names)
+    for p in leftovers:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
     for p in _glob.glob(os.path.join(config_dir, STATE_DIR, PENDING_GLOB)):
         if keep and os.path.basename(p) == keep:
             continue
@@ -449,7 +469,20 @@ def apply_pending(config_dir: str, log=print, record=None) -> dict | None:
     names: list[str] = []
     try:
         validate(src)
-        pre = create(config_dir, "pre-restore")
+        meta = _pending_meta(config_dir) or {}
+        pre = None
+        if meta.get("pre_restore"):  # a retry after a restore a power loss interrupted: its first copy is the real "before"
+            try:
+                validate(os.path.join(config_dir, BACKUP_DIR, str(meta["pre_restore"])))
+                pre = {"name": str(meta["pre_restore"])}
+            except Exception:  # noqa: BLE001 - gone or unreadable: take a new one
+                pre = None
+        if pre is None:
+            pre = create(config_dir, "pre-restore")
+            try:
+                write_json(os.path.join(config_dir, PENDING_META), {**meta, "pre_restore": pre["name"]})
+            except OSError:
+                pass  # best effort: without it a retry takes another copy
         log(f"restore: pre-restore copy {pre['name']}")
         parts = pending_parts(config_dir)
         result["parts"] = parts
@@ -507,10 +540,19 @@ def apply_pending(config_dir: str, log=print, record=None) -> dict | None:
             except Exception as err:  # noqa: BLE001
                 log(f"restore: outcome not recorded ({err})")
                 recorded = False
+        applied_unrecorded = False
         if recorded:
             try:
                 os.remove(os.path.join(config_dir, PENDING_META))
             except OSError:
                 pass
-        _drop_stale_pending(config_dir, keep=None if recorded else os.path.basename(src))  # not recorded: its archive stays with the schedule
+        elif result.get("ok"):
+            try:
+                os.replace(os.path.join(config_dir, PENDING_META), os.path.join(config_dir, APPLIED_META))
+                applied_unrecorded = True
+                log("restore: applied, outcome recorded at the next boot (ha.json could not be written)")
+            except OSError as err:
+                log(f"restore: applied but neither recorded nor marked ({err}): it would be applied again at the next boot")
+        keep = None if (recorded or applied_unrecorded) else os.path.basename(src)
+        _drop_stale_pending(config_dir, keep=keep)  # not recorded: its archive stays with the schedule
     return result

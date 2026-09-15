@@ -318,6 +318,9 @@ def parse_unified(text: str) -> list[_FilePatch]:
                          old_n=int(m.group(2) or 1), new_n=int(m.group(4) or 1))
             cur.hunks.append(hunk)
             continue
+        if hunk is not None and hunk.complete and line[:1] in ("+", "-", " ") and line.strip() != "--":
+            raise ValueError(f"hunk @@ -{hunk.old_start},{hunk.old_n} @@ carries more lines than its header declares "
+                             f"({line[:60]!r} after {hunk.old_n} old / {hunk.new_n} new): an edited diff")
         if hunk is None or hunk.complete:
             continue  # between hunks or files (a blank line after the last hunk is not context)
         if line.startswith("+"):

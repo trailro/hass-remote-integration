@@ -232,7 +232,10 @@ The container publishes one retained JSON document per entity, the service
 catalog and a health document under `hass_<domain>/`.
 
 Leave **discovery off** for now if your main HA still runs the same
-integration: otherwise you would get every entity twice.
+integration: otherwise you would get every entity twice. Turning discovery
+off after it was on removes the announced entities from your main HA again,
+like *Undo* on **Cutover** (the manager device stays while `manager_discovery`
+is on), so nothing changed in the container meanwhile lingers there.
 
 ### 5. Move over from your main Home Assistant
 

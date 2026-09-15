@@ -97,7 +97,7 @@ class BackupUploadView(ManagerView):
         dest = os.path.join(bdir, name)
         size = 0
         ok = False
-        fd, tmp = await self.hass.async_add_executor_job(lambda: tempfile.mkstemp(dir=bdir, suffix=".zip.tmp"))
+        fd, tmp = await self.hass.async_add_executor_job(lambda: tempfile.mkstemp(dir=bdir, prefix=".upload-", suffix=".zip.tmp"))
         fh = await self.hass.async_add_executor_job(os.fdopen, fd, "wb")
         try:
             while chunk := await field.read_chunk(1 << 16):

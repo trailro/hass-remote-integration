@@ -82,7 +82,8 @@ class InstalledActionView(ManagerView):
                     await self.publisher.async_reconnect()  # disconnects (no identity), retained offline
                 from .installer import instance_key
 
-                res["retained_cleared"] = await self.publisher.async_clear_identity(instance_key(domain) or "")
+                # the uninstall cleared most of it already; this second pass only finds what the reconnect published since
+                res["retained_cleared"] = self.installer.last_identity_cleared + (await self.publisher.async_clear_identity(instance_key(domain) or "") or 0)
             return self.json(res)
         if action == "rollback_full":
             return self.json(await self.installer.rollback_full(domain))

@@ -224,7 +224,7 @@ class BuildPrepareView(ManagerView):
         except ValueError as err:
             return self.json({"ok": False, "error": str(err)})
         if not self._check.checked(domain, ref, ha, str(body.get("check_id") or "")):
-            return self.json({"ok": False, "error": "run Check for exactly this integration, version and Home Assistant version first (the report on screen belongs to another combination or is older than an hour)"})
+            return self.json({"ok": False, "error": "run Check for exactly this integration, version and Home Assistant version first (the report on screen belongs to another combination, is older than an hour, or was made before the manager restarted: passed checks are kept in memory)"})
         steps: list[dict[str, Any]] = []
         ha_state = await self.updater.status()
         ha_changes = bool(ha) and ha != ha_state.get("current")

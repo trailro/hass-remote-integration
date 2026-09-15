@@ -63,7 +63,7 @@ async function prepare(start){
   $('#bmsg').textContent=start?'installing and starting…':'installing…'; const r=await post('api/build/prepare',body({start,replace:!!CUR&&CUR!==d,check_id:CHECK.id}));
   const steps=(r.steps||[]).map(s=>`${esc(s.step)}: ${s.ok?(s.deferred?'after the restart ('+esc(s.note||'')+')':'ok'):'FAILED '+esc(s.error||'')}${s.step==='start'&&s.pip_failed&&s.pip_failed.length?' (pip failed: '+s.pip_failed.map(esc).join(', ')+')':''}`).join(' · ');
   $('#bmsg').innerHTML=(r.ok?`<span class="ok">done</span> · ${steps}`:`<span class="bad">${esc(r.error)}</span> · ${steps}`)+(r.restart_required?' · <b>restart required</b>':'');
-  $('#brestart').hidden=!r.restart_required; CHECK=null; $('#bprepare').disabled=$('#bstart').disabled=true; if(OPT) options();
+  $('#brestart').hidden=!r.restart_required; CHECK=null; $('#bprepare').disabled=$('#bstart').disabled=true; await regLoad(); if(OPT) options();
 }
 // ----- HACS catalog search -----
 let CATSEQ=0, CATTIMER=null;
@@ -76,7 +76,8 @@ async function catSearch(){
   t.querySelectorAll('tr:not(:first-child)').forEach(e=>e.remove());
   const res=r.results||[];
   for(const x of res){ const tr=document.createElement('tr');
-    const taken=x.in_registry&&x.registry_repo!==x.repo;
+    // the integration in this container is never "taken", also when HACS lists its repository under a new name
+    const taken=x.in_registry&&!x.installed&&String(x.registry_repo||'').toLowerCase()!==String(x.repo||'').toLowerCase();
     const state=x.installed&&!taken?'<span class="tag ok">in this container</span>':taken?`<span class="tag warn" title="the registry has ${esc(x.registry_repo)} for this domain">domain taken</span>`:x.in_registry?'<span class="tag">in registry</span>':'';
     tr.innerHTML=`<td><b>${esc(x.name)}</b> <span class="mut">${esc(x.domain)}</span> ${state}<br><span class="mut" style="font-size:12px">${esc(x.description)}</span></td><td><a href="https://github.com/${esc(x.repo)}" target="_blank" rel="noopener">${esc(x.repo)}</a></td><td>${esc(x.last_version||'—')}</td><td class="mut" style="white-space:nowrap">${esc(x.last_updated||'')}</td><td><button data-cat="${esc(x.domain)}" data-repo="${esc(x.repo)}" data-name="${esc(x.name)}" ${taken?'disabled':''}>Use</button></td>`;
     t.appendChild(tr); }
@@ -107,7 +108,7 @@ async function loadDev(){
   if(!(r.candidates||[]).length){ const tr=document.createElement('tr'); tr.innerHTML=`<td colspan="6" class="mut">${r.exists?'no manifest.json found under the directory':'mount a directory first'}</td>`; t.appendChild(tr); }
   t.querySelectorAll('button[data-dev]').forEach(b=>b.onclick=async()=>{ if(!replaceOk(b.dataset.dev)) return; if($('#devrestart').checked&&!confirm('Reinstall from the directory and restart the process if that copy is running?')) return; $('#devmsg').textContent='installing…'; const res=await post('api/dev/install',{domain:b.dataset.dev,path:b.dataset.path,restart:$('#devrestart').checked,replace:!!CUR&&CUR!==b.dataset.dev});
     $('#devmsg').textContent=res.ok?`${res.domain} ${res.tag} (version ${res.version||'?'}) from ${res.path}${res.redeployed?(res.restarting?' — running copy refreshed, restarting…':' — running copy refreshed, restart required'):''}${res.pip_failed&&res.pip_failed.length?' · pip failed: '+res.pip_failed.join(', '):''}`:'ERROR: '+res.error;
-    if(res.restarting) setTimeout(()=>location.reload(),8000); else { loadDev(); options(); } });
+    if(res.restarting) setTimeout(()=>location.reload(),8000); else { loadDev(); regLoad().then(options); } });
 }
 $('#devrefresh').onclick=loadDev;
 regLoad().then(options).catch(e=>log('build: '+e)); loadDev().catch(()=>{});

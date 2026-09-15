@@ -46,6 +46,8 @@ class ImportUploadView(ManagerView):
         self.hass = hass
 
     async def post(self, request: web.Request) -> web.Response:
+        if _IMPORT_LOCK.locked():  # an import reads the extracted files: replacing or clearing them would import half
+            return self.json({"ok": False, "error": "an import is running: wait for it to finish"})
         if request.headers.get("X-Requested-With") != "fetch":
             return self.json_message("X-Requested-With: fetch required", status_code=400)
         if _rebuild_staged(self.hass.config.config_dir):
@@ -98,6 +100,8 @@ class ImportInspectView(ManagerView):
 
     @with_body
     async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
+        if _IMPORT_LOCK.locked():  # an import reads the extracted files: replacing or clearing them would import half
+            return self.json({"ok": False, "error": "an import is running: wait for it to finish"})
         cfg = self.hass.config.config_dir
         if os.path.isfile(os.path.join(cfg, ha_import.REBUILD_FILE)):
             return self.json({"ok": False, "error": "a Home Assistant downgrade with a clean start is scheduled: restart first"})
@@ -156,6 +160,8 @@ class ImportClearView(ManagerView):
 
     @with_body
     async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
+        if _IMPORT_LOCK.locked():  # an import reads the extracted files: replacing or clearing them would import half
+            return self.json({"ok": False, "error": "an import is running: wait for it to finish"})
         if _rebuild_staged(self.hass.config.config_dir):
             return self.json({"ok": False, "error": _REBUILD_MSG})
         await self.hass.async_add_executor_job(ha_import.clear, self.hass.config.config_dir)
