@@ -811,6 +811,16 @@ hass_<domain>/manager/result                        outcome of a manager action,
   skipped document is named in the log and on the timeline and counted there
   (`oversized_skipped`, `last_oversized`); the MQTT page shows the protocol and
   the last skipped document next to the connection state.
+- **Subscriptions**: at every connection the container subscribes to
+  `cmd/#`, `call/#` and `manager/cmd/+`. A broker that refuses them (an ACL
+  that allows publishing but not subscribing) still gets every document, but
+  no command, service call or manager action reaches the container: the
+  refused topics and the broker's reason are logged once, put on the timeline,
+  and shown in `subscribe_error` and `connect_error` of `GET /api/mqtt/status`
+  while the connection stays up. The MQTT client library's own messages are
+  logged under `custom_components.integration_manager.mqtt_publisher.paho`
+  (INFO and above; DEBUG gives a packet trace, which names topics and sizes but
+  never the password or a payload).
 - **Discovery** (off by default): one retained config per device. Entities of
   every domain that has an MQTT platform become native entities with working
   commands; the rest (cameras, media players, weather, …) are mirrored as

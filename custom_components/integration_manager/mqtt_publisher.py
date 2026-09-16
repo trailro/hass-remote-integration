@@ -76,6 +76,10 @@ TLS_CHECK_INTERVAL_S = 60  # at most one diagnostic handshake per minute while p
 DROP_AFTER_CONNECT_S = 10  # a disconnect within this of a CONNACK: the broker dropped us, the settings are not the problem
 
 _LOGGER = logging.getLogger(__name__)
+# paho's own log (a callback that raised, a socket error): its lines name topics, flags and sizes, never the password
+# or a payload.  INFO: the packet trace at DEBUG stays off with the manager's debug log, until this logger is raised
+_PAHO_LOGGER = logging.getLogger(__name__ + ".paho")
+_PAHO_LOGGER.setLevel(logging.INFO)
 ORPHAN_SWEEP_DELAY_S = 300  # after HA started: integrations still adding entities (a device slow to answer) have had time
 HEALTH_INTERVAL_S = disc.HEALTH_INTERVAL_S  # the health entities on the main HA expire after three missed publications
 REPUBLISH_BATCH = 200          # documents per batch before yielding to the event loop
@@ -392,6 +396,8 @@ class MqttPublisher:
     _receive_max = 0
     # _calls is iterated and changed on paho's thread and changed on the loop (a call refused for the in-flight cap)
     _calls_lock = threading.Lock()
+    _subscribing: tuple[Any, Any, list[str]] | None = None  # (client, mid, topics) of the SUBSCRIBE waiting for its SUBACK
+    _last_subscribe_error = ""  # the refusal already logged: repeated only after a subscription succeeded
 
     def __init__(self, hass: HomeAssistant, key_provider=None, health_provider=None, rules_provider=None) -> None:
         self._health_provider = health_provider
@@ -424,6 +430,7 @@ class MqttPublisher:
         self.stats: dict[str, Any] = {
             "connected": False,
             "connect_error": "",
+            "subscribe_error": "",  # the broker refused (or never acknowledged) the command subscriptions: set while connected
             "protocol": None,  # "MQTT 5", or "MQTT 3.1.1" for a broker that refused 5: only 5 announces a maximum packet size
             "published": 0,
             "cleared": 0,
@@ -673,6 +680,7 @@ class MqttPublisher:
             c.tls_set(ca_certs=self.config.ca_certs or None)
             if self.config.tls_insecure:
                 c.tls_insecure_set(True)
+        c.enable_logger(_PAHO_LOGGER)
         return c
 
     def public_config(self) -> dict[str, Any]:
@@ -1091,6 +1099,7 @@ class MqttPublisher:
             c.on_connect_fail = self._on_connect_fail
             c.on_disconnect = self._on_disconnect
             c.on_message = self._on_message
+            c.on_subscribe = self._on_subscribe
             c.suppress_exceptions = True  # a callback bug must not kill the network thread
             c.reconnect_delay_set(min_delay=2, max_delay=60)
             c.connect_async(self.config.host, self.config.port, keepalive=60, **self._connect_options(c))
@@ -1106,6 +1115,7 @@ class MqttPublisher:
 
     def _disconnect(self, publish_offline: bool = True) -> None:
         c, self._client = self._client, None
+        self._subscribing = None
         if c is None:
             self._live_base = self._live_prefix = None
             return
@@ -1149,6 +1159,7 @@ class MqttPublisher:
         v5 = getattr(client, "protocol", None) == mqtt.MQTTv5
         self.stats["connected"] = True
         self.stats["connect_error"] = ""
+        self.stats["subscribe_error"] = ""
         self.stats["protocol"] = "MQTT 5" if v5 else "MQTT 3.1.1"
         self._tls_checked_at, self._tls_error, self._last_disconnect = 0.0, "", ""
         client.publish(self._status_topic(), "online", qos=1, retain=True)
@@ -1160,9 +1171,13 @@ class MqttPublisher:
             # refused and cleared at once (3.1.1 brokers drop the flag on live delivery).  noLocal: the empty
             # payload that clears it does not come back to us.
             options = SubscribeOptions(qos=1, noLocal=True, retainAsPublished=True)
-            client.subscribe([(t, options) for t in topics])
+            rc, mid = client.subscribe([(t, options) for t in topics])
         else:
-            client.subscribe([(t, 1) for t in topics])
+            rc, mid = client.subscribe([(t, 1) for t in topics])
+        self._subscribing = (client, mid, topics)
+        if rc != mqtt.MQTT_ERR_SUCCESS:
+            self._subscribing = None
+            self._subscribe_failed(f"the subscription could not be sent ({mqtt.error_string(rc)})")
         _LOGGER.info("MQTT connected to %s:%s", self.config.host, self.config.port)
         events.emit("mqtt", f"connected to {self.config.host}:{self.config.port} as {self.base_topic}")
         # Runs in paho's thread: hop onto the HA loop for the full publish.  A
@@ -1177,6 +1192,28 @@ class MqttPublisher:
             self.hass.async_create_task(self.async_republish_all())
 
         self.hass.loop.call_soon_threadsafe(_resume)
+
+    def _on_subscribe(self, client, userdata, mid, reason_codes, properties=None) -> None:
+        """Paho thread: the SUBACK.  A broker whose ACL allows publishing but not subscribing refuses the topics here, and
+        only here: the connection stays up and state mirroring works while no command reaches this container."""
+        pending = self._subscribing
+        if pending is None or pending[0] is not client or pending[1] != mid:
+            return  # an earlier connection's
+        self._subscribing = None
+        refused = [f"{topic} ({code})" for topic, code in zip(pending[2], reason_codes) if getattr(code, "is_failure", False)]
+        if refused:
+            self._subscribe_failed(f"the broker refused the subscription to {', '.join(refused)}")
+        else:
+            self._last_subscribe_error = ""
+
+    def _subscribe_failed(self, reason: str) -> None:
+        message = (f"{reason}: commands, service calls and manager actions from the main Home Assistant do not reach this "
+                   "container (a broker ACL that denies subscribing?); state is still published")
+        self.stats["subscribe_error"] = self.stats["connect_error"] = message
+        if message != self._last_subscribe_error:  # once, not once per reconnect
+            self._last_subscribe_error = message
+            _LOGGER.error("MQTT: %s", message)
+            events.emit("mqtt", message)
 
     def _replace_client_soon(self, client: mqtt.Client) -> None:
         """Paho thread: paho would retry with the same protocol and window forever, so a new client is built,

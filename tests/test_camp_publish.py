@@ -29,6 +29,7 @@ class FakeClient:
 
     def subscribe(self, topics):
         self.subscribed.append(topics)
+        return (0, len(self.subscribed))  # paho: (rc, mid)
 
 
 def _publisher(**config):
