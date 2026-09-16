@@ -1101,8 +1101,8 @@ What is in place:
   Assistant writes. Its configuration archive may be at most 2 GB, its
   `backup.json` at most 1 MB, and what it extracts at most 2 GB. Reading its
   configuration archive may decompress at most 20 times the archive's size (at
-  least 2 GB), skipped members included, and an extended tar header over 1 MB
-  is refused; neither the
+  least 2 GB), skipped members included, and an extended tar header over 1 MB,
+  in the backup or in its configuration archive, is refused; neither the
   backup nor its configuration archive may hold more than 100000 files. Config entries
   with an invalid id are skipped.
 - Dangerous service domains are not callable, over MQTT or from the UI.
