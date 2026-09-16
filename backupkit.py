@@ -478,6 +478,39 @@ def cancel_restore(config_dir: str, only_zip: str | None = None, by_hand: bool =
         return had
 
 
+def drop_orphan_schedule(config_dir: str, log=print, record=None) -> dict | None:
+    """A schedule whose archive copy is gone (removed by hand, lost): nothing can be restored from it, but its meta
+    kept the backup it names from being deleted or pruned, and a version change waiting for it was cancelled at
+    every boot while System showed no restore.  Dropped and recorded as a failed restore (``record``, as
+    apply_pending records an outcome); nothing on the volume changed, so a record that cannot be written does not
+    keep it either.  Also removes archive copies no meta names.  None when there was no such schedule."""
+    with _PENDING_LOCK:
+        meta_path = os.path.join(config_dir, PENDING_META)
+        if not os.path.lexists(meta_path):
+            _drop_stale_pending(config_dir)  # an archive without its meta was never a schedule
+            return None
+        if pending_archive(config_dir) is not None:
+            return None
+        meta = _pending_meta(config_dir) or {}
+        name = meta.get("name") if isinstance(meta.get("name"), str) else None
+        result = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "ok": False, "backup": name, "parts": pending_parts(config_dir),
+                  "for_version": meta.get("for_version") if isinstance(meta.get("for_version"), str) else None,
+                  "error": f"the scheduled restore of {name or 'a backup'} was dropped: its copy of the archive "
+                           f"({meta.get('zip') or os.path.basename(LEGACY_PENDING_ZIP)}) is gone from the volume; nothing was restored"}
+        log(f"restore: {result['error']}")
+        if record is not None:
+            try:
+                record(result)
+            except Exception as err:  # noqa: BLE001
+                log(f"restore: outcome not recorded ({err})")
+        try:
+            os.remove(meta_path)
+        except OSError as err:
+            log(f"restore: {PENDING_META} could not be removed ({err})")
+        _drop_stale_pending(config_dir)
+        return result
+
+
 def pending_for_version(config_dir: str) -> str | None:
     """The Home Assistant version a scheduled restore belongs to (None: scheduled by hand)."""
     return (_pending_meta(config_dir) or {}).get("for_version")
@@ -607,8 +640,7 @@ def apply_pending(config_dir: str, log=print, record=None, storage_version: str 
     put back, so the volume never boots empty."""
     src = pending_archive(config_dir)
     if src is None:
-        _drop_stale_pending(config_dir)  # an archive without its meta was never a schedule
-        return None
+        return drop_orphan_schedule(config_dir, log, record)
     import glob as _glob
 
     for old in _glob.glob(os.path.join(config_dir, STATE_DIR, "staging-restore-*")):
