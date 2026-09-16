@@ -30,11 +30,11 @@
   <label>enabled <input id="mq_enabled" type="checkbox"></label>
   <label>base_topic <input id="mq_base_topic" type="text"></label>
   <label>host <input id="mq_host" type="text"></label>
-  <label>port <input id="mq_port" type="number"></label>
+  <label title="1-65535">port <input id="mq_port" type="number" min="1" max="65535"></label>
   <label>username <input id="mq_username" type="text"></label>
   <label>password <input id="mq_password" type="password" placeholder="(unchanged)"></label>
-  <label title="incremental pass: only documents whose content changed">republish_interval_s <input id="mq_republish_interval_s" type="number"></label>
-  <label title="everything is re-published no matter what, at most this often">full_republish_interval_min <input id="mq_full_republish_interval_min" type="number" min="5"></label>
+  <label title="incremental pass: only documents whose content changed; 30-86400 s, clamped on save">republish_interval_s <input id="mq_republish_interval_s" type="number" min="30" max="86400"></label>
+  <label title="everything is re-published no matter what, at most this often; 5-10080 min, clamped on save">full_republish_interval_min <input id="mq_full_republish_interval_min" type="number" min="5" max="10080"></label>
   <label>exclude_integrations <input id="mq_exclude_integrations" type="text" placeholder="a,b"></label>
   <label title="turn on only once the integration is fully configured here: the consuming HA creates the entities at the first publication">discovery_enabled <input id="mq_discovery_enabled" type="checkbox"></label>
   <label>discovery_prefix <input id="mq_discovery_prefix" type="text" placeholder="homeassistant"></label>
