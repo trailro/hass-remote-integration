@@ -309,7 +309,9 @@ container announces over MQTT with what your main HA has made of it.
    (`hass_<domain>_<entity id>`), so areas, labels and custom names set on the
    removed entities have to be set again.
 4. Changed your mind? *Undo* removes every discovery config again, so your
-   main HA drops the entities.
+   main HA drops the entities. The manager device stays while `manager_discovery`
+   is on: it does not depend on entity discovery, and the Undo answer says
+   `manager_device_kept`.
 
 [docs/shadow-mode.md](docs/shadow-mode.md) describes a complete shadow-mode setup, including a
 serial device shared by both instances through a TCP bridge.
@@ -743,10 +745,15 @@ hass_<domain>/manager/result                        outcome of a manager action,
 - **Entity document**: state, attributes, `last_changed`, `last_updated`,
   `last_reported`, and the registry metadata (unique id, name, device class,
   unit, icon, category, device).
-- **Document size**: a document over 1 MiB, or over the maximum packet size the
-  broker announces when it speaks MQTT 5, is skipped rather than sent: a broker
-  that refuses an oversized packet closes the connection, and the client would
-  replay the same document on every reconnect until nothing else gets through.
+- **Protocol and document size**: the container connects with MQTT 5, so a
+  broker can announce the largest packet it accepts. A document over that
+  maximum, or over 1 MiB when none is announced, is skipped rather than sent: a
+  broker that refuses an oversized packet closes the connection, and the client
+  would replay the same document on every reconnect until nothing else gets
+  through. A broker that refuses MQTT 5 gets an MQTT 3.1.1 connection, logged
+  and on the timeline; 3.1.1 cannot announce a maximum, so only the 1 MiB limit
+  applies there. `GET /api/mqtt/status` shows the protocol in `protocol`, and
+  the MQTT page shows it next to the connection state.
   A skipped document is named in the log and on the timeline, and counted in
   `GET /api/mqtt/status` (`oversized_skipped`, `last_oversized`); the MQTT page
   shows the last one next to the connection state.
@@ -795,8 +802,11 @@ hass_<domain>/manager/result                        outcome of a manager action,
   larger than 256 KB, or nested deeper than 64 levels, is refused unread, with
   the reason in the same two places. A command published with `retain` is never
   carried out, because a physical effect must not replay at every reconnect; the
-  retained message is cleared from the broker there and then, instead of waiting
-  for the next identity move.
+  retained message is cleared from the broker as it arrives. On a broker that
+  speaks only MQTT 3.1.1 this holds for a retained command found when the
+  container subscribes (at every connection); one published while the container
+  is already connected reaches it without the retain flag, runs once, and its
+  retained copy is cleared at the next connection.
 - **Service calls**: publish a JSON object to `call/<domain>/<service>` (service
   data plus optional `entity_id`, and an optional `_id`); the result comes back
   on `result/...`, with a `response` key for a service that returns response
@@ -1187,7 +1197,7 @@ points:
 | System | `GET /api/ha`, `POST /api/ha/{update,rollback}`, `POST /api/restart`, `GET/POST /api/settings` |
 | Backups | `GET /api/backups`, `POST /api/backups/create`, `POST /api/backups/upload`, `GET /api/backups/<name>/download`, `POST /api/backups/<name>/{restore,delete}`, `POST /api/backups/restore/cancel` |
 | Import | `POST /api/import/upload`, `GET/POST /api/import/inspect`, `POST /api/import/{apply,apply_all,clear}` |
-| Cutover | `GET /api/parity`, `POST /api/parity/{test,remove_orphans}`, `POST /api/cutover/{status,enable,undo}` |
+| Cutover | `GET /api/parity`, `POST /api/parity/{test,remove_orphans}`, `POST /api/cutover/{status,enable,undo}`; `enable` takes `force`, which skips the checks on the main Home Assistant (MQTT loaded, the integration's config entries, entity ids still registered there) but not the container's own (an integration running, health, MQTT connected), and the answer and the timeline say `forced`; a check on the main HA that cannot run (unreachable, its registry unreadable) blocks the enable rather than passing. Removing an orphan while discovery is off is refused, except for the manager device while `manager_discovery` announces it |
 | Logs | `GET /api/logs?level=&prefix=&q=&since_id=&limit=` (`limit` 1 to 2000; the answer carries `cursor`, the next `since_id`), `GET /api/logs/loggers`, `POST /api/logs/level` (`{"logger": …, "level": …}`), `GET /api/log_files` (an `id` per file, which changes at every start), `GET /api/log_files/tail?id=&file=&lines=&q=` (`file` is the masked name, answered `409` when several files share it; a real name is not accepted), `GET/POST /api/settings` (`log_format`) |
 | Diagnostics | `GET /api/diagnostics` (zip, secrets removed), `GET /api/diag/memory[?refs=<type>]` (one probe at a time: a second one meanwhile answers `429`) |
 

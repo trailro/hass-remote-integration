@@ -20,7 +20,7 @@
 </div>
 
 <div class="card"><h2>Assisted cutover</h2>
- <div class="mut" style="margin-bottom:8px">The day you stop the integration on the parent and let this container feed it: preconditions → discovery on (full republish) → wait for the parent to create the entities → compare. <b>Undo</b> switches discovery off and clears every retained discovery config of this identity, so the parent removes the entities again; the retained state documents stay.</div>
+ <div class="mut" style="margin-bottom:8px">The day you stop the integration on the parent and let this container feed it: preconditions → discovery on (full republish) → wait for the parent to create the entities → compare. <b>Undo</b> switches discovery off and clears every retained discovery config of this identity, so the parent removes the entities again; the retained state documents stay, and so does the manager device while <code>manager_discovery</code> is on.</div>
  <div class="step"><b>1. Preconditions</b> <span id="c1" class="mut">…</span></div>
  <div class="step"><b>2. Discovery</b> <button id="cenable" class="primary">Enable discovery &amp; republish</button> <span id="c2" class="mut"></span></div>
  <div class="step"><b>3. Wait &amp; compare</b> <button id="cwait">Watch the parent (3 min)</button> <span id="c3" class="mut"></span></div>
