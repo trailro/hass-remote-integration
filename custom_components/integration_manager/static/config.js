@@ -74,7 +74,7 @@ async function loadPatches(){
   const r=await (await fetch(`api/patches/${encodeURIComponent(DOM)}`,{headers:{'X-Requested-With':'fetch'}})).json(); if(!r.ok) return;
   for(const p of r.patches){const tr=document.createElement('tr'); tr.innerHTML=`<td>${esc(p.name)}${p.bundled?' <span class="tag" title="shipped with the image (patches/<domain>/ in the repo); a user upload of the same name overrides it">bundled</span>':''}</td><td class="mut">${p.scope?p.scope.map(esc).join(', '):'all'}</td><td><span class="${p.status==='applied'||p.status==='already applied'?'ok':p.status==='skipped'?'mut':'warn'}">${esc(p.status)}</span></td><td class="mut">${esc(p.detail||'')}</td><td><button data-e="${esc(p.name)}">${p.bundled?'View / override':'Edit'}</button>${p.bundled?'':` <button data-n="${esc(p.name)}">Delete</button>`}</td>`; t.appendChild(tr);}
   t.querySelectorAll('button[data-e]').forEach(b=>b.onclick=()=>pedEdit(b.dataset.e));
-  t.querySelectorAll('button[data-n]').forEach(b=>b.onclick=async()=>{ if(!confirm(`Delete patch ${b.dataset.n}?`)) return; await post(`api/patches/${encodeURIComponent(DOM)}/${encodeURIComponent(b.dataset.n)}/delete`); loadPatches(); });
+  t.querySelectorAll('button[data-n]').forEach(b=>b.onclick=async()=>{ if(!confirm(`Delete patch ${b.dataset.n}?`)) return; const r=await post(`api/patches/${encodeURIComponent(DOM)}/${encodeURIComponent(b.dataset.n)}/delete`); $('#pmsg').textContent=r.ok?r.note:'ERROR: '+r.error; loadPatches(); });
   $('#papply').disabled=!(ST.running&&ST.running.domain===DOM);
 }
 $('#pupload').onclick=async()=>{const f=$('#pfile').files[0]; if(!DOM||!f){$('#pmsg').textContent='choose a .py or .patch file';return;}
@@ -408,7 +408,7 @@ function pollProgress(delay=2000){
 $('#start').onclick=async()=>{try{log(`start flow ${DOM}`);const r=await post('api/flow/start',{domain:DOM});if(r.message){log('error: '+r.message);return;}flow={id:r.flow_id,kind:'config'};render(r);}catch(e){log('error: '+e.message)}};
 $('#submit').onclick=async()=>{ if(!flow) return; clearErrors(); let input; try{input=$('#submit').dataset.external==='1'?null:collect();}catch(e){showFieldError(e);return;}
   try{ const url=flow.kind==='config'?`api/flow/${flow.id}`:`api/options/${flow.id}`; const r=await post(url,{user_input:input}); if(r.type==='invalid_data'){ for(const [k,v] of Object.entries(r.errors||{})){ const w=[...$('#form').querySelectorAll('[data-name]')].find(x=>x.dataset.name===k); if(w&&w._err) w._err.textContent=String(v); else $('#baseerr').textContent=`${k}: ${v}`; } return; } if(r.message){$('#baseerr').textContent=r.message;return;} render(r);}catch(e){log('error: '+e.message)} };
-$('#abort').onclick=async()=>{ if(!flow) return; clearTimeout(PROGRESS_T); await del(flow.kind==='config'?`api/flow/${flow.id}`:`api/options/${flow.id}`); log('aborted'); flow=null; $('#stepcard').hidden=true; $('#abort').disabled=true; $('#flowid').textContent=''; };
+$('#abort').onclick=async()=>{ if(!flow) return; clearTimeout(PROGRESS_T); const r=await del(flow.kind==='config'?`api/flow/${flow.id}`:`api/options/${flow.id}`); if(!r.ok){ log('ERROR: abort failed: '+(r.error||r.message)); return; } log('aborted'); flow=null; $('#stepcard').hidden=true; $('#abort').disabled=true; $('#flowid').textContent=''; };
 async function entries(){
   const r=await (await fetch('api/entries')).json();
   const t=$('#entries'); t.querySelectorAll('tr:not(:first-child)').forEach(e=>e.remove());
@@ -417,8 +417,8 @@ async function entries(){
       <td><button data-a="options" data-id="${esc(e.entry_id)}" ${e.supports_options&&e.state==='loaded'?'':'disabled'}>Options</button> ${e.supports_reconfigure?`<button data-a="reconfigure" data-id="${esc(e.entry_id)}">Reconfigure</button> `:''}<button data-a="reload" data-id="${esc(e.entry_id)}">Reload</button> <button data-a="delete" data-id="${esc(e.entry_id)}">Delete</button></td>`;
     t.appendChild(tr); }
   t.querySelectorAll('button').forEach(b=>b.onclick=async()=>{const a=b.dataset.a,id=b.dataset.id;
-    if(a==='delete'){ if(!confirm('Delete this config entry?')) return; await post(`api/entries/${id}/delete`,{}); return entries(); }
-    if(a==='reload'){ await post(`api/entries/${id}/reload`,{}); return entries(); }
+    if(a==='delete'){ if(!confirm('Delete this config entry?')) return; const r=await post(`api/entries/${id}/delete`,{}); if(r.message) log('error: '+r.message); return entries(); }
+    if(a==='reload'){ const r=await post(`api/entries/${id}/reload`,{}); if(!r.ok) log('error: '+(r.message||'the entry did not reload')); return entries(); }
     if(a==='options'){ const r=await post(`api/entries/${id}/options`,{}); if(r.message||!r.flow_id){log('error: '+(r.message||'no flow'));return;} flow={id:r.flow_id,kind:'options'}; render(r); }
     if(a==='reconfigure'){ const r=await post('api/flow/start',{domain:DOM,source:'reconfigure',entry_id:id}); if(r.message||!r.flow_id){log('error: '+(r.message||r.reason||'no flow'));return;} flow={id:r.flow_id,kind:'config'}; render(r); } });
   let prog=[]; try{ prog=await (await fetch('api/flow/progress')).json(); }catch(e){}

@@ -30,8 +30,8 @@ $('#mqsave').onclick=async()=>{
   const r=await post('api/mqtt/config',body); log(r.ok?'MQTT config saved':'ERROR: '+JSON.stringify(r)); $('#mq_password').value=''; await mqtt();
 };
 $('#mqform').addEventListener('submit',e=>e.preventDefault());  // Enter in a field must not reload the page (no inline handler: CSP)
-$('#mqrepub').onclick=async()=>{const r=await post('api/mqtt/republish');log(`republished ${r.published} entities`);await mqtt()};
-$('#mqreconn').onclick=async()=>{await post('api/mqtt/reconnect');log('MQTT reconnecting');await mqtt()};
+$('#mqrepub').onclick=async()=>{const r=await post('api/mqtt/republish');log(r.ok?`republished ${r.published} entities`:'ERROR: '+r.error);await mqtt()};
+$('#mqreconn').onclick=async()=>{const r=await post('api/mqtt/reconnect');log(r.ok?'MQTT reconnecting':'ERROR: '+r.error);await mqtt()};
 setInterval(mqtt,15000); mqtt().catch(e=>log('mqtt: '+e)); mqttConfigLoad().catch(e=>log('mqtt config: '+e));
 // ----- health rules -----
 async function healthRules(){
