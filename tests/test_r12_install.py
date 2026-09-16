@@ -384,6 +384,73 @@ class SmokeHealthExceptionTest(unittest.TestCase):
         inst.rollback_full.assert_not_awaited()
 
 
+class _Content:
+    def __init__(self, body):
+        self.body = body
+
+    async def iter_chunked(self, n):
+        for i in range(0, len(self.body), n):
+            yield self.body[i:i + n]
+
+
+class _Resp:
+    """What aiohttp's ClientResponse offers the reads here: status, headers, content_length (None when chunked),
+    content.iter_chunked, text(), json(), raise_for_status()."""
+
+    def __init__(self, status=200, body=b"", headers=None, announce=False):
+        self.status, self.headers = status, headers or {}
+        self._body = body
+        self.content = _Content(body)
+        self.content_length = len(body) if announce else None
+
+    async def text(self):
+        return self._body.decode()
+
+    async def json(self):
+        return json.loads(self._body)
+
+    def raise_for_status(self):
+        if self.status >= 400:
+            raise OSError(f"HTTP {self.status}")
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class GitHubReadsTest(R12InstallerCase):
+    """C22: metadata reads from GitHub are capped; a rate limit is not called a private repo."""
+
+    def test_preview_manifest_is_capped(self):
+        inst = self.installer()
+        with open(inst.user_registry_file, "w", encoding="utf-8") as fh:
+            json.dump({"integrations": {"demo": {"repo": "owner/demo"}}}, fh)
+        huge = json.dumps({"domain": "demo", "version": "2.0", "x": "a" * (installer_mod.DOWNLOAD_MAX_BYTES // 8)}).encode()
+        session = SimpleNamespace(get=lambda url, **kw: _Resp(200, huge))
+        inst.settings = SimpleNamespace(github_headers=lambda: {})
+
+        async def job(fn, *args):
+            return fn(*args)
+
+        inst.hass.async_add_executor_job = job
+        with mock.patch.object(installer_mod, "async_get_clientsession", lambda hass: session):
+            with self.assertRaisesRegex(RuntimeError, "MB allowed"):
+                asyncio.run(inst.preview("demo", "2.0"))
+
+    def test_rate_limit_is_named(self):
+        with self.assertRaisesRegex(RuntimeError, "rate limit reached, resets at"):
+            installer_mod._gh_check(_Resp(403, headers={"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1790000000"}), "owner/demo")
+        with self.assertRaisesRegex(RuntimeError, "rate limit reached, retry after 60 s"):
+            installer_mod._gh_check(_Resp(429, headers={"Retry-After": "60"}), "owner/demo")
+        with self.assertRaisesRegex(RuntimeError, "private repo or bad token"):
+            installer_mod._gh_check(_Resp(403, headers={"X-RateLimit-Remaining": "4999"}), "owner/demo")
+        with self.assertRaisesRegex(RuntimeError, "private repo or bad token"):
+            installer_mod._gh_check(_Resp(404), "owner/demo")
+        installer_mod._gh_check(_Resp(200), "owner/demo")
+
+
 class BootSweepTest(unittest.TestCase):
     """M2: a deploy killed half-way is cleaned before Home Assistant scans custom_components."""
 
