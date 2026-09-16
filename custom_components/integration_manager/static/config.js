@@ -163,7 +163,9 @@ function optionsOf(sel){ return (sel.options||[]).map(o=>typeof o==='object'?{va
 function ph(text,vals){ return (typeof text==='string'&&vals)?text.replace(/\{(\w+)\}/g,(m,k)=>vals[k]!==undefined&&vals[k]!==null?String(vals[k]):m):text; }
 function hint(text,vals){ const d=document.createElement('div'); d.className='mut'; d.style.fontSize='12px'; d.textContent=ph(text,vals); return d; }
 const DURATION_UNITS=['days','hours','minutes','seconds','milliseconds'];  // HA's DurationSelector
-function partInput(value,min){ const i=document.createElement('input'); i.type='number'; if(min!=null) i.min=min; i.step=1; i.style.width='4.5em'; i.value=value; return i; }
+// HA's own duration validation (cv.time_period_dict) takes floats, so a part may hold one:
+// step=1 would make the browser call a valid 0.5 s out of range and snap it to a whole number.
+function partInput(value,min){ const i=document.createElement('input'); i.type='number'; if(min!=null) i.min=min; i.step='any'; i.style.width='4.5em'; i.value=value; return i; }
 function field(f,t,p){
   t=t||{};
   if(f.type==='expandable'){  // a form section: its fields are sent as one object under the section's name
@@ -187,7 +189,12 @@ function field(f,t,p){
     // multiple is a property of the value, not of the presentation: a list-mode select that takes several
     // values is a set of checkboxes, and sends a list, exactly like the dropdown it is drawn differently from
     const multi=(kind==='select'&&sel.select&&sel.select.multiple)||f.type==='multi_select';
+    const custom=!!(kind==='select'&&sel.select&&sel.select.custom_value);
     const dv=Array.isArray(dflt)?dflt.map(String):[String(dflt)];
+    // a default the options do not list is a custom value already chosen: with custom_value it becomes a
+    // choice of its own, so an untouched form sends it back instead of quietly dropping it
+    if(custom){ const known=new Set(opts.map(o=>String(o.value)));
+      for(const v of dv) if(v!==''&&v!=='undefined'&&v!=='null'&&!known.has(v)){ known.add(v); opts.push({value:v,label:v}); } }
     const vmap={}; opts.forEach(o=>{vmap[String(o.value)]=o.value;}); wrap._values=vmap;  // the HTML value is a string; send what the schema offered
     if(mode==='list'){ wrap.dataset.kind=multi?'checklist':'radio'; el=document.createElement('div'); el.className='radio';
       opts.forEach(o=>{const l=document.createElement('label'); const on=multi?dv.includes(String(o.value)):String(dflt)===String(o.value);
@@ -195,6 +202,11 @@ function field(f,t,p){
     }else{ el=document.createElement('select'); wrap.dataset.kind=multi?'multiselect':'select';
       if(multi){ el.multiple=true; el.size=Math.min(opts.length,8); } else if(!f.required) el.appendChild(new Option('—',''));
       opts.forEach(o=>{const op=new Option(o.label,o.value); if(dv.includes(String(o.value))) op.selected=true; el.appendChild(op);}); }
+    // custom_value: the listed options are a suggestion, not the whole set.  One text box, read by collect()
+    // on top of (single: instead of) what is picked above -- the same contract the services page uses.
+    if(custom){ const ci=document.createElement('input'); ci.type='text'; ci.dataset.custom='1';
+      ci.placeholder=multi?'other values, comma separated':'or type a value';
+      wrap._custom=ci; wrap._after=ci; }  // _after is only where it is appended; _custom is what collect() reads
   }else if(kind==='number' || f.type==='integer' || f.type==='float'){
     const n=sel.number||{};
     const slider=n.mode==='slider'&&n.min!=null&&n.max!=null;  // a range without both ends has no scale to draw
@@ -263,16 +275,19 @@ function collect(root){
     const n=w.dataset.name, k=w.dataset.kind, el=w._el; let v;
     if(k==='section'){ out[n]=collect(w); continue; }
     const orig=x=>(w._values&&Object.prototype.hasOwnProperty.call(w._values,x))?w._values[x]:x;
+    // custom_value: what the user typed, one value per comma
+    const typed=()=>w._custom?w._custom.value.split(',').map(t=>t.trim()).filter(Boolean):[];
+    const withTyped=list=>{for(const t of typed()) if(!list.includes(t)) list.push(t); return list;};
     if(k==='boolean') v=el.checked;
-    else if(k==='radio'){const c=w.querySelector('input[type=radio]:checked'); if(!c) continue; v=orig(c.value);}
-    else if(k==='checklist'){ v=[...w.querySelectorAll('input[type=checkbox]:checked')].map(c=>orig(c.value)); }
-    else if(k==='select'){ v=el.value; if(v==='') continue; v=orig(v); }
-    else if(k==='multiselect'){ v=[...el.selectedOptions].map(o=>orig(o.value)); }
+    else if(k==='radio'){const t=typed(); if(t.length) v=t[0]; else {const c=w.querySelector('input[type=radio]:checked'); if(!c) continue; v=orig(c.value);}}
+    else if(k==='checklist'){ v=withTyped([...w.querySelectorAll('input[type=checkbox]:checked')].map(c=>orig(c.value))); }
+    else if(k==='select'){ const t=typed(); if(t.length) v=t[0]; else { v=el.value; if(v==='') continue; v=orig(v); } }
+    else if(k==='multiselect'){ v=withTyped([...el.selectedOptions].map(o=>orig(o.value))); }
     else if(k==='integer'){ if(el.value==='') continue; v=num(el.value,n,true); }
     else if(k==='number'){ if(el.value==='') continue; v=num(el.value,n,false); }
     else if(k==='object'){ if(el.value.trim()==='') continue; try{ v=JSON.parse(el.value); }catch(err){ throw new FieldError(n,'invalid JSON: '+err.message); } }
     else if(k==='constant'){ if(w._const===undefined) continue; v=w._const; }
-    else if(k==='duration'){ v={...w._kept}; for(const u in w._parts) v[u]=w._parts[u].value===''?0:num(w._parts[u].value,n,true); }
+    else if(k==='duration'){ v={...w._kept}; for(const u in w._parts) v[u]=w._parts[u].value===''?0:num(w._parts[u].value,n,false); }  // fractional parts are a duration HA accepts
     else if(k==='time'){ if(el.value==='') continue; v=el.value.length===5?el.value+':00':el.value; }  // HH:MM from a browser that ignored step
     else if(k==='date'){ if(el.value==='') continue; v=el.value; }
     else if(k==='datetime'){ if(el.value==='') continue; v=el.value.replace('T',' '); }

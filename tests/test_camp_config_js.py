@@ -49,6 +49,52 @@ class SubmittedValuesTest(unittest.TestCase):
         self.assertEqual(self.sent["list_single"]["choice"], "b")
         self.assertEqual(self.sent["dropdown_multiple"]["choices"], ["b"])
 
+    def test_a_fractional_duration_can_be_submitted(self):
+        # cv.time_period_dict takes floats, so half a second is a duration, not a typing mistake
+        self.assertEqual(self.sent["duration_fractional_seconds"]["delay"]["seconds"], 0.5)
+        self.assertEqual(self.sent["duration_fractional_minutes"]["delay"]["minutes"], 1.5)
+
+    def test_a_duration_part_lets_the_browser_hold_a_fraction(self):
+        # step=1 would make the browser call the 0.5 above out of range and round the user's value away
+        self.assertEqual(self.sent["duration_part_step"]["seconds"], "any")
+
+    def test_a_custom_choice_survives_an_untouched_submit(self):
+        for key in ("custom_multi_dropdown", "custom_multi_list"):
+            with self.subTest(shape=key):
+                self.assertEqual(self.sent[key]["choices"], ["a", "custom"])
+        self.assertEqual(self.sent["custom_single_default"]["choice"], "custom")
+        self.assertEqual(self.sent["custom_single_list_default"]["choice"], "custom")
+
+    def test_a_custom_choice_can_be_typed(self):
+        self.assertEqual(self.sent["custom_multi_typed"]["choices"], ["a", "x", "y"])
+        self.assertEqual(self.sent["custom_single_typed"]["choice"], "typed")
+
+    def test_a_selector_without_custom_value_offers_no_box_to_type_in(self):
+        self.assertFalse(self.sent["no_custom_box_without_custom_value"]["has"])
+
+
+class CustomValueParityTest(unittest.TestCase):
+    """The two pages that draw a select from a selector answer custom_value the same way.
+
+    They do not share code: the services page builds HTML strings, the config flow page builds
+    elements, and the only file both load (static/hri.js) is not this change's to edit.  What is
+    shared is the contract, and this test is where it is written down."""
+
+    def setUp(self):
+        with open(os.path.join(os.path.dirname(CONFIG_JS_PATH), "services.js"), encoding="utf-8") as fh:
+            self.services_js = fh.read()
+
+    def test_both_pages_type_custom_values_into_one_comma_separated_box(self):
+        for name, src in (("config.js", CONFIG_JS), ("services.js", self.services_js)):
+            with self.subTest(page=name):
+                self.assertIn("custom", src)
+                self.assertIn("other values, comma separated", src)
+                self.assertIn("split(',')", src)
+
+    def test_both_pages_keep_a_default_the_options_do_not_list(self):
+        self.assertIn("opts.push({value:v,label:v})", CONFIG_JS)  # shown as a choice of its own
+        self.assertIn("extra=[...pre].filter(x=>!listed.has(x))", self.services_js)  # put back in the custom box
+
 
 class FlowEndingTest(unittest.TestCase):
     """The page's own vocabulary for a finished flow."""

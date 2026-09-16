@@ -47,11 +47,19 @@ const code = src.slice(src.indexOf('function optionsOf('), src.indexOf('function
 const { field, collect } = new Function('document', 'esc', 'Option', code + '\nreturn {field, collect};')(
   document, s => String(s ?? ''), Option);
 
-function submit(schemaField) {  // what the page would send for a form the user did not touch
+function submit(schemaField, touch) {  // what the page would send for a form the user did not touch
   const form = new El('div');
-  form.appendChild(field(schemaField, {}, null));
+  const wrap = form.appendChild(field(schemaField, {}, null));
+  // a browser keeps <select>.value on the selected option; the stub has to be told
+  const el = wrap._el;
+  if (el && el.tag === 'select' && !el.multiple) {
+    const sel = el.children.find(o => o.selected);
+    if (sel) el.value = sel.value;
+  }
+  if (touch) touch(wrap);
   return collect(form);
 }
+const type = text => wrap => { wrap._custom.value = text; };  // what the user puts in the custom_value box
 
 const out = {
   duration_ms: submit({ name: 'delay', selector: { duration: { enable_millisecond: true } }, default: { milliseconds: 500 } }),
@@ -61,5 +69,19 @@ const out = {
   list_multiple_scalar_default: submit({ name: 'choices', selector: { select: { mode: 'list', multiple: true, options: ['a', 'b'] } }, default: 'a' }),
   list_single: submit({ name: 'choice', selector: { select: { mode: 'list', options: ['a', 'b'] } }, default: 'b' }),
   dropdown_multiple: submit({ name: 'choices', selector: { select: { multiple: true, options: ['a', 'b'] } }, default: ['b'] }),
+
+  // F10: HA's cv.time_period_dict takes floats, so a fractional default has to be submittable
+  duration_fractional_seconds: submit({ name: 'delay', selector: { duration: {} }, default: { seconds: 0.5 } }),
+  duration_fractional_minutes: submit({ name: 'delay', selector: { duration: {} }, default: { minutes: 1.5 } }),
+  duration_part_step: (() => { const w = field({ name: 'delay', selector: { duration: {} } }, {}, null); return { seconds: String(w._parts.seconds.step) }; })(),
+
+  // F11: custom_value -- a default the options do not list is kept, and a new one can be typed
+  custom_multi_dropdown: submit({ name: 'choices', selector: { select: { options: ['a', 'b'], multiple: true, custom_value: true } }, default: ['a', 'custom'] }),
+  custom_multi_list: submit({ name: 'choices', selector: { select: { options: ['a', 'b'], multiple: true, custom_value: true, mode: 'list' } }, default: ['a', 'custom'] }),
+  custom_multi_typed: submit({ name: 'choices', selector: { select: { options: ['a', 'b'], multiple: true, custom_value: true } }, default: ['a'] }, type('x, y')),
+  custom_single_default: submit({ name: 'choice', selector: { select: { options: ['a', 'b'], custom_value: true } }, default: 'custom' }),
+  custom_single_list_default: submit({ name: 'choice', selector: { select: { options: ['a', 'b'], custom_value: true, mode: 'list' } }, default: 'custom' }),
+  custom_single_typed: submit({ name: 'choice', selector: { select: { options: ['a', 'b'], custom_value: true } }, default: 'a' }, type('typed')),
+  no_custom_box_without_custom_value: (() => ({ has: !!field({ name: 'choice', selector: { select: { options: ['a', 'b'] } } }, {}, null)._custom }))(),
 };
 console.log(JSON.stringify(out));
