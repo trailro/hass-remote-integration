@@ -1,5 +1,6 @@
 """MqttPublisher: manager commands, retained messages, _is_ours."""
 
+import asyncio
 import json
 import unittest
 import paho.mqtt.client as mqtt
@@ -114,6 +115,7 @@ class ManagerResultTest(unittest.IsolatedAsyncioTestCase):
             return fn(*args)
 
         pub.hass.async_add_executor_job = executor
+        pub.hass.async_create_task = asyncio.ensure_future  # the wait is bounded now: it needs a real task
         await pub.async_publish_manager_result({"action": "restart", "ok": True})
 
 
