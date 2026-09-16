@@ -156,7 +156,7 @@ class BackupActionView(ManagerView):
         try:
             if action == "delete":
                 if name in self.installer.protected_backups() | await self.hass.async_add_executor_job(backupkit.restore_needs, cfg):
-                    return self.json({"ok": False, "error": "a scheduled Home Assistant version change or a full rollback needs this backup"})
+                    return self.json({"ok": False, "error": "a scheduled Home Assistant version change, a full rollback or a restore from the last 7 days needs this backup"})
                 os.remove(path)
                 return self.json({"ok": True})
             if action == "restore":

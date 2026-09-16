@@ -393,8 +393,8 @@ versions* on the Integration page compares its entities and services with those
 of the version before: entities added, removed or renamed, entities whose unit,
 device class, state class or category changed, and services or service fields
 added or removed. State attributes are not compared. An entity that only gains
-a unique id in the new version, under the same entity id, counts as the same
-entity. Removed, renamed or changed entities and removed services or
+or only loses its unique id in the new version, under the same entity id, counts
+as the same entity in both directions, not as one removed and one added. Removed, renamed or changed entities and removed services or
 fields are what break automations in your main HA, so they also raise a
 notification. The last ten reports are kept.
 
@@ -508,7 +508,9 @@ restored, is itself a symbolic link. Backups, restored files and
 uploads are created readable by the container user only (umask 077).
 Automatic pruning keeps the newest backups by the date they were made (never
 later than the file's own date), never removes the backup it runs after, and
-leaves uploaded backups alone for their first 7 days. An upload never replaces
+leaves uploaded backups, and the copy taken before a restore, alone for their
+first 7 days; while that week lasts the copy is also refused for deletion, since
+it is the only way back once the restore has succeeded and its schedule is gone. An upload never replaces
 an existing backup: a name already taken gets a `-2`, `-3`, … suffix.
 A restore never rolls back the record of what happened: the timeline, the
 resource history, the change reports and the last known release versions are
@@ -556,6 +558,9 @@ integration.
 log, with filters and a live follow. Each line carries its date and time, and
 the list holds the newest 200 lines (following live drops the oldest). Loggers listed in the registry's
 `quiet_loggers` start at WARNING; raise one at runtime while you investigate.
+The root logger is not one of them: a level set there would silence or flood
+every logger at once, including the line that records the change, so it is
+refused; raise the integration's own logger instead.
 When more than 50000 lines wait to be written (a blocked output), newer lines
 are dropped and a warning says how many.
 
@@ -564,7 +569,11 @@ or debug logs. It appears in the menu only when there are any. The files are
 found through the integration's config entries (any setting ending in `.log`,
 with its rotated copies), and the `*.log` files and their rotated copies
 (`*.log.1`, `*.log.2026-09-10`) in the registry's `log_dir` and in the config
-root. Symbolic links are never listed.
+root. Symbolic links are never listed, and neither is a file with more than one
+hard link: a hard link is a second name for the same file, so nothing about the
+path tells a log apart from a `secrets.yaml` linked under a `*.log` name.
+Rotation by rename or by copy leaves one link, so nothing the integration writes
+is lost by it.
 
 By default every line is shown whole. The **Formatting** box at the bottom of
 the page splits lines into columns. A format is a JSON object:
@@ -751,7 +760,14 @@ hass_<domain>/manager/result                        outcome of a manager action,
   unknown on the main HA. An entity disabled in the container stays on the
   main HA with its customisations and shows unavailable there; it is still
   announced, with `enabled_by_default: false`, which the main HA applies only
-  when it creates an entity. Deleting the entity removes it there.
+  when it creates an entity. Deleting the entity removes it there; when it was
+  the last entity of a device that is gone from the container too, the device's
+  discovery config is cleared as well, so no empty device is left on the main HA
+  until the next full republish. Renaming a device, or changing its model or its
+  parent, reaches the main HA within a few seconds instead of waiting for that
+  republish. A button, scene or notify entity has no state to mirror but still
+  follows the availability of the entity behind it, so it shows unavailable on
+  the main HA while that entity is.
   An integration named `call`, `cmd`, `result`, `services`, `manager`,
   `health` or `status` publishes its documents under
   `<name>-integration/<domain>/<object_id>`, so they never land on the
@@ -764,7 +780,12 @@ hass_<domain>/manager/result                        outcome of a manager action,
   with the action. The state topic of a switch, light, fan, siren or
   humidifier takes only `ON`/`OFF`, `TRUE`/`FALSE` or `1`/`0` (any case,
   surrounding spaces ignored); any other payload is refused rather than read
-  as *off*, with the reason under *recent commands* and in the log.
+  as *off*, with the reason under *recent commands* and in the log. A command
+  larger than 256 KB, or nested deeper than 64 levels, is refused unread, with
+  the reason in the same two places. A command published with `retain` is never
+  carried out, because a physical effect must not replay at every reconnect; the
+  retained message is cleared from the broker there and then, instead of waiting
+  for the next identity move.
 - **Service calls**: publish a JSON object to `call/<domain>/<service>` (service
   data plus optional `entity_id`, and an optional `_id`); the result comes back
   on `result/...`, with a `response` key for a service that returns response
@@ -791,7 +812,12 @@ hass_<domain>/manager/result                        outcome of a manager action,
   the container publishes: an `entity_id` of `all`, or an entity, group (and
   its members), area, floor, label or device that resolves to an excluded or
   unknown entity, is refused, and so is a target that cannot be read (an id
-  that is not a string). Entity ids in the service data count too: fields
+  that is not a string). An area, floor or label is measured only against the
+  entity domains the service can act on: Home Assistant hands an entity service
+  its own component's entities and nothing else, so a room that also holds
+  entities this container does not publish is no reason to refuse
+  `light.turn_on` for it, while a service that is not an entity service keeps
+  the strict check. Entity ids in the service data count too: fields
   ending in `entity_id` or `entity_ids`, `group_members`,
   `snapshot_entities`, `entities`, `add_entities` and `remove_entities` (a
   list or a mapping keyed by entity id),
@@ -823,8 +849,13 @@ hass_<domain>/manager/result                        outcome of a manager action,
   updates* survive a restart (if they cannot be saved, the action still runs
   and the limit holds until the restart). A restart asked for over MQTT, on its own or
   after an install, waits up to five minutes for a running install, start,
-  backup or other action to finish; if it is still running then, the restart
-  is skipped and the result says so. Anyone who can publish under the base topic can use
+  backup or other action to finish; if it is still running then, or if the
+  restart is refused for another reason, the restart is skipped and the result
+  says so. The result goes out once the restart is really under way, so an `ok`
+  on `manager/result` means the process is going down and not only that the
+  command was accepted. While an action runs, a second one is answered
+  `<action> is still running (<n> s)`; one that never returns stops holding the
+  others after 30 minutes. Anyone who can publish under the base topic can use
   them, so turn this on only on a broker with credentials.
   hass-remote-integration itself is updated by pulling a new image.
 - **Stop, uninstall, restore**: the identity (`hass_<domain>`) belongs to the
@@ -849,7 +880,10 @@ hass_<domain>/manager/result                        outcome of a manager action,
   then pose as the broker and read the credentials. A certificate that fails
   the check shows on the MQTT page with its reason (`TLS handshake failed:
   unable to get local issuer certificate`), checked again at most once a
-  minute while the connection keeps failing. The check for foreign
+  minute while the connection keeps failing. A connection the broker accepts and
+  then drops within ten seconds is reported as the broker closing it (a packet
+  over its maximum is the usual cause), not as a TLS problem: that hint only
+  fits a connection that was never accepted. The check for foreign
   retained data and every cleanup connect the same way. Client certificates
   are not supported.
 
@@ -938,8 +972,9 @@ What is in place:
   integration that depends on `frontend` or `panel_custom` loads it, and while
   no Home Assistant user exists it would let any page create the owner account.
 - The Logs page lists regular log files only (`*.log` and rotated copies such as
-  `*.log.1`); symbolic links are skipped, so
-  a link cannot put another file of the volume (`secrets.yaml`) on the page.
+  `*.log.1`); symbolic links and files with more than one hard link are skipped,
+  so neither kind of link can put another file of the volume (`secrets.yaml`) on
+  the page. Listing them needs `X-Requested-With: fetch`, like reading a tail.
 - A `Content-Security-Policy` on every response: scripts only from the
   manager's own static files (no inline script), no plugins, no framing by
   other pages, no `<base>` rewrites. Inline style attributes are allowed.
@@ -987,7 +1022,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `HRI_PORT` | `8087` | Port of the UI and API |
+| `HRI_PORT` | `8087` | Port of the UI and API; a changed port is picked up at the next boot, and one pinned in `.storage/http` by an older setup or a restored backup is dropped |
 | `HRI_NAME` | `hass-remote-integration` | Container and volume name |
 | `HRI_VERSION` | `latest` | Image tag Compose pulls, for example `0.15.0` |
 | `TZ` | `UTC` | Time zone; an unknown zone falls back to UTC, with an error in the log |
@@ -1050,7 +1085,9 @@ overwritten by the next save from the UI, and a hand edit of `mqtt.json` is
 picked up by *Reconnect* but lost after a second save from the MQTT page.
 `registry.json` is read again whenever it changes. In `settings.json` a switch
 written as `"true"`/`"false"`, `"on"`/`"off"`, `"yes"`/`"no"` or `"1"`/`"0"` is
-read as that value; any other text uses the default.
+read as that value; any other text uses the default. A save that cannot be
+written (a full volume) leaves the running configuration as it was and answers
+with the reason, instead of a server error.
 
 The numeric MQTT settings have ranges: `port` 1-65535, `qos` 0, 1 or 2,
 `republish_interval_s` 30-86400 s and `full_republish_interval_min` 5-10080
@@ -1064,8 +1101,13 @@ A registry entry in `integration_manager/registry.json` has this shape; only
 saying what was expected: a hand edit cannot keep the container from starting.
 A `state.json` that cannot be read is kept as `state.json.corrupt-<stamp>` (the
 newest three), the loss is reported on the timeline and as a notification, and
-the manager adopts what it finds on disk: the running integration keeps running
-and can be managed again.
+the manager adopts what it finds on disk: when exactly one integration has
+config entries and a deployed copy with a `manifest.json`, and at least one
+version of it is in the store, it is recorded as running again and can be
+stopped, rolled back and updated as before (the deployed version comes from the
+marker next to the code; one that cannot be identified is recorded without a
+version). When no such integration is found, nothing is recorded as running, and
+the notification says so.
 
 ```json
 {"integrations": {"my_integration": {
@@ -1133,7 +1175,12 @@ and recorded, not that it set up: the scheduled health verdict, in `smoke_test`,
 is what tells you that, and `note` says when no verdict is coming (the version
 was already deployed and running, or the smoke test is off). `POST /api/backups/<name>/restore` takes `force` too: a
 backup that does not record its Home Assistant version answers `needs_force`
-when `.storage` is restored.
+when `.storage` is restored. `POST /api/services/call` is bounded like the MQTT
+path: a call that has not answered within `HRI_CALL_TIMEOUT` seconds is answered
+`timeout after <n>s (service still running)` while the service goes on running,
+and at most 50 calls from this endpoint run at once, a timed-out one counting
+until its service returns; beyond that a call is answered `too many calls in
+progress (50): try again later`.
 
 ---
 
@@ -1142,8 +1189,10 @@ when `.storage` is restored.
 - **The page keeps showing the installation progress.** The first start
   downloads Home Assistant; a slow connection can take several minutes. The
   container log (`docker logs <name>`) shows pip's progress. While it runs the
-  page and every `/api/` path answer `503` (the manager API does not exist
-  yet), so a healthcheck does not call the container healthy. A slow install
+  page and every `/api/` path answer `503` with a `Retry-After: 5`, and under
+  `/api/` with a JSON body naming the phase and how long the install has been
+  going, so a healthcheck does not call the container healthy while there is no
+  manager API yet. A slow install
   runs as long as it keeps making progress; an install that writes nothing at
   all for 15 minutes is taken for hung and fails: the container starts the Home
   Assistant version it already had, or, on a first start, exits and Docker
@@ -1163,7 +1212,10 @@ when `.storage` is restored.
   restart already under way. The page shows the error. Wait for it to finish
   and restart again. A restart that fails before anything stops (the state
   file cannot be written on a full volume, for example) is refused the same
-  way, with the reason.
+  way, with the reason. Once a restart is accepted, the process gives Home
+  Assistant about 205 s to stop and then exits anyway, so a stop that hangs
+  still ends in a restart rather than in a container that is up and
+  unreachable.
 - **MQTT says the base topic is in use.** Something else left retained messages
   under `hass_<domain>/`. Remove them, or tick `force_base_topic` if they are
   yours from an earlier setup.
