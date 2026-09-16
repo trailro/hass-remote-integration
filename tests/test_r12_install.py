@@ -225,6 +225,44 @@ class ManagerDomainTest(R12InstallerCase):
             self.assertEqual([c["domain"] for c in inst.dev_candidates()["candidates"]], ["demo"])
 
 
+class DevSymlinkTest(R12InstallerCase):
+    """m17: a symbolic link in the dev directory is not followed, as the README says."""
+
+    def manifest(self, path, domain):
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, "manifest.json"), "w", encoding="utf-8") as fh:
+            json.dump({"domain": domain, "version": "1.0.0"}, fh)
+
+    def test_linked_candidates_are_skipped(self):
+        inst = self.installer()
+        src, outside = os.path.join(self.dir, "src"), os.path.join(self.dir, "outside")
+        self.manifest(os.path.join(src, "custom_components", "demo"), "demo")
+        self.manifest(os.path.join(outside, "other"), "other")
+        os.symlink(os.path.join(outside, "other"), os.path.join(src, "custom_components", "other"))
+        os.symlink(os.path.join(outside, "other"), os.path.join(src, "top_link"))
+        with mock.patch.dict(inst.settings.data, {"dev_source_dir": src}):
+            cands = inst.dev_candidates()["candidates"]
+        self.assertEqual([(c["domain"], c["path"]) for c in cands],
+                         [("demo", os.path.realpath(os.path.join(src, "custom_components", "demo")))])
+
+    def test_linked_custom_components_is_skipped(self):
+        inst = self.installer()
+        src, outside = os.path.join(self.dir, "src"), os.path.join(self.dir, "outside")
+        self.manifest(os.path.join(outside, "other"), "other")
+        os.makedirs(src)
+        os.symlink(outside, os.path.join(src, "custom_components"))
+        with mock.patch.dict(inst.settings.data, {"dev_source_dir": src}):
+            self.assertEqual(inst.dev_candidates()["candidates"], [])
+
+    def test_the_directory_itself_may_be_a_link(self):
+        inst = self.installer()
+        real = os.path.join(self.dir, "checkout")
+        self.manifest(os.path.join(real, "custom_components", "demo"), "demo")
+        os.symlink(real, os.path.join(self.dir, "src"))
+        with mock.patch.dict(inst.settings.data, {"dev_source_dir": os.path.join(self.dir, "src")}):
+            self.assertEqual([c["domain"] for c in inst.dev_candidates()["candidates"]], ["demo"])
+
+
 class YamlSaveRaceTest(R12InstallerCase):
     """m11: two YAML saves of one integration overlap in the executor."""
 
