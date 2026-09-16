@@ -195,6 +195,8 @@ async def _boot() -> int:
         config[running] = yaml_cfg
         _LOGGER.info("YAML config applied for %s (%s keys)", running, len(yaml_cfg))
 
+    await hass.async_add_executor_job(drop_foreign_http_port, CONFIG_DIR, HTTP_PORT)
+
     for domain in ("http", "integration_manager"):
         if not await async_setup_component(hass, domain, config):
             _LOGGER.error("Integration %s failed to set up", domain)
@@ -202,6 +204,8 @@ async def _boot() -> int:
 
     # Fail loudly rather than silently serving on 8123: the http store's
     # "stable" config wins over anything we pass, so verify what it chose.
+    # The store was cleared above when it pinned another port, so a mismatch
+    # here is not a stale pin any more: it is worth stopping for.
     actual_port = hass.config.api.port if hass.config.api else None
     if actual_port != HTTP_PORT:
         _LOGGER.error(
@@ -631,6 +635,42 @@ def _install_import_tracer() -> None:
             return None
 
     sys.meta_path.insert(0, _Tracer())
+
+
+def _pinned_ports(data) -> list[int]:
+    """Every server_port the http store holds (its "stable" config, a pending one)."""
+    if isinstance(data, dict):
+        return [v for k, v in data.items() if k == "server_port" and isinstance(v, int)] + [
+            p for v in data.values() for p in _pinned_ports(v)
+        ]
+    return []
+
+
+def drop_foreign_http_port(config_dir: str, port: int) -> int | None:
+    """Remove .storage/http when it pins a port that is not ours, and say which one it was.
+
+    Home Assistant keeps the port it was set up with in that store, and the store travels inside a backup.
+    Restoring one taken on another HRI_PORT - from a second container, which one container per integration
+    invites - made every boot end at the port check below: with `restart: unless-stopped` a crash loop, and
+    the manager UI that could undo the restore is exactly what never comes up.  The pin says nothing we do
+    not know (SETUP_PORT is the truth and http writes the store again), so drop it and boot on.
+
+    Healing here rather than after the check on purpose: run.py is exec'd by entrypoint.py, so its exit code
+    reaches Docker's restart policy, not the entrypoint - a restart to pick up the repair would be counted as
+    a failed boot (entrypoint.py counts one before every exec) and three of them send a perfectly good Home
+    Assistant version into a rollback for what is a port problem."""
+    path = os.path.join(config_dir, ".storage", "http")
+    foreign = next((p for p in _pinned_ports(read_json(path, None)) if p != port), None)
+    if foreign is None:
+        return None
+    try:
+        os.remove(path)
+    except OSError as err:
+        _LOGGER.error("%s pins port %s instead of %s and could not be removed: %s", path, foreign, port, err)
+        return None
+    _LOGGER.warning("%s pinned port %s instead of %s (a restored backup from another container?): removed it, "
+                    "Home Assistant writes it again for port %s", path, foreign, port, port)
+    return foreign
 
 
 def _running_domain() -> str | None:
