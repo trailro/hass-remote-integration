@@ -143,7 +143,7 @@ class HeldBootStatusTest(unittest.TestCase):
         patcher = mock.patch.dict(os.environ, env, clear=True)
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.ep = _entrypoint(self.cfg)
+        self.ep = _entrypoint(self, self.cfg)
         os.makedirs(self.ep.STATE_DIR)
         with open(self.ep.LOG_FILE, "w", encoding="utf-8") as fh:
             fh.write("# install of Home Assistant 2026.9.2\nCollecting homeassistant==2026.9.2\n")
@@ -212,7 +212,7 @@ class RestoreDuringCleanStartTest(unittest.TestCase):
         self.cfg = _volume()
         self.addCleanup(shutil.rmtree, self.cfg, True)
         self.addCleanup(os.environ.pop, "HRI_CONFIG", None)
-        self.ep = _entrypoint(self.cfg)
+        self.ep = _entrypoint(self, self.cfg)
         with open(os.path.join(self.cfg, "custom_components", "x", "manifest.json"), "w", encoding="utf-8") as fh:
             fh.write("{}")
         self.pre = backupkit.create(self.cfg, "pre-change", storage_version="2026.9.2")["name"]
