@@ -1308,7 +1308,9 @@ progress (50): try again later`.
   downloads Home Assistant; a slow connection can take several minutes.
   Without a password the page shows pip's progress; it is also in
   `integration_manager/ha-install.log` on the volume, while the container log
-  shows only the start and end of the install. While it runs the
+  shows only the start and end of the install. From the start of the
+  container until Home Assistant is started (the PyPI lookup, the install, the
+  manager's requirements, a scheduled restore, removing unused venvs) the
   page and every `/api/` path answer `503` with a `Retry-After: 5`, and under
   `/api/` with a JSON body naming the phase and how long the install has been
   going, so a healthcheck does not call the container healthy while there is no

@@ -236,7 +236,7 @@ def install_status() -> dict:
     that reads "installing" must not be told that for the minutes a failed restore holds the boot."""
     held = _status.get("kind") == "restore_hold"
     error = ("Home Assistant is not started: a restore failed and could not be put back; the manager API is not up"
-             if held else "Home Assistant is still installing; the manager API is not up yet")
+             if held else f"Home Assistant is still being installed or prepared ({_status.get('phase')}); the manager API is not up yet")
     return {**_status, "elapsed": int(time.time() - _status["started"]), "installing": not held, "restore_failed": held, "error": error}
 
 
@@ -305,6 +305,11 @@ def start_status_server() -> http.server.ThreadingHTTPServer | None:
         return None
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
+
+
+# the status server main() runs from its first slow step until right before the exec: answered on the manager port
+# for the whole boot, not only while pip runs (PyPI lookups, the requirements install, a restore, venv pruning)
+_boot_server: http.server.ThreadingHTTPServer | None = None
 
 
 def stop_status_server(srv: http.server.ThreadingHTTPServer) -> None:
@@ -645,7 +650,7 @@ def hold_after_failed_rollback(result: dict | None, apply) -> dict | None:
             source = result["recovery_source"]
             _status.update(title="Home Assistant is not started: a restore failed and could not be put back", version=None, started=time.time(), kind="restore_hold",
                            phase=f"the configuration from before the restore is in backup {source}; retrying every {RESTORE_RETRY_S} s")
-            if srv is None:
+            if srv is None and _boot_server is None:  # the boot's own server shows this status already
                 srv = start_status_server()
             log(f"Home Assistant NOT started: the configuration is half restored and the way back is backup {source}. "
                 f"Free space or fix the error above; the restore is retried every {RESTORE_RETRY_S} s. "
@@ -783,9 +788,34 @@ def restrict_umask() -> int:
     return os.umask(0o077)
 
 
+def _phase(phase: str, version: str | None = None, title: str | None = None) -> None:
+    _status.update(phase=phase, version=version, kind="install", title=title or f"Starting Home Assistant{' ' + version if version else ''} …")
+
+
 def main() -> None:
+    global _boot_server
     restrict_umask()  # first: inherited by everything created from here on, and by the exec'd Home Assistant
     os.makedirs(STATE_DIR, exist_ok=True)  # before the first log() call
+    _phase("checking the volume")
+    _boot_server = start_status_server()
+    try:
+        python = _prepare()
+    except BaseException:
+        _stop_boot_server()
+        raise
+    _stop_boot_server()  # run.py binds the same port
+    os.execv(python, [python, "/app/run.py"])
+
+
+def _stop_boot_server() -> None:
+    global _boot_server
+    if _boot_server is not None:
+        stop_status_server(_boot_server)
+        _boot_server = None
+
+
+def _prepare() -> str:
+    """Everything before the exec; returns the venv's python."""
     sweep_json_tmp_files()
     clean_import_leftovers()
     state = load_state()
@@ -794,6 +824,7 @@ def main() -> None:
     if not wanted:
         # Fresh volume: start from the newest stable HA, not the version the
         # image happened to be built with (HA_VERSION_LATEST=0 disables that).
+        _phase("asking PyPI for the newest Home Assistant")
         wanted = (latest_stable() if os.environ.get("HA_VERSION_LATEST", "1") != "0" else None) or DEFAULT_VERSION
         log(f"fresh volume: installing Home Assistant {wanted}")
     current = state.get("current")
@@ -847,18 +878,18 @@ def main() -> None:
     elif failures >= MAX_BOOT_FAILURES:
         log(f"{wanted} failed to boot {failures} times and there is nothing to fall back to; retrying")
 
-    if not venv_ok(wanted) and not fits_this_python(wanted):
-        other = latest_stable()
-        py = ".".join(str(x) for x in sys.version_info[:3])
-        if other and other != wanted:
-            log(f"Home Assistant {wanted} does not support Python {py} (a newer image?): installing {other} instead")
-            state["last_error"] = f"Home Assistant {wanted} does not support this image's Python {py}; {other} is installed instead"
-            state["desired"] = wanted = other
     if not venv_ok(wanted):
-        srv = start_status_server()
+        _phase(f"checking that Home Assistant {wanted} supports this Python", wanted)
+        if not fits_this_python(wanted):
+            _phase("asking PyPI for the newest Home Assistant that supports this Python")
+            other = latest_stable()
+            py = ".".join(str(x) for x in sys.version_info[:3])
+            if other and other != wanted:
+                log(f"Home Assistant {wanted} does not support Python {py} (a newer image?): installing {other} instead")
+                state["last_error"] = f"Home Assistant {wanted} does not support this image's Python {py}; {other} is installed instead"
+                state["desired"] = wanted = other
+    if not venv_ok(wanted):
         ok = install(wanted)
-        if srv:
-            stop_status_server(srv)
         if not ok:
             fallback = current if current and venv_ok(current) else next(iter(reversed(installed_versions())), None)
             state["last_error"] = f"install of {wanted} failed; running {fallback}"
@@ -869,7 +900,9 @@ def main() -> None:
                 sys.exit(1)
             wanted = fallback
 
+    _phase("installing the manager's requirements into the venv if they changed", wanted)
     ensure_extra_requirements(wanted)
+    _phase("applying a scheduled restore or clean start, if any", wanted)
     wanted = apply_config_changes(state, wanted, current)
 
     if current and current != wanted and venv_ok(current) and not fell_back and failures < MAX_BOOT_FAILURES:
@@ -882,6 +915,7 @@ def main() -> None:
     state["current"] = wanted
     state.setdefault("desired", wanted)
     save_state(state)
+    _phase("removing unused venvs", wanted)
     if not state.get("_corrupt"):
         keep = {wanted, state.get("previous") or wanted, state.get("fallback_from") or wanted}
         prune(keep | ({state["recovery"]["for"]} if isinstance(state.get("recovery"), dict) and state["recovery"].get("for") else set()))
@@ -903,7 +937,7 @@ def main() -> None:
     state["boot_failures"] = _count(state.get("boot_failures")) + 1  # run.py zeroes it when ready
     save_state(state)
     log(f"starting Home Assistant {wanted} via {python}")
-    os.execv(python, [python, "/app/run.py"])
+    return python
 
 
 if __name__ == "__main__":
