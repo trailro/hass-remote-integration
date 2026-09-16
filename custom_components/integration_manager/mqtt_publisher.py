@@ -1375,7 +1375,11 @@ class MqttPublisher:
             # clears retained cmd topics itself when its identity moves): only text/notify take "" as a value
             self._finish(self._remember("cmd", f"{domain}.{object_id}/{field}", ""), "ignored", "empty payload")
             return
-        rec = self._remember("cmd", f"{domain}.{object_id}/{field}", payload)
+        # the value of a text entity in password mode (announced as one by discovery) never shows in the history,
+        # the status or the log
+        secret = payload if domain == "text" and field == "value" and payload and self._password_text(f"text.{object_id}") else None
+        shown = "***" if secret else payload
+        rec = self._remember("cmd", f"{domain}.{object_id}/{field}", shown)
         if problem := _payload_problem(payload):
             # unparsed like an oversized call: a JSON command (siren, alarm) would be read
             # anyway, and the state it sets is retained and re-asserted at every republish
@@ -1388,7 +1392,7 @@ class MqttPublisher:
         try:
             mapped = disc.command_to_service(domain, object_id, field, payload)
         except (ValueError, KeyError, OverflowError, RecursionError) as err:
-            _LOGGER.warning("MQTT command %s=%r rejected: %s", msg.topic, _mask_codes(payload, MASK_SCAN_CHARS), err)
+            _LOGGER.warning("MQTT command %s=%r rejected: %s", msg.topic, _mask_codes(shown, MASK_SCAN_CHARS), err)
             self._finish(rec, "rejected", str(err))
             return
         if mapped is None:
@@ -1398,7 +1402,7 @@ class MqttPublisher:
         svc_domain, service, data = mapped
         rec["what"] = f"{domain}.{object_id}/{field} → {svc_domain}.{service}"
         self.stats["commands"] += 1
-        self.stats["last_command"] = f"{msg.topic} = {_mask_codes(payload, MASK_SCAN_CHARS)}"[:140]
+        self.stats["last_command"] = f"{msg.topic} = {_mask_codes(shown, MASK_SCAN_CHARS)}"[:140]
 
         async def _call() -> None:
             recs = [rec]
@@ -1450,8 +1454,11 @@ class MqttPublisher:
                     raise
                 finish("late-error" if late else "error", "cancelled by the service handler")
             except Exception as err:  # noqa: BLE001 - logged, never crashes the loop
-                _LOGGER.error("MQTT command %s -> %s.%s failed: %s", msg.topic, svc_domain, service, err)
-                finish("late-error" if late else "error", f"{type(err).__name__}: {err}")
+                error = f"{type(err).__name__}: {err}"
+                if secret:
+                    error = error.replace(secret, "***")  # text's own ValueError quotes the value
+                _LOGGER.error("MQTT command %s -> %s.%s failed: %s", msg.topic, svc_domain, service, error)
+                finish("late-error" if late else "error", error)
 
         self.hass.loop.call_soon_threadsafe(lambda: self.hass.async_create_task(_call()))
 
@@ -1477,6 +1484,30 @@ class MqttPublisher:
             if self._range_pending.get(eid) is pending:
                 del self._range_pending[eid]
         return pending
+
+    def _password_text(self, entity_id: str) -> bool:
+        """A text entity in password mode, read like discovery reads it: its state attributes, else its registry
+        capabilities (an entity without a state yet)."""
+        state = self.hass.states.get(entity_id)
+        if state is not None:
+            attrs = state.attributes
+        else:
+            entry = er.async_get(self.hass).async_get(entity_id)
+            attrs = (entry.capabilities or {}) if entry is not None else {}
+        return attrs.get("mode") == "password"
+
+    def _password_value(self, domain: str, service: str, data: dict[str, Any]) -> str | None:
+        """The value of a text.set_value call that may reach a text entity in password mode: one named in entity_id, or,
+        for a target by area, device, floor or label, any published text entity in that mode."""
+        value = data.get("value")
+        if (domain, service) != ("text", "set_value") or not isinstance(value, str) or not value:
+            return None
+        ids = data.get("entity_id")
+        named = [ids] if isinstance(ids, str) else ids if isinstance(ids, list) else []
+        candidates = {p.strip().lower() for x in named if isinstance(x, str) for p in x.split(",")}
+        if any(k in data for k in ("area_id", "device_id", "floor_id", "label_id")):
+            candidates |= {e for e in self._topics if e.startswith("text.")}
+        return value if any(self._password_text(e) for e in candidates if e.startswith("text.")) else None
 
     def _on_manager_command(self, action: str, payload: str) -> None:
         """<base>/manager/cmd/<action> (paho thread): see manager_device.py."""
@@ -1644,13 +1675,15 @@ class MqttPublisher:
             self._finish(self._remember("call", f"{domain}.{service}", payload, sent_id), "rejected", f"bad payload: {err}")
             return
         call_id = data.pop("_id", None)
+        secret = self._password_value(domain, service, data)
+        shown = {**data, "value": "***"} if secret else data
         # an _id is unique per service for the consumer (a counter that restarts, one per automation)
         call_key = _call_key(domain, service, call_id) if call_id not in (None, "") else None
         prior = self._seen_call(call_key)
         if prior is not None:
             # A retry of the same _id (the consumer did not see the result in
             # time): answer from history, never run the service twice.
-            dup = self._remember("call", f"{domain}.{service}", data, call_id)
+            dup = self._remember("call", f"{domain}.{service}", shown, call_id)
             if prior["state"] == "running":
                 self._publish_result(domain, service, {"id": call_id, "service": f"{domain}.{service}", "ok": None, "state": "running", "duplicate": True})
                 self._finish(dup, "duplicate", "still running")
@@ -1659,7 +1692,7 @@ class MqttPublisher:
                 self._finish(dup, "duplicate", f"answered from history ({prior['state']})")
             _LOGGER.info("MQTT call %s.%s id=%s repeated: answered from history (%s)", domain, service, call_id, prior["state"])
             return
-        rec = self._remember("call", f"{domain}.{service}", data, call_id)
+        rec = self._remember("call", f"{domain}.{service}", shown, call_id)
         # the canonical record, duplicates never replace it: only what their answer needs (not the data)
         seen: dict[str, Any] | None = None
         if call_key is not None:
@@ -1669,10 +1702,15 @@ class MqttPublisher:
                 while len(self._calls) > CALLS_REMEMBERED:
                     del self._calls[next(iter(self._calls))]  # the oldest _id
         self.stats["calls"] += 1
-        self.stats["last_call"] = f"{domain}.{service} {_mask_codes(json.dumps(data), MASK_SCAN_CHARS)}"[:140]
+        self.stats["last_call"] = f"{domain}.{service} {_mask_codes(json.dumps(shown), MASK_SCAN_CHARS)}"[:140]
 
         def done(state: str, error: str | None, res: dict[str, Any]) -> None:
-            self._finish(rec, state, error, res)
+            if secret and error:
+                # the result published to the caller keeps the service's own words: the caller sent the value
+                error = error.replace(secret, "***")
+                self._finish(rec, state, error, {**res, "error": error})
+            else:
+                self._finish(rec, state, error, res)
             if seen is not None:
                 seen["state"], seen["result"] = state, res
 
