@@ -25,7 +25,7 @@ import os
 import queue
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 MAX_BYTES = 2_000_000
 KEEP = 2  # process.log.1, process.log.2
@@ -139,12 +139,20 @@ class FileLogHandler(logging.Handler):
         text: str = "",
         since_id: int = 0,
         limit: int = 500,
+        keep: Callable[[dict[str, Any]], bool] | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         """Matching records, chronological.  Without since_id: the newest
         `limit`.  With since_id (a follower catching up): the OLDEST `limit`
         newer than since_id, so nothing is skipped; truncated=True tells the
         client to poll again immediately.  Reads from the end, so the usual
-        page load parses only the tail of the newest file."""
+        page load parses only the tail of the newest file.
+
+        ``keep`` is the caller's last word on a record that passed the other
+        filters, asked before the record counts toward ``limit`` (the Logs
+        page searches the masked text, which this module cannot produce: it
+        is imported before the component is).  It is asked newest first
+        without since_id, and oldest first with it, never about more records
+        than it takes to fill the page."""
         text = text.lower()
         out: list[dict[str, Any]] = []
         truncated = False
@@ -169,6 +177,8 @@ class FileLogHandler(logging.Handler):
                     continue
                 if text and text not in str(rec.get("message", "")).lower() and text not in str(rec.get("logger", "")).lower():
                     continue
+                if since_id == 0 and keep is not None and not keep(rec):
+                    continue
                 out.append(rec)
                 if since_id == 0 and len(out) >= limit:
                     done = True
@@ -176,8 +186,15 @@ class FileLogHandler(logging.Handler):
             if done:
                 break
         out.reverse()
-        if since_id and len(out) > limit:
-            out, truncated = out[:limit], True
+        if since_id:
+            page: list[dict[str, Any]] = []
+            for rec in out:
+                if len(page) >= limit:
+                    truncated = True
+                    break
+                if keep is None or keep(rec):
+                    page.append(rec)
+            out = page
         return out, truncated
 
 

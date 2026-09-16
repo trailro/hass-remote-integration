@@ -41,31 +41,49 @@ _NEW_LOGGERS: set[str] = set()
 ROOT_LOGGER = "root"
 
 
-def _query_masked(handler, **kwargs: Any) -> tuple[list[dict[str, Any]], bool]:
+def _query_masked(handler, **kwargs: Any) -> tuple[list[dict[str, Any]], bool, int]:
     """handler.query with message and traceback masked by the diagnostics
     scrubber, over all the records at once: a PEM block printed line by line
     becomes one record per line, and no record on its own matches it.
 
-    The handler searches and pages the records before this sees them, so the
-    records that arrive are not the block: a search for bytes of a key picks
-    out the one record that holds the body, and a page boundary can leave the
-    BEGIN record on the previous page.  scrub_lines masks a line that is key
-    material on its own for exactly that reason, and the search runs again
-    here, on the masked text - so searching for a key returns the lines that
-    still say what the user typed, and nothing that only matched inside the
-    part now masked."""
-    recs, truncated = handler.query(**kwargs)
+    The search runs on the masked text, so searching for a key returns the
+    lines that still say what the user typed, and nothing that only matched
+    inside the part now masked.  It runs twice.  Inside the handler, on each
+    record masked on its own, before the record takes a place on the page: a
+    page of raw matches that all matched inside a masked value (records
+    holding ``password=needle``) would otherwise come back empty, and a
+    follower that advances from the records it is given would ask for that
+    same page forever.  Then here, on the page masked as one text, because
+    the records next to a record can show it is key material (the END marker
+    below a short last line of a body): scrub_lines masks a line that is key
+    material on its own for exactly the case where they are not on the page.
+
+    The third value is the cursor: the newest id this answer has decided on
+    (shown, or asked about and not matching), so a follower that continues
+    from it never re-reads a page and never skips a record it was not shown.
+    """
+    text = str(kwargs.get("text") or "").lower()
+    seen = int(kwargs.get("since_id") or 0)
+
+    def keep(rec: dict[str, Any]) -> bool:
+        nonlocal seen
+        seen = max(seen, int(rec.get("id") or 0))
+        if not text or text in str(rec.get("logger", "")).lower():
+            return True
+        return text in scrub_lines([str(rec.get("message") or "")])[0].lower()
+
+    recs, truncated = handler.query(**kwargs, keep=keep)
+    seen = max([seen, *(int(r.get("id") or 0) for r in recs)])
     fields = ("message", "exc")
     masked = scrub_lines([str(rec.get(f) or "") for rec in recs for f in fields])
     for i, rec in enumerate(recs):
         for j, field in enumerate(fields):
             if rec.get(field):
                 rec[field] = masked[i * len(fields) + j]
-    text = str(kwargs.get("text") or "").lower()
     if text:
         recs = [r for r in recs
                 if text in str(r.get("message", "")).lower() or text in str(r.get("logger", "")).lower()]
-    return recs, truncated
+    return recs, truncated, seen
 
 LOGS_HTML = load_template("logs")
 
@@ -160,7 +178,7 @@ class LogsApiView(ManagerView):
             limit = max(1, min(int(q.get("limit", 500) or 500), MAX_LIMIT))
         except ValueError:
             return self.json_message("since_id/limit must be integers", status_code=400)
-        recs, truncated = await self.hass.async_add_executor_job(
+        recs, truncated, cursor = await self.hass.async_add_executor_job(
             functools.partial(
                 _query_masked,
                 handler,
@@ -171,7 +189,9 @@ class LogsApiView(ManagerView):
                 limit=limit,
             )
         )
-        return self.json({"records": recs, "capacity": handler.capacity, "path": handler.path, "truncated": truncated})
+        # cursor: where the next follow poll continues (since_id), also when no record on this page survived the search
+        return self.json({"records": recs, "capacity": handler.capacity, "path": handler.path, "truncated": truncated,
+                          "cursor": cursor})
 
 
 class LoggersApiView(ManagerView):

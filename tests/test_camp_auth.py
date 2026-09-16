@@ -155,14 +155,14 @@ class MultiLineScrubTest(unittest.TestCase):
         scrubbed each record on its own, so a key logged line by line came through."""
         recs = [{"message": text, "exc": None} for text in PEM_LOG]
         handler = SimpleNamespace(query=lambda **kw: (recs, False))
-        out, _ = logs_page._query_masked(handler)
+        out, _, _ = logs_page._query_masked(handler)
         self.assertNotIn(KEY_BODY, "\n".join(r["message"] for r in out))
         self.assertIn("after", out[4]["message"])
 
     def test_the_log_records_mask_a_key_inside_one_traceback(self):
         recs = [{"message": "boom", "exc": "Traceback\n" + "\n".join(PEM_LOG[1:4])}]
         handler = SimpleNamespace(query=lambda **kw: (recs, False))
-        out, _ = logs_page._query_masked(handler)
+        out, _, _ = logs_page._query_masked(handler)
         self.assertNotIn(KEY_BODY, out[0]["exc"])
         self.assertEqual(out[0]["message"], "boom")
 

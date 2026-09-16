@@ -5,14 +5,17 @@ const EXAMPLE={pattern:'^(?P<time>\\S+ \\S+) (?P<level>[A-Z]+) \\((?P<thread>[^)
 async function loadFiles(){
  files=await (await fetch('/api/log_files',{headers:{'X-Requested-With':'fetch'}})).json();
  const sel=$('#file'), cur=sel.value;
- sel.innerHTML=files.map(f=>`<option value="${esc(f.name)}" ${f.name===cur?'selected':''}>${esc(f.name)} (${(f.bytes/1024).toFixed(0)} KB${f.active?', active':''}${f.source?', '+esc(f.source):''})</option>`).join('');
+ // the value is the file's id: two names can mask to the same label
+ sel.innerHTML=files.map(f=>`<option value="${esc(f.id)}" ${f.id===cur?'selected':''}>${esc(f.name)} (${(f.bytes/1024).toFixed(0)} KB${f.active?', active':''}${f.source?', '+esc(f.source):''})</option>`).join('');
  if(!files.length) sel.innerHTML='<option value="">(the running integration writes no log file)</option>';
 }
 let LOADING=false, AGAIN=false;
 async function load(){ if(LOADING){ AGAIN=true; return; } LOADING=true; try{ do{ AGAIN=false; await loadNow(); }while(AGAIN); } finally { LOADING=false; } }  // no overlapping polls; a change made meanwhile loads right after
 async function loadNow(){
- const p=new URLSearchParams({file:$('#file').value,lines:$('#lines').value,q:$('#q').value});
- const r=await (await fetch('/api/log_files/tail?'+p,{headers:{'X-Requested-With':'fetch'}})).json();
+ const was=$('#file').value, p=new URLSearchParams({id:was,lines:$('#lines').value,q:$('#q').value});
+ const resp=await fetch('/api/log_files/tail?'+p,{headers:{'X-Requested-With':'fetch'}}), r=await resp.json();
+ // ids are new after a restart and a file can go away: list the files again, and load once more if the selection changed
+ if(resp.status===404){ await loadFiles(); if($('#file').value!==was) AGAIN=true; }
  $('#path').textContent=r.path||'—'; $('#size').textContent=r.bytes!=null?`${(r.bytes/1024).toFixed(0)} KB · ${r.total_lines_scanned} lines read`:'';
  $('#ts').textContent=new Date().toLocaleTimeString(); $('#n').textContent=`${(r.lines||[]).length} lines`;
  $('#fmterr').textContent=r.format_error?'the stored format is ignored: '+r.format_error:'';
