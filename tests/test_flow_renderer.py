@@ -172,6 +172,26 @@ class RendererSelectorsTest(unittest.TestCase):
         # the units the schema does not show are carried over rather than dropped (tests/test_camp_config_js.py runs it)
         self.assertRegex(self.collect, r"k==='duration'.*v=\{\.\.\.w\._kept\}")
 
+    def test_a_duration_part_takes_a_fraction(self):
+        # cv.time_period_dict accepts floats: 0.5 s is a duration the page must be able to hold and send back
+        part = CONFIG_JS[CONFIG_JS.index("function partInput("):CONFIG_JS.index("function field(")]
+        self.assertIn("i.step='any'", part)
+        self.assertNotIn("i.step=1", part)
+        self.assertRegex(self.collect, r"k==='duration'.*num\(w\._parts\[u\]\.value,n,false\)")
+
+    def test_custom_value_draws_a_box_to_type_in_and_keeps_an_unlisted_default(self):
+        branch = self.field[self.field.index("kind==='select'"):self.field.index("kind==='number'")]
+        self.assertIn("sel.select.custom_value", branch)
+        self.assertIn("opts.push({value:v,label:v})", branch)  # an unlisted default becomes a choice of its own
+        self.assertIn("ci.dataset.custom='1'", branch)
+        self.assertIn("wrap._custom=ci", branch)
+        # collect() reads it for every shape the select branch can draw
+        self.assertIn("w._custom.value.split(',')", self.collect)
+        for kind in ("radio", "checklist", "select", "multiselect"):
+            with self.subTest(kind=kind):
+                line = next(ln for ln in self.collect.splitlines() if f"k==='{kind}'" in ln)
+                self.assertRegex(line, r"typed\(\)|withTyped\(")
+
     def test_a_constant_has_no_input_and_is_still_sent(self):
         self.assertIn("wrap._const=c.value", self.field)
         self.assertRegex(self.collect, r"k==='constant'.*v=w\._const")
