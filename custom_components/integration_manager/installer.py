@@ -2271,12 +2271,16 @@ class Installer:
         places = [root]
         for sub in ("custom_components", "."):
             base = os.path.join(root, sub)
+            if os.path.islink(base):
+                continue  # links in the directory are never followed, as _store_local copies it
             try:
                 places += [os.path.join(base, n) for n in sorted(os.listdir(base)) if not n.startswith(".")]
             except OSError:
                 pass
         seen: set[str] = set()
         for p in places:
+            if p != root and os.path.islink(p):
+                continue
             real = os.path.realpath(p)
             if real in seen or not os.path.isdir(real):
                 continue
