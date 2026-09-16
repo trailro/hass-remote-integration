@@ -29,7 +29,16 @@ class FakeManager:
         self.actions.append((action, rec))
 
 
-def publisher(commands=True, manager=True):
+class RecordingClient:
+    def __init__(self):
+        self.published = []
+
+    def publish(self, topic, payload=None, qos=0, retain=False):
+        self.published.append((topic, payload, qos, retain))
+        return SimpleNamespace(rc=0)
+
+
+def publisher(commands=True, manager=True, connected=False):
     pub = object.__new__(MqttPublisher)
     pub.config = MqttConfig(manager_commands=commands)
     pub.history = []
@@ -37,6 +46,8 @@ def publisher(commands=True, manager=True):
     pub._live_base = BASE
     pub._key_provider = lambda: BASE
     pub._client, pub._connected, pub._moving = None, False, False  # never connected: what it publishes goes nowhere
+    if connected:
+        pub._client, pub._connected = RecordingClient(), True
     tasks = []
     pub.hass = SimpleNamespace(loop=FakeLoop(), async_create_task=tasks.append, tasks=tasks)
     return pub
@@ -57,29 +68,36 @@ class ManagerCommandTest(unittest.TestCase):
         self.assertEqual(len(pub.history), 1)
         self.assertEqual(pub.history[0]["state"], "rejected")
         self.assertIn(error, pub.history[0]["error"])
-        # a refusal with a payload is answered once on manager/result; the action itself never runs
-        self.assertEqual(len(pub.hass.loop.calls), 1 if answered else 0)
+        # a refusal with a payload is answered once on manager/result (not retained, from paho's thread: nothing is
+        # scheduled on the loop); the action itself never runs
+        self.assertEqual(pub.hass.loop.calls, [])
+        results = [p for p in pub._client.published if p[0] == f"{BASE}/manager/result"]
+        self.assertEqual(len(results), 1 if answered else 0)
+        self.assertEqual(pub._client.published, results)
+        for _topic, payload, qos, retain in results:
+            self.assertEqual((qos, retain), (1, False))
+            self.assertEqual(json.loads(payload)["error"], pub.history[0]["error"])
         self.assertEqual(pub.manager.actions if pub.manager else [], [])
 
     def test_wrong_or_empty_payload(self):
         for payload in ("", "install", "RESTART"):
-            pub = publisher()
+            pub = publisher(connected=True)
             pub._on_manager_command("restart", payload)
             # an empty payload is what clearing a retained command looks like: no answer
             self.assert_rejected(pub, "payload must be 'restart'", answered=bool(payload))
 
     def test_unknown_action(self):
-        pub = publisher()
+        pub = publisher(connected=True)
         pub._on_manager_command("reboot", "restart")
         self.assert_rejected(pub, "unknown action 'reboot'", answered=True)
 
     def test_commands_off(self):
-        pub = publisher(commands=False)
+        pub = publisher(commands=False, connected=True)
         pub._on_manager_command("backup", "backup")
         self.assert_rejected(pub, "manager_commands is off", answered=True)
 
     def test_no_manager(self):
-        pub = publisher(manager=False)
+        pub = publisher(manager=False, connected=True)
         pub._on_manager_command("backup", "backup")
         self.assert_rejected(pub, "not set up", answered=False)
 
