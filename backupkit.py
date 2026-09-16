@@ -507,8 +507,8 @@ def cancel_restore(config_dir: str, only_zip: str | None = None, by_hand: bool =
 
 def drop_orphan_schedule(config_dir: str, log=print, record=None) -> dict | None:
     """A schedule whose archive copy is gone (removed by hand, lost): nothing can be restored from it, but its meta
-    kept the backup it names from being deleted or pruned, and a version change waiting for it was cancelled at
-    every boot while System showed no restore.  Dropped and recorded as a failed restore (``record``, as
+    kept the backup it names from being deleted or pruned for good, and a version change waiting for it was
+    cancelled while System showed no restore scheduled.  Dropped and recorded as a failed restore (``record``, as
     apply_pending records an outcome); nothing on the volume changed, so a record that cannot be written does not
     keep it either.  Also removes archive copies no meta names.  None when there was no such schedule."""
     with _PENDING_LOCK:
