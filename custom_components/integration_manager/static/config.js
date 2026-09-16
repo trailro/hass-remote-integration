@@ -243,6 +243,18 @@ function field(f,t,p){
   }else if(kind==='color_rgb'){
     el=document.createElement('input'); el.type='color'; wrap.dataset.kind='color'; el.style.padding='0';
     const rgb=Array.isArray(dflt)?dflt:[0,0,0]; el.value='#'+rgb.map(v=>Math.max(0,Math.min(255,Number(v)||0)).toString(16).padStart(2,'0')).join('');
+  }else if(kind==='text'&&sel.text&&sel.text.multiple){
+    // HA's TextSelector with multiple takes a list of strings.  One input per item, never one box split on
+    // commas: an item may hold a comma.  A blank item is dropped when the form is sent.
+    const t2=sel.text; wrap.dataset.kind='textlist'; el=document.createElement('div');
+    const add=v=>{ const row=document.createElement('div'); row.className='row'; row.style.cssText='flex-wrap:nowrap;margin:0 0 4px';
+      const i=document.createElement(t2.multiline?'textarea':'input'); if(!t2.multiline) i.type=t2.type==='password'?'password':'text';
+      i.dataset.item='1'; i.style.flex='1'; i.value=v==null?'':v;
+      const del=document.createElement('button'); del.type='button'; del.textContent='×'; del.title='remove this item'; del.onclick=()=>row.remove();
+      row.appendChild(i); row.appendChild(del); el.appendChild(row); return i; };
+    const items=Array.isArray(dflt)?dflt:(dflt==null||dflt==='')?[]:[dflt];
+    items.forEach(add); if(!items.length) add('');
+    const more=document.createElement('button'); more.type='button'; more.textContent='+ add an item'; more.onclick=()=>add('').focus(); wrap._after=more;
   }else if(kind==='text' || f.type==='string' || kind===undefined){
     const t2=sel.text||{}; if(t2.multiline){ el=document.createElement('textarea'); } else { el=document.createElement('input'); el.type=t2.type==='password'?'password':'text'; }
     if(dflt!=null) el.value=dflt; wrap.dataset.kind='text';
@@ -275,14 +287,17 @@ function collect(root){
     const n=w.dataset.name, k=w.dataset.kind, el=w._el; let v;
     if(k==='section'){ out[n]=collect(w); continue; }
     const orig=x=>(w._values&&Object.prototype.hasOwnProperty.call(w._values,x))?w._values[x]:x;
-    // custom_value: what the user typed, one value per comma
+    // custom_value: what the user typed.  Several values: one per comma.  A single value: the whole box, as
+    // typed (HA takes any string, commas included); a box holding only blanks is nothing typed.
     const typed=()=>w._custom?w._custom.value.split(',').map(t=>t.trim()).filter(Boolean):[];
+    const typedOne=()=>(w._custom&&w._custom.value.trim()!=='')?w._custom.value:null;
     const withTyped=list=>{for(const t of typed()) if(!list.includes(t)) list.push(t); return list;};
     if(k==='boolean') v=el.checked;
-    else if(k==='radio'){const t=typed(); if(t.length) v=t[0]; else {const c=w.querySelector('input[type=radio]:checked'); if(!c) continue; v=orig(c.value);}}
+    else if(k==='radio'){ v=typedOne(); if(v===null){const c=w.querySelector('input[type=radio]:checked'); if(!c) continue; v=orig(c.value);} }
     else if(k==='checklist'){ v=withTyped([...w.querySelectorAll('input[type=checkbox]:checked')].map(c=>orig(c.value))); }
-    else if(k==='select'){ const t=typed(); if(t.length) v=t[0]; else { v=el.value; if(v==='') continue; v=orig(v); } }
+    else if(k==='select'){ v=typedOne(); if(v===null){ v=el.value; if(v==='') continue; v=orig(v); } }
     else if(k==='multiselect'){ v=withTyped([...el.selectedOptions].map(o=>orig(o.value))); }
+    else if(k==='textlist'){ v=[...el.querySelectorAll('[data-item]')].map(i=>i.value).filter(t=>t.trim()!==''); }  // a list, even an empty one
     else if(k==='integer'){ if(el.value==='') continue; v=num(el.value,n,true); }
     else if(k==='number'){ if(el.value==='') continue; v=num(el.value,n,false); }
     else if(k==='object'){ if(el.value.trim()==='') continue; try{ v=JSON.parse(el.value); }catch(err){ throw new FieldError(n,'invalid JSON: '+err.message); } }

@@ -36,6 +36,9 @@ function render(){
  }
  $('#n').textContent=`${shown} / ${total}`;
 }
+// one item of a list of strings: its own input, so an item may hold a comma
+function textItem(t,multiline,password){ const input=multiline?`<textarea data-item="1" rows="2" style="flex:1">${esc(t)}</textarea>`:`<input type="${password?'password':'text'}" data-item="1" style="flex:1" value="${esc(t)}">`;
+ return `<div class="row" style="flex-wrap:nowrap;margin:0 0 4px">${input}<button type="button" data-del="1" title="remove this item">×</button></div>`; }
 function fieldInput(name,f){const sel=f.selector||{}, k=Object.keys(sel)[0], v=sel[k]||{}, ex=f.example!==undefined?f.example:(f.default!==undefined?f.default:'');
  const id=`cf_${name}`;
  if(k==='boolean'&&f.required) return `<label>${esc(name)} <span class="req">*</span></label><input type="checkbox" id="${esc(id)}" data-kind="boolean" style="width:auto" ${ex===true?'checked':''}>`;
@@ -46,6 +49,8 @@ function fieldInput(name,f){const sel=f.selector||{}, k=Object.keys(sel)[0], v=s
   return `<label>${esc(name)}${f.required?' <span class="req">*</span>':''} <span class="mut">one or more</span></label><div id="${esc(id)}" data-kind="multi" class="multi">${opts.map(o=>`<label style="display:inline-flex;gap:4px;margin-right:10px"><input type="checkbox" style="width:auto" value="${esc(o.val)}" ${pre.has(String(o.val))?'checked':''}>${esc(o.lab)}</label>`).join('')}${v.custom_value?`<input type="text" data-custom="1" value="${esc(extra.join(', '))}" placeholder="other values, comma separated">`:''}</div>`; }
  if(opts&&v.custom_value) return `<label>${esc(name)}${f.required?' <span class="req">*</span>':''} <span class="mut">pick or type</span></label><input type="text" id="${esc(id)}" data-kind="text" list="${esc(id)}_list" value="${typeof ex==='string'||typeof ex==='number'?esc(ex):''}"><datalist id="${esc(id)}_list">${opts.map(o=>`<option value="${esc(o.val)}">${esc(o.lab)}</option>`).join('')}</datalist>`;
  if(k==='select'&&v.options) return `<label>${esc(name)}${f.required?' <span class="req">*</span>':''}</label><select id="${esc(id)}" data-kind="select"><option value="">—</option>${v.options.map(o=>{const val=typeof o==='object'?o.value:o, lab=typeof o==='object'?(o.label??o.value):o; return `<option value="${esc(val)}" ${String(ex)===String(val)?'selected':''}>${esc(lab)}</option>`}).join('')}</select>`;
+ if(k==='text'&&v.multiple){ const items=Array.isArray(ex)?ex:(ex===''||ex==null)?[]:[ex];  // HA wants a list of strings here, not one string
+  return `<label>${esc(name)}${f.required?' <span class="req">*</span>':''} <span class="mut">one or more</span></label><div id="${esc(id)}" data-kind="textlist" data-multiline="${v.multiline?1:''}" data-password="${v.type==='password'?1:''}">${(items.length?items:['']).map(t=>textItem(t,v.multiline,v.type==='password')).join('')}<button type="button" data-add="1">+ add an item</button></div>`; }
  if(k==='number') return `<label>${esc(name)}${f.required?' <span class="req">*</span>':''} <span class="mut">${esc(v.unit_of_measurement||'')}</span></label><input type="number" id="${esc(id)}" data-kind="number" ${v.min!=null?'min="'+esc(v.min)+'"':''} ${v.max!=null?'max="'+esc(v.max)+'"':''} step="${esc(v.step??'any')}" value="${ex!==''&&typeof ex!=='object'?esc(ex):''}">`;
  if(k==='object'||typeof ex==='object'&&ex!==null) return `<label>${esc(name)}${f.required?' <span class="req">*</span>':''} <span class="mut">JSON</span></label><textarea id="${esc(id)}" data-kind="json" rows="3">${ex!==''&&ex!==null?esc(JSON.stringify(ex,null,1)):''}</textarea>`;
  return `<label>${esc(name)}${f.required?' <span class="req">*</span>':''} <span class="mut">${esc(selKind(sel))}</span></label><input type="text" id="${esc(id)}" data-kind="text" value="${typeof ex==='string'||typeof ex==='number'?esc(ex):''}" placeholder="${esc(f.description||'')}">`;}
@@ -56,10 +61,15 @@ function callForm(domain,s){const keys=Object.keys(s.fields||{});
   <label>extra service data <span class="mut">JSON, merged over the fields above (for fields the catalog does not list)</span></label><textarea id="ct_extra" rows="2" placeholder="{}"></textarea>
   <div class="row" style="margin-top:8px"><button class="primary" id="ct_go">Call service</button><span id="ct_msg" class="mut"></span></div><pre id="ct_out"></pre></div>`;}
 function wireCall(x,domain,s){const go=x.querySelector('#ct_go'); if(!go) return;
+ x.addEventListener('click',e=>{const b=e.target.closest('button[data-add],button[data-del]'); if(!b) return;  // the add/remove buttons of a list of strings
+  if(b.dataset.del){ b.parentElement.remove(); return; }
+  const list=b.parentElement; b.insertAdjacentHTML('beforebegin',textItem('',!!list.dataset.multiline,!!list.dataset.password)); b.previousElementSibling.querySelector('[data-item]').focus(); });
  go.onclick=async()=>{const data={}; let bad=''; const badJson=new Set();
   for(const [k,f] of Object.entries(s.fields||{})){const el=x.querySelector(`#cf_${CSS.escape(k)}`); if(!el) continue; const kind=el.dataset.kind;
    if(kind==='boolean'){ data[k]=el.checked; continue; }
    if(kind==='bool3'){ if(el.value!=='') data[k]=el.value==='true'; continue; }
+   if(kind==='textlist'){ const vals=[...el.querySelectorAll('[data-item]')].map(i=>i.value).filter(t=>t.trim()!=='');
+    if(vals.length) data[k]=vals; continue; }  // every item as typed (a comma is part of it); like a multi select, nothing typed is not sent
    if(kind==='multi'){ const vals=[...el.querySelectorAll('input[type=checkbox]:checked')].map(c=>c.value);
     const custom=el.querySelector('input[data-custom]'); if(custom) vals.push(...custom.value.split(',').map(t=>t.trim()).filter(Boolean));
     if(vals.length) data[k]=vals; continue; }  // nothing picked: not sent (a required one is reported below)

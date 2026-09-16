@@ -185,12 +185,20 @@ class RendererSelectorsTest(unittest.TestCase):
         self.assertIn("opts.push({value:v,label:v})", branch)  # an unlisted default becomes a choice of its own
         self.assertIn("ci.dataset.custom='1'", branch)
         self.assertIn("wrap._custom=ci", branch)
-        # collect() reads it for every shape the select branch can draw
+        # collect() reads it for every shape the select branch can draw: several values one per comma,
+        # a single value as the whole box (a comma is part of it)
         self.assertIn("w._custom.value.split(',')", self.collect)
-        for kind in ("radio", "checklist", "select", "multiselect"):
+        for kind, reader in (("radio", r"typedOne\(\)"), ("checklist", r"withTyped\("), ("select", r"typedOne\(\)"), ("multiselect", r"withTyped\(")):
             with self.subTest(kind=kind):
                 line = next(ln for ln in self.collect.splitlines() if f"k==='{kind}'" in ln)
-                self.assertRegex(line, r"typed\(\)|withTyped\(")
+                self.assertRegex(line, reader)
+
+    def test_a_multiple_text_selector_is_one_input_per_item(self):
+        branch = self.field[self.field.index("sel.text.multiple"):self.field.index("kind==='text' || f.type==='string'")]
+        self.assertIn("wrap.dataset.kind='textlist'", branch)
+        self.assertIn("i.dataset.item='1'", branch)
+        self.assertIn("del.onclick=()=>row.remove()", branch)
+        self.assertRegex(self.collect, r"k==='textlist'.*querySelectorAll\('\[data-item\]'\)")
 
     def test_a_constant_has_no_input_and_is_still_sent(self):
         self.assertIn("wrap._const=c.value", self.field)
