@@ -3,6 +3,7 @@
 import asyncio
 import json
 import unittest
+from unittest import mock
 import paho.mqtt.client as mqtt
 from types import SimpleNamespace
 
@@ -111,12 +112,12 @@ class ManagerResultTest(unittest.IsolatedAsyncioTestCase):
         pub._connected = True
         pub._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="hri-unit")  # never connected: publish() returns MQTT_ERR_NO_CONN
 
-        async def executor(fn, *args):
-            return fn(*args)
-
-        pub.hass.async_add_executor_job = executor
-        pub.hass.async_create_task = asyncio.ensure_future  # the wait is bounded now: it needs a real task
+        # exactly what HA hands back: a Future from the executor, and async_create_task refusing one
+        loop = asyncio.get_running_loop()
+        pub.hass.async_add_executor_job = lambda fn, *args: loop.run_in_executor(None, fn, *args)
+        pub.hass.async_create_task = mock.Mock(side_effect=TypeError("a coroutine was expected"))
         await pub.async_publish_manager_result({"action": "restart", "ok": True})
+        pub.hass.async_create_task.assert_not_called()
 
 
 class IsOursTest(unittest.TestCase):

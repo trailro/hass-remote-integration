@@ -2181,14 +2181,16 @@ class MqttPublisher:
         # paho already holds both messages, so delivery does not depend on this wait; the executor job does,
         # and a wedged pool would hang the action's task for good, which is how a restart came to answer "ok"
         # and never happen. The wait is bounded here, not only inside wait_for_publish.
-        task = self.hass.async_create_task(self.hass.async_add_executor_job(
-            lambda: [i.wait_for_publish(3) for i in (info, doc) if i is not None]))
-        done, _ = await asyncio.wait({task}, timeout=MANAGER_RESULT_WAIT_S)
+        waited = self.hass.async_add_executor_job(
+            lambda: [i.wait_for_publish(3) for i in (info, doc) if i is not None])
+        done, _ = await asyncio.wait({waited}, timeout=MANAGER_RESULT_WAIT_S)  # a future, not a coroutine: never a task
         if not done:
+            # the executor is wedged; whatever it raises later must not surface as "never retrieved"
+            waited.add_done_callback(lambda f: f.exception())
             _LOGGER.warning("MQTT: the result of a manager action may not have reached the broker in time")
             return
         try:
-            task.result()
+            waited.result()
         except (RuntimeError, ValueError) as err:  # the connection dropped in between: the action itself still completes
             _LOGGER.warning("MQTT: the result of a manager action may not have reached the broker: %s", err)
 
