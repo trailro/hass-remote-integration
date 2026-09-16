@@ -285,7 +285,9 @@ A `degraded` verdict (entities unavailable, silent, or without a state yet)
 is never rolled back: the version did set up, so it is kept, and the
 notification says it is degraded. An integration with no config entry and no
 YAML stored here is not judged: the verdict is `unconfigured`, with no rollback
-and no notification. A failed or degraded smoke test raises a
+and no notification. A health check that itself fails (an exception in the
+manager, not a verdict) is tried again every minute, three times, and then
+recorded as `unknown`, never rolled back. A failed or degraded smoke test raises a
 notification and stays in the last error until another version runs healthy,
 also across the rollback's restart.
 
