@@ -487,7 +487,11 @@ Home Assistant version change, before a restore and before replacing the
 integration; optionally daily. On **System**
 you can create, download, upload, delete and restore them. A restore is
 applied at the next restart, can be partial (only `.storage`, only the manager
-state, …), and is rolled back if it fails halfway. Restoring the YAML part also
+state, …), and is rolled back if it fails halfway. *Cancel restore* cancels a
+restore scheduled by hand; a restore that belongs to a scheduled Home Assistant
+version change is cancelled together with that change (choose the running
+version under Home Assistant), and cancelling it on its own is refused.
+Restoring the YAML part also
 removes root `*.yaml` / `*.yml` files that are not in the backup, so a file
 created after it (a `secrets.yaml`, for example) does not survive the restore.
 A restore that fails (a full disk, a file that cannot be written) puts the
