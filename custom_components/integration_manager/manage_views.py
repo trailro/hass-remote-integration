@@ -8,13 +8,13 @@ from typing import Any
 import os
 import re
 import tempfile
-import threading
 
 from aiohttp import web
 from homeassistant.core import HomeAssistant
 
 from . import events, patches, preflight
 from .installer import Installer
+from .installer import save_lock as _save_lock
 from .logfiles_page import clean_log_format
 from .settings import DEFAULTS, HEALTH_MODES
 from .mqtt_publisher import MqttPublisher
@@ -27,17 +27,6 @@ MAX_PATCH = 2 * 1024 * 1024
 
 def _tag_ok(tag: str) -> bool:
     return bool(_TAG_RE.match(tag)) and ".." not in tag
-
-
-_SAVE_LOCKS: dict[str, threading.Lock] = {}
-_SAVE_LOCKS_GUARD = threading.Lock()
-
-
-def _save_lock(path: str) -> threading.Lock:
-    """One lock per file, for writes that run in the executor (two requests
-    are two executor jobs, on two threads)."""
-    with _SAVE_LOCKS_GUARD:
-        return _SAVE_LOCKS.setdefault(os.path.realpath(path), threading.Lock())
 
 
 class RunView(ManagerView):

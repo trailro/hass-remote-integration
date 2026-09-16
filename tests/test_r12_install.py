@@ -225,6 +225,63 @@ class ManagerDomainTest(R12InstallerCase):
             self.assertEqual([c["domain"] for c in inst.dev_candidates()["candidates"]], ["demo"])
 
 
+class YamlSaveRaceTest(R12InstallerCase):
+    """m11: two YAML saves of one integration overlap in the executor."""
+
+    def test_overlapping_saves(self):
+        import homeassistant.util.yaml as ha_yaml
+
+        inst = self.installer()
+        inst.hass.config.path = lambda *p: os.path.join(self.dir, *p)
+        real = ha_yaml.load_yaml
+        second_loaded = threading.Event()
+        calls = []
+
+        def load_yaml(fname, secrets=None):  # HA's loader; the first save lingers after it, as a slow disk would
+            data = real(fname, secrets)
+            calls.append(fname)
+            if len(calls) == 1:
+                second_loaded.wait(1.0)  # with a lock per file the second save cannot get here meanwhile
+            else:
+                second_loaded.set()
+            return data
+
+        results, errors = {}, []
+
+        def save(key, text):
+            try:
+                results[key] = inst.yaml_write("demo", text)
+            except Exception as err:  # noqa: BLE001
+                errors.append(err)
+
+        with mock.patch.object(ha_yaml, "load_yaml", load_yaml):
+            first = threading.Thread(target=save, args=("a", "a: 1\n"))
+            first.start()
+            while not calls:
+                time.sleep(0.005)
+            second = threading.Thread(target=save, args=("b", "b: 2\nc: 3\n"))
+            second.start()
+            first.join(5)
+            second.join(5)
+        self.assertEqual(errors, [])
+        self.assertEqual((results["a"]["keys"], results["b"]["keys"]), (1, 2))
+        with open(inst.yaml_path("demo"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "b: 2\nc: 3\n")  # the later save wins, whole
+        self.assertEqual(os.listdir(os.path.dirname(inst.yaml_path("demo"))), ["demo.yaml"])
+
+    def test_invalid_yaml_leaves_nothing_behind(self):
+        inst = self.installer()
+        inst.hass.config.path = lambda *p: os.path.join(self.dir, *p)
+        inst.yaml_write("demo", "a: 1\n")
+        with self.assertRaises(ValueError):
+            inst.yaml_write("demo", "- a list\n")
+        with open(inst.yaml_path("demo"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "a: 1\n")
+        self.assertEqual(os.listdir(os.path.dirname(inst.yaml_path("demo"))), ["demo.yaml"])
+        self.assertEqual(inst.yaml_write("demo", "  \n"), {"keys": 0, "removed": True})
+        self.assertEqual(os.listdir(os.path.dirname(inst.yaml_path("demo"))), [])
+
+
 class BootSweepTest(unittest.TestCase):
     """M2: a deploy killed half-way is cleaned before Home Assistant scans custom_components."""
 
