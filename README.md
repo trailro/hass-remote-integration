@@ -546,7 +546,8 @@ ends the wait and starts Home Assistant on the configuration as it is. A
 restore replaces symbolic links inside the trees it restores with real files
 and directories instead of writing through them, and does not start when
 `.storage`, `custom_components` or `integration_manager`, of the parts being
-restored, is itself a symbolic link. Backups, restored files and
+restored, is itself a symbolic link; putting the previous configuration back
+after a failed restore follows the same rule. Backups, restored files and
 uploads are created readable by the container user only (umask 077).
 Automatic pruning keeps the newest backups by the date they were made (never
 later than the file's own date), never removes the backup it runs after, and

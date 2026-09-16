@@ -533,6 +533,24 @@ def _extract_to(zf: zipfile.ZipFile, names: list[str], root: str) -> int:
     return n
 
 
+def _move_into(staging: str, config_dir: str) -> None:
+    """Move what was extracted into ``staging`` to the same places under ``config_dir``.  A symbolic link on the
+    way (a directory, or a file) is replaced by a real directory or the file, never written through."""
+    for name in sorted(os.listdir(staging)):
+        s_path, d_path = os.path.join(staging, name), os.path.join(config_dir, name)
+        if os.path.isdir(s_path):
+            for root, dirs, files in os.walk(s_path):
+                rel_root = os.path.relpath(root, s_path)
+                target_root = os.path.join(d_path, rel_root) if rel_root != "." else d_path
+                if os.path.islink(target_root):  # top-down: every parent was checked before
+                    os.remove(target_root)  # replaced by a real directory, never written through
+                os.makedirs(target_root, exist_ok=True)
+                for f in files:
+                    os.replace(os.path.join(root, f), os.path.join(target_root, f))
+        else:
+            os.replace(s_path, d_path)
+
+
 def _wipe_trees(config_dir: str, names: list[str], parts: list[str] | None = None) -> None:
     """Remove what the backup replaces so files it lacks do not linger;
     ha.json, local backups, logs and restore artefacts are kept.  The root
@@ -597,6 +615,7 @@ def apply_pending(config_dir: str, log=print, record=None, storage_version: str 
         shutil.rmtree(old, ignore_errors=True)  # left behind by a restore a power loss interrupted
     result = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "ok": False, "error": ""}
     staging = os.path.join(config_dir, STATE_DIR, f"staging-restore-{int(time.time())}")
+    rollback_staging = staging + "-rollback"
     pre = None
     wiped = False
     names: list[str] = []
@@ -639,19 +658,7 @@ def apply_pending(config_dir: str, log=print, record=None, storage_version: str 
             count = _extract_to(zf, names, staging)  # fails here -> nothing touched yet
             wiped = True  # before: a failure halfway through the wipe must still roll back
             _wipe_trees(config_dir, names, parts)
-            for name in sorted(os.listdir(staging)):
-                s_path, d_path = os.path.join(staging, name), os.path.join(config_dir, name)
-                if os.path.isdir(s_path):
-                    for root, dirs, files in os.walk(s_path):
-                        rel_root = os.path.relpath(root, s_path)
-                        target_root = os.path.join(d_path, rel_root) if rel_root != "." else d_path
-                        if os.path.islink(target_root):  # top-down: every parent was checked before
-                            os.remove(target_root)  # replaced by a real directory, never written through
-                        os.makedirs(target_root, exist_ok=True)
-                        for f in files:
-                            os.replace(os.path.join(root, f), os.path.join(target_root, f))
-                else:
-                    os.replace(s_path, d_path)
+            _move_into(staging, config_dir)
         for rel in SECRET_FILES:
             if os.path.isfile(os.path.join(config_dir, rel)):
                 os.chmod(os.path.join(config_dir, rel), 0o600)
@@ -672,7 +679,12 @@ def apply_pending(config_dir: str, log=print, record=None, storage_version: str 
                     # placed: clear the same trees first, then put back exactly
                     # what was there
                     _wipe_trees(config_dir, names or before, result.get("parts"))  # names: none when a retry failed before reading the archive
-                    _extract_to(zf, before, config_dir)
+                    # through a staging directory and the same moves as the restore: a tree the wipe leaves alone
+                    # (one the failed restore did not have) may hold a symbolic link to a directory
+                    shutil.rmtree(rollback_staging, ignore_errors=True)
+                    os.makedirs(rollback_staging)
+                    _extract_to(zf, before, rollback_staging)
+                    _move_into(rollback_staging, config_dir)
                 _sync()
                 result["rolled_back_to"] = pre["name"]
                 log(f"restore: put back {pre['name']}")
@@ -688,6 +700,7 @@ def apply_pending(config_dir: str, log=print, record=None, storage_version: str 
             raise
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(rollback_staging, ignore_errors=True)
         if outcome in (None, "rollback_failed"):
             # the volume may be half restored: the schedule (with its pre-restore copy) stays for a retry
             if outcome == "rollback_failed" and record is not None:
