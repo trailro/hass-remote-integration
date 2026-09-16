@@ -172,7 +172,7 @@ The UI has one page per task:
 | **Install** | Install from the registry or any GitHub repo, the environment builder, dev mode |
 | **MQTT** | Broker connection, translator status, discovery, recent commands, health rules |
 | **Cutover** | Compare with your main HA, enable discovery, undo |
-| **Entities / Devices / Services** | Inspect, rename, disable, call services (the form sends lists for multiple-choice fields, accepts typed custom values, and checks required fields after the extra JSON is merged) |
+| **Entities / Devices / Services** | Inspect, rename, disable, call services (the form sends lists for multiple-choice fields and for text fields that take several values, one box per item, accepts typed custom values, and checks required fields after the extra JSON is merged) |
 | **Logs / Log files** | The integration's logs and the log files it writes |
 | **System** | Home Assistant version, backups and restore, import from a HA backup, settings, diagnostics |
 
@@ -217,7 +217,9 @@ Choose whichever fits the integration, on the **Integration** page:
   Selectors render as the control they describe: durations, dates, times,
   colours, read-only constants, and a number as a box, or as a slider when it
   asks for one and gives both ends, either way with its unit next to the
-  label; one the page does not know falls back to a JSON textarea saying so.
+  label; a text field that takes several values shows one box per item (an item
+  may contain a comma), and a single custom select value is sent whole. One the
+  page does not know falls back to a JSON textarea saying so.
   A value the page cannot convert (a fraction in a whole-number field, broken
   JSON) is refused with the reason under that field, and nothing is sent.
 - **YAML config**: for integrations configured in `configuration.yaml`, paste
