@@ -227,14 +227,15 @@ def _log_files(config_dir: str, installer, entry_paths: list[str]) -> list[dict[
     domain = installer.running if installer else None
     now = time.time()
     seen: dict[str, dict[str, Any]] = {}
+    root = os.path.realpath(config_dir)  # a config dir reached through a link: names relative to where the files are
 
     def add(path: str, source: str) -> None:
         if os.path.islink(path):
             return  # a link could name any file under the config dir (secrets.yaml) as a log
         real = os.path.realpath(path)
-        if not real.startswith(os.path.realpath(config_dir) + os.sep) or not os.path.isfile(real):
+        if not real.startswith(root + os.sep) or not os.path.isfile(real):
             return  # only files under the config dir
-        rel = os.path.relpath(real, config_dir)
+        rel = os.path.relpath(real, root)
         if rel in seen or rel.startswith(("integration_manager/", "venv-", "backups/", ".storage/")):
             return
         if any(os.path.basename(rel).startswith(x) for x in NOT_OURS):
