@@ -78,7 +78,7 @@ def read_json(path: str, default: Any = None) -> Any:
     try:
         with open(path, encoding="utf-8") as fh:
             return json.load(fh)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):  # nested past the parser's depth: as unreadable as a torn file
         return default
 
 

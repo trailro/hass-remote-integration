@@ -691,7 +691,11 @@ def drop_foreign_http_port(config_dir: str, port: int) -> int | None:
     a failed boot (entrypoint.py counts one before every exec) and three of them send a perfectly good Home
     Assistant version into a rollback for what is a port problem."""
     path = os.path.join(config_dir, ".storage", "http")
-    foreign = next((p for p in _pinned_ports(read_json(path, None)) if p != port), None)
+    try:
+        foreign = next((p for p in _pinned_ports(read_json(path, None)) if p != port), None)
+    except RecursionError:
+        # a hand-written store nested too deep to walk says nothing we can trust, and would end the boot here
+        foreign = "an unreadable store"
     if foreign is None:
         return None
     try:
