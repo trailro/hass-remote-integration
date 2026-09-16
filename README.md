@@ -987,7 +987,12 @@ secret) to require a password:
   generation, signed into the cookie and kept across restarts and restores).
   When the volume cannot record the logout (full or read-only), every session
   still ends and the page says that they are valid again after a restart;
-- scripts send the password as `Authorization: Bearer <password>`;
+- scripts send the password as `Authorization: Bearer <password>` (the
+  scheme in any case);
+- a line end at either end of `HRI_PASSWORD` (an `.env` file saved with
+  Windows line ends) is not part of the password, since no login form or header
+  can carry one; spaces are, so a password may start or end with one. The file
+  of `HRI_PASSWORD_FILE` is read without the spaces and line ends around it;
 - after 5 wrong attempts from one address, that address is refused for 15
   minutes (for IPv6, the whole /64 it belongs to); after 30 wrong attempts
   within 5 minutes from all addresses together (for example from a whole IPv6

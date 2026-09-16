@@ -23,6 +23,10 @@ checked it against the resolved one: with the config dir reached through a
 symbolic link, every name read ``../<real dir>/...`` and the ``.storage/`` and
 ``integration_manager/`` exclusions matched nothing.
 
+C5: ``Authorization: bearer <password>`` was not taken for the password (the
+scheme is case-insensitive), and ``HRI_PASSWORD`` from an .env file with CRLF
+line ends kept the CR, which no login form or header can carry.
+
 Every test fails on the tree before the fix unless its docstring says it pins
 behaviour that already held.
 """
@@ -44,6 +48,7 @@ from types import SimpleNamespace
 from unittest import mock
 from urllib.parse import urlencode
 
+from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 
 import logbuffer
@@ -397,3 +402,48 @@ class SymlinkedConfigDirTest(unittest.TestCase):
             resp = asyncio.run(logfiles_page.LogFileTailView(self.hass, self.installer).get(request))
         self.assertEqual(resp.status, 200)
         self.assertEqual([row["raw"] for row in json.loads(resp.body)["lines"]], ["2026-09-17 10:00:00 INFO [probe] logs/radio.log"])
+
+
+# ----- C5 -----------------------------------------------------------------------------------------
+
+class BearerSchemeTest(unittest.TestCase):
+
+    def setUp(self):
+        from tests.test_r3_web import SessionCookieTest, _request
+
+        self.request = _request
+        self.auth, self.guard = SessionCookieTest._guard(self)
+
+    def run_guard(self, header):
+        async def handler(request):
+            return web.Response(text="ok")
+
+        return asyncio.run(self.guard(self.request(headers={"Authorization": header}, path="/api/status"), handler))
+
+    def test_the_scheme_in_any_case(self):
+        for header in ("Bearer pw", "bearer pw", "BEARER pw", "bEaReR pw"):
+            with self.subTest(header=header):
+                self.assertEqual(self.run_guard(header).status, 200)
+
+    def test_a_wrong_password_in_any_case_counts_as_a_failure(self):
+        self.assertEqual(self.run_guard("bearer wrong").status, 401)
+        self.assertEqual(len(self.auth._failures.get("10.0.0.9", [])), 1)
+
+
+class PasswordFromTheEnvironmentTest(unittest.TestCase):
+
+    def configured(self, value):
+        env = {k: v for k, v in os.environ.items() if k != "HRI_PASSWORD_FILE"}
+        with mock.patch.dict(os.environ, {**env, "HRI_PASSWORD": value}, clear=True):
+            return auth_mod._configured_password()
+
+    def test_line_ends_are_dropped(self):
+        for value in ("pw\r\n", "pw\n", "pw\r", "\npw"):
+            with self.subTest(value=value):
+                self.assertEqual(self.configured(value), ("pw", ""))
+        self.assertEqual(self.configured("pw \r\n"), ("pw ", ""))
+        self.assertEqual(self.configured("\r\n"), ("", ""))
+
+    def test_spaces_are_kept(self):
+        """Pins behaviour that already held."""
+        self.assertEqual(self.configured(" pw "), (" pw ", ""))

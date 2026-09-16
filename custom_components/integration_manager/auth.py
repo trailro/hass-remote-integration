@@ -75,7 +75,10 @@ def _configured_password() -> tuple[str, str]:
             # as "": the same mistake as an unreadable one, and must not open the UI either
             return secrets.token_urlsafe(32), f"HRI_PASSWORD_FILE {path} is empty"
         return password, ""
-    password = os.environ.get("HRI_PASSWORD", "")
+    # a CR or LF at either end (an .env file with Windows line ends) is dropped: neither can be typed into the login
+    # form (a password input strips them) nor sent in a header, so no usable password loses anything.  Spaces are
+    # kept, unlike in the file: they can be typed, and a password may end with one on purpose
+    password = os.environ.get("HRI_PASSWORD", "").strip("\r\n")
     return (password, "") if password.strip() else ("", "")
 
 
@@ -277,7 +280,7 @@ async def async_setup_auth(hass: HomeAssistant) -> Auth:
                 _set_session_cookie(response, request, legacy, left)
             return response
         header = request.headers.get("Authorization", "")
-        if header.startswith("Bearer "):
+        if header[:7].lower() == "bearer ":  # the scheme is case-insensitive (RFC 7235)
             client = _client(request)
             left = auth.locked_for(client)
             if left:
