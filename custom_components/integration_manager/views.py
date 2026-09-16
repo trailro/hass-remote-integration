@@ -27,7 +27,7 @@ from .flow_page import FLOW_HTML
 from .ui import version_info
 from .flows import FlowDriver
 from .ha_updater import HaUpdater
-from .installer import _DOMAIN_RE, Installer
+from .installer import _DOMAIN_RE, _REPO_RE, _TAG_RE, Installer
 from .mqtt_publisher import MqttPublisher
 from .mqtt_rules import FIELDS
 from .ui import load_template, render
@@ -37,8 +37,6 @@ _SYSTEM_HTML = load_template("system")
 _MQTT_HTML = load_template("mqtt")
 
 
-_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")  # \Z: "$" also matches before a trailing newline
-_TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+@-]{0,100}\Z")
 
 
 class IndexView(ManagerView):

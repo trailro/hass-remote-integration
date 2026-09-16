@@ -27,12 +27,10 @@ from homeassistant.core import HomeAssistant
 from . import events, preflight
 from .ha_updater import HaUpdater
 from .http_util import ManagerView, with_body
-from .installer import Installer, manager_domain_error
+from .installer import _DOMAIN_RE, _REPO_RE, Installer, manager_domain_error
+from .installer import tag_ok as _ok_ref
 from .ui import load_template, render
 
-_DOMAIN_RE = re.compile(r"^[a-z0-9_]{1,64}\Z")
-_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+@-]{0,100}\Z")
-_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 _HA_RE = re.compile(r"^\d{4}\.\d{1,2}\.\d+(b\d+)?\Z")
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}\Z")
 
@@ -64,10 +62,6 @@ async def _commit_of(hass: HomeAssistant, installer: Installer, domain: str, ref
             return str((await resp.json()).get("sha") or "")
     except Exception:  # noqa: BLE001
         return ""
-
-
-def _ok_ref(ref: str) -> bool:
-    return bool(_REF_RE.match(ref)) and ".." not in ref
 
 
 class PreflightView(ManagerView):

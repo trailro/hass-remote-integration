@@ -13,20 +13,15 @@ from aiohttp import web
 from homeassistant.core import HomeAssistant
 
 from . import events, patches, preflight
-from .installer import Installer
+from .installer import _DOMAIN_RE, Installer
 from .installer import save_lock as _save_lock
+from .installer import tag_ok as _tag_ok
 from .logfiles_page import clean_log_format
 from .settings import DEFAULTS, HEALTH_MODES
 from .mqtt_publisher import MqttPublisher
 from .http_util import ManagerView, with_body
 
-_DOMAIN_RE = re.compile(r"^[a-z0-9_]{1,64}\Z")
-_TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+@-]{0,100}\Z")
 MAX_PATCH = 2 * 1024 * 1024
-
-
-def _tag_ok(tag: str) -> bool:
-    return bool(_TAG_RE.match(tag)) and ".." not in tag
 
 
 def _replace_file(d: str, name: str, data: bytes) -> None:
