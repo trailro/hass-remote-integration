@@ -105,13 +105,13 @@ class BuildReasonTest(unittest.TestCase):
 class SourceOnlyTest(unittest.TestCase):
     def test_wheel_rows_are_not_built(self):
         calls = []
-        with mock.patch("subprocess.run", side_effect=lambda *a, **k: calls.append(a)):
+        with mock.patch.object(preflight, "_run_pip", side_effect=lambda *a, **k: calls.append(a)):
             out = preflight._build_from_source("python", [{"name": "requests", "version": "2", "source_only": False}], None)
         self.assertEqual((out, calls), ([], []))
 
     def test_failed_build_is_reported(self):
         proc = mock.Mock(returncode=1, stderr="Building wheel\nerror: command 'gcc' failed: No such file or directory\n")
-        with mock.patch("subprocess.run", return_value=proc):
+        with mock.patch.object(preflight, "_run_pip", return_value=proc):
             out = preflight._build_from_source("python", [{"name": "pycrypto", "version": "2.6.1", "source_only": True}], None)
         self.assertEqual(out[0]["built"], False)
         self.assertIn("gcc", out[0]["error"])

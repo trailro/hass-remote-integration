@@ -7,8 +7,10 @@ import json
 import os
 import shutil
 import socket
+import signal
 import tarfile
 import tempfile
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -248,6 +250,71 @@ class RestoreDuringCleanStartTest(unittest.TestCase):
         self.boot(["custom_components"])
         self.assertTrue(os.path.isfile(os.path.join(self.aside, "auth")))
         self.assertTrue(any(self.ASIDE in line and "boot.zip" in line for line in self.logged), self.logged)
+
+
+class PreflightPipProcessGroupTest(unittest.TestCase):
+    """F18: a preflight pip run that hit its timeout was killed alone; the build backend it started ran on."""
+
+    def setUp(self):
+        from custom_components.integration_manager import preflight
+
+        self.preflight = preflight
+        d = _tmp(self)
+        self.pidfile = os.path.join(d, "backend.pid")
+        self.python = os.path.join(d, "python")  # stands in for the venv's python running pip: it starts a backend and waits
+        with open(self.python, "w", encoding="utf-8") as fh:
+            fh.write(f"#!/bin/sh\nsleep 60 &\necho $! > {self.pidfile}\nwait\n")
+        os.chmod(self.python, 0o700)
+        self.addCleanup(self.kill_backend)
+
+    def backend_pid(self):
+        try:
+            with open(self.pidfile, encoding="utf-8") as fh:
+                return int(fh.read())
+        except (OSError, ValueError):
+            return None
+
+    def kill_backend(self):
+        if (pid := self.backend_pid()) is not None:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+    def backend_alive(self):
+        pid = self.backend_pid()
+        self.assertIsNotNone(pid, "the fake pip never started its backend")
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            try:
+                with open(f"/proc/{pid}/stat", encoding="utf-8") as fh:
+                    if fh.read().rsplit(")", 1)[1].split()[0] == "Z":
+                        return False  # killed, not reaped yet (nothing reaps an orphan without an init process)
+            except OSError:
+                return False
+            time.sleep(0.05)
+        return True
+
+    def test_a_dry_run_that_times_out_takes_its_backend_with_it(self):
+        with mock.patch.object(self.preflight, "PIP_TIMEOUT_S", 1):
+            res = self.preflight._pip_dry_run(self.python, ["demo"], None)
+        self.assertIn("did not finish", res["stderr"])
+        self.assertFalse(self.backend_alive())
+
+    def test_a_source_build_that_times_out_takes_its_backend_with_it(self):
+        with mock.patch.object(self.preflight, "PIP_TIMEOUT_S", 1):
+            out = self.preflight._build_from_source(self.python, [{"name": "demo", "version": "1", "source_only": True, "url": ""}], None)
+        self.assertFalse(out[0]["built"])
+        self.assertIn("not built within", out[0]["error"])
+        self.assertFalse(self.backend_alive())
+
+    def test_output_and_exit_code_come_back_as_from_subprocess_run(self):
+        with open(self.python, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\necho '{\"install\": []}'\necho warn >&2\nexit 0\n")
+        res = self.preflight._pip_dry_run(self.python, ["demo"], None)
+        self.assertEqual(res, {"ok": True, "install": [], "stderr": ""})
+        proc = self.preflight._run_pip([self.python])
+        self.assertEqual((proc.returncode, proc.stderr), (0, "warn\n"))
 
 
 if __name__ == "__main__":

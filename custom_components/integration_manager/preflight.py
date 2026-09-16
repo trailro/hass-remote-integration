@@ -1,12 +1,19 @@
-"""Preflight of an integration version before anything touches the running
-environment: the release is unpacked into a scratch directory, its
-requirements are resolved by pip in dry-run mode against this venv (nothing
-installed), every patch is evaluated against the new code and against the
-requirement versions the update would bring, the manifest's dependencies
-are checked against HA's loader, and the minimum Home Assistant version
-(hacs.json) is compared with the target.  The report says what would
-change and whether anything blocks the update.  Used by "Preflight" on the
-Config page and by the environment builder."""
+"""Preflight of an integration version before the switch: the release is
+unpacked into a scratch directory, its requirements are resolved by pip in
+dry-run mode against this venv (nothing is installed into it), every package
+pip would take from a source archive is built into a temporary directory,
+every patch is evaluated against the new code and against the requirement
+versions the update would bring, the manifest's dependencies are checked
+against HA's loader, and the minimum Home Assistant version (hacs.json) is
+compared with the target.  The report says what would change and whether
+anything blocks the update.  Used by "Preflight" on the Config page and by
+the environment builder.
+
+Not a sandbox: resolving an sdist or a direct URL runs its build backend
+(setup.py, PEP 517 metadata hooks), and the source build runs it in full.
+That is third-party code, run by pip in this container with the manager's
+rights, as the install would run it.  The integration's own code is only
+parsed."""
 
 from __future__ import annotations
 
@@ -16,6 +23,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -55,10 +63,28 @@ def _read_text(path: str) -> str:
     except OSError:
         return ""
 
+def _run_pip(cmd: list[str]) -> subprocess.CompletedProcess:
+    """subprocess.run(capture_output=True, text=True, timeout=PIP_TIMEOUT_S), with pip in its own process group:
+    a timeout kills the group, so also the build backends pip started (a compiler, meson, a setup.py that hangs),
+    which a kill of pip alone left running and holding memory after the preflight had given up on them."""
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd="/tmp", start_new_session=True) as proc:
+        try:
+            stdout, stderr = proc.communicate(timeout=PIP_TIMEOUT_S)
+        except BaseException:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            proc.wait()  # not communicate(): a backend that left the group could hold the pipes open
+            raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
 def _pip_dry_run(python: str, requirements: list[str], constraints: str | None) -> dict[str, Any]:
     """Blocking: what pip would install for ``requirements`` in this venv.
-    ``--dry-run --report`` resolves everything (wheels are downloaded to a
-    temporary place, nothing is installed)."""
+    ``--dry-run --report`` resolves everything and installs nothing, but it
+    downloads the archives, and for a source archive or a direct URL it runs
+    the package's build backend to read its metadata."""
     if not requirements:
         return {"ok": True, "install": [], "stderr": ""}
     if (why := next((w for w in map(bad_requirement, requirements) if w), None)):
@@ -67,7 +93,7 @@ def _pip_dry_run(python: str, requirements: list[str], constraints: str | None) 
     if constraints and os.path.isfile(constraints):
         cmd += ["-c", constraints]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=PIP_TIMEOUT_S, cwd="/tmp")
+        proc = _run_pip(cmd)
     except subprocess.TimeoutExpired:
         return {"ok": False, "install": [], "stderr": f"pip did not finish within {PIP_TIMEOUT_S}s"}
     if proc.returncode != 0:
@@ -124,8 +150,9 @@ def _build_reason(stderr: str) -> str:
 
 
 def _build_from_source(python: str, rows: list[dict[str, Any]], constraints: str | None) -> list[dict[str, Any]]:
-    """Blocking: build every package pip would take from a source archive, the way the install will.
-    The image has no compiler: a pure-Python package builds, one with C code does not."""
+    """Blocking: build every package pip would take from a source archive, the way the install will (its build
+    backend runs in full; the wheel goes to a temporary directory, nothing is installed).  The image has no
+    compiler: a pure-Python package builds, one with C code does not."""
     import tempfile
 
     out = []
@@ -138,7 +165,7 @@ def _build_from_source(python: str, rows: list[dict[str, Any]], constraints: str
             if constraints and os.path.isfile(constraints):
                 cmd += ["-c", constraints]
             try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=PIP_TIMEOUT_S, cwd="/tmp")
+                proc = _run_pip(cmd)
                 ok, err = proc.returncode == 0, ""
                 if not ok:
                     err = _build_reason(proc.stderr)
