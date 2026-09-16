@@ -586,7 +586,7 @@ class RegistryAligner:
         n_e = sum(1 for e in list(er.async_get(self.hass).entities.values())
                   if self.hass.states.get(e.entity_id) is not None and self.align_entity(e.entity_id))
         dreg = dr.async_get(self.hass)
-        n_d = sum(1 for d in list(dreg.devices) + list(getattr(dreg, "child_devices", []) or []) if self.align_device(d.id))
+        n_d = sum(1 for d in registry_devices(dreg) if self.align_device(d.id))
         self._save()
         pe, pd = self.pending_counts
         return {"entities": n_e, "devices": n_d, "pending_entities": pe, "pending_devices": pd}
@@ -660,6 +660,15 @@ _KEEP_STATES = (ConfigEntryState.LOADED, ConfigEntryState.SETUP_RETRY, ConfigEnt
 def _reauth_pending(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return any(f.get("context", {}).get("source") == "reauth" and f.get("context", {}).get("entry_id") == entry.entry_id
                for f in hass.config_entries.flow.async_progress_by_handler(entry.domain, include_uninitialized=True))
+
+
+def registry_devices(reg: Any) -> list[Any]:
+    """Every device entry of the device registry, child devices included.
+    ``DeviceRegistry.devices`` is a collection of entries from HA 2026.9 on;
+    before that it is the device id -> entry mapping itself, so iterating it
+    yields ids (and there are no child devices yet)."""
+    devs = [*reg.devices, *(getattr(reg, "child_devices", None) or ())]
+    return [d for d in (reg.async_get(x) if isinstance(x, str) else x for x in devs) if d is not None]
 
 
 def storage_for_entry(files: list[str], entry_id: str | None, other_ids: list[str], first_of_domain: bool) -> list[str]:
