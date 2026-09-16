@@ -1243,8 +1243,12 @@ class Installer:
         else:
             self._smoke_waiting.pop((domain, tag), None)
             waited = 0.0
-        hung = still_setting_up and not self.busy and self.hass.is_running and waited > max(self.SETUP_WAIT_S, self.settings.int_("smoke_test_s", 0, 86400))
-        if (self.busy or not self.hass.is_running or still_setting_up) and not hung:
+        from .views import _HA_CHANGE_LOCK
+
+        # a full rollback is refused while a version change's lock is held (a switch being cancelled holds it without busy)
+        busy = self.busy or _HA_CHANGE_LOCK.locked()
+        hung = still_setting_up and not busy and self.hass.is_running and waited > max(self.SETUP_WAIT_S, self.settings.int_("smoke_test_s", 0, 86400))
+        if (busy or not self.hass.is_running or still_setting_up) and not hung:
             # an install/start in progress, or (at boot) HA not started / the entry
             # still setting up: judging now would be a false failure -> rollback
             self._smoke_handle = self.hass.loop.call_later(
@@ -1589,15 +1593,25 @@ class Installer:
     async def rollback_full(self, domain: str | None = None, rejected: bool = False) -> dict[str, Any]:
         """Previous version AND the backup taken before the switch (registries,
         config entry as it was), applied at the restart the caller triggers."""
+        from .views import _HA_CHANGE_LOCK
+
         if self._rollback_running:
             # an automatic one overlapping a manual one, or a double click: the second schedule would drop the
             # first one's archive, and its failed start would cancel the restore the first one reports as done
             return {"ok": False, "error": "a full rollback is already running"}
+        # its restore is checked and scheduled like a version change's or a restore by hand: under that lock, with busy
+        # reserved.  Without them a change prepared between the check and the schedule replaced this restore, or was
+        # replaced by it, and both answered ok.  Refused, never waited for; the smoke test defers its verdict while
+        # either is held, so the automatic rollback is not refused by them
+        if _HA_CHANGE_LOCK.locked() or self.busy:
+            return {"ok": False, "error": "a Home Assistant version change or an install is running: try again in a moment"}
         self._rollback_running = True  # before the first await
+        self.busy = True
         try:
             return await self._rollback_full(domain, rejected)
         finally:
             self._rollback_running = False
+            self.busy = False
 
     def _cancel_own_restore(self, zip_name: str) -> None:
         """Blocking: cancel the scheduled restore only while it is still this operation's archive."""
@@ -1620,33 +1634,48 @@ class Installer:
             return {"ok": False, "error": f"the pre-update backup {backup} no longer exists (deleted?); only a plain start of {prev_tag} is possible"}
         if prev_tag not in rec.get("versions", {}):
             return {"ok": False, "error": f"previous version {prev_tag} is no longer in the version store"}
-        try:
-            # validate BEFORE switching files/pip back: a corrupt zip must not leave a half rollback
-            await self.hass.async_add_executor_job(backupkit.validate, zip_path)
-        except ValueError as err:
-            return {"ok": False, "error": f"the pre-update backup is unusable ({err}); only a plain start of {prev_tag} is possible"}
-        if backupkit.pending(self.config_dir):
-            return {"ok": False, "error": "a restore is scheduled for the next restart: restart (or cancel it in the Backup card) first"}
-        # written BEFORE the restore is scheduled, because state.json is what the restore does NOT bring back:
-        # killed between the schedule and the state start() writes at its end, the next boot would restore the
-        # old files and .storage while state.json still names the rejected version, and the boot reconcile
-        # would deploy that version over the restored configuration.  _apply_pending_rollback finishes it there.
-        intent_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-        self.state.pending_rollback = {"domain": domain, "tag": prev_tag, "backup": backup, "at": intent_at}
-        self._save_state()
-        try:
-            # scheduled BEFORE the files change: a kill between the two then restores the backup at the next boot
-            # (its custom_components are the old code), never boots the old code on the migrated .storage.
-            # not the manager part: start() writes a consistent state.json (and it holds this rollback's
-            # verdict/last_error); .storage brings back the un-migrated config entry, custom_components the old files
-            zip_name = os.path.basename(await self.hass.async_add_executor_job(
-                backupkit.schedule_restore, self.config_dir, backup, ["storage", "custom_components"], None, True))
-        except (ValueError, OSError) as err:
-            self.state.pending_rollback = None  # nothing is scheduled: there is no rollback to finish at a boot
+        from .views import _HA_CHANGE_LOCK
+
+        async with _HA_CHANGE_LOCK:  # free: rollback_full checked it, with no await since
+            try:
+                # validate BEFORE switching files/pip back: a corrupt zip must not leave a half rollback
+                await self.hass.async_add_executor_job(backupkit.validate, zip_path)
+            except ValueError as err:
+                return {"ok": False, "error": f"the pre-update backup is unusable ({err}); only a plain start of {prev_tag} is possible"}
+            if backupkit.pending(self.config_dir):
+                return {"ok": False, "error": "a restore is scheduled for the next restart: restart (or cancel it in the Backup card) first"}
+            # a clean start schedules no archive: this restore would take its place at the boot, and the switch is cancelled there
+            ha_state = await self.hass.async_add_executor_job(jsonio.read_json, os.path.join(self.config_dir, backupkit.STATE_DIR, "ha.json"), {})
+            change = ha_state.get("change") if isinstance(ha_state, dict) else None
+            if isinstance(change, dict) and change.get("mode") in ("restore", "rebuild") and change.get("to") != homeassistant.const.__version__:
+                return {"ok": False, "error": f"a switch to Home Assistant {change.get('to')} with a {'configuration restore' if change.get('mode') == 'restore' else 'clean start'} "
+                                              "is scheduled: cancel it on System (choose the running version) before a full rollback"}
+            # written BEFORE the restore is scheduled, because state.json is what the restore does NOT bring back:
+            # killed between the schedule and the state start() writes at its end, the next boot would restore the
+            # old files and .storage while state.json still names the rejected version, and the boot reconcile
+            # would deploy that version over the restored configuration.  _apply_pending_rollback finishes it there.
+            intent_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+            self.state.pending_rollback = {"domain": domain, "tag": prev_tag, "backup": backup, "at": intent_at}
             self._save_state()
-            return {"ok": False, "error": f"the backup could not be scheduled, nothing was changed: {err}"}
+            try:
+                # scheduled BEFORE the files change: a kill between the two then restores the backup at the next boot
+                # (its custom_components are the old code), never boots the old code on the migrated .storage.
+                # not the manager part: start() writes a consistent state.json (and it holds this rollback's
+                # verdict/last_error); .storage brings back the un-migrated config entry, custom_components the old files
+                zip_name = os.path.basename(await self.hass.async_add_executor_job(
+                    backupkit.schedule_restore, self.config_dir, backup, ["storage", "custom_components"], None, True))
+            except (ValueError, OSError) as err:
+                self.state.pending_rollback = None  # nothing is scheduled: there is no rollback to finish at a boot
+                self._save_state()
+                return {"ok": False, "error": f"the backup could not be scheduled, nothing was changed: {err}"}
         try:
-            res = await self.start(domain, prev_tag, own_restore=zip_name)  # start() refuses other scheduled restores, not this one
+            # busy handed to start(): it refuses while busy and takes it back before its first await, so nothing
+            # begins in between; the lock is not needed past the schedule, busy refuses a change or a restore
+            self.busy = False
+            try:
+                res = await self.start(domain, prev_tag, own_restore=zip_name)  # start() refuses other scheduled restores, not this one
+            finally:
+                self.busy = True  # until rollback_full releases it
         except BaseException:
             await self.hass.async_add_executor_job(self._cancel_own_restore, zip_name)
             self.state.pending_rollback = None
