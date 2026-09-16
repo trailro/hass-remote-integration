@@ -182,12 +182,16 @@ class RendererSelectorsTest(unittest.TestCase):
     def test_custom_value_draws_a_box_to_type_in_and_keeps_an_unlisted_default(self):
         branch = self.field[self.field.index("kind==='select'"):self.field.index("kind==='number'")]
         self.assertIn("sel.select.custom_value", branch)
-        self.assertIn("opts.push({value:v,label:v})", branch)  # an unlisted default becomes a choice of its own
+        # an unlisted default is kept: a choice of its own for a single value, a box of its own among several (F18)
+        self.assertIn("if(multi) extra.push(v); else opts.push({value:v,label:v});", branch)
         self.assertIn("ci.dataset.custom='1'", branch)
         self.assertIn("wrap._custom=ci", branch)
-        # collect() reads it for every shape the select branch can draw: several values one per comma,
-        # a single value as the whole box (a comma is part of it)
-        self.assertIn("w._custom.value.split(',')", self.collect)
+        self.assertIn("l=itemList(extra,{})", branch)
+        self.assertIn("wrap._custom=box", branch)
+        # collect() reads it for every shape the select branch can draw: several values one box each, a single
+        # value as the whole box (a comma, or a space around it, is part of the value either way)
+        self.assertIn("w._custom.querySelectorAll('[data-item]')", self.collect)
+        self.assertNotIn("split(',')", self.collect)
         for kind, reader in (("radio", r"typedOne\(\)"), ("checklist", r"withTyped\("), ("select", r"typedOne\(\)"), ("multiselect", r"withTyped\(")):
             with self.subTest(kind=kind):
                 line = next(ln for ln in self.collect.splitlines() if f"k==='{kind}'" in ln)
@@ -195,9 +199,11 @@ class RendererSelectorsTest(unittest.TestCase):
 
     def test_a_multiple_text_selector_is_one_input_per_item(self):
         branch = self.field[self.field.index("sel.text.multiple"):self.field.index("kind==='text' || f.type==='string'")]
+        items = CONFIG_JS[CONFIG_JS.index("function itemList("):CONFIG_JS.index("function field(")]
         self.assertIn("wrap.dataset.kind='textlist'", branch)
-        self.assertIn("i.dataset.item='1'", branch)
-        self.assertIn("del.onclick=()=>row.remove()", branch)
+        self.assertIn("itemList(", branch)
+        self.assertIn("i.dataset.item='1'", items)
+        self.assertIn("del.onclick=()=>row.remove()", items)
         self.assertRegex(self.collect, r"k==='textlist'.*querySelectorAll\('\[data-item\]'\)")
 
     def test_a_constant_has_no_input_and_is_still_sent(self):

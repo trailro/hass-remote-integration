@@ -75,7 +75,7 @@ class SubmittedValuesTest(unittest.TestCase):
         self.assertEqual(self.sent["custom_single_list_default"]["choice"], "custom")
 
     def test_a_custom_choice_can_be_typed(self):
-        self.assertEqual(self.sent["custom_multi_typed"]["choices"], ["a", "x", "y"])
+        self.assertEqual(self.sent["custom_multi_typed"]["choices"], ["a", "x, y"])  # F18: one box, one value
         self.assertEqual(self.sent["custom_single_typed"]["choice"], "typed")
 
     def test_a_selector_without_custom_value_offers_no_box_to_type_in(self):
@@ -86,7 +86,7 @@ class SubmittedValuesTest(unittest.TestCase):
         self.assertEqual(self.sent["custom_single_comma"], {"choice": "Smith, John"})
         self.assertEqual(self.sent["custom_single_list_comma"], {"choice": "Smith, John"})
         self.assertEqual(self.sent["custom_single_blank_box"], {"choice": "b"})  # blanks are nothing typed: the pick counts
-        self.assertEqual(self.sent["custom_multi_comma"], {"choices": ["Smith", "John"]})  # several values: still one per comma
+        self.assertEqual(self.sent["custom_multi_comma"], {"choices": ["Smith, John"]})  # F18: several values are one box each, not one per comma
 
     def test_a_multiple_text_selector_sends_a_list_of_strings(self):
         # F15: TextSelector(multiple=True) refuses anything but a list; an item may hold a comma
@@ -136,9 +136,9 @@ class ServicesCallFormTest(unittest.TestCase):
         self.assertEqual({k: v["error"] for k, v in self.sent.items() if isinstance(v, dict) and "error" in v}, {})
 
     def test_a_single_custom_value_keeps_its_commas(self):
-        # the same contract as the config flow page (F14): the whole box for one value, one per comma for several
+        # the same contract as the config flow page (F14, F18): the whole box for one value, one box per value for several
         self.assertEqual(self.sent["custom_single_comma"], {"who": "Smith, John"})
-        self.assertEqual(self.sent["custom_multi_comma"], {"who": ["Smith", "John"]})
+        self.assertEqual(self.sent["custom_multi_comma"], {"who": ["Smith, John"]})
         self.assertEqual(self.sent["text_single_comma"], {"word": "Smith, John"})
 
     def test_a_multiple_text_field_sends_a_list_of_strings(self):
@@ -163,6 +163,39 @@ class ServicesCallFormTest(unittest.TestCase):
         self.assertEqual(self.sent["text_multiple_empty_required"], {"refused": "words is required. "})
 
 
+@unittest.skipUnless(shutil.which("node") and os.path.isfile(HARNESS) and os.path.isfile(SERVICES_HARNESS), "node (or a harness) is not available here")
+class CustomMultiSelectRoundTripTest(unittest.TestCase):
+    """F18: a select with multiple and custom_value, on both pages, from the same fixtures (tests/js/select_roundtrip.mjs).
+
+    The services page joined the items the options do not list into one box with ', ' and split and trimmed
+    them on submit, so an untouched form sent ["Smith, John", "  padded  "] as ["Smith", "John", "padded"];
+    the config flow page kept a default but split what was typed.  HA takes each custom item as a string, as
+    it is.  Nothing sent (the services page) counts as []."""
+
+    FIXTURES = os.path.join(os.path.dirname(HARNESS), "select_roundtrip.mjs")
+
+    @classmethod
+    def setUpClass(cls):
+        fixtures = subprocess.run([shutil.which("node"), "--input-type=module", "-e",
+                                   f"import {{roundTrips}} from {json.dumps('file://' + os.path.abspath(cls.FIXTURES))}; console.log(JSON.stringify(roundTrips));"],
+                                  capture_output=True, text=True, timeout=60)
+        if fixtures.returncode != 0:
+            raise AssertionError(f"the fixtures failed to load: {fixtures.stderr.strip()}")
+        cls.fixtures = json.loads(fixtures.stdout)
+        cls.pages = {"config.js": run_harness(HARNESS, CONFIG_JS_PATH), "services.js": run_harness(SERVICES_HARNESS, SERVICES_JS_PATH)}
+
+    def test_every_fixture_sends_the_list_as_it_is(self):
+        self.assertGreaterEqual(len(self.fixtures), 9)
+        for page, sent in self.pages.items():
+            for key, fx in self.fixtures.items():
+                with self.subTest(page=page, fixture=key):
+                    self.assertEqual(sent[f"roundtrip.{key}"], fx.get("sent", fx["value"]))
+
+    def test_a_default_round_trips_on_the_services_page_too(self):
+        # the catalog gives an example more often, but a default alone is drawn the same way
+        self.assertEqual(self.pages["services.js"]["custom_multi_default_not_example"], {"names": ["Smith, John", "  padded  "]})
+
+
 class CustomValueParityTest(unittest.TestCase):
     """The two pages that draw a select from a selector answer custom_value the same way.
 
@@ -174,12 +207,13 @@ class CustomValueParityTest(unittest.TestCase):
         with open(SERVICES_JS_PATH, encoding="utf-8") as fh:
             self.services_js = fh.read()
 
-    def test_both_pages_type_custom_values_into_one_comma_separated_box(self):
+    def test_both_pages_type_several_custom_values_one_box_each(self):
+        # F18: never one box split on commas (what the two pages send is compared in CustomMultiSelectRoundTripTest)
         for name, src in (("config.js", CONFIG_JS), ("services.js", self.services_js)):
             with self.subTest(page=name):
-                self.assertIn("custom", src)
-                self.assertIn("other values, comma separated", src)
-                self.assertIn("split(',')", src)
+                self.assertIn("other values, one per box", src)
+                self.assertNotIn("comma separated", src.replace("target entity_id(s) <span class=\"mut\">comma separated", ""))
+                self.assertNotIn(".value.split(',')", src.replace("tEl.value.split(',')", ""))
 
     def test_only_several_values_are_split_on_commas(self):
         # F14: a single custom value is the whole box on both pages
@@ -201,8 +235,8 @@ class CustomValueParityTest(unittest.TestCase):
                 self.assertIn("querySelectorAll('[data-item]')", src)
 
     def test_both_pages_keep_a_default_the_options_do_not_list(self):
-        self.assertIn("opts.push({value:v,label:v})", CONFIG_JS)  # shown as a choice of its own
-        self.assertIn("extra=[...pre].filter(x=>!listed.has(x))", self.services_js)  # put back in the custom box
+        self.assertIn("if(multi) extra.push(v); else opts.push({value:v,label:v});", CONFIG_JS)  # a box of its own, or (single) a choice
+        self.assertIn("extra=[...pre].filter(x=>!listed.has(x))", self.services_js)  # a box of its own
 
 
 class FlowEndingTest(unittest.TestCase):
