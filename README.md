@@ -817,7 +817,10 @@ hass_<domain>/manager/result                        outcome of a manager action,
   no command, service call or manager action reaches the container: the
   refused topics and the broker's reason are logged once, put on the timeline,
   and shown in `subscribe_error` and `connect_error` of `GET /api/mqtt/status`
-  while the connection stays up. `status` turns `online` only once the broker
+  while the connection stays up. Only a refusal the broker states can be seen:
+  mosquitto's `acl_file` grants every subscription and silently drops what the
+  client may not read (its dynamic security plugin refuses it). `status` turns
+  `online` only once the broker
   has answered the subscription, so a command the main Home Assistant sends the
   moment the device becomes available is received; a refused subscription still
   turns it `online` (the documents keep flowing), and a broker that has not
