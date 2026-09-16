@@ -30,7 +30,11 @@ async function loadGroups(){
   const lv=g.levels[lg]||'—', tr=document.createElement('tr');
   tr.innerHTML=`<td>${esc(g.name)}</td><td class="id">${esc(lg)}</td><td>${esc(lv)}</td><td class="mut">${g.counts[lg]||0}</td>
    <td><select data-lg="${esc(lg)}">${['(inherited)','DEBUG','INFO','WARNING','ERROR'].map(l=>`<option ${l===lv?'selected':''}>${l}</option>`).join('')}</select></td>`;
-  tr.querySelector('select').onchange=async e=>{await fetch('/api/logs/level',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({logger:lg,level:e.target.value==='(inherited)'?null:e.target.value})}); loadGroups();};
+  tr.querySelector('select').onchange=async e=>{
+    // a refused level (the root logger) would otherwise revert with no explanation
+    const r=await fetch('/api/logs/level',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({logger:lg,level:e.target.value==='(inherited)'?null:e.target.value})});
+    if(!r.ok) log('error: '+((await r.json().catch(()=>({}))).error||r.status));
+    loadGroups();};
   t.appendChild(tr);
  }
 }
