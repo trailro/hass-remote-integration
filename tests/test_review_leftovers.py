@@ -21,6 +21,7 @@ class EventsRotationTest(unittest.TestCase):
             log = events.Events(path)
             for i in range(40):
                 log.add("mqtt", f"message {i:02d}")
+            self.assertTrue(events.drain(5))  # written by the timeline's own thread
             self.assertLessEqual(os.path.getsize(path), 400)
             self.assertTrue(os.path.isfile(path + ".1"))
             self.assertFalse(os.path.exists(path + ".2"))
@@ -32,6 +33,7 @@ class EventsRotationTest(unittest.TestCase):
             path = os.path.join(d, "integration_manager", "events.jsonl")
             events.Events(path).add("boot", "x" * 300)
             events.Events(path).add("boot", "y" * 300)  # would pass the cap: rotated first
+            self.assertTrue(events.drain(5))
             self.assertTrue(os.path.isfile(path + ".1"))
             self.assertLessEqual(os.path.getsize(path), 400)
 
