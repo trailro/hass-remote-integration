@@ -64,6 +64,9 @@ EXCLUDE_GLOBS = (
     f"{STATE_DIR}/staging-*", f"{STATE_DIR}/staging-*/*", f"{STATE_DIR}/backups", f"{STATE_DIR}/backups/*",
     f"{STATE_DIR}/import.tar", f"{STATE_DIR}/import.tar.tmp", f"{STATE_DIR}/import-extracted", f"{STATE_DIR}/import-extracted/*",
     ".storage/*.log", ".storage/core.uuid",
+    # the port Home Assistant was set up with: a backup from a container on another HRI_PORT (a second
+    # container) would pin a foreign port here and every boot would stop at run.py's port check
+    ".storage/http",
     # a store being written (HA's temporary file: tmp + 8 random characters) and an import's set-aside original
     ".storage/tmp" + "[a-z0-9_]" * 8, ".storage/*.pre-import",
     # the record of what happened (timeline, resource history, change reports) must survive a restore

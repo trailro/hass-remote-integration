@@ -505,9 +505,12 @@ leaves uploaded backups alone for their first 7 days. An upload never replaces
 an existing backup: a name already taken gets a `-2`, `-3`, … suffix.
 A restore never rolls back the record of what happened: the timeline, the
 resource history, the change reports and the last known release versions are
-not part of backups, and neither are the login key and the logout record, a
-store file Home Assistant is writing at that moment (`.storage/tmp…`) or an
-original an import set aside (`.storage/*.pre-import`). A backup whose file
+not part of backups, and neither are the login key and the logout record, the
+port Home Assistant was set up with (`.storage/http`, which would pin a foreign
+port when the backup comes from a container on another `HRI_PORT`; a restored
+one from an older archive is dropped at the next boot), a store file Home
+Assistant is writing at that moment (`.storage/tmp…`) or an original an import
+set aside (`.storage/*.pre-import`). A backup whose file
 names are not in their plain form (`./`, `//`, `..`) is refused.
 
 Every backup records the Home Assistant version it was made on (the *HA* column),
