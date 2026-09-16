@@ -92,6 +92,7 @@ def latest_stable() -> str | None:
         return None
     best = None
     for v, files in data.get("releases", {}).items():
+        files = [f for f in files or [] if isinstance(f, dict) and not f.get("yanked")]  # a release yanked whole is not installable
         if not re.fullmatch(r"\d{4}\.\d{1,2}\.\d+", v) or not files or vkey(v) < vkey(DEFAULT_VERSION):
             continue
         if not _python_fits(files[0].get("requires_python")):

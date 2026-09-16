@@ -482,7 +482,10 @@ three have to support that Python:
 
 - **Home Assistant.** Only versions whose PyPI `requires_python` accepts the
   image's Python are offered on **System** or installed. A version that would
-  need another Python is refused before the restart.
+  need another Python is refused before the restart. While PyPI cannot be
+  reached a version is refused too ("try again"), unless its venv is already
+  installed for this Python. A release whose files were all yanked on PyPI is
+  never offered, installed or picked for a first start.
 - **The integration's requirements.** The preflight resolves them with pip
   against the running venv. A package whose `requires_python` excludes the
   image's Python, or that conflicts with Home Assistant's pins, is a blocker.
