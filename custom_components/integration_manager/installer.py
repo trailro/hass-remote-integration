@@ -143,7 +143,7 @@ def instance_key(domain: str | None) -> str | None:
 
 @dataclass
 class Domain:
-    versions: dict[str, dict[str, Any]] = field(default_factory=dict)  # tag -> {installed_at, version, requirements, pin}
+    versions: dict[str, dict[str, Any]] = field(default_factory=dict)  # tag -> {installed_at, version, requirements, ...}
     running_tag: str | None = None      # tag whose files sit in custom_components/<domain>
     previous_tag: str | None = None     # what ran before the last version switch
     pre_update_backup: str | None = None
@@ -889,10 +889,8 @@ class Installer:
             # only now, with the new release verified and in the store, does the
             # current integration go (a bad tag or a GitHub error leaves it untouched)
             replaced = await self._replace_current(domain)
-            pin = next((r for r in manifest.get("requirements", []) if _req_name(r).replace("-", "_") in
-                        (spec.get("patch_module") or "",)), None)
             self._dom(domain)["versions"][tag] = {"installed_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "version": manifest.get("version"),
-                                                 "requirements": manifest.get("requirements", []), "pin": pin,
+                                                 "requirements": manifest.get("requirements", []),
                                                  "min_ha": manifest.get("_hri_min_ha")}
             recorded = True
             self.state.last_action = f"installed {domain} {tag} into the version store"
@@ -909,7 +907,7 @@ class Installer:
                 await self.hass.async_add_executor_job(self._ensure_deployed, domain, tag, True)  # one copy + the .hri-tag marker
                 self.state.restart_required = True
                 self._save_state()
-            return {"ok": True, "domain": domain, "tag": tag, "version": manifest.get("version"), "pin": pin, "redeployed": was_running, **replaced}
+            return {"ok": True, "domain": domain, "tag": tag, "version": manifest.get("version"), "redeployed": was_running, **replaced}
         except Exception as err:  # noqa: BLE001
             _LOGGER.exception("install %s %s failed", domain, tag)
             if fresh and not recorded:
@@ -2063,7 +2061,7 @@ class Installer:
             if not tag_ok(stored_tag) or manifest is None:
                 continue
             versions[stored_tag] = {"installed_at": installed_at if stored_tag == tag else "", "version": manifest.get("version"),
-                                    "requirements": manifest.get("requirements", []), "pin": None, "adopted": True}
+                                    "requirements": manifest.get("requirements", []), "adopted": True}
         if not versions:
             _LOGGER.error("not adopting %s after the damaged state.json: no version of it is in the store", domain)
             return None
@@ -2340,11 +2338,8 @@ class Installer:
             manifest = await self.hass.async_add_executor_job(self._store_local, cand["path"], domain, tag)
             stored = True
             replaced = await self._replace_current(domain)  # after the copy succeeded
-            spec = self.spec(domain)
-            pin = next((r for r in manifest.get("requirements", []) if _req_name(r).replace("-", "_") in
-                        (spec.get("patch_module") or "",)), None)
             self._dom(domain)["versions"][tag] = {"installed_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "version": manifest.get("version"),
-                                                 "requirements": manifest.get("requirements", []), "pin": pin, "source": cand["path"]}
+                                                 "requirements": manifest.get("requirements", []), "source": cand["path"]}
             recorded = True
             self.state.last_action = f"installed {domain} from {cand['path']} as {tag}"
             self._save_state()
