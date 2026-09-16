@@ -244,6 +244,22 @@ class FullVolumeAnswersJsonTest(unittest.TestCase):
         self.assertTrue(res["ok"])
         self.assertEqual(st.data["backup_keep"], 9)
 
+    def test_log_format_is_checked_off_the_event_loop(self):
+        st = SimpleNamespace(data={}, async_save=mock.AsyncMock(), public=lambda: {}, github_headers=lambda: {})
+        view = manage_views.SettingsView(SimpleNamespace(settings=st, _releases_cache={}, scheduler=None))
+        threads = []
+        real = manage_views.clean_log_format
+
+        def spy(value):
+            threads.append(threading.current_thread() is threading.main_thread())
+            return real(value)
+
+        with mock.patch.object(manage_views, "clean_log_format", spy):
+            res = _body(asyncio.run(view.post(_request({"log_format": {"pattern": "^(?P<time>\\S+) (?P<message>.*)$"}}))))
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(threads, [False])
+        self.assertIn("log_format", st.data)
+
     def test_the_registry_post_says_why(self):
         inst = SimpleNamespace(add_to_registry=mock.Mock(side_effect=OSError(28, "No space left on device")))
         res = _body(asyncio.run(views.RegistryView(inst).post(_request({"domain": "demo", "repo": "owner/demo"}))))

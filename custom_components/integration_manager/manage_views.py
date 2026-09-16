@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import asyncio
 import os
 import re
 import tempfile
@@ -444,7 +445,8 @@ class SettingsView(ManagerView):
                     clean[str(dom)] = r
             new["health"] = clean
         if "log_format" in body:
-            fmt, err = clean_log_format(body["log_format"])
+            # compiling the pattern is bounded but still CPU work: never on the event loop
+            fmt, err = await asyncio.get_running_loop().run_in_executor(None, clean_log_format, body["log_format"])
             if err:
                 return self.json({"ok": False, "error": f"log_format: {err}"})
             new["log_format"] = fmt
