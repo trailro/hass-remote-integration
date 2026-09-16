@@ -128,6 +128,7 @@ CALL_MAX_DEPTH = 64
 # (mosquitto is far more generous); the maximum a broker announces wins over it.  Only MQTT 5 announces one,
 # which is why every client speaks MQTT 5 and drops to 3.1.1 only for a broker that refuses it.
 MANAGER_RESULT_WAIT_S = 5  # the executor may be wedged: the action must not wait on the broker forever
+STOP_JOIN_S = 5  # how long stopping a client waits for its network thread before closing the socket under it
 PUBLISH_MAX_BYTES = 1024 * 1024
 # paho 2.1 ignores the receive maximum an MQTT 5 broker announces and keeps up to this many QoS 1 messages
 # unacknowledged; a broker announcing less (HiveMQ: 10) may close the connection over it
@@ -142,11 +143,24 @@ RESERVED_TOPIC_SEGMENTS = frozenset({"call", "cmd", "result", "services", "manag
 _SECRET_NAME = (r"(?!(?:translation|sort|primary)_key\b)"
                 r"(?:(?:[A-Za-z0-9_-]*[_-])?(?:code|pin|key)"
                 r"|[A-Za-z0-9_-]*(?:usercode|passcode|password|passwd|secret|token|apikey|passkey|bindkey))")
-# a key inside a JSON string (a service value that is itself JSON) has its quotes escaped: \"code\": \"1234\"
-_CODE_VALUE = re.compile(
-    r"""((?<![A-Za-z0-9_-])(?:\\*["'])?""" + _SECRET_NAME + r"""(?:\\*["'])?\s*[:=]\s*)"""
-    r"""((\\+)"(?:(?!\\+").)*\\+"|"(?:[^"\\]|\\.)*"|'[^']*'|[^,}\s]+)""",
-    re.IGNORECASE)
+# The text rule runs on paho's network thread, over text anyone who may publish under the base topic writes: it must
+# stay linear whatever that text is.  A key inside a JSON string (a service value that is itself JSON) has its quotes
+# escaped (\"code\": \"1234\"): the match starts at the name, after however many backslashes, runs are taken whole
+# (possessive), and an escaped value ends at the first backslash-quote; one without any is masked up to the end of
+# its token, like an unquoted value.  Masking a cut text (cut=True), a string the cut left open is masked to the end.
+def _code_value_rule(cut: bool) -> re.Pattern[str]:
+    end = r"|\Z" if cut else ""
+    return re.compile(
+        r"""((?<![A-Za-z0-9_-])""" + _SECRET_NAME + r"""(?:\\*+["'])?\s*+[:=]\s*+)"""
+        r"""(?:(\\++)"(?:(?:[^\\\n]++|\\++(?!"))*+(?:\\++\"""" + end + r""")|[^,}\s]*+)"""
+        r"""|"(?:[^"\\]|\\.)*+(?:\"""" + end + r""")|'[^']*+(?:'""" + end + r""")|[^,}\s]++)""",
+        re.IGNORECASE)
+
+
+_CODE_VALUE = _code_value_rule(cut=False)
+_CODE_VALUE_CUT = _code_value_rule(cut=True)
+# what the text rule reads of a history row, a status line or a log line (shown cut to a few hundred characters)
+MASK_SCAN_CHARS = 4096
 _SECRET_KEY = re.compile(_SECRET_NAME, re.IGNORECASE)
 _JSON_STRING = re.compile(r'"(?:[^"\\]+|\\.)*"?')
 _JSON_BRACKET = re.compile(r"[\[\]{}]")
@@ -154,22 +168,26 @@ _JSON_BRACKET = re.compile(r"[\[\]{}]")
 _ENTITY_LIST_KEYS = frozenset({"group_members", "snapshot_entities", "entities", "add_entities", "remove_entities"})
 
 
-def _mask_codes(text: str) -> str:
+def _mask_codes(text: str, limit: int | None = None) -> str:
     """Alarm and lock codes, PINs, passwords and tokens stay out of the command history, the status and the log.
     JSON is masked on its parsed keys, which the text rule cannot see when they are written with escapes
-    ("\\u0063ode"); the text rule then covers what is not JSON and secrets written inside string values."""
+    ("\\u0063ode"); the text rule then covers what is not JSON and secrets written inside string values.
+    With a limit, the text rule reads no more than that many characters: what comes back is masked and cut there."""
     if _payload_problem(text) is None and text.lstrip()[:1] in ("{", "["):
         try:
-            masked, changed = _masked(json.loads(text))
+            masked, changed = _masked(json.loads(text), limit)
         except (ValueError, RecursionError):
             pass
         else:
             if changed:
                 text = json.dumps(masked, ensure_ascii=False)
-    return _CODE_VALUE.sub(lambda m: m.group(1) + (f'{m.group(3)}"***{m.group(3)}"' if m.group(3) else '"***"'), text)
+    rule = _CODE_VALUE
+    if limit is not None and len(text) > limit:
+        text, rule = text[:limit], _CODE_VALUE_CUT
+    return rule.sub(lambda m: m.group(1) + (f'{m.group(2)}"***{m.group(2)}"' if m.group(2) else '"***"'), text)
 
 
-def _masked(value: Any) -> tuple[Any, bool]:
+def _masked(value: Any, limit: int | None = None) -> tuple[Any, bool]:
     """(the parsed value with the value of every secret key masked, whether any was)"""
     if isinstance(value, dict):
         out, changed = {}, False
@@ -177,14 +195,14 @@ def _masked(value: Any) -> tuple[Any, bool]:
             if _SECRET_KEY.fullmatch(key):
                 out[key], changed = "***", True
             else:
-                out[key], sub = _masked(item)
+                out[key], sub = _masked(item, limit)
                 changed = changed or sub
         return out, changed
     if isinstance(value, list):
-        items = [_masked(item) for item in value]
+        items = [_masked(item, limit) for item in value]
         return [item for item, _ in items], any(sub for _, sub in items)
     if isinstance(value, str) and value.lstrip()[:1] in ("{", "["):
-        masked = _mask_codes(value)  # a JSON document sent as a string value: its keys are keys too
+        masked = _mask_codes(value, limit)  # a JSON document sent as a string value: its keys are keys too
         return masked, masked != value
     return value, False
 
@@ -906,8 +924,33 @@ class MqttPublisher:
 
     @staticmethod
     def _stop_client(c: mqtt.Client) -> None:
-        c.loop_stop()
-        c.disconnect()
+        """Blocking, bounded: the client's network thread is gone when this returns, whatever the broker does.
+        loop_stop() alone joins a thread that ends only once no QoS 1 message waits for its acknowledgement, which a
+        live broker that stopped acknowledging never gives: the DISCONNECT goes first (paho closes the socket once
+        it is written), and a thread still running after STOP_JOIN_S (the broker does not even read) has its socket
+        closed under it."""
+        try:
+            c.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+
+        def stop() -> None:
+            try:
+                c.loop_stop()
+            except Exception:  # noqa: BLE001 - the thread ended between paho's check and its join
+                pass
+
+        stopper = threading.Thread(target=stop, name="hri-mqtt-stop", daemon=True)
+        stopper.start()
+        stopper.join(STOP_JOIN_S)
+        if stopper.is_alive():
+            try:
+                sock = c.socket()
+                if sock is not None:
+                    sock.close()
+            except Exception:  # noqa: BLE001
+                pass
+            stopper.join(STOP_JOIN_S)
 
     def _clear_topics(self, suffix: str, topics: list[str]) -> None:
         """Blocking: an empty retained payload to each topic from a throwaway
@@ -1040,11 +1083,7 @@ class MqttPublisher:
         old = self._client
         if old is not None:  # belt and braces next to the lock: never leave a second client running
             self._client = None
-            try:
-                old.loop_stop()
-                old.disconnect()
-            except Exception:  # noqa: BLE001
-                pass
+            self._stop_client(old)
         try:
             c = self._new_client(self.client_id)  # tls_set raises on an unreadable CA file
             c.will_set(self._status_topic(), "offline", qos=1, retain=True)
@@ -1078,14 +1117,7 @@ class MqttPublisher:
         finally:
             # always: an orphaned paho thread would keep reconnecting with
             # our callbacks bound and steal the client id from the new client
-            try:
-                c.loop_stop()
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                c.disconnect()
-            except Exception:  # noqa: BLE001
-                pass
+            self._stop_client(c)
         self._connected = False
         self._connected_at = 0.0
         self.stats["connected"] = False
@@ -1286,7 +1318,7 @@ class MqttPublisher:
         try:
             mapped = disc.command_to_service(domain, object_id, field, payload)
         except (ValueError, KeyError, OverflowError, RecursionError) as err:
-            _LOGGER.warning("MQTT command %s=%r rejected: %s", msg.topic, _mask_codes(payload), err)
+            _LOGGER.warning("MQTT command %s=%r rejected: %s", msg.topic, _mask_codes(payload, MASK_SCAN_CHARS), err)
             self._finish(rec, "rejected", str(err))
             return
         if mapped is None:
@@ -1296,7 +1328,7 @@ class MqttPublisher:
         svc_domain, service, data = mapped
         rec["what"] = f"{domain}.{object_id}/{field} → {svc_domain}.{service}"
         self.stats["commands"] += 1
-        self.stats["last_command"] = f"{msg.topic} = {_mask_codes(payload)}"[:140]
+        self.stats["last_command"] = f"{msg.topic} = {_mask_codes(payload, MASK_SCAN_CHARS)}"[:140]
 
         async def _call() -> None:
             recs = [rec]
@@ -1404,8 +1436,10 @@ class MqttPublisher:
 
     def _remember(self, kind: str, what: str, data: Any, call_id: Any = None) -> dict[str, Any]:
         text = json.dumps(data, default=str) if not isinstance(data, str) else data
-        # masked before it is cut: a cut JSON document no longer parses, and its escaped keys would show
-        rec = {"id": call_id, "kind": kind, "what": what, "data": _mask_codes(text if len(text) <= CALL_MAX_BYTES else text[:1000])[:200],
+        # masked before it is cut: a cut JSON document no longer parses, and its escaped keys would show.  paho's
+        # network thread runs this before any payload check: the text rule reads MASK_SCAN_CHARS of it at most
+        rec = {"id": call_id, "kind": kind, "what": what,
+               "data": _mask_codes(text if len(text) <= CALL_MAX_BYTES else text[:MASK_SCAN_CHARS + 1], MASK_SCAN_CHARS)[:200],
                "received": time.time(), "finished": None, "duration_ms": None, "state": "running", "error": None, "result": None}
         self.history.append(rec)
         return rec
@@ -1565,7 +1599,7 @@ class MqttPublisher:
                 while len(self._calls) > CALLS_REMEMBERED:
                     del self._calls[next(iter(self._calls))]  # the oldest _id
         self.stats["calls"] += 1
-        self.stats["last_call"] = f"{domain}.{service} {_mask_codes(json.dumps(data))}"[:140]
+        self.stats["last_call"] = f"{domain}.{service} {_mask_codes(json.dumps(data), MASK_SCAN_CHARS)}"[:140]
 
         def done(state: str, error: str | None, res: dict[str, Any]) -> None:
             self._finish(rec, state, error, res)
