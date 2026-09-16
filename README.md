@@ -193,7 +193,9 @@ integration, any release, branch or commit, and a Home Assistant version, then
 *Check*. Check resolves the ref to a commit, downloads that commit into a scratch directory, resolves its
 Python requirements with `pip --dry-run`, evaluates patches and dependencies
 and the minimum HA version, and tells you whether anything blocks the
-combination, without touching the running environment. *Prepare* installs
+combination, without installing anything. Resolving and building packages that
+come as source archives runs their build code (`setup.py`, PEP 517 hooks) in the
+container, as the install would. *Prepare* installs
 exactly the combination that passed, at the commit Check saw: if a branch has
 moved since, run Check again, and if GitHub cannot say which commit the ref
 points at, Prepare refuses. Check also warns about configuration the
@@ -938,9 +940,12 @@ name (a reverse proxy with its own name, see below).
 Over plain HTTP the password and the session travel unencrypted, so on a
 network you do not trust put the UI behind a reverse proxy with TLS. The status
 page served before Home Assistant runs (while a Home Assistant version
-installs, or while a failed restore waits for a retry) is not protected; it
-shows only the phase and, for a failed restore, the name of the backup to
-restore from.
+installs, or while a failed restore waits for a retry) is not protected. It
+shows the phase and, for a failed restore, the name of the backup to restore
+from; while Home Assistant installs and no password is set, it also shows the
+tail of the install log, which the System page shows to anyone without a
+password anyway. While a failed restore holds the boot, `/api/` paths answer
+`503` with `installing: false` and `restore_failed: true`.
 
 Behind a reverse proxy, note that Home Assistant's HTTP server in the container
 is not set up for proxies: it answers `400 Bad Request` to any request that
@@ -1020,7 +1025,10 @@ What is in place:
   The environment builder downloads exactly the commit its Check verified.
 - An imported Home Assistant backup must be the uncompressed `.tar` Home
   Assistant writes. Its configuration archive may be at most 2 GB, its
-  `backup.json` at most 1 MB, and what it unpacks at most 2 GB; neither the
+  `backup.json` at most 1 MB, and what it extracts at most 2 GB. Reading its
+  configuration archive may decompress at most 20 times the archive's size (at
+  least 2 GB), skipped members included, and an extended tar header over 1 MB
+  is refused; neither the
   backup nor its configuration archive may hold more than 100000 files. Config entries
   with an invalid id are skipped.
 - Dangerous service domains are not callable, over MQTT or from the UI.
@@ -1091,7 +1099,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
     ha-install.log              pip output of the last Home Assistant version install
     import.tar                  an uploaded Home Assistant backup, until it is inspected
     import-extracted/           what the inspection unpacked from it, until the import or Clear
-  .storage.pre-rebuild-<time>/  .storage set aside by a clean start, removed once the rebuild finished
+  .storage.pre-rebuild-<time>/  .storage set aside by a clean start, removed once the rebuild finished or a restore replaced .storage before that
   backups/                      backups (zip); <time>-pre-restore.zip is the copy taken before a restore
 ```
 
@@ -1205,8 +1213,10 @@ progress (50): try again later`.
 ## Troubleshooting
 
 - **The page keeps showing the installation progress.** The first start
-  downloads Home Assistant; a slow connection can take several minutes. The
-  container log (`docker logs <name>`) shows pip's progress. While it runs the
+  downloads Home Assistant; a slow connection can take several minutes.
+  Without a password the page shows pip's progress; it is also in
+  `integration_manager/ha-install.log` on the volume, while the container log
+  shows only the start and end of the install. While it runs the
   page and every `/api/` path answer `503` with a `Retry-After: 5`, and under
   `/api/` with a JSON body naming the phase and how long the install has been
   going, so a healthcheck does not call the container healthy while there is no

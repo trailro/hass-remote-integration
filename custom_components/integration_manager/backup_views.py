@@ -263,17 +263,12 @@ class RestoreCancelView(ManagerView):
 def _cancel_restore_by_hand(cfg: str) -> tuple[bool, str | None]:
     """Blocking: (cancelled, the version change the restore belongs to).  A version change's own restore stays:
     without it that switch is cancelled by the entrypoint one boot later (its restore "did not happen"), while
-    ha.json still shows it scheduled; it goes with the switch (HaUpdater.cancel_config_change).  A leftover
-    for a switch that is no longer in ha.json is cancelled like any other.  The schedule is read once and
-    cancelled only while it is still that archive's: one scheduled in between is never taken for this one."""
-    meta = backupkit._pending_meta(cfg) or {}  # noqa: SLF001 - its archive and its version from one read
-    for_version = meta.get("for_version")
-    if for_version and backupkit.pending(cfg):
-        ha_state = read_json(os.path.join(cfg, backupkit.STATE_DIR, "ha.json"), {})
-        change = ha_state.get("change") if isinstance(ha_state, dict) else None
-        if isinstance(change, dict) and change.get("to") == for_version:
-            return False, str(for_version)
-    return backupkit.cancel_restore(cfg, only_zip=meta.get("zip")), None
+    ha.json still shows it scheduled; it goes with the switch (HaUpdater.cancel_config_change).  backupkit
+    checks and cancels under the schedule lock, so a restore scheduled in between is never taken for this one."""
+    try:
+        return backupkit.cancel_restore(cfg, by_hand=True), None
+    except backupkit.BelongsToVersionChange as err:
+        return False, str(err.for_version)
 
 
 def _last_restore(hass: HomeAssistant) -> dict[str, Any] | None:
