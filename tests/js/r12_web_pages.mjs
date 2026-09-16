@@ -24,4 +24,14 @@ const out = {};
     out.logout[name] = { alerts, sent, href: location.href };
   }
 }
+{  // C3: the target's entity domains come from an integration's services.yaml
+  const src = read('services.js');
+  const code = src.slice(src.indexOf('function selKind('), src.indexOf('function chips('));
+  const { callForm } = new Function('document', 'esc', 'CSS', 'fetch', 'confirm', code + '\nreturn {callForm};')(
+    document, pageEsc(path.join(STATIC, 'services.js')), { escape: s => s }, async () => ({}), () => true);
+  const x = new El('td');
+  x.innerHTML = callForm('demo', { name: 'probe', fields: {}, target: { entity: [{ domain: ['<img src=x onerror=alert(1)>', 'light'] }, { domain: 'switch' }] } });
+  const label = x.querySelectorAll('label')[0];
+  out.target_domains = { images: x.querySelectorAll('img').length, label: label ? label.textContent : null };
+}
 console.log(JSON.stringify(out));

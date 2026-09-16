@@ -57,7 +57,7 @@ function fieldInput(name,f){const sel=f.selector||{}, k=Object.keys(sel)[0], v=s
  return `<label>${esc(name)}${f.required?' <span class="req">*</span>':''} <span class="mut">${esc(selKind(sel))}</span></label><input type="text" id="${esc(id)}" data-kind="text" value="${typeof ex==='string'||typeof ex==='number'?esc(ex):''}" placeholder="${esc(f.description||'')}">`;}
 function callForm(domain,s){const keys=Object.keys(s.fields||{});
  return `<div class="call"><div class="k">call <b>${esc(domain)}.${esc(s.name)}</b> from here (runs in this container's HA; the same call over MQTT goes to <code>&lt;base&gt;/call/${esc(domain)}/${esc(s.name)}</code>)</div>
-  ${s.target?`<label>target entity_id(s) <span class="mut">comma separated${s.target.entity&&[].concat(s.target.entity).some(t=>t.domain)?' · '+[].concat(s.target.entity).map(t=>[].concat(t.domain||[]).join('/')).join(', '):''}</span></label><input type="text" id="ct_entity" placeholder="climate.x, sensor.y">`:''}
+  ${s.target?`<label>target entity_id(s) <span class="mut">comma separated${s.target.entity&&[].concat(s.target.entity).some(t=>t.domain)?' · '+esc([].concat(s.target.entity).map(t=>[].concat(t.domain||[]).join('/')).join(', ')):''}</span></label><input type="text" id="ct_entity" placeholder="climate.x, sensor.y">`:''}
   <div class="grid">${keys.map(k=>`<div>${fieldInput(k,s.fields[k])}</div>`).join('')}</div>
   <label>extra service data <span class="mut">JSON, merged over the fields above (for fields the catalog does not list)</span></label><textarea id="ct_extra" rows="2" placeholder="{}"></textarea>
   <div class="row" style="margin-top:8px"><button class="primary" id="ct_go">Call service</button><span id="ct_msg" class="mut"></span></div><pre id="ct_out"></pre></div>`;}
