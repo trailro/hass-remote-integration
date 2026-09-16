@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import re
 import time
@@ -280,8 +279,9 @@ class BuildPrepareView(ManagerView):
             if _HA_CHANGE_LOCK.locked():
                 return self.json({"ok": False, "error": "a Home Assistant version change is being prepared: try again in a moment", "steps": steps})
             try:
-                dropped = await self.installer.hass.async_add_executor_job(self.updater.cancel_config_change)
-                self.updater.set_desired(ha)
+                async with _HA_CHANGE_LOCK:  # held across both writes: a change scheduled in between would be overwritten
+                    dropped = await self.installer.hass.async_add_executor_job(self.updater.cancel_config_change)
+                    await self.installer.hass.async_add_executor_job(self.updater.set_desired, ha)
             except ValueError as err:  # an unreadable ha.json
                 return self.json({"ok": False, "error": f"Home Assistant {ha}: {err}", "steps": steps})
             steps.append({"step": "ha", "ok": True, "desired": ha, "note": f"cancelled the scheduled move to {ha_state.get('desired')}"

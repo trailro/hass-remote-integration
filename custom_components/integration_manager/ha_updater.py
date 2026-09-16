@@ -24,7 +24,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 PYPI_URL = "https://pypi.org/pypi/homeassistant/json"
 CACHE_S = 600
-_STABLE = re.compile(r"^\d{4}\.\d{1,2}\.\d+$")
+_STABLE = re.compile(r"^\d{4}\.\d{1,2}\.\d+\Z")  # \Z: "$" also matches before a trailing newline
 
 
 class HaUpdater:
@@ -118,6 +118,7 @@ class HaUpdater:
         return out
 
     def previous_version(self) -> str:
+        """Blocking: reads ha.json."""
         prev = self._read().get("previous")
         if not prev:
             raise ValueError("no previous Home Assistant version recorded")
@@ -173,8 +174,11 @@ class HaUpdater:
         return await self.hass.async_add_executor_job(self.set_desired, version.strip())
 
     def set_desired(self, version: str, change: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Blocking, for the executor.  Not only for the fsyncs: the per-file lock is shared with writers that run
+        in executor threads (run.py's boot-ok mark, an async_set_desired), so on the loop it would wait for their
+        fsync too, with nothing bounding it on a stalled disk, and every view, MQTT command and timer waits with it."""
         version = version.strip()
-        if not _STABLE.match(version) and not re.match(r"^\d{4}\.\d{1,2}\.\d+(b\d+)?$", version):
+        if not _STABLE.match(version) and not re.match(r"^\d{4}\.\d{1,2}\.\d+(b\d+)?\Z", version):
             raise ValueError(f"not a Home Assistant version: {version!r}")
 
         def apply(state: dict[str, Any]) -> dict[str, Any]:
