@@ -188,6 +188,11 @@ def _mask_codes(text: str, limit: int | None = None) -> str:
         else:
             if changed:
                 text = json.dumps(masked, ensure_ascii=False)
+    return _mask_text(text, limit)
+
+
+def _mask_text(text: str, limit: int | None = None) -> str:
+    """The text rule of _mask_codes alone: for text whose JSON keys are masked already, or that does not parse."""
     rule = _CODE_VALUE
     if limit is not None and len(text) > limit:
         text, rule = text[:limit], _CODE_VALUE_CUT
@@ -338,15 +343,6 @@ def platform_of(hass: HomeAssistant, entity_id: str) -> str | None:
             if entity_id in platform.entities:
                 return platform.platform_name
     return None
-
-
-def _call_id_of(payload: str) -> Any:
-    """The "_id" of a call payload when it can be read (echoed in a refusal), else None."""
-    try:
-        data = _loads_call(payload)
-    except (ValueError, RecursionError):
-        return None
-    return data.get("_id") if isinstance(data, dict) else None
 
 
 def _comp_key(entity_id: str) -> str:
@@ -1541,12 +1537,19 @@ class MqttPublisher:
             return
         c.publish(f"{self.base_topic}/manager/result", _dumps({"ok": False, "action": action[:40], "error": error}), qos=1, retain=False)
 
-    def _remember(self, kind: str, what: str, data: Any, call_id: Any = None) -> dict[str, Any]:
-        text = json.dumps(data, default=str) if not isinstance(data, str) else data
-        # masked before it is cut: a cut JSON document no longer parses, and its escaped keys would show.  paho's
-        # network thread runs this before any payload check: the text rule reads MASK_SCAN_CHARS of it at most
+    def _remember(self, kind: str, what: str, data: Any, call_id: Any = None, unparsable: bool = False) -> dict[str, Any]:
+        """data: the text as received, or what it parsed to (masked on its keys, never parsed again); unparsable: text
+        that is known not to parse (only the text rule reads it)."""
+        if isinstance(data, str):
+            # masked before it is cut: a cut JSON document no longer parses, and its escaped keys would show.  paho's
+            # network thread runs this before any payload check: the text rule reads MASK_SCAN_CHARS of it at most
+            text = data if len(data) <= CALL_MAX_BYTES else data[:MASK_SCAN_CHARS + 1]
+            shown = _mask_text(text, MASK_SCAN_CHARS) if unparsable else _mask_codes(text, MASK_SCAN_CHARS)
+        else:
+            masked, changed = _masked(data, MASK_SCAN_CHARS)
+            shown = _mask_text(json.dumps(masked, ensure_ascii=False, default=str) if changed else json.dumps(data, default=str), MASK_SCAN_CHARS)
         rec = {"id": call_id, "kind": kind, "what": what,
-               "data": _mask_codes(text if len(text) <= CALL_MAX_BYTES else text[:MASK_SCAN_CHARS + 1], MASK_SCAN_CHARS)[:200],
+               "data": shown[:200],
                "received": time.time(), "finished": None, "duration_ms": None, "state": "running", "error": None, "result": None}
         self.history.append(rec)
         return rec
@@ -1655,31 +1658,40 @@ class MqttPublisher:
         an optional "_id" is echoed back).  Outcome goes to
         <base>/result/<domain>/<service>, not retained."""
         parts = rest.split("/")
-        # read once, before the payload is parsed for real: the refusals below all answer with it, and the
-        # command history is only useful to the consumer when a refused call carries the id it sent
-        sent_id = _call_id_of(payload)
+        # parsed once, on paho's thread, and passed along: the refusals below all answer with the id it carries (the
+        # command history is only useful to the consumer when a refused call carries the id it sent), and the history
+        # masks what it parsed to
+        try:
+            parsed: Any = _loads_call(payload)
+            bad = None if isinstance(parsed, dict) else "payload must be a JSON object"
+        except (ValueError, RecursionError) as err:
+            parsed, bad = None, str(err)
+        sent_id = parsed.get("_id") if isinstance(parsed, dict) else None
+
+        def remember(what: str) -> dict[str, Any]:
+            if isinstance(parsed, (dict, list)):
+                return self._remember("call", what, parsed, sent_id)
+            return self._remember("call", what, payload, sent_id, unparsable=bad is not None and parsed is None)
+
         if len(parts) != 2:
-            self._finish(self._remember("call", rest[:80], payload, sent_id), "rejected", "topic must be <base>/call/<domain>/<service>")
+            self._finish(remember(rest[:80]), "rejected", "topic must be <base>/call/<domain>/<service>")
             _LOGGER.warning("MQTT call on %r ignored: the topic must be <base>/call/<domain>/<service>", rest[:80])
             return
         domain, service = parts[0].lower(), parts[1].lower()  # HA looks services up in lower case, so the deny list must too
         if not _SERVICE_NAME.fullmatch(domain) or not _SERVICE_NAME.fullmatch(service):
-            self._finish(self._remember("call", rest[:80], payload, sent_id), "rejected", "domain and service must be names made of a-z, 0-9 and _")
+            self._finish(remember(rest[:80]), "rejected", "domain and service must be names made of a-z, 0-9 and _")
             return
         denied = (f"domain {domain} is not callable over MQTT" if domain in MQTT_CALL_DENY_DOMAINS or domain in self.config.exclude_integrations
                   else f"{domain}.{service} is not callable over MQTT" if (domain, service) in MQTT_CALL_DENY_SERVICES else None)
         if denied:
             self._publish_result(domain, service, {"id": sent_id, "service": f"{domain}.{service}", "ok": False, "error": denied})
-            self._finish(self._remember("call", f"{domain}.{service}", payload, sent_id), "rejected", denied)
+            self._finish(remember(f"{domain}.{service}"), "rejected", denied)
             return
-        try:
-            data = _loads_call(payload)
-            if not isinstance(data, dict):
-                raise ValueError("payload must be a JSON object")
-        except (ValueError, RecursionError) as err:
-            self._publish_result(domain, service, {"id": sent_id, "service": f"{domain}.{service}", "ok": False, "error": f"bad payload: {err}"})
-            self._finish(self._remember("call", f"{domain}.{service}", payload, sent_id), "rejected", f"bad payload: {err}")
+        if bad is not None:
+            self._publish_result(domain, service, {"id": sent_id, "service": f"{domain}.{service}", "ok": False, "error": f"bad payload: {bad}"})
+            self._finish(remember(f"{domain}.{service}"), "rejected", f"bad payload: {bad}")
             return
+        data: dict[str, Any] = parsed
         call_id = data.pop("_id", None)
         secret = self._password_value(domain, service, data)
         shown = {**data, "value": "***"} if secret else data
@@ -1708,7 +1720,7 @@ class MqttPublisher:
                 while len(self._calls) > CALLS_REMEMBERED:
                     del self._calls[next(iter(self._calls))]  # the oldest _id
         self.stats["calls"] += 1
-        self.stats["last_call"] = f"{domain}.{service} {_mask_codes(json.dumps(shown), MASK_SCAN_CHARS)}"[:140]
+        self.stats["last_call"] = f"{domain}.{service} {rec['data']}"[:140]
 
         def done(state: str, error: str | None, res: dict[str, Any]) -> None:
             if secret and error:
