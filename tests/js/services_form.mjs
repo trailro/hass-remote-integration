@@ -4,6 +4,7 @@
 //   node tests/js/services_form.mjs <path to services.js>
 import fs from 'fs';
 import { El, document, pageEsc } from './dom.mjs';
+import { selector as customMulti, roundTrips, typeItems } from './select_roundtrip.mjs';
 
 const src = fs.readFileSync(process.argv[2], 'utf8');
 const code = src.slice(src.indexOf('function selKind('), src.indexOf('function chips('));
@@ -31,7 +32,7 @@ const scenarios = {
   // F14 on this page: a single select with custom_value is one text box, read whole
   custom_single_comma: () => call({ who: { selector: { select: { options: ['a'], custom_value: true } } } }, typeInto('who', 'Smith, John')),
   custom_multi_comma: () => call({ who: { selector: { select: { options: ['a'], multiple: true, custom_value: true } } } },
-    x => { x.querySelector('#cf_who').querySelector('[data-custom]').value = 'Smith, John'; }),
+    x => typeItems(() => x.querySelector('#cf_who').querySelectorAll('[data-item]'), () => x.querySelector('#cf_who').querySelector('button[data-add]'), ['Smith, John'])),
   text_single_comma: () => call({ word: { selector: { text: {} } } }, typeInto('word', 'Smith, John')),
 
   // F15 on this page: a list of strings, one input per item
@@ -49,6 +50,16 @@ const scenarios = {
     button(x, 'words', 'button[data-add]')[0].click(); items(x, 'words')[1].value = 'line 1\nline 2'; }),
   text_multiple_password: async () => ({ type: (() => { const x = new El('td'); x.innerHTML = callForm('demo', { name: 'probe', fields: words({ type: 'password' }) }); return items(x, 'words')[0].type; })() }),
 };
+
+// F18: the round trips config_form.mjs runs too (an example here, as a service's catalog gives one; nothing sent is [])
+for (const [key, fx] of Object.entries(roundTrips)) {
+  scenarios[`roundtrip.${key}`] = async () => {
+    const sent = await call({ names: { selector: { select: { ...customMulti, ...(fx.mode ? { mode: fx.mode } : {}) } }, example: fx.value } },
+      fx.type && (x => typeItems(() => x.querySelector('#cf_names').querySelectorAll('[data-item]'), () => x.querySelector('#cf_names').querySelector('button[data-add]'), fx.type)));
+    return sent.names ?? [];
+  };
+}
+scenarios.custom_multi_default_not_example = async () => call({ names: { selector: { select: customMulti }, default: ['Smith, John', '  padded  '] } });
 
 const out = {};
 for (const [key, run] of Object.entries(scenarios)) {

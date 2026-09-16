@@ -166,6 +166,20 @@ const DURATION_UNITS=['days','hours','minutes','seconds','milliseconds'];  // HA
 // HA's own duration validation (cv.time_period_dict) takes floats, so a part may hold one:
 // step=1 would make the browser call a valid 0.5 s out of range and snap it to a whole number.
 function partInput(value,min){ const i=document.createElement('input'); i.type='number'; if(min!=null) i.min=min; i.step='any'; i.style.width='4.5em'; i.value=value; return i; }
+// A list of strings, one input per item, never one box split on commas: an item may hold a comma, or spaces
+// around it.  A blank item is dropped when the form is sent.  HA's TextSelector with multiple takes such a list;
+// so does a select with multiple and custom_value, for the values its options do not list.
+function itemList(values,t2){
+  const el=document.createElement('div');
+  const add=v=>{ const row=document.createElement('div'); row.className='row'; row.style.cssText='flex-wrap:nowrap;margin:0 0 4px';
+    const i=document.createElement(t2.multiline?'textarea':'input'); if(!t2.multiline) i.type=t2.type==='password'?'password':'text';
+    i.dataset.item='1'; i.style.flex='1'; i.value=v==null?'':v;
+    const del=document.createElement('button'); del.type='button'; del.textContent='×'; del.title='remove this item'; del.onclick=()=>row.remove();
+    row.appendChild(i); row.appendChild(del); el.appendChild(row); return i; };
+  values.forEach(add); if(!values.length) add('');
+  const more=document.createElement('button'); more.type='button'; more.dataset.add='1'; more.textContent='+ add an item'; more.onclick=()=>add('').focus();
+  return {el,more};
+}
 function field(f,t,p){
   t=t||{};
   if(f.type==='expandable'){  // a form section: its fields are sent as one object under the section's name
@@ -191,10 +205,12 @@ function field(f,t,p){
     const multi=(kind==='select'&&sel.select&&sel.select.multiple)||f.type==='multi_select';
     const custom=!!(kind==='select'&&sel.select&&sel.select.custom_value);
     const dv=Array.isArray(dflt)?dflt.map(String):[String(dflt)];
-    // a default the options do not list is a custom value already chosen: with custom_value it becomes a
-    // choice of its own, so an untouched form sends it back instead of quietly dropping it
+    // a default the options do not list is a custom value already chosen: with custom_value it is kept, so an
+    // untouched form sends it back instead of quietly dropping it -- a choice of its own for a single value,
+    // a box of its own among the typed values of a multiple one (as the services page draws it)
+    const extra=[];
     if(custom){ const known=new Set(opts.map(o=>String(o.value)));
-      for(const v of dv) if(v!==''&&v!=='undefined'&&v!=='null'&&!known.has(v)){ known.add(v); opts.push({value:v,label:v}); } }
+      for(const v of dv) if(v!==''&&v!=='undefined'&&v!=='null'&&!known.has(v)){ known.add(v); if(multi) extra.push(v); else opts.push({value:v,label:v}); } }
     const vmap={}; opts.forEach(o=>{vmap[String(o.value)]=o.value;}); wrap._values=vmap;  // the HTML value is a string; send what the schema offered
     if(mode==='list'){ wrap.dataset.kind=multi?'checklist':'radio'; el=document.createElement('div'); el.className='radio';
       opts.forEach(o=>{const l=document.createElement('label'); const on=multi?dv.includes(String(o.value)):String(dflt)===String(o.value);
@@ -202,10 +218,13 @@ function field(f,t,p){
     }else{ el=document.createElement('select'); wrap.dataset.kind=multi?'multiselect':'select';
       if(multi){ el.multiple=true; el.size=Math.min(opts.length,8); } else if(!f.required) el.appendChild(new Option('—',''));
       opts.forEach(o=>{const op=new Option(o.label,o.value); if(dv.includes(String(o.value))) op.selected=true; el.appendChild(op);}); }
-    // custom_value: the listed options are a suggestion, not the whole set.  One text box, read by collect()
-    // on top of (single: instead of) what is picked above -- the same contract the services page uses.
-    if(custom){ const ci=document.createElement('input'); ci.type='text'; ci.dataset.custom='1';
-      ci.placeholder=multi?'other values, comma separated':'or type a value';
+    // custom_value: the listed options are a suggestion, not the whole set.  Read by collect() on top of (single:
+    // instead of) what is picked above -- the same contract the services page uses.  Several values: one box per
+    // value (F18); a single value: one box, read whole.
+    if(custom&&multi){ const l=itemList(extra,{}), box=document.createElement('div'); box.dataset.custom='1';
+      const note=document.createElement('span'); note.className='mut'; note.textContent='other values, one per box';
+      box.appendChild(note); box.appendChild(l.el); box.appendChild(l.more); wrap._custom=box; wrap._after=box; }
+    else if(custom){ const ci=document.createElement('input'); ci.type='text'; ci.dataset.custom='1'; ci.placeholder='or type a value';
       wrap._custom=ci; wrap._after=ci; }  // _after is only where it is appended; _custom is what collect() reads
   }else if(kind==='number' || f.type==='integer' || f.type==='float'){
     const n=sel.number||{};
@@ -244,17 +263,9 @@ function field(f,t,p){
     el=document.createElement('input'); el.type='color'; wrap.dataset.kind='color'; el.style.padding='0';
     const rgb=Array.isArray(dflt)?dflt:[0,0,0]; el.value='#'+rgb.map(v=>Math.max(0,Math.min(255,Number(v)||0)).toString(16).padStart(2,'0')).join('');
   }else if(kind==='text'&&sel.text&&sel.text.multiple){
-    // HA's TextSelector with multiple takes a list of strings.  One input per item, never one box split on
-    // commas: an item may hold a comma.  A blank item is dropped when the form is sent.
-    const t2=sel.text; wrap.dataset.kind='textlist'; el=document.createElement('div');
-    const add=v=>{ const row=document.createElement('div'); row.className='row'; row.style.cssText='flex-wrap:nowrap;margin:0 0 4px';
-      const i=document.createElement(t2.multiline?'textarea':'input'); if(!t2.multiline) i.type=t2.type==='password'?'password':'text';
-      i.dataset.item='1'; i.style.flex='1'; i.value=v==null?'':v;
-      const del=document.createElement('button'); del.type='button'; del.textContent='×'; del.title='remove this item'; del.onclick=()=>row.remove();
-      row.appendChild(i); row.appendChild(del); el.appendChild(row); return i; };
-    const items=Array.isArray(dflt)?dflt:(dflt==null||dflt==='')?[]:[dflt];
-    items.forEach(add); if(!items.length) add('');
-    const more=document.createElement('button'); more.type='button'; more.textContent='+ add an item'; more.onclick=()=>add('').focus(); wrap._after=more;
+    // HA's TextSelector with multiple takes a list of strings: one input per item (itemList)
+    wrap.dataset.kind='textlist';
+    const l=itemList(Array.isArray(dflt)?dflt:(dflt==null||dflt==='')?[]:[dflt],sel.text); el=l.el; wrap._after=l.more;
   }else if(kind==='text' || f.type==='string' || kind===undefined){
     const t2=sel.text||{}; if(t2.multiline){ el=document.createElement('textarea'); } else { el=document.createElement('input'); el.type=t2.type==='password'?'password':'text'; }
     if(dflt!=null) el.value=dflt; wrap.dataset.kind='text';
@@ -287,9 +298,9 @@ function collect(root){
     const n=w.dataset.name, k=w.dataset.kind, el=w._el; let v;
     if(k==='section'){ out[n]=collect(w); continue; }
     const orig=x=>(w._values&&Object.prototype.hasOwnProperty.call(w._values,x))?w._values[x]:x;
-    // custom_value: what the user typed.  Several values: one per comma.  A single value: the whole box, as
-    // typed (HA takes any string, commas included); a box holding only blanks is nothing typed.
-    const typed=()=>w._custom?w._custom.value.split(',').map(t=>t.trim()).filter(Boolean):[];
+    // custom_value: what the user typed, as typed (HA takes any string, commas and spaces included).  Several
+    // values: one per box.  A single value: the whole box.  A box holding only blanks is nothing typed.
+    const typed=()=>w._custom?[...w._custom.querySelectorAll('[data-item]')].map(i=>i.value).filter(t=>t.trim()!==''):[];
     const typedOne=()=>(w._custom&&w._custom.value.trim()!=='')?w._custom.value:null;
     const withTyped=list=>{for(const t of typed()) if(!list.includes(t)) list.push(t); return list;};
     if(k==='boolean') v=el.checked;

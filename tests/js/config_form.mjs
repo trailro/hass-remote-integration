@@ -4,6 +4,7 @@
 //   node tests/js/config_form.mjs <path to config.js>
 import fs from 'fs';
 import { El, Option, document, pageEsc } from './dom.mjs';  // .value is a string there, as in a browser: that is what hid F15
+import { selector as customMulti, roundTrips, typeItems } from './select_roundtrip.mjs';
 
 const src = fs.readFileSync(process.argv[2], 'utf8');
 const code = src.slice(src.indexOf('function optionsOf('), src.indexOf('function clearErrors('));
@@ -17,7 +18,8 @@ function submit(schemaField, touch) {  // what the page would send for a form th
   if (touch) touch(wrap);
   return collect(form);
 }
-const type = text => wrap => { wrap._custom.value = text; };  // what the user puts in the custom_value box
+const type = text => wrap => { wrap._custom.value = text; };  // what the user puts in the custom_value box (a single value)
+const typeItem = text => wrap => typeItems(() => wrap._custom.querySelectorAll('[data-item]'), () => wrap._custom.querySelector('button[data-add]'), [text]);  // several: one box per value
 const items = wrap => wrap._el.querySelectorAll('[data-item]');  // the inputs of a list of strings
 const multiText = extra => ({ name: 'words', selector: { text: { multiple: true, ...extra } } });
 
@@ -50,7 +52,7 @@ const scenarios = {
   // F11: custom_value -- a default the options do not list is kept, and a new one can be typed
   custom_multi_dropdown: () => submit({ name: 'choices', selector: { select: { options: ['a', 'b'], multiple: true, custom_value: true } }, default: ['a', 'custom'] }),
   custom_multi_list: () => submit({ name: 'choices', selector: { select: { options: ['a', 'b'], multiple: true, custom_value: true, mode: 'list' } }, default: ['a', 'custom'] }),
-  custom_multi_typed: () => submit({ name: 'choices', selector: { select: { options: ['a', 'b'], multiple: true, custom_value: true } }, default: ['a'] }, type('x, y')),
+  custom_multi_typed: () => submit({ name: 'choices', selector: { select: { options: ['a', 'b'], multiple: true, custom_value: true } }, default: ['a'] }, typeItem('x, y')),
   custom_single_default: () => submit({ name: 'choice', selector: { select: { options: ['a', 'b'], custom_value: true } }, default: 'custom' }),
   custom_single_list_default: () => submit({ name: 'choice', selector: { select: { options: ['a', 'b'], custom_value: true, mode: 'list' } }, default: 'custom' }),
   custom_single_typed: () => submit({ name: 'choice', selector: { select: { options: ['a', 'b'], custom_value: true } }, default: 'a' }, type('typed')),
@@ -60,7 +62,7 @@ const scenarios = {
   custom_single_comma: () => submit({ name: 'choice', selector: { select: { options: ['a', 'b'], custom_value: true } }, default: 'a' }, type('Smith, John')),
   custom_single_list_comma: () => submit({ name: 'choice', selector: { select: { options: ['a', 'b'], custom_value: true, mode: 'list' } }, default: 'a' }, type('Smith, John')),
   custom_single_blank_box: () => submit({ name: 'choice', selector: { select: { options: ['a', 'b'], custom_value: true } }, default: 'b' }, type('   ')),
-  custom_multi_comma: () => submit({ name: 'choices', selector: { select: { options: ['a', 'b'], multiple: true, custom_value: true } }, default: [] }, type('Smith, John')),
+  custom_multi_comma: () => submit({ name: 'choices', selector: { select: { options: ['a', 'b'], multiple: true, custom_value: true } }, default: [] }, typeItem('Smith, John')),
 
   // F15: a multiple text selector is a list of strings, whatever the strings hold
   text_multiple_empty: () => submit({ ...multiText(), default: [] }),
@@ -78,6 +80,12 @@ const scenarios = {
   text_multiple_password: () => { const w = field({ ...multiText({ type: 'password' }), default: ['x'] }, {}, null); return { type: items(w)[0].type }; },
   text_single_unchanged: () => submit({ name: 'word', selector: { text: {} }, default: 'Smith, John' }),
 };
+// F18: the round trips services_form.mjs runs too; the list goes out under roundtrip.<fixture>
+for (const [key, fx] of Object.entries(roundTrips)) {
+  scenarios[`roundtrip.${key}`] = () => submit({ name: 'names', selector: { select: { ...customMulti, ...(fx.mode ? { mode: fx.mode } : {}) } }, default: fx.value },
+    fx.type && (w => typeItems(() => w._custom.querySelectorAll('[data-item]'), () => w._custom.querySelector('button[data-add]'), fx.type))).names;
+}
+
 // one scenario that throws is reported under its own name instead of taking the others down with it
 const out = {};
 for (const [key, run] of Object.entries(scenarios)) {

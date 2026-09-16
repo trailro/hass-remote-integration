@@ -44,9 +44,10 @@ function fieldInput(name,f){const sel=f.selector||{}, k=Object.keys(sel)[0], v=s
  if(k==='boolean'&&f.required) return `<label>${esc(name)} <span class="req">*</span></label><input type="checkbox" id="${esc(id)}" data-kind="boolean" style="width:auto" ${ex===true?'checked':''}>`;
  if(k==='boolean') return `<label>${esc(name)} <span class="mut">${ex===true||ex===false?'default '+ex:'optional'}</span></label><select id="${esc(id)}" data-kind="bool3"><option value="">— (not sent)</option><option value="true">true</option><option value="false">false</option></select>`;
  const opts=k==='select'&&v.options?v.options.map(o=>typeof o==='object'?{val:o.value,lab:o.label??o.value}:{val:o,lab:o}):null;
- if(opts&&v.multiple){ const pre=new Set([].concat(ex===''?[]:ex).map(String));  // a list, as the selector declares: checkboxes, and a custom entry when allowed
-  const listed=new Set(opts.map(o=>String(o.val))), extra=[...pre].filter(x=>!listed.has(x));  // an example the options do not list is a custom value: it belongs in the custom box, not nowhere
-  return `<label>${esc(name)}${f.required?' <span class="req">*</span>':''} <span class="mut">one or more</span></label><div id="${esc(id)}" data-kind="multi" class="multi">${opts.map(o=>`<label style="display:inline-flex;gap:4px;margin-right:10px"><input type="checkbox" style="width:auto" value="${esc(o.val)}" ${pre.has(String(o.val))?'checked':''}>${esc(o.lab)}</label>`).join('')}${v.custom_value?`<input type="text" data-custom="1" value="${esc(extra.join(', '))}" placeholder="other values, comma separated">`:''}</div>`; }
+ if(opts&&v.multiple){ const pre=new Set([].concat(ex===''?[]:ex).map(String));  // a list, as the selector declares: checkboxes, and custom items when allowed
+  const listed=new Set(opts.map(o=>String(o.val))), extra=[...pre].filter(x=>!listed.has(x));  // an example the options do not list is a custom value: it gets a box of its own, not nowhere
+  // one box per custom item, as a list of strings: joined into one box and split on commas, "Smith, John" went out as two items and "  padded  " trimmed
+  return `<label>${esc(name)}${f.required?' <span class="req">*</span>':''} <span class="mut">one or more</span></label><div id="${esc(id)}" data-kind="multi" class="multi">${opts.map(o=>`<label style="display:inline-flex;gap:4px;margin-right:10px"><input type="checkbox" style="width:auto" value="${esc(o.val)}" ${pre.has(String(o.val))?'checked':''}>${esc(o.lab)}</label>`).join('')}${v.custom_value?`<div data-custom="1" style="margin-top:4px"><span class="mut">other values, one per box</span>${(extra.length?extra:['']).map(t=>textItem(t)).join('')}<button type="button" data-add="1">+ add a value</button></div>`:''}</div>`; }
  if(opts&&v.custom_value) return `<label>${esc(name)}${f.required?' <span class="req">*</span>':''} <span class="mut">pick or type</span></label><input type="text" id="${esc(id)}" data-kind="text" list="${esc(id)}_list" value="${typeof ex==='string'||typeof ex==='number'?esc(ex):''}"><datalist id="${esc(id)}_list">${opts.map(o=>`<option value="${esc(o.val)}">${esc(o.lab)}</option>`).join('')}</datalist>`;
  if(k==='select'&&v.options) return `<label>${esc(name)}${f.required?' <span class="req">*</span>':''}</label><select id="${esc(id)}" data-kind="select"><option value="">—</option>${v.options.map(o=>{const val=typeof o==='object'?o.value:o, lab=typeof o==='object'?(o.label??o.value):o; return `<option value="${esc(val)}" ${String(ex)===String(val)?'selected':''}>${esc(lab)}</option>`}).join('')}</select>`;
  if(k==='text'&&v.multiple){ const items=Array.isArray(ex)?ex:(ex===''||ex==null)?[]:[ex];  // HA wants a list of strings here, not one string
@@ -61,7 +62,7 @@ function callForm(domain,s){const keys=Object.keys(s.fields||{});
   <label>extra service data <span class="mut">JSON, merged over the fields above (for fields the catalog does not list)</span></label><textarea id="ct_extra" rows="2" placeholder="{}"></textarea>
   <div class="row" style="margin-top:8px"><button class="primary" id="ct_go">Call service</button><span id="ct_msg" class="mut"></span></div><pre id="ct_out"></pre></div>`;}
 function wireCall(x,domain,s){const go=x.querySelector('#ct_go'); if(!go) return;
- x.addEventListener('click',e=>{const b=e.target.closest('button[data-add],button[data-del]'); if(!b) return;  // the add/remove buttons of a list of strings
+ x.addEventListener('click',e=>{const b=e.target.closest('button[data-add],button[data-del]'); if(!b) return;  // the add/remove buttons of a list of strings (a text list, or custom select values)
   if(b.dataset.del){ b.parentElement.remove(); return; }
   const list=b.parentElement; b.insertAdjacentHTML('beforebegin',textItem('',!!list.dataset.multiline,!!list.dataset.password)); b.previousElementSibling.querySelector('[data-item]').focus(); });
  go.onclick=async()=>{const data={}; let bad=''; const badJson=new Set();
@@ -71,7 +72,7 @@ function wireCall(x,domain,s){const go=x.querySelector('#ct_go'); if(!go) return
    if(kind==='textlist'){ const vals=[...el.querySelectorAll('[data-item]')].map(i=>i.value).filter(t=>t.trim()!=='');
     if(vals.length) data[k]=vals; continue; }  // every item as typed (a comma is part of it); like a multi select, nothing typed is not sent
    if(kind==='multi'){ const vals=[...el.querySelectorAll('input[type=checkbox]:checked')].map(c=>c.value);
-    const custom=el.querySelector('input[data-custom]'); if(custom) vals.push(...custom.value.split(',').map(t=>t.trim()).filter(Boolean));
+    const custom=el.querySelector('[data-custom]'); if(custom) for(const i of custom.querySelectorAll('[data-item]')) if(i.value.trim()!==''&&!vals.includes(i.value)) vals.push(i.value);  // each as typed
     if(vals.length) data[k]=vals; continue; }  // nothing picked: not sent (a required one is reported below)
    const v=el.value; if(v===''||v==null){ if(f.required&&kind==='text') data[k]=''; continue; }  // a required text field may be cleared on purpose
    if(kind==='number') data[k]=Number(v); else if(kind==='json'){ try{data[k]=JSON.parse(v);}catch(e){bad+=`${k}: invalid JSON. `; badJson.add(k);} } else data[k]=v; }
