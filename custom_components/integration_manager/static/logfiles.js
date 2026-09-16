@@ -3,7 +3,7 @@ let files=[];
 const EXAMPLE={pattern:'^(?P<time>\\S+ \\S+) (?P<level>[A-Z]+) \\((?P<thread>[^)]*)\\) \\[(?P<logger>[^\\]]+)\\] (?P<message>.*)$',
  hide:['thread'], dim:['time','logger'], color_by:'level', colors:{WARNING:'warn',ERROR:'bad',CRITICAL:'bad',DEBUG:'muted'}};
 async function loadFiles(){
- files=await (await fetch('/api/log_files')).json();
+ files=await (await fetch('/api/log_files',{headers:{'X-Requested-With':'fetch'}})).json();
  const sel=$('#file'), cur=sel.value;
  sel.innerHTML=files.map(f=>`<option value="${esc(f.name)}" ${f.name===cur?'selected':''}>${esc(f.name)} (${(f.bytes/1024).toFixed(0)} KB${f.active?', active':''}${f.source?', '+esc(f.source):''})</option>`).join('');
  if(!files.length) sel.innerHTML='<option value="">(the running integration writes no log file)</option>';

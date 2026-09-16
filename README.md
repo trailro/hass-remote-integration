@@ -861,6 +861,10 @@ By default there is **no login**, like many self-hosted appliances on a
 trusted LAN. Set `HRI_PASSWORD` (or `HRI_PASSWORD_FILE`, for example a Docker
 secret) to require a password:
 
+- a `HRI_PASSWORD_FILE` that cannot be read, or that is empty (a Docker secret
+  created but never populated), is treated as a password that failed to arrive:
+  nothing is accepted until it is fixed, the login page says why, and the reason
+  is in the log and on the timeline;
 - the browser gets a session cookie from the login page, valid for 30 days,
   and **log out** in the top bar ends every session of the UI, in all browsers,
   including one opened a moment before (each logout starts a new session
@@ -996,7 +1000,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | `HRI_TRACE_IMPORT` | unset | Diagnostics: log who imports the given packages |
 | `HRI_DEBUG` | unset | Debug logging for the manager, and blocking-call detection on the event loop |
 | `HRI_PASSWORD` | unset | Password for the web UI and API; unset or empty means no login |
-| `HRI_PASSWORD_FILE` | unset | File holding the password, for example a Docker secret; wins over `HRI_PASSWORD` |
+| `HRI_PASSWORD_FILE` | unset | File holding the password, for example a Docker secret; wins over `HRI_PASSWORD`, and must not be empty |
 | `HRI_COOKIE_SECURE` | unset | `1` marks the session cookie `Secure` (behind a reverse proxy with TLS) |
 
 ### Files on the volume
@@ -1085,8 +1089,8 @@ the internet or another server, upload files, or return patches, log file
 tails, logs or diagnostics, or run patch code, also need `X-Requested-With: fetch`: `/api/catalog`,
 `/api/patch_editor`, `/api/patches/<domain>` (and its `/upload`), `/api/backups/upload`,
 `/api/import/upload`, `/api/parity`, `/api/releases/preview`,
-`/api/diagnostics`, `/api/diag/memory` (also without `refs`), `/api/logs` and
-`/api/log_files/tail`; without it they answer `400`.
+`/api/diagnostics`, `/api/diag/memory` (also without `refs`), `/api/logs`,
+`/api/log_files` and `/api/log_files/tail`; without it they answer `400`.
 `?refresh=1` on `/api/releases` and `/api/ha` is ignored without it.
 `GET /api/status` answers without the header too (for monitors and
 `verify.sh`), but then from a copy at most 10 seconds old, since building it
