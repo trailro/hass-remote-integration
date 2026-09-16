@@ -27,6 +27,7 @@ import re
 import threading
 import time
 from typing import Any, Callable
+from urllib.parse import unquote_plus
 
 MAX_BYTES = 2_000_000
 KEEP = 2  # process.log.1, process.log.2
@@ -35,6 +36,55 @@ KEEP = 2  # process.log.1, process.log.2
 QUEUE_MAX = 50_000
 _TAIL = 8192  # bytes read from the end of a file to find the last id
 _TORN_ID = re.compile(r'\{"id":\s*(\d+)')  # the id at the start of a record whose line a crash cut short
+
+# A URL in a log line: aiohttp.access writes the request line of every request (and its Referer), HA's http security
+# filter the raw path of a request it refuses.  The log searches send what the user typed as ?q= (someone checking
+# whether a secret was logged types the secret), the Log files page may be asked for a file by a name that holds what
+# its mask hides, and a client may put a credential in any URL (HA's signed paths: authSig).  Those values are masked
+# before a record is written, so they never reach process.log or the container log.
+_URL_QUERY = re.compile(r"([^\s\"'?#]*)\?([^\s\"'#]+)")
+_LOG_SEARCH_PATHS = ("/api/logs", "/api/log_files/tail")
+# on the log search endpoints every value is masked but these, in the form the pages send them
+_LOG_SEARCH_PLAIN = {
+    "level": re.compile(r"[A-Za-z]{1,10}"),
+    "limit": re.compile(r"\d{1,9}"),
+    "since_id": re.compile(r"\d{1,19}"),
+    "lines": re.compile(r"\d{1,9}"),
+    "id": re.compile(r"[0-9a-f]{32}"),
+    "prefix": re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,199}"),  # a logger name
+}
+# elsewhere, a parameter named like a credential (each of these is also a literal the Log files page's search looks
+# for before it runs the scrubber on a line: logfiles_page._RULE_LITERALS)
+_CREDENTIAL_PARAM = re.compile(r"token|pass|pwd|secret|sig|key|code|session|cookie|credential", re.I)
+
+
+def _mask_query(match: re.Match[str]) -> str:
+    path, query = match.group(1), match.group(2)
+    search = unquote_plus(path).rstrip("/").endswith(_LOG_SEARCH_PATHS)
+    parts = []
+    for part in query.split("&"):
+        name, sep, value = part.partition("=")
+        if search and part and not sep:
+            part = "***"  # a value with an unencoded "&" in it (the raw path HA's security filter logs)
+        elif sep and value:
+            name_text = unquote_plus(name)
+            if search:
+                plain = _LOG_SEARCH_PLAIN.get(name_text)
+                if plain is None or not plain.fullmatch(value):
+                    part = f"{name}=***"
+            elif _CREDENTIAL_PARAM.search(name_text):
+                part = f"{name}=***"
+        parts.append(part)
+    return f"{path}?{'&'.join(parts)}"
+
+
+def mask_query_secrets(text: str) -> str:
+    """``text`` with the query values above replaced by ``***``, whatever
+    they hold: the rest of the line (method, path, status, size, time) is
+    kept, and a masked line does not depend on what the value was."""
+    if "?" not in text or "=" not in text:
+        return text
+    return _URL_QUERY.sub(_mask_query, text)
 
 
 class FileLogHandler(logging.Handler):
@@ -112,8 +162,8 @@ class FileLogHandler(logging.Handler):
             "level": record.levelname,
             "levelno": record.levelno,
             "logger": record.name,
-            "message": msg,
-            "exc": exc,
+            "message": mask_query_secrets(msg),
+            "exc": mask_query_secrets(exc) if exc else exc,
         }
         with self.lock:
             rec["id"] = next(self._ids)  # under the lock: ids grow in file order, also when a direct write at exit meets the listener
@@ -174,11 +224,16 @@ class FileLogHandler(logging.Handler):
         than it takes to fill the page.
 
         ``text`` searches the raw message.  A caller whose ``keep`` searches
-        the masked text passes no ``text``: which records reach ``keep``, and
-        so how far the page reaches and how long the answer takes, would
-        otherwise depend on whether a guess matched inside a masked value."""
+        the masked text passes no ``text`` (the Logs page does): which records
+        reach ``keep``, and so how far the page reaches and how long the answer
+        takes, would otherwise depend on whether a guess matched inside a masked
+        value.  With both ``text`` and ``keep``, a record whose text does not
+        contain ``text`` is never returned, but ``keep`` is still asked about
+        it, with its message and traceback left out, so what the caller learns
+        from being asked is the same whether a masked value held the text or not."""
         text = text.lower()
         out: list[dict[str, Any]] = []
+        newer: list[tuple[dict[str, Any], bool]] = []  # with since_id: (record, matched), newest first
         truncated = False
         done = False
         for p in self._files():
@@ -199,26 +254,29 @@ class FileLogHandler(logging.Handler):
                     continue
                 if prefixes and not str(rec.get("logger", "")).startswith(prefixes):
                     continue
-                if text and text not in str(rec.get("message", "")).lower() and text not in str(rec.get("logger", "")).lower():
+                matched = not text or text in str(rec.get("message", "")).lower() or text in str(rec.get("logger", "")).lower()
+                if not matched:
+                    if keep is None:
+                        continue
+                    rec = {**rec, "message": "", "exc": None}
+                if since_id:
+                    newer.append((rec, matched))
                     continue
-                if since_id == 0 and keep is not None and not keep(rec):
+                if keep is not None and not keep(rec) or not matched:
                     continue
                 out.append(rec)
-                if since_id == 0 and len(out) >= limit:
+                if len(out) >= limit:
                     done = True
                     break
             if done:
                 break
         out.reverse()
-        if since_id:
-            page: list[dict[str, Any]] = []
-            for rec in out:
-                if len(page) >= limit:
-                    truncated = True
-                    break
-                if keep is None or keep(rec):
-                    page.append(rec)
-            out = page
+        for rec, matched in reversed(newer):
+            if len(out) >= limit:
+                truncated = True
+                break
+            if (keep is None or keep(rec)) and matched:
+                out.append(rec)
         return out, truncated
 
 
@@ -272,7 +330,9 @@ class _QueueHandler(logging.handlers.QueueHandler):
     """The message is rendered on the logging thread, like the stock handler
     (its arguments may change afterwards), but the traceback stays apart:
     the stock prepare folds it into the message, process.log keeps both
-    fields."""
+    fields.  Query values that can carry a secret are masked here, so the
+    stderr handler behind the queue (the container log) never gets them
+    either."""
 
     listener: _QueueListener
     dropped = 0  # records not queued because the queue was full (approximate across threads; reset when reported)
@@ -289,10 +349,13 @@ class _QueueHandler(logging.handlers.QueueHandler):
             record.message = record.getMessage()
         except Exception:  # noqa: BLE001
             record.message = str(record.msg)
+        record.message = mask_query_secrets(record.message)
         record.msg, record.args = record.message, None
         if record.exc_info:
             record.exc_text = record.exc_text or logging.Formatter().formatException(record.exc_info)
             record.exc_info = None  # the traceback objects hold frames: not kept alive in the queue
+        if record.exc_text:
+            record.exc_text = mask_query_secrets(record.exc_text)
         return record
 
     def handle(self, record: logging.LogRecord) -> Any:
