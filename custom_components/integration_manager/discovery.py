@@ -663,6 +663,20 @@ def _finite(p: str) -> float:
     return value
 
 
+_ON_PAYLOADS, _OFF_PAYLOADS = frozenset({"ON", "TRUE", "1"}), frozenset({"OFF", "FALSE", "0"})
+
+
+def _on_off(p: str) -> bool:
+    """A state payload is one of the two token sets and nothing else: read as a plain "not on",
+    a typo or a TOGGLE the consumer sends would silently turn the device off."""
+    token = p.strip().upper()
+    if token in _ON_PAYLOADS:
+        return True
+    if token in _OFF_PAYLOADS:
+        return False
+    raise ValueError(f"{p!r} is neither an on nor an off payload")
+
+
 def _pick(field: str, table: dict[str, Any]) -> tuple[str, str, dict[str, Any]] | None:
     """Only the chosen field's conversion runs: a literal table would call
     float("heat") while building the entry for "temperature"."""
@@ -674,7 +688,6 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
     """Map an incoming entity command topic to (domain, service, data)."""
     entity_id = f"{domain}.{object_id}"
     p = payload.strip()  # protocol tokens and numbers; literal values (text, message, option) use the payload as sent
-    on = p.upper() in ("ON", "TRUE", "1")
     t = {"entity_id": entity_id}
 
     if domain == "climate":
@@ -693,14 +706,14 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
             "mode": lambda: ("water_heater", "set_operation_mode", {**t, "operation_mode": p}),
         })
     if domain == "switch" and field == "state":
-        return "switch", "turn_on" if on else "turn_off", t
+        return "switch", "turn_on" if _on_off(p) else "turn_off", t
     if domain == "select" and field == "option":
         return "select", "select_option", {**t, "option": payload}  # options match exactly: "eco " is not "eco"
     if domain == "number" and field == "value":
         return "number", "set_value", {**t, "value": _finite(p)}
     if domain == "light":
         if field == "state":
-            return "light", "turn_on" if on else "turn_off", t
+            return "light", "turn_on" if _on_off(p) else "turn_off", t
         return _pick(field, {
             "brightness": lambda: ("light", "turn_on", {**t, "brightness": int(_finite(p))}),
             "color_temp": lambda: ("light", "turn_on", {**t, "color_temp_kelvin": int(_finite(p))}),
@@ -723,7 +736,7 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
             return "valve", "set_valve_position", {**t, "position": int(_finite(p))}
     if domain == "fan":
         if field == "state":
-            return "fan", "turn_on" if on else "turn_off", t
+            return "fan", "turn_on" if _on_off(p) else "turn_off", t
         return _pick(field, {
             "percentage": lambda: ("fan", "set_percentage", {**t, "percentage": int(_finite(p))}),
             "preset_mode": lambda: ("fan", "set_preset_mode", {**t, "preset_mode": p}),
@@ -746,11 +759,11 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
         data = _json_or_text(p)
         if isinstance(data, dict):  # MQTT siren sends {"state": "ON", "tone": ..., "duration": ...}
             extra = {k: v for k, v in data.items() if k in ("tone", "duration", "volume_level")}
-            return "siren", "turn_on" if str(data.get("state", "")).upper() == "ON" else "turn_off", {**t, **extra}
-        return "siren", "turn_on" if on else "turn_off", t
+            return "siren", "turn_on" if _on_off(str(data.get("state", ""))) else "turn_off", {**t, **extra}
+        return "siren", "turn_on" if _on_off(p) else "turn_off", t
     if domain == "humidifier":
         if field == "state":
-            return "humidifier", "turn_on" if on else "turn_off", t
+            return "humidifier", "turn_on" if _on_off(p) else "turn_off", t
         return _pick(field, {
             "humidity": lambda: ("humidifier", "set_humidity", {**t, "humidity": int(_finite(p))}),
             "mode": lambda: ("humidifier", "set_mode", {**t, "mode": p}),
