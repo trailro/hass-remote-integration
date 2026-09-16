@@ -63,6 +63,7 @@ def _read_text(path: str) -> str:
     except OSError:
         return ""
 
+
 def _run_pip(cmd: list[str]) -> subprocess.CompletedProcess:
     """subprocess.run(capture_output=True, text=True, timeout=PIP_TIMEOUT_S), with pip in its own process group:
     a timeout kills the group, so also the build backends pip started (a compiler, meson, a setup.py that hangs),

@@ -1,6 +1,7 @@
 """Review round 9, boot and import part: the import's unpack budget, the pre-HA status page, a restore during a
 pending clean start, the preflight's pip process group."""
 
+import asyncio
 import gzip
 import io
 import json
@@ -14,6 +15,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from types import SimpleNamespace
 from unittest import mock
 
 import backupkit
@@ -315,6 +317,62 @@ class PreflightPipProcessGroupTest(unittest.TestCase):
         self.assertEqual(res, {"ok": True, "install": [], "stderr": ""})
         proc = self.preflight._run_pip([self.python])
         self.assertEqual((proc.returncode, proc.stderr), (0, "warn\n"))
+
+
+class ImportApplyUndoesAnyValueErrorTest(unittest.TestCase):
+    """apply() re-raised every ValueError untouched, taking it for its own: one from inside async_add (a listener
+    of the entry change, anything setup lets through) left the copied stores in place and the originals in
+    .pre-import."""
+
+    def test_a_value_error_from_async_add_puts_the_original_stores_back(self):
+        from custom_components.integration_manager import ha_import
+
+        cfg = _tmp(self)
+        src = os.path.join(cfg, ha_import.EXTRACT_DIR, ".storage")
+        os.makedirs(src)
+        os.makedirs(os.path.join(cfg, ".storage"))
+        for name in ("hub.e1", "hub_shared"):
+            with open(os.path.join(src, name), "w", encoding="utf-8") as fh:
+                fh.write("from the backup")
+        with open(os.path.join(cfg, ".storage", "hub.e1"), "w", encoding="utf-8") as fh:
+            fh.write("this volume's own")
+        summary = {"domains": {"hub": {"entries": [{"entry_id": "e1", "data": {}}], "storage_files": ["hub.e1", "hub_shared"]}}}
+
+        async def executor(fn, *args):
+            return fn(*args)
+
+        async def async_add(_entry):
+            raise ValueError("raised by a listener")
+
+        config_entries = SimpleNamespace(async_entries=lambda _d=None: [], async_get_entry=lambda _i: None, async_add=async_add)
+        hass = SimpleNamespace(config=SimpleNamespace(config_dir=cfg), config_entries=config_entries, async_add_executor_job=executor)
+        aligner = mock.Mock()
+        with mock.patch.object(ha_import, "load_summary", return_value=summary), self.assertRaises(ValueError):
+            asyncio.run(ha_import.apply(hass, aligner, "hub", "e1", None, None, align=False, copy_storage=True, running=False, cleanup=False))
+        self.assertEqual(sorted(os.listdir(os.path.join(cfg, ".storage"))), ["hub.e1"])
+        with open(os.path.join(cfg, ".storage", "hub.e1"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "this volume's own")
+
+
+class CachedCatalogTest(unittest.TestCase):
+    """catalog.search read every key of a row without a default: a hand-edited hacs_catalog.json made the Install
+    page's search a 500 whenever the cached list was used (HACS unreachable)."""
+
+    def test_rows_search_cannot_read_are_dropped_from_the_cached_list(self):
+        from custom_components.integration_manager import catalog
+
+        cfg = _tmp(self)
+        os.makedirs(os.path.join(cfg, "integration_manager"))
+        good = {"domain": "demo", "repo": "o/demo", "name": "Demo", "description": "a demo", "last_version": "1.0",
+                "last_updated": "2026-09-01", "topics": ["demo"]}
+        with open(os.path.join(cfg, "integration_manager", "hacs_catalog.json"), "w", encoding="utf-8") as fh:
+            json.dump({"fetched_at": "x", "rows": [{"domain": "nameless", "repo": "o/n"}, "text", {**good, "topics": None},
+                                                   {**good, "name": 5}, good]}, fh)
+        cat = catalog.Catalog(SimpleNamespace(config=SimpleNamespace(path=lambda *p: os.path.join(cfg, *p))))
+        rows = cat._load_cached()
+        results, total = catalog.search(rows, "demo", {}, set())
+        self.assertEqual((total, results[0]["domain"]), (1, "demo"))
+        self.assertEqual(rows, [good])
 
 
 if __name__ == "__main__":

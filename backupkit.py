@@ -32,7 +32,8 @@ STATE_DIR = "integration_manager"
 # os.replace) names the archive copy and the parts.  The archive is copied
 # under a unique name first, so a failure anywhere leaves the previous
 # schedule (or none) intact and never an archive paired with foreign parts.
-PENDING = os.path.join(STATE_DIR, "restore-pending.zip")  # legacy archive name, still honoured
+# the archive of a schedule whose meta names none: written before 0.7.0 (every schedule since records "zip")
+LEGACY_PENDING_ZIP = os.path.join(STATE_DIR, "restore-pending.zip")
 PENDING_META = os.path.join(STATE_DIR, "restore-pending.json")
 PENDING_GLOB = "restore-pending*.zip"
 # a restore that was applied but whose outcome could not be recorded (a full disk): the meta is renamed
@@ -411,7 +412,7 @@ def pending_archive(config_dir: str) -> str | None:
     meta = _pending_meta(config_dir)
     if meta is None:
         return None
-    path = os.path.join(config_dir, STATE_DIR, meta.get("zip") or os.path.basename(PENDING))
+    path = os.path.join(config_dir, STATE_DIR, meta.get("zip") or os.path.basename(LEGACY_PENDING_ZIP))
     return path if os.path.isfile(path) else None
 
 
