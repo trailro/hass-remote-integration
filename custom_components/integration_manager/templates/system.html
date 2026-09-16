@@ -40,7 +40,7 @@
 </div>
 
 <div class="card"><h2>Import settings from a Home Assistant backup</h2>
- <div class="mut" style="margin-bottom:8px">Upload a Home Assistant backup (<code>.tar</code>, encrypted or not): its config entries are listed per integration; import one (editable data/options) or every installed one at once. Entity/device ids and names can be aligned from the backup and the integration's <code>.storage</code> files copied.</div>
+ <div class="mut" style="margin-bottom:8px">Upload a Home Assistant backup (<code>.tar</code>, encrypted or not): its config entries are listed per integration; import one (editable data/options) or every installed one at once. Entity/device ids and names can be aligned from the backup and the integration's <code>.storage</code> files copied. An import is refused while a start, stop or install is running, or while another import is: wait for it to finish.</div>
  <div class="row" style="margin-bottom:8px">
   <input type="file" id="imfile" accept=".tar"><input type="password" id="impass" placeholder="backup encryption key (if protected)" style="min-width:260px">
   <button id="imupload" class="primary">Upload &amp; inspect</button><button id="imclear">Clear</button><span id="immsg" class="mut"></span>

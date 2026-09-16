@@ -210,12 +210,16 @@ Choose whichever fits the integration, on the **Integration** page:
 
 - **Config flow**: runs the integration's own setup dialog, like HA's
   frontend would (the integration must be started first, because the flow is
-  its code). Field labels, menu entries, errors and abort reasons come from
-  the integration's `translations/en.json`, the same file HA's frontend
-  reads; an integration that ships none shows the raw schema keys. Selectors
-  render as the control they describe (sliders with their unit, durations,
-  dates and times, colours, read-only constants); one the page does not know
-  falls back to a JSON textarea saying so.
+  its code). Step titles and descriptions, field labels and their hints,
+  section names, menu entries, errors, progress messages and abort reasons
+  come from the integration's `translations/en.json`, the same file HA's
+  frontend reads; an integration that ships none shows the raw schema keys.
+  Selectors render as the control they describe: durations, dates, times,
+  colours, read-only constants, and a number as a box, or as a slider when it
+  asks for one and gives both ends, either way with its unit next to the
+  label; one the page does not know falls back to a JSON textarea saying so.
+  A value the page cannot convert (a fraction in a whole-number field, broken
+  JSON) is refused with the reason under that field, and nothing is sent.
 - **YAML config**: for integrations configured in `configuration.yaml`, paste
   what would go under `<domain>:`. It is validated on save and applied at boot.
   When a later release imports that YAML into a config entry, a notification
@@ -227,7 +231,11 @@ Choose whichever fits the integration, on the **Integration** page:
   are aligned, so entities keep the same ids they had in your main HA. A
   config entry whose id is not plain letters and digits is skipped. A store
   file belongs to the longest domain of the backup it is named after:
-  `foo_bar_tokens` comes with `foo_bar`, never with `foo`.
+  `foo_bar_tokens` comes with `foo_bar`, never with `foo`. An import is
+  refused while another import, or a start, stop or install, is running: the
+  import decides as it goes whether the entry is stored enabled, and a stop
+  finishing underneath it would leave an enabled entry behind a manager that
+  reports the integration stopped.
 
 ### 3. Start it
 
@@ -364,6 +372,13 @@ a time: a second one (a double click, or a manual one while the automatic one
 runs) is refused. After an automatic
 rollback there is no Full rollback target: the version the smoke test rejected
 is never offered again that way.
+
+A full rollback records the version it goes back to before it schedules the
+restore, so one cut off halfway (`docker stop`, a power loss) finishes at the
+next boot instead of putting the rejected version back on the restored
+configuration. If the restore did not happen at all (cancelled by hand,
+dropped, or failed), the rollback is given up: the integration stays on the
+version it was running, and the reason goes on the timeline.
 
 A downgrade of the integration after its config entries were migrated to a
 newer format usually fails (`migration_error`), which the preflight warns
@@ -726,7 +741,10 @@ hass_<domain>/manager/result                        outcome of a manager action,
   included. The two bounds of a thermostat range change arrive as two
   commands and become one service call: the first waits up to 1 s for the
   second. An alarm panel with a code asks for it on the main HA and sends it
-  with the action.
+  with the action. The state topic of a switch, light, fan, siren or
+  humidifier takes only `ON`/`OFF`, `TRUE`/`FALSE` or `1`/`0` (any case,
+  surrounding spaces ignored); any other payload is refused rather than read
+  as *off*, with the reason under *recent commands* and in the log.
 - **Service calls**: publish a JSON object to `call/<domain>/<service>` (service
   data plus optional `entity_id`, and an optional `_id`); the result comes back
   on `result/...`, with a `response` key for a service that returns response
@@ -1010,6 +1028,13 @@ picked up by *Reconnect* but lost after a second save from the MQTT page.
 written as `"true"`/`"false"`, `"on"`/`"off"`, `"yes"`/`"no"` or `"1"`/`"0"` is
 read as that value; any other text uses the default.
 
+The numeric MQTT settings have ranges: `port` 1-65535, `qos` 0, 1 or 2,
+`republish_interval_s` 30-86400 s and `full_republish_interval_min` 5-10080
+min. The MQTT page refuses a port or a qos outside them and clamps the two
+intervals. The same ranges are applied when `mqtt.json` is read, so a hand
+edit cannot keep the manager from starting: a value out of range, or not a
+number, falls back to its default (1883, 0, 300, 60) with a warning in the log.
+
 A registry entry in `integration_manager/registry.json` has this shape; only
 `repo` is required:
 
@@ -1176,8 +1201,10 @@ A few things that shaped the code, useful if you read it:
   cannot be installed. Wheels differ between amd64 and arm64, so an integration
   can install on one and not the other.
 - Packages that load native system libraries (`libusb`, `bluez`, codecs) need
-  those libraries in the image. The preflight does not check them. A missing
-  library shows up when the integration loads.
+  those libraries in the image. The image carries `libturbojpeg`, which Home
+  Assistant's camera component wants; nothing else is added for a particular
+  integration. The preflight does not check them. A missing library shows up
+  when the integration loads.
 - The code checks read the source only. Modules imported dynamically
   (`importlib`, `__import__`), code that behaves differently on this Python at
   run time, and incompatibilities inside requirements are caught by the smoke
