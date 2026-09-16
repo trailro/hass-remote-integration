@@ -3,7 +3,10 @@
 ``HRI_PASSWORD`` (or ``HRI_PASSWORD_FILE``, e.g. a Docker secret; it wins)
 set and not empty: every page and API call needs a session cookie from
 ``/login``, or the password as ``Authorization: Bearer <password>`` for
-scripts.  Unset or empty: no login, as before.
+scripts.  Unset or empty: no login, as before.  A ``HRI_PASSWORD_FILE``
+that cannot be read, or that is there but empty, is a password that was
+meant to be set: the UI stays closed with a password nobody knows, and the
+login page says why.
 
 The session cookie carries its expiry and an HMAC over it and a tag of the
 password, keyed with a random key kept on the volume: changing the password
@@ -54,19 +57,26 @@ DATA_KEY = "integration_manager_auth"
 LOGIN_HTML = load_template("login")
 
 
-def _configured_password() -> str:
-    """Blocking: the password from HRI_PASSWORD_FILE or HRI_PASSWORD ('' = no login)."""
+def _configured_password() -> tuple[str, str]:
+    """Blocking: (password, why it cannot be used) from HRI_PASSWORD_FILE or
+    HRI_PASSWORD; ('', '') = no login.  A reason means a password was meant to
+    be set but did not arrive: a random one is returned, so the admin surface
+    stays closed and the reason is what the login page shows."""
     path = os.environ.get("HRI_PASSWORD_FILE", "").strip()
     if path:
         try:
             with open(path, encoding="utf-8") as fh:
-                return fh.read().strip()
+                password = fh.read().strip()
         except OSError as err:
             # fail closed: a password was meant to be set, so the UI must not open without one
-            _LOGGER.error("HRI_PASSWORD_FILE %s is not readable (%s): nobody can log in until it is fixed", path, err)
-            return secrets.token_urlsafe(32)
+            return secrets.token_urlsafe(32), f"HRI_PASSWORD_FILE {path} is not readable ({err})"
+        if not password:
+            # a Docker secret declared but never populated, or a file truncated by a full disk, reads
+            # as "": the same mistake as an unreadable one, and must not open the UI either
+            return secrets.token_urlsafe(32), f"HRI_PASSWORD_FILE {path} is empty"
+        return password, ""
     password = os.environ.get("HRI_PASSWORD", "")
-    return password if password.strip() else ""
+    return (password, "") if password.strip() else ("", "")
 
 
 def _load_key(path: str) -> bytes:
@@ -88,8 +98,11 @@ def _load_key(path: str) -> bytes:
 
 
 class Auth:
-    def __init__(self, password: str, key: bytes = b"", revoked_path: str | None = None) -> None:
+    def __init__(self, password: str, key: bytes = b"", revoked_path: str | None = None, unusable: str = "") -> None:
         self.enabled = bool(password)
+        # set when the configured password never arrived: the password here is a random one nobody
+        # knows, and this is the text the login page shows instead of "wrong password"
+        self.unusable = unusable
         self.revoked_path = revoked_path
         # session generation, raised by every logout and signed into each cookie: only cookies of the
         # current generation are valid.  Stored as a number that only grows and is never below the time
@@ -235,13 +248,16 @@ def _set_session_cookie(response: web.StreamResponse, request: web.Request, valu
 
 async def async_setup_auth(hass: HomeAssistant) -> Auth:
     """Install the password check (after the host guard) when a password is set."""
-    password = await hass.async_add_executor_job(_configured_password)
+    password, unusable = await hass.async_add_executor_job(_configured_password)
     if not password:
         auth = Auth("")
         hass.data[DATA_KEY] = auth
         return auth
+    if unusable:
+        _LOGGER.error("%s: nobody can log in until it is fixed", unusable)
+        events.emit("auth", f"{unusable}: nobody can log in until it is fixed")
     key = await hass.async_add_executor_job(_load_key, hass.config.path("integration_manager", "auth_key"))
-    auth = Auth(password, key, hass.config.path("integration_manager", "auth_revoked"))
+    auth = Auth(password, key, hass.config.path("integration_manager", "auth_revoked"), unusable)
     await hass.async_add_executor_job(auth.load_revoked)
     hass.data[DATA_KEY] = auth
 
@@ -301,6 +317,8 @@ class LoginView(ManagerView):
     async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
         if not self.auth.enabled:
             return self.json({"ok": True, "note": "no password is set"})
+        if self.auth.unusable:  # no attempt can succeed: say why instead of counting it as a wrong password
+            return self.json({"ok": False, "error": f"{self.auth.unusable}: no password can be accepted until it is fixed"}, status_code=503)
         client = _client(request)
         left = self.auth.locked_for(client)
         if left:
