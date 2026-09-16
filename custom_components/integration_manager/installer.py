@@ -65,6 +65,7 @@ BUILTIN_REGISTRY = "/app/registry.json"
 MANAGER_DOMAIN = "integration_manager"  # this component; never the integration the container runs
 RELEASE_CACHE_S = 300
 DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024  # a release zipball; integrations are a few MB
+METADATA_MAX_BYTES = 10 * 1024 * 1024  # a release list, a manifest.json or a hacs.json: kilobytes
 UNPACK_MAX_BYTES = 300 * 1024 * 1024    # summed uncompressed size of an archive
 UNPACK_MAX_MEMBERS = 20000
 DEV_COPY_IGNORE = frozenset({"__pycache__", ".git", ".mypy_cache", ".pytest_cache"})
@@ -182,6 +183,13 @@ _STATE_TYPES: dict[str, tuple[type, ...]] = {
 
 
 def _gh_check(resp, what: str) -> None:
+    headers = getattr(resp, "headers", None) or {}
+    if resp.status in (403, 429) and (headers.get("X-RateLimit-Remaining") == "0" or headers.get("Retry-After")):
+        try:
+            when = "resets at " + time.strftime("%H:%M", time.localtime(int(headers["X-RateLimit-Reset"])))
+        except (KeyError, TypeError, ValueError):
+            when = f"retry after {headers.get('Retry-After')} s" if headers.get("Retry-After") else "try again later"
+        raise RuntimeError(f"GitHub {resp.status} for {what}: rate limit reached, {when} (a token in the Integrations card raises the limit)")
     if resp.status in (401, 403, 404):
         raise RuntimeError(f"GitHub {resp.status} for {what}: private repo or bad token? (set a token in the Integrations card)")
     resp.raise_for_status()
@@ -785,7 +793,7 @@ class Installer:
             async with session.get(GITHUB_API.format(repo=spec["repo"]) + "/releases", params={"per_page": 15},
                                    headers=self.settings.github_headers()) as resp:
                 _gh_check(resp, spec["repo"])
-                raw = await resp.json()
+                raw = json.loads(await read_capped(resp, f"{spec['repo']} releases", METADATA_MAX_BYTES))
             self._releases_checked[domain] = time.strftime("%Y-%m-%dT%H:%M:%S")
             rels = [{"tag": r["tag_name"], "prerelease": bool(r["prerelease"]), "published": (r.get("published_at") or "")[:10],
                      "notes": (r.get("body") or "")[:4000], "url": r.get("html_url")} for r in raw]
@@ -805,13 +813,13 @@ class Installer:
         async with session.get(RAW_GITHUB.format(repo=spec["repo"], tag=tag, domain=domain), headers=self.settings.github_headers()) as resp:
             if resp.status != 200:
                 raise ValueError(f"manifest.json not found for {domain} {tag} (HTTP {resp.status})")
-            new = json.loads(await resp.text())
+            new = json.loads(await read_capped(resp, f"{spec['repo']}@{tag} manifest.json", METADATA_MAX_BYTES))
         min_ha = None
         try:
             async with session.get(f"https://raw.githubusercontent.com/{spec['repo']}/{tag}/hacs.json", headers=self.settings.github_headers()) as r2:
                 if r2.status == 200:
-                    min_ha = (json.loads(await r2.text()) or {}).get("homeassistant")
-        except (ValueError, OSError, AttributeError):
+                    min_ha = (json.loads(await read_capped(r2, f"{spec['repo']}@{tag} hacs.json", METADATA_MAX_BYTES)) or {}).get("homeassistant")
+        except (ValueError, OSError, AttributeError, RuntimeError):
             min_ha = None  # the preview still shows the manifest
         rec = self.state.installed.get(domain, {})
         cur_tag = rec.get("running_tag")
