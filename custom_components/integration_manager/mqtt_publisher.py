@@ -46,6 +46,7 @@ from datetime import timedelta
 from typing import Any
 
 import paho.mqtt.client as mqtt
+from paho.mqtt.subscribeoptions import SubscribeOptions
 
 from homeassistant.config_entries import SIGNAL_CONFIG_ENTRY_CHANGED
 from homeassistant.const import (
@@ -124,9 +125,13 @@ CALL_MAX_DEPTH = 64
 # A packet over the broker's maximum makes the broker close the connection, and paho replays the queued
 # QoS 1 message on every automatic reconnect: one oversized document loops the bridge and stops everything
 # else, a new client (Reconnect) being the only way out.  1 MiB is what EMQX and HiveMQ accept by default
-# (mosquitto is far more generous); an MQTT 5 broker's announced maximum wins over it.
+# (mosquitto is far more generous); the maximum a broker announces wins over it.  Only MQTT 5 announces one,
+# which is why every client speaks MQTT 5 and drops to 3.1.1 only for a broker that refuses it.
 MANAGER_RESULT_WAIT_S = 5  # the executor may be wedged: the action must not wait on the broker forever
 PUBLISH_MAX_BYTES = 1024 * 1024
+# paho 2.1 ignores the receive maximum an MQTT 5 broker announces and keeps up to this many QoS 1 messages
+# unacknowledged; a broker announcing less (HiveMQ: 10) may close the connection over it
+PAHO_INFLIGHT = 20
 PUBLISH_OVERHEAD_BYTES = 32  # fixed header, topic length, packet id and properties, on top of topic + payload
 # Topic segments of our own under the base topic: an integration with one of these names gets its documents under
 # "<name>-integration" ("-" is never part of an integration domain), otherwise an integration called "call" would
@@ -137,9 +142,12 @@ RESERVED_TOPIC_SEGMENTS = frozenset({"call", "cmd", "result", "services", "manag
 _SECRET_NAME = (r"(?!(?:translation|sort|primary)_key\b)"
                 r"(?:(?:[A-Za-z0-9_-]*[_-])?(?:code|pin|key)"
                 r"|[A-Za-z0-9_-]*(?:usercode|passcode|password|passwd|secret|token|apikey|passkey|bindkey))")
+# a key inside a JSON string (a service value that is itself JSON) has its quotes escaped: \"code\": \"1234\"
 _CODE_VALUE = re.compile(
-    r"""((?<![A-Za-z0-9_-])["']?""" + _SECRET_NAME + r"""["']?\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'[^']*'|[^,}\s]+)""",
+    r"""((?<![A-Za-z0-9_-])(?:\\*["'])?""" + _SECRET_NAME + r"""(?:\\*["'])?\s*[:=]\s*)"""
+    r"""((\\+)"(?:(?!\\+").)*\\+"|"(?:[^"\\]|\\.)*"|'[^']*'|[^,}\s]+)""",
     re.IGNORECASE)
+_SECRET_KEY = re.compile(_SECRET_NAME, re.IGNORECASE)
 _JSON_STRING = re.compile(r'"(?:[^"\\]+|\\.)*"?')
 _JSON_BRACKET = re.compile(r"[\[\]{}]")
 # service data fields that name entities besides the target (media_player.join, scene.apply/create, group.set, ...)
@@ -147,8 +155,38 @@ _ENTITY_LIST_KEYS = frozenset({"group_members", "snapshot_entities", "entities",
 
 
 def _mask_codes(text: str) -> str:
-    """Alarm and lock codes, PINs, passwords and tokens stay out of the command history, the status and the log."""
-    return _CODE_VALUE.sub(lambda m: m.group(1) + '"***"', text)
+    """Alarm and lock codes, PINs, passwords and tokens stay out of the command history, the status and the log.
+    JSON is masked on its parsed keys, which the text rule cannot see when they are written with escapes
+    ("\\u0063ode"); the text rule then covers what is not JSON and secrets written inside string values."""
+    if _payload_problem(text) is None and text.lstrip()[:1] in ("{", "["):
+        try:
+            masked, changed = _masked(json.loads(text))
+        except (ValueError, RecursionError):
+            pass
+        else:
+            if changed:
+                text = json.dumps(masked, ensure_ascii=False)
+    return _CODE_VALUE.sub(lambda m: m.group(1) + (f'{m.group(3)}"***{m.group(3)}"' if m.group(3) else '"***"'), text)
+
+
+def _masked(value: Any) -> tuple[Any, bool]:
+    """(the parsed value with the value of every secret key masked, whether any was)"""
+    if isinstance(value, dict):
+        out, changed = {}, False
+        for key, item in value.items():
+            if _SECRET_KEY.fullmatch(key):
+                out[key], changed = "***", True
+            else:
+                out[key], sub = _masked(item)
+                changed = changed or sub
+        return out, changed
+    if isinstance(value, list):
+        items = [_masked(item) for item in value]
+        return [item for item, _ in items], any(sub for _, sub in items)
+    if isinstance(value, str) and value.lstrip()[:1] in ("{", "["):
+        masked = _mask_codes(value)  # a JSON document sent as a string value: its keys are keys too
+        return masked, masked != value
+    return value, False
 
 
 def _payload_problem(payload: str) -> str | None:
@@ -329,6 +367,13 @@ class MqttPublisher:
     _in_flight = 0  # service calls and commands whose service task has not finished
     _connected_at = 0.0  # monotonic time of the last CONNACK: a drop right after one is not a TLS problem
     _broker_max_packet = 0  # maximum packet size the broker announced (MQTT 5 only), 0 = none announced
+    # what the broker at _learned_for taught this process: it refused MQTT 5, it announced a receive maximum below
+    # paho's window.  Forgotten when the host, port or TLS setting changes: that may be another broker.
+    _learned_for = ""
+    _mqtt311 = False
+    _receive_max = 0
+    # _calls is iterated and changed on paho's thread and changed on the loop (a call refused for the in-flight cap)
+    _calls_lock = threading.Lock()
 
     def __init__(self, hass: HomeAssistant, key_provider=None, health_provider=None, rules_provider=None) -> None:
         self._health_provider = health_provider
@@ -358,10 +403,10 @@ class MqttPublisher:
         self._connected = False
         self._lock = threading.Lock()
         self._conn_lock = asyncio.Lock()  # reconnects never overlap: two paho clients with one client id kick each other off forever
-        self._unsub: list[Any] = []
         self.stats: dict[str, Any] = {
             "connected": False,
             "connect_error": "",
+            "protocol": None,  # "MQTT 5", or "MQTT 3.1.1" for a broker that refused 5: only 5 announces a maximum packet size
             "published": 0,
             "cleared": 0,
             "oversized_skipped": 0,
@@ -461,6 +506,15 @@ class MqttPublisher:
             default = MqttConfig.__dataclass_fields__[name].default
             _LOGGER.warning("MQTT: %s=%r in %s is not usable: using %s", name, out[name], self.path, default)
             out[name] = default
+        if out.get("ca_certs"):
+            # a restored or hand-edited file is held to the directory a save allows (a file missing for now stays:
+            # the connection names it, and the next save must not drop the setting); without it a private broker
+            # certificate no longer verifies, which fails the connection instead of trusting anything
+            try:
+                out["ca_certs"] = self._ca_certs_path(str(out["ca_certs"]).strip(), must_exist=False)
+            except ValueError as err:
+                _LOGGER.warning("MQTT: %s in %s: using the system CAs", err, self.path)
+                out["ca_certs"] = ""
         return out
 
     async def async_save(self, updates: dict[str, Any]) -> MqttConfig:
@@ -535,7 +589,7 @@ class MqttPublisher:
             current[k] = v
         return MqttConfig(**current)
 
-    def _ca_certs_path(self, value: str) -> str:
+    def _ca_certs_path(self, value: str, must_exist: bool = True) -> str:
         """"" (the system CAs) or the absolute path of an existing file inside the config directory."""
         if not value:
             return ""
@@ -545,13 +599,56 @@ class MqttPublisher:
         real = os.path.realpath(path)
         if os.path.commonpath([root, real]) != root:
             raise ValueError(f"ca_certs must be a file under {config_dir}")
-        if not os.path.isfile(real):
+        if must_exist and not os.path.isfile(real):
             raise ValueError(f"ca_certs: {path} is not a file")
         return path
 
+    def _broker_traits(self) -> tuple[bool, int]:
+        """(refused MQTT 5, receive maximum to keep to) for the configured broker."""
+        key = f"{self.config.host}:{self.config.port}/{self.config.tls}"
+        if key != self._learned_for:
+            self._learned_for, self._mqtt311, self._receive_max = key, False, 0
+        return self._mqtt311, self._receive_max
+
+    def _learned_mqtt311(self, client: mqtt.Client, reason_code: Any) -> bool:
+        """A refused MQTT 5 connection: what a 3.1.1 broker answers (CONNACK code 1) to a protocol it does not speak.
+        Recorded, so the next client of this broker speaks 3.1.1."""
+        if getattr(client, "protocol", None) != mqtt.MQTTv5 or str(reason_code) != "Unsupported protocol version":
+            return False
+        self._broker_traits()
+        if not self._mqtt311:
+            self._mqtt311 = True
+            where = f"{self.config.host}:{self.config.port}"
+            _LOGGER.warning("MQTT: %s refused MQTT 5: using MQTT 3.1.1, which cannot announce a maximum packet size", where)
+            events.emit("mqtt", f"{where} refused MQTT 5: using MQTT 3.1.1")
+        return True
+
+    def _learned_receive_max(self, client: mqtt.Client, properties: Any) -> bool:
+        """The broker announced a receive maximum below the client's window: recorded, the client must be replaced
+        (paho cannot shrink the window of an open connection)."""
+        announced = getattr(properties, "ReceiveMaximum", None)
+        if getattr(client, "protocol", None) != mqtt.MQTTv5 or not isinstance(announced, int) or announced < 1:
+            return False
+        if announced >= client.max_inflight_messages:
+            return False
+        self._broker_traits()
+        self._receive_max = announced
+        _LOGGER.info("MQTT: the broker accepts %s unacknowledged messages at a time: reconnecting with that window", announced)
+        return True
+
+    @staticmethod
+    def _connect_options(client: mqtt.Client) -> dict[str, Any]:
+        # MQTT 5 has no clean_session; clean_start on every connect (paho's default is the first only) is the same thing
+        return {"clean_start": True} if getattr(client, "protocol", None) == mqtt.MQTTv5 else {}
+
     def _new_client(self, client_id: str) -> mqtt.Client:
         """A paho client with the configured credentials and TLS: the connection, and every scan, probe and cleanup."""
-        c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id, clean_session=True)
+        mqtt311, receive_max = self._broker_traits()
+        if mqtt311:
+            c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id, protocol=mqtt.MQTTv311, clean_session=True)
+        else:
+            c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id, protocol=mqtt.MQTTv5)
+            c.max_inflight_messages_set(min(receive_max or PAHO_INFLIGHT, PAHO_INFLIGHT))
         if self.config.username:
             c.username_pw_set(self.config.username, self.config.password or None)
         if self.config.tls:
@@ -571,28 +668,25 @@ class MqttPublisher:
     # ----- lifecycle -------------------------------------------------------
 
     async def async_start(self) -> None:
-        self._undiscover_due = await self.hass.async_add_executor_job(os.path.isfile, self._undiscover_file())
-        self._unsub.append(self.hass.bus.async_listen(EVENT_STATE_CHANGED, self._on_state))
-        self._unsub.append(
-            self.hass.bus.async_listen(er.EVENT_ENTITY_REGISTRY_UPDATED, self._on_registry)
-        )
+        self._undiscover_due = await self.hass.async_add_executor_job(self._read_undiscover_due)
+        # listeners for the life of the process: the publisher is never set up twice
+        self.hass.bus.async_listen(EVENT_STATE_CHANGED, self._on_state)
+        self.hass.bus.async_listen(er.EVENT_ENTITY_REGISTRY_UPDATED, self._on_registry)
         # A device renamed (or removed) here changes the device block of its
         # discovery config only; the entity registry stays silent, so nothing
         # else would refresh discovery before the hourly full republish.
-        self._unsub.append(
-            self.hass.bus.async_listen(dr.EVENT_DEVICE_REGISTRY_UPDATED, self._on_device_registry)
-        )
+        self.hass.bus.async_listen(dr.EVENT_DEVICE_REGISTRY_UPDATED, self._on_device_registry)
         self._arm_republish_timer()
-        self._unsub.append(async_track_time_interval(self.hass, self._on_health_timer, timedelta(seconds=HEALTH_INTERVAL_S)))
+        async_track_time_interval(self.hass, self._on_health_timer, timedelta(seconds=HEALTH_INTERVAL_S))
         # the verdict follows the integration at once (its entry loading at boot, a
         # failed setup, a reload), not only at the next timer tick a minute later
-        self._unsub.append(async_dispatcher_connect(self.hass, SIGNAL_CONFIG_ENTRY_CHANGED, self._on_entry_changed))
-        self._unsub.append(self.hass.bus.async_listen(EVENT_COMPONENT_LOADED, self._on_component_loaded))
+        async_dispatcher_connect(self.hass, SIGNAL_CONFIG_ENTRY_CHANGED, self._on_entry_changed)
+        self.hass.bus.async_listen(EVENT_COMPONENT_LOADED, self._on_component_loaded)
         self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, self._on_started)
         # Integrations register their services after we connect (the
         # integration loads later in the boot); refresh the catalog, debounced.
         for ev in (EVENT_SERVICE_REGISTERED, EVENT_SERVICE_REMOVED):
-            self._unsub.append(self.hass.bus.async_listen(ev, self._on_service_event))
+            self.hass.bus.async_listen(ev, self._on_service_event)
         self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, self._on_stop)
         if self.config.enabled:
             # in the background: a broker that hangs, or the sweep of an identity that changed while
@@ -615,22 +709,49 @@ class MqttPublisher:
             new = await self.hass.async_add_executor_job(self._load)
             if self.config.discovery_enabled and not new.discovery_enabled:
                 self._set_undiscover_due(True)  # e.g. Undo on Cutover: its own cleanup clears this once the broker confirmed
+            # the file may carry a save still waiting for its reconnect (the MQTT form, then a cutover): an exclusion
+            # adopted here would otherwise never be compared again, and its entities stay published and commandable
+            self._drop_newly_excluded(new)
             self.config = new
+
+    def _drop_newly_excluded(self, new: MqttConfig) -> None:
+        """Integrations excluded by `new`: their retained documents and discovery components go, and their
+        entities stop taking commands (_topics is what a command or a call may reach)."""
+        newly_excluded = set(new.exclude_integrations) - set(self.config.exclude_integrations)
+        if not newly_excluded:
+            return
+        for eid, topic in list(self._topics.items()):
+            if (self._integration_of(eid) or "unregistered") not in newly_excluded:
+                continue
+            if self._connected:
+                if self.config.discovery_enabled:
+                    self._remove_component(eid)  # removal first, then the empty document
+                self._clear(eid)
+            else:
+                # cleared at the next connect: _publish_state never touches an excluded entity again
+                self._topics.pop(eid, None)
+                self._last_hash.pop(topic, None)
+                self._pending_clears.add(topic)
+        if not self._connected:
+            self._resync_excluded = True  # after a restart this process does not know every topic of theirs
 
     def _undiscover_file(self) -> str:
         return self.hass.config.path("integration_manager", "mqtt_undiscover.json")
 
     def _set_undiscover_due(self, due: bool) -> None:
-        """Kept on disk: a restart before the broker confirmed the cleanup must not forget it."""
+        """Kept on disk: a restart before the broker confirmed the cleanup must not forget it.  Written by the ordered
+        writer, off the loop: "due" and "done" recorded moments apart land in that order, which a file removed here
+        and written there would not guarantee.  A failed write is logged by the writer."""
+        if not due and not self._undiscover_due:
+            return  # nothing recorded: the file is absent or already says so
         self._undiscover_due = due
-        path = self._undiscover_file()
-        try:
-            if due:
-                write_json(path, {"base": self.base_topic, "prefix": self.config.discovery_prefix}, fsync=False)
-            elif os.path.isfile(path):
-                os.remove(path)
-        except OSError as err:
-            _LOGGER.warning("MQTT: the pending discovery cleanup could not be recorded: %s", err)
+        writer.write_nowait(self._undiscover_file(), {"due": due, "base": self.base_topic, "prefix": self.config.discovery_prefix},
+                            fsync=False)
+
+    def _read_undiscover_due(self) -> bool:
+        """Blocking.  A file without "due" was written by an older version, which removed it once done."""
+        data = read_json(self._undiscover_file(), None)
+        return isinstance(data, dict) and data.get("due", True) is not False
 
     def undiscover_done(self) -> None:
         """The retained discovery configs were cleared (Cutover Undo)."""
@@ -662,23 +783,8 @@ class MqttPublisher:
             self._started_at = time.time()  # health grace restarts with a new identity
             self._pending_clears.clear()
         self._last_wanted = self.wanted_base_topic
-        # integrations newly excluded: their retained documents must go too
-        newly_excluded = set(new.exclude_integrations) - set(self.config.exclude_integrations)
-        if newly_excluded and not moved:
-            for eid, topic in list(self._topics.items()):
-                if (self._integration_of(eid) or "unregistered") not in newly_excluded:
-                    continue
-                if self._connected:
-                    if self.config.discovery_enabled:
-                        self._remove_component(eid)  # removal first, then the empty document
-                    self._clear(eid)
-                else:
-                    # cleared at the next connect: _publish_state never touches an excluded entity again
-                    self._topics.pop(eid, None)
-                    self._last_hash.pop(topic, None)
-                    self._pending_clears.add(topic)
-            if not self._connected:
-                self._resync_excluded = True  # after a restart this process does not know every topic of theirs
+        if not moved:
+            self._drop_newly_excluded(new)
         for t in ("_registry_timer", "_services_timer"):
             h = getattr(self, t, None)
             if h is not None:
@@ -759,56 +865,68 @@ class MqttPublisher:
         under `topics` until the burst goes quiet; returns {topic: payload}.
         The network thread is always stopped, whatever happens."""
         found: dict[str, bytes] = {}
-        c = self._new_client(f"{self.client_id}-{suffix}-{secrets.token_hex(3)}")
-        c.on_message = lambda cl, u, m: found.__setitem__(m.topic, m.payload) if m.retain and m.payload else None
-        ack: dict[str, Any] = {"rc": None, "granted": None}
-        c.on_connect = lambda cl, u, flags, rc, props=None: ack.__setitem__("rc", rc)
-        c.on_subscribe = lambda cl, u, mid, granted, props=None: ack.__setitem__("granted", granted)
-        c.connect(self.config.host, self.config.port, keepalive=30)
+        deadline = time.monotonic() + 5
+        c = self._throwaway_client(suffix, "scan", deadline,
+                                   lambda cl, u, m: found.__setitem__(m.topic, m.payload) if m.retain and m.payload else None)
         try:
+            granted: list[Any] = []
+            c.on_subscribe = lambda cl, u, mid, codes, props=None: granted.append(codes)
             c.subscribe(topics)
-            c.loop_start()
-            t0 = time.time()
-            while (ack["rc"] is None or ack["granted"] is None) and time.time() - t0 < 5:
+            while not granted and time.monotonic() < deadline:
                 time.sleep(0.05)
-            if ack["rc"] is None or ack["rc"] != 0:
-                raise RuntimeError(f"the broker did not accept the scan connection ({ack['rc']})")
-            if ack["granted"] is None or any(getattr(g, "is_failure", False) for g in ack["granted"]):
+            if not granted or any(getattr(g, "is_failure", False) for g in granted[0]):
                 raise RuntimeError("the broker refused the subscription (ACL?)")
             self._collect_quiet(c, found, min_s=min_s)
         finally:
-            c.loop_stop()
-            c.disconnect()
+            self._stop_client(c)
         return found
+
+    def _throwaway_client(self, suffix: str, what: str, deadline: float, on_message: Any = None) -> mqtt.Client:
+        """Blocking: a client of its own, connected (CONNACK received) with its network loop running, else RuntimeError.
+        A broker that refuses MQTT 5, or keeps fewer unacknowledged messages than the client would send, gets a
+        second client that suits it; the first one never subscribed or published anything."""
+        for _attempt in range(2):
+            c = self._new_client(f"{self.client_id}-{suffix}-{secrets.token_hex(3)}")
+            ack: dict[str, Any] = {"rc": None, "props": None}
+            c.on_connect = lambda cl, u, flags, rc, props=None: ack.update(rc=rc, props=props)
+            c.on_message = on_message
+            c.connect(self.config.host, self.config.port, keepalive=30, **self._connect_options(c))
+            c.loop_start()
+            # is_connected() is false until the broker's CONNACK: a slow (remote, TLS) broker is not a lost one
+            while ack["rc"] is None and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if ack["rc"] is not None and (self._learned_mqtt311(c, ack["rc"]) if ack["rc"] != 0 else self._learned_receive_max(c, ack["props"])):
+                self._stop_client(c)
+                continue
+            if ack["rc"] is None or ack["rc"] != 0:
+                self._stop_client(c)
+                raise RuntimeError(f"the broker did not accept the {what} connection ({ack['rc']})")
+            return c
+        raise RuntimeError(f"the broker did not accept the {what} connection (refused twice)")
+
+    @staticmethod
+    def _stop_client(c: mqtt.Client) -> None:
+        c.loop_stop()
+        c.disconnect()
 
     def _clear_topics(self, suffix: str, topics: list[str]) -> None:
         """Blocking: an empty retained payload to each topic from a throwaway
         client (QoS 1, awaited)."""
         if not topics:
             return
-        c = self._new_client(f"{self.client_id}-{suffix}-clear-{secrets.token_hex(3)}")
-        ack: dict[str, Any] = {"rc": None}
-        c.on_connect = lambda cl, u, flags, rc, props=None: ack.__setitem__("rc", rc)
-        c.connect(self.config.host, self.config.port, keepalive=30)
+        # one budget for the whole sweep, not 5 s per topic: a broker that stops acknowledging
+        # would otherwise hold the reconnect lock (or an uninstall) for hours
+        deadline = time.monotonic() + min(120.0, 15.0 + 0.02 * len(topics))
+        c = self._throwaway_client(f"{suffix}-clear", "cleanup", deadline)
         try:
-            c.loop_start()
             infos = [c.publish(t, "", qos=1, retain=True) for t in topics]
-            # one budget for the whole sweep, not 5 s per topic: a broker that stops acknowledging
-            # would otherwise hold the reconnect lock (or an uninstall) for hours
-            deadline = time.monotonic() + min(120.0, 15.0 + 0.02 * len(infos))
-            # is_connected() is false until the broker's CONNACK: a slow (remote, TLS) broker is not a lost one
-            while time.monotonic() < deadline and ack["rc"] is None:
-                time.sleep(0.05)
-            if ack["rc"] is None or ack["rc"] != 0:
-                raise RuntimeError(f"the broker did not accept the cleanup connection ({ack['rc']})")
             while time.monotonic() < deadline and c.is_connected() and not all(i.is_published() for i in infos):
                 time.sleep(0.1)
             unconfirmed = sum(1 for i in infos if not i.is_published())
             if unconfirmed:
                 raise RuntimeError(f"the broker did not confirm {unconfirmed} of {len(infos)} cleared topics")
         finally:
-            c.loop_stop()
-            c.disconnect()
+            self._stop_client(c)
 
     @staticmethod
     def _collect_quiet(c: mqtt.Client, found: dict[str, bytes], min_s: float = 2.0, quiet_s: float = 1.0, max_s: float = 15.0) -> None:
@@ -936,7 +1054,7 @@ class MqttPublisher:
             c.on_message = self._on_message
             c.suppress_exceptions = True  # a callback bug must not kill the network thread
             c.reconnect_delay_set(min_delay=2, max_delay=60)
-            c.connect_async(self.config.host, self.config.port, keepalive=60)
+            c.connect_async(self.config.host, self.config.port, keepalive=60, **self._connect_options(c))
             c.loop_start()
             self._client = c
             self.stats["connect_error"] = ""
@@ -978,23 +1096,41 @@ class MqttPublisher:
         if reason_code != 0:
             self._connected = False
             self.stats["connected"] = False
+            if self._learned_mqtt311(client, reason_code):
+                self.stats["connect_error"] = "the broker refused MQTT 5: reconnecting with MQTT 3.1.1"
+                self._replace_client_soon(client)
+                return
             self.stats["connect_error"] = f"reason_code={reason_code}"
             _LOGGER.error("MQTT connect refused: %s", reason_code)
             return
         if self._stopping:
             return  # no "online" and no republish while Home Assistant stops
+        if self._learned_receive_max(client, properties):
+            # nothing sent yet: a burst of discovery configs over the broker's receive maximum would cost the connection
+            self._replace_client_soon(client)
+            return
         self._connected = True
         self._connected_at = time.monotonic()
-        # MQTT 5 only: the broker states what it accepts, which beats guessing (paho itself refuses a bigger packet)
+        # MQTT 5 only: the broker states what it accepts, which beats guessing; paho does not check it
         announced = getattr(properties, "MaximumPacketSize", None)
         self._broker_max_packet = announced if isinstance(announced, int) and announced > 0 else 0
+        v5 = getattr(client, "protocol", None) == mqtt.MQTTv5
         self.stats["connected"] = True
         self.stats["connect_error"] = ""
+        self.stats["protocol"] = "MQTT 5" if v5 else "MQTT 3.1.1"
         self._tls_checked_at, self._tls_error, self._last_disconnect = 0.0, "", ""
         client.publish(self._status_topic(), "online", qos=1, retain=True)
         # Commands from the consuming HA: <base>/cmd/<domain>/<object_id>/<field>
         # and generic service calls: <base>/call/<domain>/<service>
-        client.subscribe([(f"{self._cmd_base()}/#", 1), (f"{self._call_base()}/#", 1), (f"{self._manager_cmd_base()}/+", 1)])
+        topics = [f"{self._cmd_base()}/#", f"{self._call_base()}/#", f"{self._manager_cmd_base()}/+"]
+        if v5:
+            # retainAsPublished: a command published with retain while we are subscribed arrives flagged, so it is
+            # refused and cleared at once (3.1.1 brokers drop the flag on live delivery).  noLocal: the empty
+            # payload that clears it does not come back to us.
+            options = SubscribeOptions(qos=1, noLocal=True, retainAsPublished=True)
+            client.subscribe([(t, options) for t in topics])
+        else:
+            client.subscribe([(t, 1) for t in topics])
         _LOGGER.info("MQTT connected to %s:%s", self.config.host, self.config.port)
         events.emit("mqtt", f"connected to {self.config.host}:{self.config.port} as {self.base_topic}")
         # Runs in paho's thread: hop onto the HA loop for the full publish.  A
@@ -1009,6 +1145,19 @@ class MqttPublisher:
             self.hass.async_create_task(self.async_republish_all())
 
         self.hass.loop.call_soon_threadsafe(_resume)
+
+    def _replace_client_soon(self, client: mqtt.Client) -> None:
+        """Paho thread: paho would retry with the same protocol and window forever, so a new client is built,
+        on the loop and under the connection lock like any reconnect."""
+        async def replace() -> None:
+            async with self._conn_lock:
+                if self._client is not client or self._stopping:
+                    return  # a reconnect or a stop replaced it first
+                await self.hass.async_add_executor_job(self._disconnect, False)
+                await self.hass.async_add_executor_job(self._connect)
+
+        self.hass.loop.call_soon_threadsafe(
+            lambda: self.hass.async_create_background_task(replace(), "integration_manager MQTT client replaced"))
 
     def _on_connect_fail(self, client, userdata) -> None:
         """Paho thread: the broker could not be reached (paho keeps retrying)."""
@@ -1053,8 +1202,12 @@ class MqttPublisher:
         self._connected = False
         self._connected_at = 0.0
         self.stats["connected"] = False
-        if reason_code != 0:
-            reason = str(reason_code)
+        # paho 2.1 reads the reason of a broker's MQTT 5 DISCONNECT only when properties follow it: a bare "packet too
+        # large" (what mosquitto sends) reaches us as a normal disconnection, and a broker never ends a session we did
+        # not ask it to end for a normal reason
+        from_broker = getattr(flags, "is_disconnect_packet_from_server", False) is True
+        if reason_code != 0 or from_broker:
+            reason = str(reason_code) if reason_code != 0 else "the broker ended the session"
             # A plain connection to a TLS listener never gets a CONNACK, so the TLS hint is only honest while
             # none arrived.  A drop moments after one is a broker closing an established connection - a packet
             # over its maximum is the usual cause - and blaming TLS sends the operator the wrong way.
@@ -1087,6 +1240,8 @@ class MqttPublisher:
 
     def _handle_message(self, msg) -> None:
         if getattr(msg, "retain", False):
+            if not msg.payload:
+                return  # a retained command being cleared (MQTT 5 keeps the flag on it): nothing to run, nothing to clear
             # a command published with retain would run again at every
             # (re)subscription: physical effects must never replay.  Left on
             # the broker it would also arrive again at every connect, so the
@@ -1141,7 +1296,7 @@ class MqttPublisher:
         svc_domain, service, data = mapped
         rec["what"] = f"{domain}.{object_id}/{field} → {svc_domain}.{service}"
         self.stats["commands"] += 1
-        self.stats["last_command"] = _mask_codes(f"{msg.topic} = {payload}")
+        self.stats["last_command"] = f"{msg.topic} = {_mask_codes(payload)}"[:140]
 
         async def _call() -> None:
             recs = [rec]
@@ -1249,7 +1404,8 @@ class MqttPublisher:
 
     def _remember(self, kind: str, what: str, data: Any, call_id: Any = None) -> dict[str, Any]:
         text = json.dumps(data, default=str) if not isinstance(data, str) else data
-        rec = {"id": call_id, "kind": kind, "what": what, "data": _mask_codes(text[:1000])[:200],
+        # masked before it is cut: a cut JSON document no longer parses, and its escaped keys would show
+        rec = {"id": call_id, "kind": kind, "what": what, "data": _mask_codes(text if len(text) <= CALL_MAX_BYTES else text[:1000])[:200],
                "received": time.time(), "finished": None, "duration_ms": None, "state": "running", "error": None, "result": None}
         self.history.append(rec)
         return rec
@@ -1267,9 +1423,10 @@ class MqttPublisher:
         """The canonical record of a call with this id inside the dedup window.  Expires old records on every call,
         with an _id or without: a burst of ids followed by calls without one must not keep them all."""
         now = time.time()
-        for k in [k for k, r in self._calls.items() if now - r["received"] >= DEDUP_WINDOW_S]:
-            del self._calls[k]  # expired
-        return self._calls.get(key) if key is not None else None
+        with self._calls_lock:
+            for k in [k for k, r in self._calls.items() if now - r["received"] >= DEDUP_WINDOW_S]:
+                del self._calls[k]  # expired
+            return self._calls.get(key) if key is not None else None
 
     def _call_started(self, task: asyncio.Task) -> None:
         """A service task counts against CALLS_IN_FLIGHT_MAX until it ends, a timed-out one included."""
@@ -1403,11 +1560,12 @@ class MqttPublisher:
         seen: dict[str, Any] | None = None
         if call_key is not None:
             seen = {"received": rec["received"], "state": "running", "result": None}
-            self._calls[call_key] = seen
-            while len(self._calls) > CALLS_REMEMBERED:
-                del self._calls[next(iter(self._calls))]  # the oldest _id
+            with self._calls_lock:
+                self._calls[call_key] = seen
+                while len(self._calls) > CALLS_REMEMBERED:
+                    del self._calls[next(iter(self._calls))]  # the oldest _id
         self.stats["calls"] += 1
-        self.stats["last_call"] = _mask_codes(f"{domain}.{service} {json.dumps(data)}")[:140]
+        self.stats["last_call"] = f"{domain}.{service} {_mask_codes(json.dumps(data))}"[:140]
 
         def done(state: str, error: str | None, res: dict[str, Any]) -> None:
             self._finish(rec, state, error, res)
@@ -1432,8 +1590,9 @@ class MqttPublisher:
                 res = {**base, "ok": False, "error": f"too many calls in progress ({CALLS_IN_FLIGHT_MAX}): try again later"}
                 self._publish_result(domain, service, res)
                 done("rejected", res["error"], res)
-                if seen is not None and self._calls.get(call_key) is seen:
-                    del self._calls[call_key]  # never ran: a retry with the same _id runs once there is room
+                with self._calls_lock:  # paho's thread iterates the dict
+                    if seen is not None and self._calls.get(call_key) is seen:
+                        del self._calls[call_key]  # never ran: a retry with the same _id runs once there is room
                 _LOGGER.warning("MQTT call %s.%s refused: %s calls in progress", domain, service, self._in_flight)
                 return
             wants = self.hass.services.supports_response(domain, service) != SupportsResponse.NONE
@@ -1723,11 +1882,20 @@ class MqttPublisher:
             add(disc_id, block, entry.entity_id, comp)
         return groups, counts
 
-    def discovery_preview(self) -> list[dict[str, Any]]:
-        """What would be (or is) published as discovery, for the UI/API."""
+    def _announced_groups(self) -> tuple[dict[str, tuple[dict[str, Any], dict[str, dict[str, Any]]]], dict[str, int]]:
+        """_group_by_device plus the manager device, with via_device only towards devices that are announced too
+        (the consumer would create a nameless stub otherwise)."""
         groups, counts = self._group_by_device()
         hid, hblock, hcomps = self._manager_discovery()
         groups[hid] = (hblock, hcomps)
+        for block, _comps in groups.values():
+            if block.get("via_device") and block["via_device"] not in groups:
+                block.pop("via_device", None)
+        return groups, counts
+
+    def discovery_preview(self) -> list[dict[str, Any]]:
+        """What would be (or is) published as discovery, for the UI/API."""
+        groups, _counts = self._announced_groups()
         return [
             {"discovery_id": disc_id, "topic": self._discovery_topic(disc_id), "device": block,
              "components": {eid: comp for eid, comp in comps.items()}}
@@ -1767,16 +1935,9 @@ class MqttPublisher:
     def _publish_discovery_all(self) -> None:
         if not self.config.discovery_enabled:
             return  # e.g. a delayed republish that lands after an undo
-        groups, counts = self._group_by_device()
-        hid, hblock, hcomps = self._manager_discovery()
-        groups[hid] = (hblock, hcomps)
-        # via_device only towards devices that are announced too (the consumer
-        # would create a nameless stub otherwise); parents before children
-        for disc_id, (block, comps) in groups.items():
-            if block.get("via_device") and block["via_device"] not in groups:
-                block.pop("via_device", None)
+        groups, counts = self._announced_groups()
 
-        def depth(disc_id: str) -> int:
+        def depth(disc_id: str) -> int:  # parents before children
             d, cur = 0, disc_id
             while d < 10 and (nxt := groups[cur][0].get("via_device")) in groups and nxt != cur:
                 d, cur = d + 1, nxt
@@ -1829,14 +1990,16 @@ class MqttPublisher:
     def remove_discovered_component(self, discovery_id: str, entity_id: str, platform: str) -> bool:
         """Tell the consumer to drop ONE component of a device we announce
         (its removal form inside the device config), without touching its
-        registry: an entity that vanished here while we were not looking."""
+        registry: an entity that vanished here while we were not looking.
+        False when that device is not announced now: its other components would have to be announced
+        with it, and an empty config instead removes every one of them from the consumer."""
         if not self._connected:
             return False
-        if not self.config.discovery_enabled:
-            # discovery is off: never announce the device again, only remove it there
-            self._last_hash.pop(self._discovery_topic(discovery_id), None)
-            return self._publish(self._discovery_topic(discovery_id), None, qos=1)
-        groups, _ = self._group_by_device()
+        groups, _ = self._announced_groups()  # the manager device included: it is announced like any other
+        manager_id = f"{self.base_topic}_manager"
+        announced = self.config.discovery_enabled or (discovery_id == manager_id and self.config.manager_discovery)
+        if not announced:
+            return False
         if discovery_id not in groups:
             # the whole device is gone here: an empty retained config removes it there
             self._last_hash.pop(self._discovery_topic(discovery_id), None)
@@ -2177,7 +2340,10 @@ class MqttPublisher:
         if c is None or not self._connected:
             return
         info = c.publish(f"{self.base_topic}/manager/result", _dumps(result), qos=1, retain=False)
-        doc = c.publish(self._manager_topic(), _dumps(self.manager.document()), qos=1, retain=True) if self.manager else None
+        # the answer (not retained) goes to whoever asked, under the names they used; the retained document does not
+        # go out while an identity move sweeps those names, or the sweep's work is undone
+        doc = (c.publish(self._manager_topic(), _dumps(self.manager.document()), qos=1, retain=True)
+               if self.manager and not self._moving else None)
         # paho already holds both messages, so delivery does not depend on this wait; the executor job does,
         # and a wedged pool would hang the action's task for good, which is how a restart came to answer "ok"
         # and never happen. The wait is bounded here, not only inside wait_for_publish.
@@ -2460,13 +2626,13 @@ class MqttPublisher:
             await self._async_resync_excluded()
         if self._undiscover_due and not self.config.discovery_enabled:
             try:
-                n = await self.hass.async_add_executor_job(self._clear_discovery_retained)
+                removed = await self.hass.async_add_executor_job(self._clear_discovery_retained)
                 self._set_undiscover_due(False)
                 keep = f"{self.base_topic}_manager"
                 for did in [d for d in self._discovery_map if d != keep]:
                     self._discovery_map.pop(did, None)
                     self._blocks.pop(did, None)
-                _LOGGER.info("MQTT: discovery turned off: removed %s announced devices from the consumer", n)
+                _LOGGER.info("MQTT: discovery turned off: removed %s announced devices from the consumer", removed)
             except RuntimeError as err:
                 _LOGGER.warning("MQTT: removing the announced entities after discovery was turned off failed, retried: %s", err)
         if self._orphan_sweep_due and self.hass.is_running and time.time() - self._started_at > ORPHAN_SWEEP_DELAY_S:
