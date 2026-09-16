@@ -18,6 +18,7 @@ from unittest import mock
 import run
 from custom_components.integration_manager import manager_device as md
 from custom_components.integration_manager import scheduler as sched_mod
+from custom_components.integration_manager import writer as writer_mod
 from custom_components.integration_manager.installer import Installer
 from tests.fakes import FakeInstaller, FakePublisher, FakeUpdater
 
@@ -213,8 +214,11 @@ class RestartBusyTest(unittest.IsolatedAsyncioTestCase):
         inst = Installer(SimpleNamespace(config=SimpleNamespace(config_dir=tempfile.mkdtemp())))
         self.busy_at_first_await, self.stops = [], []
 
-        async def job(fn, *args):
+        async def drain(_timeout):  # the only await restart() has left before the stop
             self.busy_at_first_await.append(inst.busy)
+            return True
+
+        async def job(fn, *args):
             return fn(*args)
 
         async def stop():
@@ -224,7 +228,10 @@ class RestartBusyTest(unittest.IsolatedAsyncioTestCase):
             self.stops.append(coro)
             coro.close()
 
-        inst.hass = SimpleNamespace(async_add_executor_job=job, async_create_task=create_task, async_stop=stop)
+        patch = mock.patch.object(writer_mod, "async_drain", drain)
+        patch.start()
+        self.addCleanup(patch.stop)
+        inst.hass = SimpleNamespace(data={}, async_add_executor_job=job, async_create_task=create_task, async_stop=stop)
         return inst
 
     async def test_restart_marks_busy_before_first_await(self):

@@ -86,13 +86,17 @@ TASK_CANCEL_TIMEOUT_S = 5  # homeassistant.runner.TASK_CANCELATION_TIMEOUT
 BOOT_OK_CAP_S = 600
 WRITER_DRAIN_S = 10  # at exit: the manager's JSON saves still queued
 LOG_FLUSH_S = 5  # at exit: log lines still queued
-# Docker's stop_grace_period (compose file, README) is 240 s from SIGTERM.  The watchdog is armed at
-# EVENT_HOMEASSISTANT_STOP, which HA fires after its first stop stage (shutdown jobs, up to 20 s); when it
-# fires it drains the JSON writer and the log queue (5 s each) before exiting: 20 + 205 + 5 + 5 = 235 s.
+# Docker's stop_grace_period (compose file, README) is 240 s from SIGTERM.  On the signal path the watchdog is
+# armed at EVENT_HOMEASSISTANT_STOP, which HA fires after its first stop stage (shutdown jobs, up to 20 s); when
+# it fires it drains the JSON writer and the log queue (5 s each) before exiting: 20 + 205 + 5 + 5 = 235 s.
 # HA's remaining stages (100 + 60 + 30 s) plus run.py's own exit (task cancel 5, executor 10, writer 10,
 # log queue 10) could reach ~245 s in the worst case: the watchdog cuts that before Docker's SIGKILL.
+# A restart asked for from the manager arms it itself (hass.data["hri_stop_watchdog"]) before it calls
+# async_stop: a stop that hangs on its way to that first stage never reaches the STOP event, and the hard
+# exit that exists for exactly this case would never fire.
 STOP_WATCHDOG_S = 205
 WATCHDOG_DRAIN_S = 5
+_stop_watchdog: threading.Thread | None = None  # armed once, by whichever of the two paths gets there first
 _boot_settled = False  # this boot's boot_failures count is resolved: marked ok, or taken back after a stop
 _boot_signalled = False  # the boot signal handler stopped this boot (a cancelled boot task is then a clean stop)
 
@@ -196,6 +200,10 @@ async def _boot() -> int:
         _LOGGER.info("YAML config applied for %s (%s keys)", running, len(yaml_cfg))
 
     await hass.async_add_executor_job(drop_foreign_http_port, CONFIG_DIR, HTTP_PORT)
+
+    # installer.restart arms it when it asks HA to stop: a stop that hangs before HA's first stage
+    # never fires EVENT_HOMEASSISTANT_STOP, where _on_stop below would otherwise arm it
+    hass.data["hri_stop_watchdog"] = _arm_stop_watchdog
 
     for domain in ("http", "integration_manager"):
         if not await async_setup_component(hass, domain, config):
@@ -451,11 +459,16 @@ def _run_loop(boot: Callable[[], Awaitable[int]]) -> int:
 def _arm_stop_watchdog(timeout: float = STOP_WATCHDOG_S) -> threading.Thread:
     """HA's stop stages are bounded, but a hang outside them would leave the
     process up and unreachable, and Docker's restart policy only acts once it
-    exits: exit hard after `timeout`."""
+    exits: exit hard after `timeout`.  Idempotent: a manager restart arms it
+    when it asks for the stop, the STOP event then finds it already running."""
+    global _stop_watchdog
+
+    if _stop_watchdog is not None:
+        return _stop_watchdog
 
     def watch() -> None:
         time.sleep(timeout)
-        msg = f"still not stopped {int(timeout)} s after the stop began: exiting hard"
+        msg = f"still not stopped {int(timeout)} s after the stop was asked for: exiting hard"
         _LOGGER.critical(msg)
         writer = sys.modules.get("custom_components.integration_manager.writer")
         if writer is not None and not writer.drain(WATCHDOG_DRAIN_S):
@@ -467,6 +480,7 @@ def _arm_stop_watchdog(timeout: float = STOP_WATCHDOG_S) -> threading.Thread:
         os._exit(1)
 
     thread = threading.Thread(target=watch, name="stop-watchdog", daemon=True)
+    _stop_watchdog = thread
     thread.start()
     return thread
 
