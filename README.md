@@ -575,7 +575,10 @@ root. Symbolic links are never listed, and neither is a file with more than one
 hard link: a hard link is a second name for the same file, so nothing about the
 path tells a log apart from a `secrets.yaml` linked under a `*.log` name.
 Rotation by rename or by copy leaves one link, so nothing the integration writes
-is lost by it.
+is lost by it. File names are masked like everything else on the page, and two
+files whose names mask to the same text are still listed separately and each
+opens its own file. A live follow with a search keeps advancing even when a
+whole batch of new lines matched only inside masked values.
 
 By default every line is shown whole. The **Formatting** box at the bottom of
 the page splits lines into columns. A format is a JSON object:
@@ -1169,7 +1172,7 @@ points:
 | Backups | `GET /api/backups`, `POST /api/backups/create`, `POST /api/backups/upload`, `GET /api/backups/<name>/download`, `POST /api/backups/<name>/{restore,delete}`, `POST /api/backups/restore/cancel` |
 | Import | `POST /api/import/upload`, `GET/POST /api/import/inspect`, `POST /api/import/{apply,apply_all,clear}` |
 | Cutover | `GET /api/parity`, `POST /api/parity/{test,remove_orphans}`, `POST /api/cutover/{status,enable,undo}` |
-| Logs | `GET /api/logs?level=&prefix=&q=&since_id=&limit=` (`limit` 1 to 2000), `GET /api/logs/loggers`, `POST /api/logs/level` (`{"logger": …, "level": …}`), `GET /api/log_files`, `GET /api/log_files/tail?file=&lines=&q=`, `GET/POST /api/settings` (`log_format`) |
+| Logs | `GET /api/logs?level=&prefix=&q=&since_id=&limit=` (`limit` 1 to 2000; the answer carries `cursor`, the next `since_id`), `GET /api/logs/loggers`, `POST /api/logs/level` (`{"logger": …, "level": …}`), `GET /api/log_files` (an `id` per file, which changes at every start), `GET /api/log_files/tail?id=&file=&lines=&q=` (`file` is the masked name, answered `409` when several files share it; a real name is not accepted), `GET/POST /api/settings` (`log_format`) |
 | Diagnostics | `GET /api/diagnostics` (zip, secrets removed), `GET /api/diag/memory[?refs=<type>]` (one probe at a time: a second one meanwhile answers `429`) |
 
 `POST /api/logs/level` accepts any existing logger; a logger that does not
