@@ -3,7 +3,8 @@ and paho's own log was never enabled.  m4: "online" went out before the SUBSCRIB
 flip was lost.  m5: the value of a text entity in password mode was kept in clear in the command history, the status
 and the log.  D2: an entity moved into a device whose config is over the broker's maximum rescheduled the discovery pass
 every 5 s for good.  C11: a whitespace-only call payload ran the service with no data.
-C13: a live discovery-prefix change swept every retained entity document, not only the discovery configs.  Every test fails on the tree
+C13: a live discovery-prefix change swept every retained entity document, not only the discovery configs.  C14: a call
+payload was parsed up to four times on paho's thread.  Every test fails on the tree
 before its fix."""
 
 import asyncio
@@ -535,6 +536,56 @@ class LivePrefixMoveTest(unittest.TestCase):
     def test_a_new_base_topic_still_clears_the_documents(self):
         _scanned, cleared = self._move(new_base="hass_other")
         self.assertEqual(set(cleared), {f"{BASE}/demo/sensor/x", "homeassistant/device/hass_camp_dev/config"})
+
+
+class CallParsedOnceTest(unittest.TestCase):
+    """C14: _call_id_of, _loads_call, the history row and last_call each parsed the payload (up to 256 KB) again."""
+
+    def _parses(self, rest, payload):
+        pub = camp._publisher()
+        pub.stats.update(calls=0, last_call=None)
+        real = json.loads
+        reads = []
+
+        def loads(text, *a, **k):
+            if text == payload:
+                reads.append(text)
+            return real(text, *a, **k)
+
+        with mock.patch.object(mp.json, "loads", loads):
+            pub._on_call(rest, payload)
+        return pub, len(reads)
+
+    def test_an_accepted_call(self):
+        payload = json.dumps({"entity_id": "script.x", "code": "1234", "_id": 5, "pad": "y" * 1000})
+        pub, reads = self._parses("script/turn_on", payload)
+        self.assertEqual(reads, 1)
+        rec = pub.history[-1]
+        self.assertEqual((rec["id"], rec["state"]), (5, "running"))
+        self.assertNotIn("1234", rec["data"] + pub.stats["last_call"])
+        self.assertTrue(pub.stats["last_call"].startswith('script.turn_on {"entity_id": "script.x", "code": "***"'))
+
+    def test_refusals(self):
+        for rest, payload, error in (
+            ("homeassistant/restart", json.dumps({"code": "1234", "_id": "a"}), "not callable"),
+            ("script/turn_on", json.dumps([{"code": "1234"}]), "payload must be a JSON object"),
+            ("script/turn_on/x", json.dumps({"code": "1234", "_id": "a"}), "topic must be"),
+        ):
+            with self.subTest(rest=rest):
+                pub, reads = self._parses(rest, payload)
+                self.assertEqual(reads, 1)
+                rec = pub.history[-1]
+                self.assertEqual(rec["state"], "rejected")
+                self.assertIn(error, rec["error"])
+                self.assertNotIn("1234", rec["data"])
+                if isinstance(json.loads(payload), dict):
+                    self.assertEqual(rec["id"], "a")
+
+    def test_an_unparsable_payload_is_masked_by_the_text_rule(self):
+        pub, reads = self._parses("script/turn_on", '{"code": "1234", oops')
+        self.assertEqual(reads, 1)
+        self.assertIn("bad payload", pub.history[-1]["error"])
+        self.assertNotIn("1234", pub.history[-1]["data"])
 
 
 if __name__ == "__main__":
