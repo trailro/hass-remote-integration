@@ -1716,7 +1716,9 @@ class Installer:
             self.state.last_action = "restart requested"
             self._save_state()
             events.emit("restart", "process restart requested")
-            await self.hass.async_add_executor_job(self._reset_boot_failures)
+            # on the loop, like _save_state above: as an executor job it queued behind a pool an
+            # integration had exhausted and never returned, so the stop below never started
+            self._reset_boot_failures()
             if not await writer.async_drain(10):  # the final write drains it too, but a stop stage could time out first
                 _LOGGER.warning("restart: JSON saves still pending after 10 s")
         except BaseException as err:
@@ -1728,13 +1730,27 @@ class Installer:
                 raise
             _LOGGER.error("restart failed before stopping: %s", err)
             return {"ok": False, "error": f"restart failed before stopping: {err}"}
+        self._arm_stop_watchdog()
+        # busy stays set from here on: the process is going down, and if async_stop hangs or fails the
+        # watchdog exits hard rather than leaving a half-stopped HA that accepts installs again
         self.hass.async_create_task(self.hass.async_stop())
         return {"ok": True}
 
+    def _arm_stop_watchdog(self) -> None:
+        """run.py's hard exit, armed here rather than at EVENT_HOMEASSISTANT_STOP:
+        a stop that hangs before HA's first stage never fires that event."""
+        arm = self.hass.data.get("hri_stop_watchdog")
+        if arm is None:  # not the run.py process (a test, or HA started some other way)
+            return
+        try:
+            arm()
+        except Exception as err:  # noqa: BLE001 - the restart goes ahead without the safety net
+            _LOGGER.error("the stop watchdog could not be armed: %s", err)
+
     def _reset_boot_failures(self) -> None:
         """A deliberate restart before HA reached STARTED must not count as
-        a crash for the entrypoint's fallback logic.  Under the per-file lock:
-        this runs in the executor while the loop may be writing ha.json."""
+        a crash for the entrypoint's fallback logic.  Under the per-file lock,
+        which the loop and the executor both take: one small JSON write."""
 
         def reset(data: Any) -> dict[str, Any] | None:
             if isinstance(data, dict) and data.get("boot_failures"):

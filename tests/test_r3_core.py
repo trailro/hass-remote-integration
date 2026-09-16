@@ -23,6 +23,7 @@ from homeassistant.util.async_ import get_scheduled_timer_handles
 import logbuffer
 import run
 from custom_components.integration_manager import scheduler as sched_mod
+from custom_components.integration_manager import writer as writer_mod
 from custom_components.integration_manager.installer import Installer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -45,7 +46,7 @@ class RestartFailureTest(unittest.IsolatedAsyncioTestCase):
             self.stops.append(coro)
             coro.close()
 
-        inst.hass = SimpleNamespace(async_add_executor_job=job, async_create_task=create_task, async_stop=stop)
+        inst.hass = SimpleNamespace(data={}, async_add_executor_job=job, async_create_task=create_task, async_stop=stop)
         return inst
 
     async def test_enospc_on_save(self):
@@ -72,11 +73,10 @@ class RestartFailureTest(unittest.IsolatedAsyncioTestCase):
     async def test_cancelled_request_resets_busy_and_propagates(self):
         inst = self.installer()
 
-        async def job(fn, *args):
+        async def drain(_timeout):  # the only await left before the stop
             raise asyncio.CancelledError
 
-        inst.hass.async_add_executor_job = job
-        with self.assertRaises(asyncio.CancelledError):
+        with mock.patch.object(writer_mod, "async_drain", drain), self.assertRaises(asyncio.CancelledError):
             await inst.restart()
         self.assertFalse(inst.busy)
 
