@@ -597,8 +597,11 @@ path tells a log apart from a `secrets.yaml` linked under a `*.log` name.
 Rotation by rename or by copy leaves one link, so nothing the integration writes
 is lost by it. File names are masked like everything else on the page, and two
 files whose names mask to the same text are still listed separately and each
-opens its own file. A live follow with a search keeps advancing even when a
-whole batch of new lines matched only inside masked values.
+opens its own file; after a restart the page selects the same file again by
+its name, and says so when several files share that name. A live follow keeps
+advancing even when a whole batch of new lines matched only inside masked values
+or a level or logger filter matched nothing, and a follower that fell behind
+reads on at once while more lines are waiting.
 
 By default every line is shown whole. The **Formatting** box at the bottom of
 the page splits lines into columns. A format is a JSON object:
@@ -1040,7 +1043,13 @@ What is in place:
   pages, the `file` a tail asks for, and URL parameters named like a credential
   (`access_token`, `authSig`, …) become `***`, so searching for your own secret
   does not write it to disk; lines written by an earlier version are masked where
-  they are shown and in the diagnostics zip.
+  they are shown and in the diagnostics zip. A parameter name counts as a
+  credential when it holds `token`, `secret`, `password` and the like anywhere,
+  or `pass`, `sig`, `key`, `code` or `session` as a word of its own (`authSig`,
+  `api_key`, but not `zipcode`, `keyword` or `design`; `translation_key`,
+  `sort_key` and `primary_key` stay readable), and a percent-encoded name counts
+  as its decoded one. A `-----BEGIN …-----` line with no END marker masks the
+  rest of its own line and the base64-only lines under it, and nothing else.
   A key is recognised from its `-----END …-----` marker or from the shape of
   its own lines, so a search result or a tail that starts in the middle of a
   block is masked too; key material with no marker anywhere in the window and
