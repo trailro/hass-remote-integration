@@ -163,13 +163,14 @@ class RendererSelectorsTest(unittest.TestCase):
         # the time/date/datetime branch passes its kind through, so name those here
         self.assertLessEqual({"duration", "constant", "time", "date", "datetime", "color"}, handled)
 
-    def test_duration_is_four_numbers_collected_into_one_object(self):
+    def test_duration_is_numbers_collected_into_one_object(self):
         branch = self.field[self.field.index("kind==='duration'"):self.field.index("kind==='time'")]
-        for unit in ("days", "hours", "minutes", "seconds"):
+        for unit in ("days", "hours", "minutes", "seconds", "milliseconds"):
             self.assertIn(f"'{unit}'", branch)
-        self.assertIn("enable_day", branch)
-        self.assertIn("enable_second", branch)
-        self.assertRegex(self.collect, r"k==='duration'.*v=\{\}")
+        for option in ("enable_day", "enable_second", "enable_millisecond"):
+            self.assertIn(option, branch)
+        # the units the schema does not show are carried over rather than dropped (tests/test_camp_config_js.py runs it)
+        self.assertRegex(self.collect, r"k==='duration'.*v=\{\.\.\.w\._kept\}")
 
     def test_a_constant_has_no_input_and_is_still_sent(self):
         self.assertIn("wrap._const=c.value", self.field)

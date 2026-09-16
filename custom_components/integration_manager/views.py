@@ -157,6 +157,8 @@ class RegistryView(ManagerView):
             spec = self.installer.add_to_registry(str(body.get("domain", "")), repo, str(body.get("name") or "")[:80] or None)
         except ValueError as err:
             return self.json({"ok": False, "error": str(err)})
+        except OSError as err:  # a full volume: the UI shows the reason instead of aiohttp's HTML 500
+            return self.json({"ok": False, "error": f"registry.json could not be written: {type(err).__name__}: {err}"})
         return self.json({"ok": True, "domain": str(body.get("domain", "")).strip().lower(), "spec": spec})
 
 

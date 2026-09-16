@@ -60,6 +60,7 @@ _LOGGER = logging.getLogger(__name__)
 GITHUB_API = "https://api.github.com/repos/{repo}"
 RAW_GITHUB = "https://raw.githubusercontent.com/{repo}/{tag}/custom_components/{domain}/manifest.json"
 BUILTIN_REGISTRY = "/app/registry.json"
+MANAGER_DOMAIN = "integration_manager"  # this component; never the integration the container runs
 RELEASE_CACHE_S = 300
 DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024  # a release zipball; integrations are a few MB
 UNPACK_MAX_BYTES = 300 * 1024 * 1024    # summed uncompressed size of an archive
@@ -70,6 +71,7 @@ _TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+@-]{0,100}\Z")  # as the views 
 SCRATCH_PREFIXES = (".staging-", ".old-", ".preflight-")  # never a tag: tags do not start with a dot
 SCRATCH_MAX_AGE_S = 3600
 PRE_RESTORE_GRACE_S = 7 * 86400  # as backupkit's upload grace: a restore proves itself wrong within days
+CORRUPT_STATE_KEEP = 3  # state.json.corrupt-<stamp> copies kept; the older ones are the same damage, twice removed
 
 
 def tag_ok(tag: Any) -> bool:
@@ -172,6 +174,23 @@ def _req_name(req: str) -> str:
         return re.split(r"[\s<>=!~;@\[]", req, 1)[0].strip()
 
 
+def _registry_integrations(path: str) -> dict[str, Any]:
+    """The ``integrations`` map of a registry file, {} for anything else.
+    The user registry is documented as hand-editable ("add your own in
+    /config/integration_manager/registry.json"), so a list, a string or a
+    number where the map belongs is a user error to log, not a crash: the
+    manager comes up and says what it ignored."""
+    data = jsonio.read_json(path)
+    if data is None:
+        return {}
+    integrations = data.get("integrations") if isinstance(data, dict) else None
+    if isinstance(integrations, dict):
+        return integrations
+    _LOGGER.error("%s is ignored: it must be {\"integrations\": {\"<domain>\": {\"repo\": \"owner/name\"}}}, not %s",
+                  path, type(integrations if isinstance(data, dict) else data).__name__)
+    return {}
+
+
 def _mtime(path: str) -> int:
     try:
         return os.stat(path).st_mtime_ns
@@ -242,6 +261,7 @@ class Installer:
         self._abandoned_switch: dict[str, dict[str, Any]] = {}  # domain -> restart_required before its uninstall asked for one
         self.busy = False
         self._backup_lock = asyncio.Lock()  # backups on their own queue up instead of refusing each other
+        self.state_load_error: str | None = None  # a damaged state.json, reported by the boot reconcile
         os.makedirs(self.versions_dir, exist_ok=True)
         self._sweep_scratch()
         self.state = self._load_state()
@@ -251,11 +271,7 @@ class Installer:
     # ----- registry --------------------------------------------------------
 
     def _builtin_registry(self) -> dict[str, dict[str, Any]]:
-        try:
-            with open(BUILTIN_REGISTRY, encoding="utf-8") as fh:
-                return json.load(fh).get("integrations") or {}
-        except (OSError, ValueError):
-            return {}
+        return _registry_integrations(BUILTIN_REGISTRY)
 
     def registry(self) -> dict[str, dict[str, Any]]:
         """Built-in + user registries, cached by both files' mtimes (read
@@ -271,14 +287,9 @@ class Installer:
     def _registry_uncached(self) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
         for path in (BUILTIN_REGISTRY, self.user_registry_file):
-            try:
-                with open(path, encoding="utf-8") as fh:
-                    data = json.load(fh)
-                for domain, spec in (data.get("integrations") or {}).items():
-                    if isinstance(spec, dict) and (spec.get("repo") or spec.get("local")):
-                        out[domain] = {**out.get(domain, {}), **spec}
-            except (OSError, ValueError):
-                continue
+            for domain, spec in _registry_integrations(path).items():
+                if isinstance(spec, dict) and (spec.get("repo") or spec.get("local")):
+                    out[str(domain)] = {**out.get(str(domain), {}), **spec}
         return out
 
     def add_to_registry(self, domain: str, repo: str, name: str | None = None, local: bool = False) -> dict[str, Any]:
@@ -292,12 +303,14 @@ class Installer:
         if builtin and builtin.get("repo") != repo:
             raise ValueError(f"{domain} is a built-in registry entry pinned to {builtin['repo']}; use another domain name")
         data = jsonio.read_json(self.user_registry_file, {"integrations": {}})
-        if not isinstance(data, dict):
+        if not isinstance(data, dict) or not isinstance(data.get("integrations"), dict):
+            # a hand-edited file of the wrong shape is reported at every read and ignored everywhere else;
+            # adding an entry has to start from something usable rather than raise here
             data = {"integrations": {}}
         entry = {"name": name or domain, "repo": repo}
         if local:
             entry["local"] = True
-        data.setdefault("integrations", {})[domain] = entry
+        data["integrations"][domain] = entry
         os.makedirs(self.state_dir, exist_ok=True)
         write_json(self.user_registry_file, data, fsync=False)  # called from request handlers on the loop
         return self.registry()[domain]
@@ -307,6 +320,39 @@ class Installer:
 
     # ----- state -----------------------------------------------------------
 
+    def _keep_corrupt_state(self, why: str) -> str:
+        """A copy of the state file the manager is about to stop using, and
+        the reason, which _reconcile reports (timeline, last_error, a
+        notification): an empty state silently means "nothing runs"."""
+        kept = f"{self.state_file}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
+        try:
+            shutil.copyfile(self.state_file, kept)
+        except OSError:
+            kept = "(could not be copied)"
+        _LOGGER.error("state.json %s; starting with an empty state, the damaged file is kept as %s", why, kept)
+        self.state_load_error = (f"state.json {why}: the manager started with an empty state "
+                                 f"(a copy is kept as {os.path.basename(kept)})")
+        self._prune_corrupt_states()
+        return kept
+
+    def _prune_corrupt_states(self, keep: int = CORRUPT_STATE_KEEP) -> list[str]:
+        """The copies are only ever read by a human; without this they stay
+        for the life of the volume, one per damaged boot."""
+        try:
+            names = sorted(n for n in os.listdir(self.state_dir) if n.startswith(os.path.basename(self.state_file) + ".corrupt-"))
+        except OSError:
+            return []
+        removed = []
+        for name in names[:-keep] if keep > 0 else names:
+            try:
+                os.remove(os.path.join(self.state_dir, name))
+                removed.append(name)
+            except OSError:
+                continue
+        if removed:
+            _LOGGER.info("state.json: removed %s older damaged copies (%s kept)", len(removed), keep)
+        return removed
+
     def _load_state(self) -> State:
         try:
             with open(self.state_file, encoding="utf-8") as fh:
@@ -314,15 +360,12 @@ class Installer:
         except OSError:
             return State()
         except ValueError:
-            kept = f"{self.state_file}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
-            try:
-                shutil.copyfile(self.state_file, kept)
-            except OSError:
-                kept = "(could not be copied)"
-            _LOGGER.error("state.json is not valid JSON; starting with an empty state, the damaged file is kept as %s", kept)
+            self._keep_corrupt_state("is not valid JSON")
             return State()
         if not isinstance(data, dict) or "installed" not in data:
-            _LOGGER.error("state.json has an unknown layout; starting with an empty state (file kept)")
+            # kept aside like a file that does not parse: both are a state the manager cannot use,
+            # and the copy is the only way back to what was installed
+            self._keep_corrupt_state("has an unknown layout")
             return State()
         fields = {k: v for k, v in data.items() if k in State.__dataclass_fields__}
         defaults = State()
@@ -1018,9 +1061,14 @@ class Installer:
                         + (f"; stopped {prev_domain}" if prev_domain else "") + ("; restart required" if needs_restart or yaml_pending else ""),
                         domain=domain, tag=tag, patches=patch_outcome, pip_failed=failed)
             can_rollback = switching and had_previous and bool(backup) and abandoned is None
-            if effective and not needs_restart and not yaml_pending:
+            # A start of the version that already runs is not "effective", but the code it deploys is new
+            # (a dev build, a repair), or a dev install deployed it just before and asked for the restart.
+            # Without a verdict nothing notices that the entry fails to set up and the Overview goes on saying
+            # the integration runs.
+            verdict = effective or deployed or needs_restart or self.state.restart_required
+            if verdict and not needs_restart and not yaml_pending:
                 self._schedule_smoke(domain, tag, can_rollback)
-            elif effective:
+            elif verdict:
                 # entries get enabled by the reconcile of the next boot; the
                 # smoke test runs there too.  An older timer must not fire in
                 # between and wipe this record.
@@ -1029,8 +1077,17 @@ class Installer:
                     self._smoke_handle = None
                 self.state.pending_smoke = {"domain": domain, "tag": tag, "can_rollback": can_rollback}
                 self._save_state()
+            # what this answer promises: ok means deployed and recorded, never "it set up"; the verdict says so
+            scheduled = self._smoke_pending or (self.state.pending_smoke if verdict else None)
+            if scheduled:
+                note = ""
+            elif not verdict:
+                note = "nothing changed: this version was already deployed and running; no health verdict is scheduled"
+            else:
+                note = "the start only deployed: the smoke test is off (smoke_test_s = 0), so nothing checks that it sets up"
             return {"ok": True, "domain": domain, "tag": tag, "deployed": deployed, "restart_required": needs_restart or yaml_pending,
-                    "pre_update_backup": backup, "patches": patch_outcome, "pip_failed": failed, **changed}
+                    "pre_update_backup": backup, "patches": patch_outcome, "pip_failed": failed,
+                    "smoke_test": scheduled, "note": note, **changed}
         except Exception as err:  # noqa: BLE001
             _LOGGER.exception("start %s %s failed", domain, tag)
             self.state.last_error = f"{type(err).__name__}: {err}"
@@ -1554,7 +1611,8 @@ class Installer:
         # killed between the schedule and the state start() writes at its end, the next boot would restore the
         # old files and .storage while state.json still names the rejected version, and the boot reconcile
         # would deploy that version over the restored configuration.  _apply_pending_rollback finishes it there.
-        self.state.pending_rollback = {"domain": domain, "tag": prev_tag, "backup": backup}
+        self.state.pending_rollback = {"domain": domain, "tag": prev_tag, "backup": backup,
+                                       "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
         self._save_state()
         try:
             # scheduled BEFORE the files change: a kill between the two then restores the backup at the next boot
@@ -1810,7 +1868,12 @@ class Installer:
         domain, tag, backup = intent["domain"], intent["tag"], intent["backup"]
         ha_state = jsonio.read_json(os.path.join(self.state_dir, "ha.json"), {}) or {}
         last = ha_state.get("last_restore") if isinstance(ha_state, dict) else None
-        restored = isinstance(last, dict) and last.get("ok") and last.get("backup") == backup
+        # "ok" plus the file name is not this rollback's restore: the same archive may have been restored by
+        # hand before the intent was written, and that older outcome would pass a rollback whose restore never
+        # ran.  The intent carries when it was recorded; an older outcome is not it (an intent from before this
+        # field is still trusted on the name alone, as it was)
+        restored = isinstance(last, dict) and last.get("ok") and last.get("backup") == backup \
+            and str(last.get("at") or "") >= str(intent.get("at") or "")
         rec = self.state.installed.get(domain) or {}
         self.state.pending_rollback = None
         if not restored or tag not in (rec.get("versions") or {}):
@@ -1836,7 +1899,81 @@ class Installer:
         events.emit("rollback", f"{domain} back to {tag}; {backup} restored (the rollback was interrupted and finished at this boot)",
                     domain=domain, tag=tag)
 
+    def _tag_of_deployed(self, domain: str) -> tuple[str | None, str | None]:
+        """(tag, installed_at) from the marker _ensure_deployed writes next to
+        the deployed code."""
+        try:
+            with open(os.path.join(self._component_dir(domain), ".hri-tag"), encoding="utf-8") as fh:
+                parts = fh.read().split("\n")
+        except OSError:
+            return None, None
+        tag = parts[0].strip()
+        return (tag if tag_ok(tag) else None), (parts[1].strip() if len(parts) > 1 else None)
+
+    def _adopt_from_disk(self) -> str | None:
+        """After a damaged state.json: config entries exist for a domain the
+        empty state does not know, so that integration IS loaded and
+        publishing.  Recording it is strictly better than reporting "nothing
+        runs": stop, rollback and the version list come back, and the
+        one-integration rule keeps holding (an install would otherwise land
+        next to it instead of replacing it).  Nothing is guessed - the version
+        store and the marker of the deployed copy say which tag runs - and
+        nothing is deployed: a tag that cannot be identified is left out,
+        which only means the manager knows less, not something wrong."""
+        domains = {e.domain for e in self.hass.config_entries.async_entries() if e.domain != MANAGER_DOMAIN}
+        domains = {d for d in domains if d not in self.state.installed and self._manifest_at(self._component_dir(d))}
+        if len(domains) != 1:
+            if domains:
+                _LOGGER.error("not adopting %s after the damaged state.json: exactly one integration runs in a container", sorted(domains))
+            return None
+        domain = domains.pop()
+        tag, installed_at = self._tag_of_deployed(domain)
+        versions: dict[str, dict[str, Any]] = {}
+        try:
+            stored = sorted(os.listdir(os.path.join(self.versions_dir, domain)))
+        except OSError:
+            stored = []
+        for name in stored:
+            stored_tag = name.replace("%2F", "/").replace("%25", "%")
+            manifest = self._manifest_at(self._version_dir(domain, stored_tag))
+            if not tag_ok(stored_tag) or manifest is None:
+                continue
+            versions[stored_tag] = {"installed_at": installed_at if stored_tag == tag else "", "version": manifest.get("version"),
+                                    "requirements": manifest.get("requirements", []), "pin": None, "adopted": True}
+        if not versions:
+            _LOGGER.error("not adopting %s after the damaged state.json: no version of it is in the store", domain)
+            return None
+        rec = asdict(Domain())
+        rec["versions"] = versions
+        rec["running_tag"] = tag if tag in versions else None
+        self.state.installed[domain] = rec
+        # "running" is what the config entries say, not what the files on disk are: an integration that was
+        # stopped has disabled entries, and adopting it as running would enable them at this very reconcile
+        if any(e.disabled_by is None for e in self._entries_of(domain)):
+            self.state.domain = domain
+        self._save_state()
+        return domain
+
+    def _report_state_loss(self) -> None:
+        """One damaged state.json used to be one log line and a UI that showed
+        nothing running while the integration was loaded and publishing."""
+        from homeassistant.components import persistent_notification as ha_pn
+
+        adopted = self._adopt_from_disk()
+        note = self.state_load_error or ""
+        if adopted:
+            note += f"; adopted {adopted} {self.running_tag or '(version unknown)'} from the config entries and the version store"
+        else:
+            note += "; no config entry of an installed integration was found, so nothing is recorded as running"
+        self.state_load_error = None
+        self.state.last_error = note
+        self._save_state()
+        events.emit("error", note, domain=adopted)
+        ha_pn.async_create(self.hass, note, title="Manager state lost", notification_id="hri_state_lost")
+
     async def _reconcile(self) -> None:
+        if self.state_load_error:
+            self._report_state_loss()  # before the rollback/deploy below: they act on the state it repairs
         self._apply_pending_rollback()  # before anything is deployed: it decides which tag this boot runs
         domain = self.state.domain
         rec = self.state.installed.get(domain or "", {})

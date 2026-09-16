@@ -7,6 +7,8 @@ from typing import Any
 
 import os
 import re
+import tempfile
+import threading
 
 from aiohttp import web
 from homeassistant.core import HomeAssistant
@@ -25,6 +27,17 @@ MAX_PATCH = 2 * 1024 * 1024
 
 def _tag_ok(tag: str) -> bool:
     return bool(_TAG_RE.match(tag)) and ".." not in tag
+
+
+_SAVE_LOCKS: dict[str, threading.Lock] = {}
+_SAVE_LOCKS_GUARD = threading.Lock()
+
+
+def _save_lock(path: str) -> threading.Lock:
+    """One lock per file, for writes that run in the executor (two requests
+    are two executor jobs, on two threads)."""
+    with _SAVE_LOCKS_GUARD:
+        return _SAVE_LOCKS.setdefault(os.path.realpath(path), threading.Lock())
 
 
 class RunView(ManagerView):
@@ -296,13 +309,26 @@ class PatchEditView(ManagerView):
         def _write() -> bool | None:
             """None: refused (exists); else whether it overrides a bundled patch."""
             d = patches.patch_dir(cfg, domain)
-            overrides = patches.is_bundled(cfg, domain, name)
-            if create and os.path.isfile(os.path.join(d, name)):
-                return None
-            os.makedirs(d, exist_ok=True)
-            with open(os.path.join(d, name + ".tmp"), "w", encoding="utf-8") as fh:
-                fh.write(text)
-            os.replace(os.path.join(d, name + ".tmp"), os.path.join(d, name))
+            target = os.path.join(d, name)
+            # One "<name>.tmp" shared by every save of the same file mixed two submissions: both wrote it, the
+            # first renamed it away, and the second went on writing through its open handle - into the file that
+            # was now the patch.  A unique temporary file per save, one save of a file at a time.
+            with _save_lock(target):
+                overrides = patches.is_bundled(cfg, domain, name)
+                if create and os.path.isfile(target):
+                    return None
+                os.makedirs(d, exist_ok=True)
+                fd, tmp = tempfile.mkstemp(dir=d, prefix="." + name + ".", suffix=".tmp")
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                        fh.write(text)
+                    os.replace(tmp, target)
+                except BaseException:
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+                    raise
             return overrides
 
         overrides = await self.hass.async_add_executor_job(_write)
@@ -472,8 +498,14 @@ class SettingsView(ManagerView):
                 except Exception as err:  # noqa: BLE001
                     return self.json({"ok": False, "error": f"could not reach GitHub: {type(err).__name__}: {err}"})
             new["github_token"] = token
+        before = dict(st.data)  # a failed write must not leave the UI showing a value the file does not have
         st.data.update(new)
-        await st.async_save()
+        try:
+            await st.async_save()
+        except OSError as err:  # a full volume, like restart / backup create / restore answer it
+            st.data.clear()
+            st.data.update(before)
+            return self.json({"ok": False, "error": f"settings.json could not be written: {type(err).__name__}: {err}"})
         self.installer._releases_cache.clear()
         if getattr(self.installer, "scheduler", None) is not None:
             self.installer.scheduler.rearm()
