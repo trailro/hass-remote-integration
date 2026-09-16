@@ -190,10 +190,25 @@ def _log_files(config_dir: str, installer, entry_paths: list[str]) -> list[dict[
 
 def _tail(path: str, lines: int, needle: str) -> tuple[list[str], int]:
     """Last `lines` lines matching `needle`, reading the file backwards in
-    blocks so a 7-day log is never loaded whole."""
+    blocks so a 7-day log is never loaded whole.
+
+    Key material is masked as each block is read, before `needle` decides
+    which lines survive: the window the caller gets back is the window a
+    scrubber can no longer make sense of, so a search for bytes of a key
+    ("MIIF...") would otherwise pick the body out of its block and hand it
+    back with the BEGIN line the scrubber needs left behind.  The masking
+    runs on the whole block, which is contiguous, so the state of a block
+    that spans two reads carries from the newer to the older one; the search
+    then decides on the masked text, and finds nothing where a key was.
+    Masking the scanned lines and not scrubbing them is what keeps the cost:
+    it is a length test and one substring test per line, so a tail of a 99 MB
+    log stays in the milliseconds."""
+    from .diagnostics import mask_key_material_lines  # diagnostics imports this module
+
     needle = needle.lower()
     found: list[str] = []
     scanned = 0
+    in_block = False  # inside a key block whose END marker a newer block already passed
     with open(path, "rb") as fh:
         fh.seek(0, os.SEEK_END)
         pos = fh.tell()
@@ -208,18 +223,19 @@ def _tail(path: str, lines: int, needle: str) -> tuple[list[str], int]:
             buf = fh.read(step) + buf
             parts = buf.split(b"\n")
             buf = parts[0]  # possibly partial first line, keep for next round
-            for raw in reversed(parts[1:]):
-                if not raw.strip():
+            chunk, in_block = mask_key_material_lines(
+                [raw.decode("utf-8", errors="replace") for raw in parts[1:]], in_block)
+            for text in reversed(chunk):
+                if not text.strip():
                     continue
                 scanned += 1
-                text = raw.decode("utf-8", errors="replace")
                 if needle and needle not in text.lower():
                     continue
                 found.append(text)
                 if len(found) >= lines:
                     break
         if pos == 0 and buf.strip() and len(found) < lines and scanned_bytes < MAX_SCAN_BYTES + block:
-            text = buf.decode("utf-8", errors="replace")
+            text = mask_key_material_lines([buf.decode("utf-8", errors="replace")], in_block)[0][0]
             scanned += 1
             if not needle or needle in text.lower():
                 found.append(text)
@@ -228,7 +244,12 @@ def _tail(path: str, lines: int, needle: str) -> tuple[list[str], int]:
 
 
 def _tail_masked(path: str, lines: int, needle: str) -> tuple[list[str], int]:
-    """_tail with secrets masked by the diagnostics scrubber (the rules of the zip)."""
+    """_tail with secrets masked by the diagnostics scrubber (the rules of the zip).
+
+    _tail has already masked key material, which is the part the search must
+    not be able to select on; the rest of the rules (a password in a line, a
+    bearer token, a cookie) match within one line and run here, on the lines
+    that survived the search, not on everything the scan read."""
     from .diagnostics import scrub_lines  # diagnostics imports this module
 
     found, scanned = _tail(path, lines, needle)
@@ -289,8 +310,12 @@ class LogFilesView(ManagerView):
             # the names and sizes of the files, from a walk of the config dir: for this UI, like the tail,
             # not for a request any page can make
             return self.json_message("X-Requested-With: fetch required", status_code=400)
+        from .diagnostics import scrub  # diagnostics imports this module
+
         files = await self.hass.async_add_executor_job(_log_files, self.hass.config.config_dir, self.installer, _entry_paths(self.hass, self.installer.running))
-        return self.json([{k: v for k, v in f.items() if k != "path"} for f in files])
+        # a name comes from the config dir (an integration that names its log file after what it
+        # connects to) and from the registry's log_dir: scrubbed like the lines inside the file
+        return self.json([{**{k: v for k, v in f.items() if k != "path"}, "name": scrub(f["name"])} for f in files])
 
 
 class LogFileTailView(ManagerView):
@@ -303,6 +328,8 @@ class LogFileTailView(ManagerView):
     async def get(self, request: web.Request) -> web.Response:
         if request.headers.get("X-Requested-With") != "fetch":
             return self.json_message("X-Requested-With: fetch required", status_code=400)  # log lines are for this UI, not for any page's requests
+        from .diagnostics import scrub  # diagnostics imports this module
+
         q = request.query
         try:
             lines = max(1, min(int(q.get("lines", DEFAULT_LINES) or DEFAULT_LINES), MAX_LINES))
@@ -313,7 +340,8 @@ class LogFileTailView(ManagerView):
         if not files:
             return self.json({"path": None, "bytes": None, "columns": [], "lines": [], "total_lines_scanned": 0, "format_error": fmt_error})
         wanted = q.get("file") or files[0]["name"]
-        chosen = next((f for f in files if f["name"] == wanted), None)
+        # the listing shows scrubbed names, so that is what comes back here
+        chosen = next((f for f in files if wanted in (f["name"], scrub(f["name"]))), None)
         if chosen is None:  # never open arbitrary paths
             return self.json_message("unknown file", status_code=404)
         try:
@@ -321,5 +349,5 @@ class LogFileTailView(ManagerView):
         except OSError as err:
             return self.json_message(f"cannot read the file (rotated away?): {err}", status_code=404)
         columns, rows, slow = await self.hass.async_add_executor_job(_format_lines, fmt, raw_lines)
-        return self.json({"path": chosen["path"], "bytes": chosen["bytes"], "total_lines_scanned": scanned,
+        return self.json({"path": scrub(chosen["path"]), "bytes": chosen["bytes"], "total_lines_scanned": scanned,
                           "columns": columns, "lines": rows, "format_error": fmt_error or slow})

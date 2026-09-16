@@ -47,6 +47,17 @@ _AUTH_TEXT = re.compile(r"(authorization['\"]?\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|(?:
 _COOKIE_TEXT = re.compile(r"(\b(?:set-)?cookie['\"]?\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\r\n]+)", re.I)
 # a whole PEM block; a truncated one (a cut log tail) up to the first character that cannot be base64
 _PEM = re.compile(r"-----BEGIN ([A-Z0-9 ]+)-----[\s\S]*?(?:-----END \1-----|(?=[^A-Za-z0-9+/=\s\\])|\Z)")
+# a line that is nothing but base64: the body of a key whose BEGIN line the caller never saw
+# (a search that selected this line alone, the start of a tail window, a page boundary).  40
+# characters is shorter than any line of a real key body and longer than the identifiers that
+# appear alone on a log line.  The two long runs that are not key material are spelled out: a
+# hex digest (a git sha is 40 characters), and a path or an MQTT topic, which are lower case
+# and "/" where a key body of this length is, with certainty, mixed case.
+_KEY_BODY_LINE = re.compile(r"(?![0-9a-fA-F]+\Z)(?![a-z0-9/]+\Z)[A-Za-z0-9+/]{40,}={0,2}")
+_PEM_BODY_LINE = re.compile(r"[A-Za-z0-9+/]+={0,2}")
+# inside a block that is known to be open, the body can carry the logger's prefix (an integration
+# that logs a key one line per record); a run that long is not a topic or a path
+_PEM_BODY_TAIL = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{40,}={0,2}\Z")
 _BEARER = re.compile(r"\b(Bearer|Basic)\s+([A-Za-z0-9._~+/=-]{8,})")
 # user:password@host: the password may hold "/" or "@" (urlsplit cuts the authority at the first "/"), so it
 # runs to the "@" that a host-like part follows
@@ -83,8 +94,62 @@ def _scrub_one_line_rules(value: str) -> str:
 
 def _mask_pem_in_place(match: re.Match[str]) -> str:
     """A PEM block masked without changing how many lines it occupies: the
-    marker on the first line, ``***`` for every further line it covered."""
-    return f"-----BEGIN {match.group(1)}-----***-----END {match.group(1)}-----" + "\n***" * match.group(0).count("\n")
+    marker on the first line, ``***`` for every further line it covered.
+
+    A match that ends on a newline covered no text on the line after it - the
+    body was masked before this ran, and the rule stops at the first character
+    that cannot be base64, so ``***`` is where it stops.  That line keeps what
+    it has instead of collecting a second ``***``."""
+    lines = match.group(0).count("\n")
+    open_line = 1 if match.group(0).endswith("\n") else 0
+    return (f"-----BEGIN {match.group(1)}-----***-----END {match.group(1)}-----"
+            + "\n***" * (lines - open_line) + "\n" * open_line)
+
+
+def mask_key_material_lines(lines: list[str], in_block: bool = False) -> tuple[list[str], bool]:
+    """Key material masked line by line, without needing the whole block.
+
+    The PEM rule needs the BEGIN marker and the body in one text, so it only
+    works on a text nobody has cut: filtering first and scrubbing the
+    survivors, or scrubbing a window that starts below the BEGIN line, hands
+    back the body of a key the rule can no longer recognise.  Two rules that
+    do not need the marker above the body:
+
+    * read from the end, the base64 run above an ``-----END ...-----`` marker
+      is that block's body whether its BEGIN line is in this batch or not.
+      ``in_block`` is that state, carried in and out, so a caller reading a
+      file backwards block by block passes it from one batch to the older one;
+    * a line that is nothing but base64 and too long to be an identifier is
+      masked on its own, which is what closes a search, a page or a tail whose
+      window holds neither marker.
+
+    ``lines`` come in and go out in file order.  Masking only ever replaces a
+    line with ``***``, so it can drop a caller's match but never create one,
+    and a caller may mask first and search afterwards.  Every line a tail
+    reads passes through here, so the tests a line usually fails come first:
+    a substring search for the marker, then a length and a space (a log line
+    has a space in it long before it has forty base64 characters)."""
+    out = list(lines)
+    for i in range(len(out) - 1, -1, -1):
+        line = out[i]
+        if "-----" in line:
+            # the BEGIN line of the block being masked, or its END marker (or both, inline)
+            in_block = "-----END " in line and "-----BEGIN " not in line
+            continue
+        if in_block:
+            text = line.strip()
+            if not text:
+                continue  # a blank line neither ends the block nor needs masking
+            if _PEM_BODY_LINE.fullmatch(text):
+                out[i] = "***"
+                continue
+            if (m := _PEM_BODY_TAIL.search(text)) is not None:
+                out[i] = line[:line.index(text)] + text[:m.start()] + "***"
+                continue
+            in_block = False  # not body after all: the log line above a stray END marker
+        if len(line) >= 40 and " " not in line and _KEY_BODY_LINE.fullmatch(line.strip()):
+            out[i] = "***"
+    return out, in_block
 
 
 def scrub_lines(texts: list[str]) -> list[str]:
@@ -95,8 +160,13 @@ def scrub_lines(texts: list[str]) -> list[str]:
     it: the BEGIN line comes back masked while the key body on the lines after
     it is printed verbatim, which reads as masked and is not.  The pieces are
     scrubbed as one text and come back with the newlines they went in with, so
-    the caller keeps one element per element and its line numbering."""
-    masked = _PEM.sub(_mask_pem_in_place, "\n".join(texts)).split("\n")
+    the caller keeps one element per element and its line numbering.
+
+    The pieces are often not the whole log either - a search kept some records,
+    a page ended, a tail window began below the BEGIN line - so the line rules
+    (mask_key_material_lines) run as well, and recognise key material that has
+    no marker left above it."""
+    masked, _ = mask_key_material_lines(_PEM.sub(_mask_pem_in_place, "\n".join(texts)).split("\n"))
     lines = [_scrub_one_line_rules(line) for line in masked]
     out, at = [], 0
     for text in texts:
@@ -104,6 +174,25 @@ def scrub_lines(texts: list[str]) -> list[str]:
         out.append("\n".join(lines[at:at + count]))
         at += count
     return out
+
+
+def scrub_text(text: str) -> str:
+    """scrub() for a text that is a log: the line rules apply to it as well, so
+    a window that cut a key's BEGIN marker off does not print the body."""
+    return "\n".join(scrub_lines(text.split("\n")))
+
+
+def log_records_text(records: list[dict[str, Any]]) -> str:
+    """The zip's log.txt: the newest records the handler holds, one line each.
+
+    The messages are scrubbed as lines and the prefix is put on afterwards,
+    the way the Logs page does it: this window is the newest 1000 records, so
+    it can start below the BEGIN line of a key the integration logged, and a
+    line that is key material is only recognisable as key material while it is
+    still the whole line."""
+    masked = scrub_lines([str(r.get("message") or "") for r in records])
+    return "\n".join(f"{r.get('ts', '')} {r.get('level', '')} [{r.get('logger')}] {text}"
+                     for r, text in zip(records, masked))
 
 
 def _dump(obj: Any) -> str:
@@ -162,9 +251,7 @@ class DiagnosticsView(ManagerView):
         handler = logbuffer.find()
         if handler is not None:
             records, _ = await self.hass.async_add_executor_job(lambda: handler.query(limit=1000))
-            files["log.txt"] = scrub("\n".join(
-                f"{r.get('ts', '')} {r.get('level', '')} [{r.get('logger')}] {r.get('message')}"
-                for r in records))
+            files["log.txt"] = log_records_text(records)
         files["log_file.txt"] = await self.hass.async_add_executor_job(self._log_file_tail, _entry_paths(self.hass, self.installer.running))
         files["README.txt"] = ("hass-remote-integration diagnostics, generated " + time.strftime("%Y-%m-%dT%H:%M:%S%z")
                                + "\nSecrets scrubbed; settings.json/mqtt.json contents not included.\n")
@@ -193,7 +280,9 @@ class DiagnosticsView(ManagerView):
                 size = fh.tell()
                 fh.seek(max(0, size - 200_000))
                 lines = fh.read().decode("utf-8", errors="replace").splitlines()
-            # the integration's own log can carry passwords and tokens like any other log
-            return scrub(f"# {os.path.relpath(path, cfg)}, last {min(LOG_FILE_TAIL, len(lines))} lines\n" + "\n".join(lines[-LOG_FILE_TAIL:]))
+            # the integration's own log can carry passwords and tokens like any other log, and
+            # this window (the last 200 kB, then the last LOG_FILE_TAIL lines) can start inside a key
+            return scrub_text(f"# {os.path.relpath(path, cfg)}, last {min(LOG_FILE_TAIL, len(lines))} lines\n"
+                              + "\n".join(lines[-LOG_FILE_TAIL:]))
         except OSError as err:
             return f"(log file unreadable: {err})"

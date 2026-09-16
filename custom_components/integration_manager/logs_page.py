@@ -44,7 +44,16 @@ ROOT_LOGGER = "root"
 def _query_masked(handler, **kwargs: Any) -> tuple[list[dict[str, Any]], bool]:
     """handler.query with message and traceback masked by the diagnostics
     scrubber, over all the records at once: a PEM block printed line by line
-    becomes one record per line, and no record on its own matches it."""
+    becomes one record per line, and no record on its own matches it.
+
+    The handler searches and pages the records before this sees them, so the
+    records that arrive are not the block: a search for bytes of a key picks
+    out the one record that holds the body, and a page boundary can leave the
+    BEGIN record on the previous page.  scrub_lines masks a line that is key
+    material on its own for exactly that reason, and the search runs again
+    here, on the masked text - so searching for a key returns the lines that
+    still say what the user typed, and nothing that only matched inside the
+    part now masked."""
     recs, truncated = handler.query(**kwargs)
     fields = ("message", "exc")
     masked = scrub_lines([str(rec.get(f) or "") for rec in recs for f in fields])
@@ -52,6 +61,10 @@ def _query_masked(handler, **kwargs: Any) -> tuple[list[dict[str, Any]], bool]:
         for j, field in enumerate(fields):
             if rec.get(field):
                 rec[field] = masked[i * len(fields) + j]
+    text = str(kwargs.get("text") or "").lower()
+    if text:
+        recs = [r for r in recs
+                if text in str(r.get("message", "")).lower() or text in str(r.get("logger", "")).lower()]
     return recs, truncated
 
 LOGS_HTML = load_template("logs")
