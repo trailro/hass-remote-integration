@@ -78,6 +78,14 @@ def tag_ok(tag: Any) -> bool:
     return isinstance(tag, str) and bool(_TAG_RE.match(tag)) and ".." not in tag
 
 
+def manager_domain_error(domain: Any) -> str | None:
+    """The manager's own domain is never an integration to install, start or remove: deploying it would replace
+    custom_components/integration_manager, the code that is running."""
+    if str(domain or "").strip().lower() == MANAGER_DOMAIN:
+        return f"{MANAGER_DOMAIN} is this manager itself, not an integration it can install, start or remove"
+    return None
+
+
 def bad_requirement(req: Any) -> str | None:
     """Why ``req`` must not reach pip or uv, or None: an option ("-e ...",
     "--index-url ...") in a manifest would change what gets installed from where."""
@@ -289,6 +297,9 @@ class Installer:
         out: dict[str, dict[str, Any]] = {}
         for path in (BUILTIN_REGISTRY, self.user_registry_file):
             for domain, spec in _registry_integrations(path).items():
+                if manager_domain_error(domain):
+                    _LOGGER.warning("%s: the %s entry is ignored (%s)", path, domain, manager_domain_error(domain))
+                    continue
                 if isinstance(spec, dict) and (spec.get("repo") or spec.get("local")):
                     out[str(domain)] = {**out.get(str(domain), {}), **spec}
         return out
@@ -300,6 +311,8 @@ class Installer:
         repo = repo.strip().strip("/")
         if not re.fullmatch(r"[a-z0-9_]{1,64}", domain) or (repo.count("/") != 1 and not (local and not repo)):
             raise ValueError("domain must be a HA domain (a_b), repo must be owner/name")
+        if (why := manager_domain_error(domain)):
+            raise ValueError(why)
         builtin = self._builtin_registry().get(domain)
         if builtin and builtin.get("repo") != repo:
             raise ValueError(f"{domain} is a built-in registry entry pinned to {builtin['repo']}; use another domain name")
@@ -838,6 +851,8 @@ class Installer:
         if backupkit.pending(self.config_dir):
             return {"ok": False, "error": "a restore is scheduled for the next restart: restart (or cancel it) first"}
         domain = domain or self.installed_domain
+        if (why := manager_domain_error(domain)):
+            return {"ok": False, "error": why}
         spec = self.spec(domain)
         if not domain or not spec:
             return {"ok": False, "error": f"unknown integration {domain!r}: add it to the registry first"}
@@ -946,6 +961,8 @@ class Installer:
         step of the same operation (a full rollback); any other scheduled restore refuses."""
         if tag and not tag_ok(tag):  # none: the running or newest stored tag
             return {"ok": False, "error": f"invalid tag {str(tag)[:80]!r}"}
+        if (why := manager_domain_error(domain)):
+            return {"ok": False, "error": why}
         rec = self.state.installed.get(domain)
         if not rec or not rec.get("versions"):
             return {"ok": False, "error": f"{domain} is not installed"}
@@ -1534,6 +1551,8 @@ class Installer:
 
     async def uninstall(self, domain: str) -> dict[str, Any]:
         """Remove every version, the deployed files and the config entries."""
+        if (why := manager_domain_error(domain)):
+            return {"ok": False, "error": why}
         if domain not in self.state.installed:
             return {"ok": False, "error": f"{domain} is not installed"}
         if self.busy:
@@ -2243,7 +2262,7 @@ class Installer:
                 continue
             seen.add(real)
             m = self._manifest_at(real)
-            if m and m.get("domain"):
+            if m and m.get("domain") and not manager_domain_error(m["domain"]):  # a checkout of this repository has one
                 out["candidates"].append({"path": real, "domain": m["domain"], "version": m.get("version"), "name": m.get("name"),
                                           "requirements": m.get("requirements", []), "config_flow": bool(m.get("config_flow")),
                                           "in_registry": m["domain"] in self.registry(),
@@ -2257,6 +2276,8 @@ class Installer:
         is running, its deployed files are refreshed and a restart is due."""
         import backupkit
 
+        if (why := manager_domain_error(domain)):
+            return {"ok": False, "error": why}
         if backupkit.pending(self.config_dir):
             return {"ok": False, "error": "a restore is scheduled for the next restart: restart (or cancel it) first"}
         if (why := self._replace_guard(domain, replace)):
