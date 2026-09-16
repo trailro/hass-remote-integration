@@ -234,6 +234,21 @@ function field(f,t,p){
   return wrap;
 }
 
+// A value collect() refuses to convert on the user's behalf: the flow is not
+// submitted, and the message goes under the field it names.
+class FieldError extends Error{
+  constructor(name,detail){ super(`${name}: ${detail}`); this.field=name; this.detail=detail; }
+}
+// parseInt/parseFloat stop at the first character they cannot use, so "1e2" and
+// "1.5" would reach the schema as 1 and the user would never learn why it was
+// rejected (or, worse, accepted).  The whole value counts, or nothing does.
+function num(value,name,integer){
+  const v=Number(value);
+  if(!Number.isFinite(v)) throw new FieldError(name,`not a number: ${value}`);
+  if(integer&&!Number.isInteger(v)) throw new FieldError(name,`whole number expected: ${value}`);
+  return v;
+}
+
 function collect(root){
   const out={}; root=root||$('#form');
   for(const w of root.querySelectorAll(':scope > [data-name]')){
@@ -244,19 +259,24 @@ function collect(root){
     else if(k==='radio'){const c=w.querySelector('input[type=radio]:checked'); if(!c) continue; v=orig(c.value);}
     else if(k==='select'){ v=el.value; if(v==='') continue; v=orig(v); }
     else if(k==='multiselect'){ v=[...el.selectedOptions].map(o=>orig(o.value)); }
-    else if(k==='integer'){ if(el.value==='') continue; v=parseInt(el.value,10); }
-    else if(k==='number'){ if(el.value==='') continue; v=parseFloat(el.value); }
-    else if(k==='object'){ if(el.value.trim()==='') continue; v=JSON.parse(el.value); }
+    else if(k==='integer'){ if(el.value==='') continue; v=num(el.value,n,true); }
+    else if(k==='number'){ if(el.value==='') continue; v=num(el.value,n,false); }
+    else if(k==='object'){ if(el.value.trim()==='') continue; try{ v=JSON.parse(el.value); }catch(err){ throw new FieldError(n,'invalid JSON: '+err.message); } }
     else if(k==='constant'){ if(w._const===undefined) continue; v=w._const; }
-    else if(k==='duration'){ v={}; for(const u in w._parts) v[u]=parseInt(w._parts[u].value,10)||0; }
+    else if(k==='duration'){ v={}; for(const u in w._parts) v[u]=w._parts[u].value===''?0:num(w._parts[u].value,n,true); }
     else if(k==='time'){ if(el.value==='') continue; v=el.value.length===5?el.value+':00':el.value; }  // HH:MM from a browser that ignored step
     else if(k==='date'){ if(el.value==='') continue; v=el.value; }
     else if(k==='datetime'){ if(el.value==='') continue; v=el.value.replace('T',' '); }
-    else if(k==='color'){ const m=/^#(..)(..)(..)$/.exec(el.value); if(!m) continue; v=[1,2,3].map(g=>parseInt(m[g],16)); }
+    else if(k==='color'){ const m=/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(el.value); if(!m) throw new FieldError(n,`not a colour: ${el.value}`); v=[1,2,3].map(g=>parseInt(m[g],16)); }
     else { if(el.value==='') continue; v=el.value; }
     out[n]=v;
   }
   return out;
+}
+function clearErrors(){ $('#baseerr').textContent=''; $('#form').querySelectorAll('.err').forEach(e=>{e.textContent='';}); }
+function showFieldError(e){  // under the field collect() named, so the user sees which value never left the page
+  const w=e.field?[...$('#form').querySelectorAll('[data-name]')].find(x=>x.dataset.name===e.field):null;
+  if(w&&w._err) w._err.textContent=e.detail; else $('#baseerr').textContent=e.message;
 }
 // The integration's own translations/en.json, sliced to this step by the API:
 // a flow result names schema keys, step ids and error keys, and only these turn
@@ -323,7 +343,7 @@ function pollProgress(delay=2000){
   },delay);
 }
 $('#start').onclick=async()=>{try{log(`start flow ${DOM}`);const r=await post('api/flow/start',{domain:DOM});if(r.message){log('error: '+r.message);return;}flow={id:r.flow_id,kind:'config'};render(r);}catch(e){log('error: '+e.message)}};
-$('#submit').onclick=async()=>{ if(!flow) return; let input; try{input=$('#submit').dataset.external==='1'?null:collect();}catch(e){$('#baseerr').textContent='invalid JSON: '+e.message;return;}
+$('#submit').onclick=async()=>{ if(!flow) return; clearErrors(); let input; try{input=$('#submit').dataset.external==='1'?null:collect();}catch(e){showFieldError(e);return;}
   try{ const url=flow.kind==='config'?`api/flow/${flow.id}`:`api/options/${flow.id}`; const r=await post(url,{user_input:input}); if(r.type==='invalid_data'){ for(const [k,v] of Object.entries(r.errors||{})){ const w=[...$('#form').querySelectorAll('[data-name]')].find(x=>x.dataset.name===k); if(w&&w._err) w._err.textContent=String(v); else $('#baseerr').textContent=`${k}: ${v}`; } return; } if(r.message){$('#baseerr').textContent=r.message;return;} render(r);}catch(e){log('error: '+e.message)} };
 $('#abort').onclick=async()=>{ if(!flow) return; clearTimeout(PROGRESS_T); await del(flow.kind==='config'?`api/flow/${flow.id}`:`api/options/${flow.id}`); log('aborted'); flow=null; $('#stepcard').hidden=true; $('#abort').disabled=true; $('#flowid').textContent=''; };
 async function entries(){
@@ -337,8 +357,7 @@ async function entries(){
     if(a==='delete'){ if(!confirm('Delete this config entry?')) return; await post(`api/entries/${id}/delete`,{}); return entries(); }
     if(a==='reload'){ await post(`api/entries/${id}/reload`,{}); return entries(); }
     if(a==='options'){ const r=await post(`api/entries/${id}/options`,{}); if(r.message||!r.flow_id){log('error: '+(r.message||'no flow'));return;} flow={id:r.flow_id,kind:'options'}; render(r); }
-    if(a==='reconfigure'){ const r=await post('api/flow/start',{domain:DOM,source:'reconfigure',entry_id:id}); if(r.message||!r.flow_id){log('error: '+(r.message||r.reason||'no flow'));return;} flow={id:r.flow_id,kind:'config'}; render(r); }
-    if(a==='continue'){ const r=await post(`api/flow/${id}`,{user_input:null}); if(r.message||!r.type){log('error: '+(r.message||'no flow'));return;} flow={id,kind:'config'}; render(r); } });
+    if(a==='reconfigure'){ const r=await post('api/flow/start',{domain:DOM,source:'reconfigure',entry_id:id}); if(r.message||!r.flow_id){log('error: '+(r.message||r.reason||'no flow'));return;} flow={id:r.flow_id,kind:'config'}; render(r); } });
   let prog=[]; try{ prog=await (await fetch('api/flow/progress')).json(); }catch(e){}
   const pb=$('#flowsprogress'); if(!pb) return; pb.innerHTML='';
   for(const f of (Array.isArray(prog)?prog:[]).filter(f=>f.handler===DOM&&f.source!=='user')){ const b=document.createElement('button'); b.textContent=`Continue ${f.source||'flow'}${f.step_id?' · '+f.step_id:''}`; b.onclick=async()=>{ const r=await post(`api/flow/${f.flow_id}`,{user_input:null}); if(r.message){log('error: '+r.message);return;} flow={id:f.flow_id,kind:'config'}; render(r); }; pb.appendChild(b); pb.appendChild(document.createTextNode(' ')); }

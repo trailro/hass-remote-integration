@@ -1,7 +1,11 @@
 """Shared HTTP plumbing for every view of the manager.
 
-* ``ManagerView``: unauthenticated (LAN appliance, see hostguard.py) and
-  named ``integration_manager:<ClassName>`` automatically.
+* ``ManagerView``: Home Assistant's own authentication is off (the manager
+  has no HA users of its own), so what guards a view is the host guard
+  (hostguard.py) plus, when ``HRI_PASSWORD``/``HRI_PASSWORD_FILE`` is set,
+  the manager's password middleware (auth.py) in front of every request.
+  With no password set the views are open on the LAN, as an appliance.
+  Named ``integration_manager:<ClassName>`` automatically.
 * ``_json_object`` / ``with_body``: the JSON-body gate.  Requiring the
   application/json content type is what makes cross-site POSTs from a
   browser preflight (and fail); several endpoints install code, so this
@@ -28,7 +32,8 @@ class ManagerView(HomeAssistantView):
     def register(self, hass: Any, app: web.Application, router: web.UrlDispatcher) -> None:
         """HomeAssistantView.register without CORS: Home Assistant's
         configured origins (cast.home-assistant.io by default) must not get
-        a pass to an unauthenticated API that installs code."""
+        a pass to an API that installs code and does not ask HA for a
+        token."""
         from homeassistant.helpers.http import request_handler_factory
 
         for method in ("get", "post", "delete", "put", "patch", "head", "options"):

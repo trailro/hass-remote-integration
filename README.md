@@ -275,7 +275,8 @@ is on), so nothing changed in the container meanwhile lingers there.
 ### 5. Move over from your main Home Assistant
 
 The recommended path is **shadow mode**: run the container next to your main
-HA for a while, with MQTT enabled and discovery off, and compare.
+HA for a while, with MQTT enabled and discovery off, and compare what the
+container announces over MQTT with what your main HA has made of it.
 
 1. Make sure only one side talks to the hardware in a way that conflicts
    (for example, only one side sends commands to the devices).
@@ -283,8 +284,11 @@ HA for a while, with MQTT enabled and discovery off, and compare.
    (optional). They are used to compare, and by *Enable discovery* to check
    that the main HA no longer has config entries or entity ids of the
    integration. The URL must not contain `user:password@`: the token
-   authenticates. The page lists entities missing on either side and
-   differences in state, names and flags.
+   authenticates. The page matches the entities this container announces over
+   MQTT with the MQTT entities your main HA created from that discovery, by
+   unique id, and lists what is missing on either side and what differs in
+   state, names and flags. The integration's own entities on your main HA are
+   not part of the comparison: compare those by hand before the cutover.
 3. When you are happy: **remove the integration from your main HA** (delete
    its config entries; disabling keeps its entity ids registered, and the
    Cutover page refuses then), then click *Enable discovery* on **Cutover**.
