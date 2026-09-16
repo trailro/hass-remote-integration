@@ -29,6 +29,22 @@ def _tag_ok(tag: str) -> bool:
     return bool(_TAG_RE.match(tag)) and ".." not in tag
 
 
+def _replace_file(d: str, name: str, data: bytes) -> None:
+    """Blocking, under ``_save_lock`` of the target: a unique temporary file in the same directory, renamed over
+    the target, so a reader (a boot applying the patches) never sees half a file and two saves never share one."""
+    fd, tmp = tempfile.mkstemp(dir=d, prefix="." + name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, os.path.join(d, name))
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
 class RunView(ManagerView):
     """POST /api/run/start {domain, tag?, force?} | POST /api/run/stop: the ONE
     running integration.  The MQTT publisher follows the identity.  A start of
@@ -224,8 +240,8 @@ class PatchUploadView(ManagerView):
 
         def _store() -> None:
             os.makedirs(d, exist_ok=True)
-            with open(os.path.join(d, name), "wb") as fh:
-                fh.write(data)
+            with _save_lock(os.path.join(d, name)):
+                _replace_file(d, name, data)
 
         await self.hass.async_add_executor_job(_store)
         return self.json({"ok": True, "name": name, "scope": patches.version_scope(text)})
@@ -311,17 +327,7 @@ class PatchEditView(ManagerView):
                 if create and os.path.isfile(target):
                     return None
                 os.makedirs(d, exist_ok=True)
-                fd, tmp = tempfile.mkstemp(dir=d, prefix="." + name + ".", suffix=".tmp")
-                try:
-                    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                        fh.write(text)
-                    os.replace(tmp, target)
-                except BaseException:
-                    try:
-                        os.remove(tmp)
-                    except OSError:
-                        pass
-                    raise
+                _replace_file(d, name, text.encode("utf-8"))
             return overrides
 
         overrides = await self.hass.async_add_executor_job(_write)
