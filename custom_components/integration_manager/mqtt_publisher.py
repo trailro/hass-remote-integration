@@ -224,6 +224,24 @@ class MqttConfig:
     tls_insecure: bool = False
 
 
+# Every numeric setting, with the range it is usable in.  An interval has no upper bound of its own,
+# and a big enough one makes timedelta(seconds=...) raise OverflowError while the republish timer is
+# armed - that happens in async_start(), before the views that could correct the value are registered,
+# so the manager would never come up again once such a value reached mqtt.json.
+INT_BOUNDS = {
+    "port": (1, 65535),
+    "qos": (0, 2),
+    "republish_interval_s": (30, 86400),        # at most a day between incremental passes
+    "full_republish_interval_min": (5, 10080),  # at most a week between full ones
+}
+
+
+def _bounded(name: str, value: Any) -> int:
+    """The setting as an int inside its range; raises for anything that is not a number."""
+    low, high = INT_BOUNDS[name]
+    return min(high, max(low, int(value)))
+
+
 def _notification_count(hass: HomeAssistant) -> int:
     """Persistent notifications the integration raised (a headless HA shows
     them nowhere else): part of the health document for the parent."""
@@ -406,9 +424,27 @@ class MqttPublisher:
             with open(self.path, encoding="utf-8") as fh:
                 data = json.load(fh)
             known = {k: v for k, v in data.items() if k in MqttConfig.__dataclass_fields__}
-            return MqttConfig(**known)
+            return MqttConfig(**self._sane(known))
         except (OSError, ValueError, TypeError):
             return MqttConfig()
+
+    def _sane(self, data: dict[str, Any]) -> dict[str, Any]:
+        """A numeric setting on disk that is out of range (or not a number at all) falls back to its
+        default, warned: it was written by an older version or by hand, and the boot must not die on it."""
+        out = dict(data)
+        for name in INT_BOUNDS:
+            if name not in out:
+                continue
+            try:
+                value = _bounded(name, out[name])
+                if value == out[name]:
+                    continue
+            except (TypeError, ValueError):
+                pass
+            default = MqttConfig.__dataclass_fields__[name].default
+            _LOGGER.warning("MQTT: %s=%r in %s is not usable: using %s", name, out[name], self.path, default)
+            out[name] = default
+        return out
 
     async def async_save(self, updates: dict[str, Any]) -> MqttConfig:
         """Validate types strictly: a null/NaN from the form would be stored
@@ -439,7 +475,7 @@ class MqttPublisher:
                 with open(self.path, encoding="utf-8") as fh:
                     on_disk = json.load(fh)
                 if isinstance(on_disk, dict):
-                    current.update({k: v for k, v in on_disk.items() if k in current})
+                    current.update(self._sane({k: v for k, v in on_disk.items() if k in current}))
             except (OSError, ValueError):
                 pass  # no file yet (or unreadable): the running config is the base
         for k, v in updates.items():
@@ -454,7 +490,7 @@ class MqttPublisher:
                 if not isinstance(v, str):
                     raise ValueError("ca_certs must be a string")
                 v = self._ca_certs_path(v.strip())
-            elif k in ("port", "republish_interval_s", "qos", "full_republish_interval_min"):
+            elif k in INT_BOUNDS:
                 try:
                     v = int(v)
                 except (TypeError, ValueError):
@@ -463,10 +499,9 @@ class MqttPublisher:
                     raise ValueError("port out of range")
                 if k == "qos" and v not in (0, 1, 2):
                     raise ValueError("qos must be 0, 1 or 2")
-                if k == "republish_interval_s":
-                    v = max(30, v)
-                if k == "full_republish_interval_min":
-                    v = max(5, v)
+                # an interval has no wrong value, only an unusable one: clamped, the way the
+                # minimum has always been, so the form can never store one the timer cannot use
+                v = _bounded(k, v)
             elif k == "exclude_integrations":
                 if isinstance(v, str):
                     v = [x.strip() for x in v.split(",") if x.strip()]
@@ -582,7 +617,7 @@ class MqttPublisher:
         if self._republish_unsub is not None:
             self._republish_unsub()
         self._republish_unsub = async_track_time_interval(
-            self.hass, self._on_timer, timedelta(seconds=max(30, self.config.republish_interval_s)))
+            self.hass, self._on_timer, timedelta(seconds=_bounded("republish_interval_s", self.config.republish_interval_s)))
         self._republish_interval = self.config.republish_interval_s
 
     async def async_reconnect(self) -> None:
@@ -2126,7 +2161,10 @@ class MqttPublisher:
                 # the state is the time of the last occurrence: only a time not seen before is a new one
                 # (an availability flap restores the same time: unavailable -> T must not replay T)
                 last = self._last_event.get(new.entity_id)
-                if last is None and old is not None and old.state not in ("unavailable", "unknown"):
+                if last is None and old is not None and old.state != "unavailable":
+                    # "unknown" is an entity that exists and has never fired, so the step out of it is
+                    # the first real occurrence; a restored state arrives with no old state at all, and
+                    # a flap (unavailable -> T) is left alone because this process may not have seen T
                     last = old.state
                 is_event = old is not None and last is not None and new.state != last
                 self._last_event[new.entity_id] = new.state
@@ -2201,7 +2239,7 @@ class MqttPublisher:
             self._pending_clears.add(topic)  # sent at the next republish
 
     async def _on_timer(self, _now) -> None:
-        full = time.time() - self._last_full >= max(5, self.config.full_republish_interval_min) * 60
+        full = time.time() - self._last_full >= _bounded("full_republish_interval_min", self.config.full_republish_interval_min) * 60
         await self.async_republish_all(full=full)
 
     @callback
