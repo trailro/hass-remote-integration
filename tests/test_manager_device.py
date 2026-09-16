@@ -99,6 +99,33 @@ class DocumentTest(unittest.TestCase):
         self.assertEqual(u["latest_version"], "9999.1.0")
         self.assertEqual(u["release_url"], "https://github.com/home-assistant/core/releases/tag/9999.1.0")
 
+    def test_the_document_writes_no_file(self):
+        """C18: document() is read by GET /api/manager and every publication; the known versions are saved by the
+        version check and the resource sample instead."""
+        upd = FakeUpdater()
+        dev = device(updater=upd)
+        dev._latest_file = "/nonexistent/integration_manager/latest_versions.json"
+        written = []
+        upd._cache = (1.0, {"latest_stable": "9999.1.0"})
+        with unittest.mock.patch.object(md.writer, "write_nowait", lambda path, data, **_k: written.append((path, data))):
+            self.assertEqual(dev.document()["updates"]["home_assistant"]["latest_version"], "9999.1.0")
+            self.assertEqual(written, [])
+
+            async def executor(func, *args):
+                return func(*args)
+
+            dev.hass = SimpleNamespace(async_add_executor_job=executor)
+            dev._sample_blocking = lambda: {}
+
+            async def record(_now):
+                return None
+
+            dev._record = record
+            asyncio.run(dev.async_sample())
+            self.assertEqual(written, [(dev._latest_file, {"home_assistant": "9999.1.0"})])
+            asyncio.run(dev.async_sample())  # unchanged: not written again
+            self.assertEqual(len(written), 1)
+
     def test_ha_in_progress(self):
         dev = device()
         for desired, expected in ((None, False), (md.HA_VERSION, False), ("2000.1.0", False), ("9999.1.0", True)):
