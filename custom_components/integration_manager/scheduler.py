@@ -65,7 +65,7 @@ class Scheduler:
             self._retry()  # one pending retry at most: the daily tick and a retry both land here
             self._retry = None
         if st.bool_("backup_daily") and self.installer.busy and not self.installer.backup_running:
-            _LOGGER.info("daily backup skipped: an install/start is running; retrying in 30 min")
+            _LOGGER.info("daily backup skipped: another action is running; retrying in 30 min")
             self._retry = async_call_later(self.hass, 1800, HassJob(self._daily, "daily backup retry"))
             return
         if st.bool_("backup_daily"):

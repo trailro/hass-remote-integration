@@ -1604,7 +1604,7 @@ class Installer:
         # replaced by it, and both answered ok.  Refused, never waited for; the smoke test defers its verdict while
         # either is held, so the automatic rollback is not refused by them
         if _ha_change_lock_taken() or self.busy:
-            return {"ok": False, "error": "a Home Assistant version change or an install is running: try again in a moment"}
+            return {"ok": False, "error": "a Home Assistant version change or another action is running (an install, start, stop, import, restore or full rollback): try again in a moment"}
         self._rollback_running = True  # before the first await
         self.busy = True
         try:
@@ -1815,7 +1815,7 @@ class Installer:
 
     async def restart(self) -> dict[str, Any]:
         if self.busy:
-            return {"ok": False, "error": "another action is running (install/start): wait for it"}
+            return {"ok": False, "error": "another action is running (an install, start, stop, import, restore or full rollback): wait for it to finish"}
         self.busy = True  # before the first await: no install/start may begin while the process goes down
         before = (self.state.restart_required, self.state.last_action)
         try:

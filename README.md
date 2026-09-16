@@ -222,8 +222,9 @@ Choose whichever fits the integration, on the **Integration** page:
   label; a text field that takes several values, and the typed values of a
   multi-select that allows them, show one box per item (an item may contain a
   comma or surrounding spaces and is sent as typed), and a single custom select
-  value is sent whole. One the
-  page does not know falls back to a JSON textarea saying so.
+  value is sent whole. A multi-select in list mode shows as checkboxes, a value
+  typed into a single select replaces the one picked, and a duration part may be
+  a fraction. One the page does not know falls back to a JSON textarea saying so.
   A value the page cannot convert (a fraction in a whole-number field, broken
   JSON) is refused with the reason under that field, and nothing is sent.
 - **YAML config**: for integrations configured in `configuration.yaml`, paste
@@ -383,7 +384,7 @@ a time: a second one (a double click, or a manual one while the automatic one
 runs) is refused. A full rollback is also refused while a Home Assistant version change, an
 install or a restore is being prepared, and while a switch with a configuration
 restore or a clean start is scheduled; the smoke test's automatic rollback waits
-for the first two instead. Once a full rollback has scheduled its restore, a
+for those three instead. Once a full rollback has scheduled its restore, a
 restore by hand is refused until the restart finishes it. After an automatic
 rollback there is no Full rollback target: the version the smoke test rejected
 is never offered again that way.
@@ -503,10 +504,10 @@ state, …), and is rolled back if it fails halfway. *Cancel restore* cancels a
 restore scheduled by hand; a restore that belongs to a scheduled Home Assistant
 version change is cancelled together with that change (choose the running
 version under Home Assistant), and cancelling it on its own is refused. A
-restore is refused (try again) while a Home Assistant version change or an
-install is being prepared, and a version change is refused while a restore is
-being scheduled. *Cancel restore* is refused the same way (try again) while a Home
-Assistant version change, a full rollback or an install is being prepared.
+restore and *Cancel restore* are refused (try again) while a Home Assistant
+version change, a full rollback, an install, a start or stop, or an import is
+being prepared or running, and a version change is refused while a restore or a
+full rollback is being scheduled or a restore is being cancelled.
 Restoring the YAML part also
 removes root `*.yaml` / `*.yml` files that are not in the backup, so a file
 created after it (a `secrets.yaml`, for example) does not survive the restore.
@@ -530,7 +531,7 @@ restored, is itself a symbolic link. Backups, restored files and
 uploads are created readable by the container user only (umask 077).
 Automatic pruning keeps the newest backups by the date they were made (never
 later than the file's own date), never removes the backup it runs after, and
-leaves uploaded backups, and the copy taken before a restore, alone for their
+leaves uploaded backups, and the copy taken before the last restore, alone for their
 first 7 days; while that week lasts the copy is also refused for deletion, since
 it is the only way back once the restore has succeeded and its schedule is gone. An upload never replaces
 an existing backup: a name already taken gets a `-2`, `-3`, … suffix.
@@ -572,7 +573,9 @@ volume usage, one sample a minute, for 48 hours by default and up to 120
 (*kept for … hours* on the same card). Memory that keeps growing for hours, or
 an event loop held for 500 ms or more in several minutes of the last hour,
 raises a notification: the usual signs of a leak or of blocking code in the
-integration.
+integration. Every notification the integration raises goes on the timeline;
+more than three within two seconds become one line that counts them and names
+the first three titles.
 
 ### Logs and log files
 
@@ -580,6 +583,10 @@ integration.
 log, with filters and a live follow. Each line carries its date and time, and
 the list holds the newest 200 lines (following live drops the oldest). Loggers listed in the registry's
 `quiet_loggers` start at WARNING; raise one at runtime while you investigate.
+A live follow keeps advancing even when a whole batch of new lines matched only
+inside masked values, or a level or logger filter matched nothing, and a
+follower that fell behind reads on at once while more lines are waiting. The
+search runs once typing pauses.
 The root logger is not one of them: a level set there would silence or flood
 every logger at once, including the line that records the change, so it is
 refused; raise the integration's own logger instead.
@@ -598,10 +605,10 @@ Rotation by rename or by copy leaves one link, so nothing the integration writes
 is lost by it. File names are masked like everything else on the page, and two
 files whose names mask to the same text are still listed separately and each
 opens its own file; after a restart the page selects the same file again by
-its name, and says so when several files share that name. A live follow keeps
-advancing even when a whole batch of new lines matched only inside masked values
-or a level or logger filter matched nothing, and a follower that fell behind
-reads on at once while more lines are waiting.
+its name, and says so when several files share that name. A tail reads at most
+the last 32 MB of a file, and a search also stops after 20000 lines that hold
+something the masking looks at (a word such as `token` or `key`); *lines read*
+says how far it got.
 
 By default every line is shown whole. The **Formatting** box at the bottom of
 the page splits lines into columns. A format is a JSON object:
@@ -629,8 +636,8 @@ Inside JSON every backslash is written twice. For lines like
 
 The format is checked on save: the pattern must compile and have at least one
 named group. It is stored in `integration_manager/settings.json`, so it
-survives image updates and is part of backups. The filter box always searches
-the whole line, hidden groups included. Matching has a time limit: when a
+survives image updates and is part of backups. The filter box searches the
+whole line with secrets already masked, hidden groups included. Matching has a time limit: when a
 pattern is too slow for the lines on screen, the remaining lines are shown
 whole and the page says so.
 
@@ -767,14 +774,10 @@ hass_<domain>/manager/result                        outcome of a manager action,
   would replay the same document on every reconnect until nothing else gets
   through. A broker that refuses MQTT 5 gets an MQTT 3.1.1 connection, logged
   and on the timeline; 3.1.1 cannot announce a maximum, so only the 1 MiB limit
-  applies there. `GET /api/mqtt/status` shows the protocol in `protocol`, and
-  the MQTT page shows it next to the connection state.
-  A skipped document is named in the log and on the timeline, and counted in
-  `GET /api/mqtt/status` (`oversized_skipped`, `last_oversized`); the MQTT page
-  shows the last one next to the connection state.
-- **Stopping the integration** clears the retained service catalog, so the main
-  HA is not left with services that cannot be called; a later start publishes it
-  again. The entity documents stay, marked unavailable.
+  applies there. `GET /api/mqtt/status` shows the protocol in `protocol`, and a
+  skipped document is named in the log and on the timeline and counted there
+  (`oversized_skipped`, `last_oversized`); the MQTT page shows the protocol and
+  the last skipped document next to the connection state.
 - **Discovery** (off by default): one retained config per device. Entities of
   every domain that has an MQTT platform become native entities with working
   commands; the rest (cameras, media players, weather, …) are mirrored as
@@ -815,9 +818,11 @@ hass_<domain>/manager/result                        outcome of a manager action,
   surrounding spaces ignored); any other payload is refused rather than read
   as *off*, with the reason under *recent commands* and in the log. A command
   larger than 256 KB, or nested deeper than 64 levels, is refused unread, with
-  the reason in the same two places. A command published with `retain` is never
-  carried out, because a physical effect must not replay at every reconnect; the
-  retained message is cleared from the broker as it arrives. On a broker that
+  the reason in the same two places. A command, service call or manager action
+  published with `retain` is never carried out, because a physical effect must
+  not replay at every reconnect; the retained message is cleared from the broker
+  as it arrives, and the log names the topic (it does not appear under *recent
+  commands*). On a broker that
   speaks only MQTT 3.1.1 this holds for a retained command found when the
   container subscribes (at every connection); one published while the container
   is already connected reaches it without the retain flag, runs once, and its
@@ -826,7 +831,9 @@ hass_<domain>/manager/result                        outcome of a manager action,
   data plus optional `entity_id`, and an optional `_id`); the result comes back
   on `result/...`, with a `response` key for a service that returns response
   data (the catalog marks those `"response": "optional"` or `"required"`, from
-  what the integration registered). A repeated `_id` within five minutes is answered from memory
+  what the integration registered). A result over the broker's maximum packet
+  size is answered without its response data, with `ok: false` and the reason,
+  so the caller still gets an answer. A repeated `_id` within five minutes is answered from memory
   and never executed twice (the latest 1000 `_id`s are kept); the comparison
   keeps the type, so `1` and `"1"` are two different calls. At most 50 service
   calls and commands run at once, a timed-out call counting until its service
@@ -851,9 +858,9 @@ hass_<domain>/manager/result                        outcome of a manager action,
   the container publishes: an `entity_id` of `all`, or an entity, group (and
   its members), area, floor, label or device that resolves to an excluded or
   unknown entity, is refused, and so is a target that cannot be read (an id
-  that is not a string). An area, floor or label is measured only against the
+  that is not a string). An area, floor, label or device is measured only against the
   entity domains the service can act on: Home Assistant hands an entity service
-  its own component's entities and nothing else, so a room that also holds
+  its own component's entities and nothing else, so a room or device that also holds
   entities this container does not publish is no reason to refuse
   `light.turn_on` for it, while a service that is not an entity service keeps
   the strict check. Entity ids in the service data count too: fields
@@ -901,6 +908,8 @@ hass_<domain>/manager/result                        outcome of a manager action,
   running integration. *Stop* is not a removal: the whole device, the manager
   device included, goes unavailable on the main Home Assistant and keeps its
   entities with their customisations until the integration starts again.
+  *Stop* also clears the retained service catalog, so the main Home Assistant
+  is not left with services it cannot call; the next start publishes it again.
   *Uninstall* clears everything retained under that identity, so the main Home
   Assistant removes the entities and devices. Entities that a restore, an
   import or a rebuild took away before a restart are removed there five
@@ -936,7 +945,8 @@ secret) to require a password:
 
 - a `HRI_PASSWORD_FILE` that cannot be read, or that is empty (a Docker secret
   created but never populated), is treated as a password that failed to arrive:
-  nothing is accepted until it is fixed, the login page says why, and the reason
+  nothing is accepted until it is fixed, a login attempt says why (`POST
+  /api/login` answers `503` with the reason), and the reason
   is in the log and on the timeline;
 - the browser gets a session cookie from the login page, valid for 30 days,
   and **log out** in the top bar ends every session of the UI, in all browsers,
@@ -1014,7 +1024,7 @@ What is in place:
 - Home Assistant's onboarding API (`/api/onboarding…`) answers `403`. An
   integration that depends on `frontend` or `panel_custom` loads it, and while
   no Home Assistant user exists it would let any page create the owner account.
-- The Logs page lists regular log files only (`*.log` and rotated copies such as
+- The **Log files** page lists regular log files only (`*.log` and rotated copies such as
   `*.log.1`); symbolic links and files with more than one hard link are skipped,
   so neither kind of link can put another file of the volume (`secrets.yaml`) on
   the page. Listing them needs `X-Requested-With: fetch`, like reading a tail.
@@ -1101,7 +1111,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | `HRI_DEV_SRC` | `./dev-src` | Dev mode: directory mounted at `/dev-src` |
 | `HRI_DEBUGPY` | unset | Dev mode: debugger port |
 | `HRI_DEBUGPY_HOST` | `127.0.0.1` | Dev mode: address debugpy binds inside the container (the dev overlay sets `0.0.0.0`) |
-| `HRI_CALL_TIMEOUT` | `60` | Seconds a service call or command may take before it is reported as a timeout (a whole number; a value that is not one logs a warning and uses 60, one below 1 uses 1) |
+| `HRI_CALL_TIMEOUT` | `60` | Seconds a service call (over MQTT and from the Services page or `POST /api/services/call`) or a command may take before it is reported as a timeout (a whole number; a value that is not one logs a warning and uses 60, one below 1 uses 1) |
 | `HRI_TRACEMALLOC` | unset | Diagnostics: allocation tracing frames (costs memory); a value that is not a number traces 25 |
 | `HRI_TRACE_IMPORT` | unset | Diagnostics: log who imports the given packages |
 | `HRI_DEBUG` | unset | Debug logging for the manager, and blocking-call detection on the event loop |
@@ -1123,7 +1133,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
     mqtt.json                   broker configuration (mode 600)
     mqtt_rules.json             per-entity MQTT rules
     mqtt_identity.json          base topic and discovery prefix retained data was last published under
-    mqtt_undiscover.json        a discovery cleanup the broker has not confirmed yet
+    mqtt_undiscover.json        whether a discovery cleanup still waits for the broker's confirmation
     ha.json                     Home Assistant version, version changes, boot failures, last restore
     restore-pending.json        a restore scheduled for the next restart (with its zip)
     restore-applied.json        outcome of a restore that could not be recorded (a full volume), recorded at the next boot
@@ -1144,7 +1154,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
     ha-install.log              pip output of the last Home Assistant version install
     import.tar                  an uploaded Home Assistant backup, until it is inspected
     import-extracted/           what the inspection unpacked from it, until the import or Clear
-  .storage.pre-rebuild-<time>/  .storage set aside by a clean start, removed once the rebuild finished or a restore replaced .storage before that
+  .storage.pre-rebuild-<time>/  .storage set aside by a clean start: removed once the rebuild finished or a restore replaced .storage; kept (and logged) when the clean start was dropped, delete it by hand
   backups/                      backups (zip); <time>-pre-restore.zip is the copy taken before a restore
 ```
 
@@ -1166,6 +1176,9 @@ min. The MQTT page refuses a port or a qos outside them and clamps the two
 intervals. The same ranges are applied when `mqtt.json` is read, so a hand
 edit cannot keep the manager from starting: a value out of range, or not a
 number, falls back to its default (1883, 0, 300, 60) with a warning in the log.
+A `ca_certs` that resolves outside `/config` (a hand edit, a restored file, a
+symbolic link out of the volume) is dropped the same way: the system CAs are
+used, with a warning in the log.
 
 A registry entry in `integration_manager/registry.json` has this shape; only
 `repo` is required. A file of another shape is ignored, with a line in the log
@@ -1204,8 +1217,8 @@ Every page is backed by a JSON API on the same port, so everything can be
 scripted. With a password set, send it as `Authorization: Bearer <password>`. POST
 bodies are JSON (`Content-Type: application/json`). Requests that reach out to
 the internet or another server, upload files, or return patches, log file
-tails, logs or diagnostics, or run patch code, also need `X-Requested-With: fetch`: `/api/catalog`,
-`/api/patch_editor`, `/api/patches/<domain>` (and its `/upload`), `/api/backups/upload`,
+tails, logs or diagnostics, or run or store patch code, also need `X-Requested-With: fetch`: `/api/catalog`,
+`/api/patch_editor` (reading, *Check* and *Save*), `/api/patches/<domain>` (and its `/upload`), `/api/backups/upload`,
 `/api/import/upload`, `/api/parity`, `/api/releases/preview`,
 `/api/diagnostics`, `/api/diag/memory` (also without `refs`), `/api/logs`,
 `/api/log_files` and `/api/log_files/tail`; without it they answer `400`.
@@ -1218,7 +1231,7 @@ points:
 | Area | Endpoints |
 |---|---|
 | Status | `GET /api/status`, `GET /api/summary`, `GET /api/manager`, `GET /api/manager/history?hours=`, `GET /api/mqtt/status`, `GET /api/events`, `GET /api/notifications`, `POST /api/notifications/dismiss_all`, `POST /api/notifications/<id>/dismiss` |
-| Login | `POST /api/login` (`{"password": …}`, sets the session cookie), `POST /api/logout` (ends every session) |
+| Login | `POST /api/login` (`{"password": …}`, sets the session cookie; `503` with the reason while `HRI_PASSWORD_FILE` is empty or unreadable), `POST /api/logout` (ends every session) |
 | Integration | `POST /api/install`, `GET /api/change_reports`, `POST /api/run/{start,stop,cancel_pending_start}`, `GET /api/releases`, `GET /api/releases/preview?domain=&tag=`, `POST /api/releases/preflight`, `POST /api/updates/check`, `POST /api/installed/<domain>/{uninstall,rollback_full,remove_version}`, `GET/POST /api/registry` |
 | Builder / dev | `GET /api/catalog?q=`, `GET /api/build/options`, `POST /api/build/{check,prepare}`, `GET /api/dev`, `POST /api/dev/install` |
 | Configuration | `POST /api/flow/start`, `GET /api/flow/progress`, `POST /api/flow/<id>`, `POST/DELETE /api/options/<flow_id>`, `GET/POST /api/yaml/<domain>`, `GET /api/entries`, `POST /api/entries/<entry_id>/{options,reload,delete}` |
@@ -1226,9 +1239,9 @@ points:
 | MQTT | `GET/POST /api/mqtt/config`, `GET/POST /api/mqtt/rules`, `POST /api/mqtt/{reconnect,republish}`, `GET /api/mqtt/discovery`, `GET /api/mqtt/commands` |
 | Entities | `GET /api/entities`, `POST /api/entities/<entity_id>/{rename,name,disable,enable,delete,mqtt_exclude,mqtt_include,mqtt_name}`, `GET /api/devices`, `POST /api/devices/<device_id>/{name,delete}`, `GET /api/services`, `POST /api/services/call` |
 | System | `GET /api/ha`, `POST /api/ha/{update,rollback}`, `POST /api/restart`, `GET/POST /api/settings` |
-| Backups | `GET /api/backups`, `POST /api/backups/create`, `POST /api/backups/upload`, `GET /api/backups/<name>/download`, `POST /api/backups/<name>/{restore,delete}`, `POST /api/backups/restore/cancel` |
+| Backups | `GET /api/backups`, `POST /api/backups/create`, `POST /api/backups/upload`, `GET /api/backups/<name>/download`, `POST /api/backups/<name>/{restore,delete}`, `POST /api/backups/restore/cancel` (answers `cancelled`; a restore that belongs to a scheduled Home Assistant version change is refused with `for_version`) |
 | Import | `POST /api/import/upload`, `GET/POST /api/import/inspect`, `POST /api/import/{apply,apply_all,clear}` |
-| Cutover | `GET /api/parity`, `POST /api/parity/{test,remove_orphans}`, `POST /api/cutover/{status,enable,undo}`; `enable` takes `force`, which skips the checks on the main Home Assistant (MQTT loaded, the integration's config entries, entity ids still registered there) but not the container's own (an integration running, health, MQTT connected), and the answer and the timeline say `forced`; a check on the main HA that cannot run (unreachable, its registry unreadable) blocks the enable rather than passing. Removing an orphan while discovery is off is refused, except for the manager device while `manager_discovery` announces it |
+| Cutover | `GET /api/parity`, `POST /api/parity/{test,remove_orphans}`, `POST /api/cutover/{status,enable,undo}`; `enable` takes `force`, which skips the checks on the main Home Assistant (MQTT loaded, the integration's config entries, entity ids still registered there) but not the container's own (an integration running, health, MQTT connected), and the answer and the timeline say `forced`; `undo` answers `cleared_discovery_configs` and `manager_device_kept`; a check on the main HA that cannot run (unreachable, its registry unreadable) blocks the enable rather than passing. Removing an orphan while discovery is off is refused, except for the manager device while `manager_discovery` announces it |
 | Logs | `GET /api/logs?level=&prefix=&q=&since_id=&limit=` (`limit` 1 to 2000; the answer carries `cursor`, the next `since_id`), `GET /api/logs/loggers`, `POST /api/logs/level` (`{"logger": …, "level": …}`), `GET /api/log_files` (an `id` per file, which changes at every start), `GET /api/log_files/tail?id=&file=&lines=&q=` (`file` is the masked name, answered `409` when several files share it; a real name is not accepted), `GET/POST /api/settings` (`log_format`) |
 | Diagnostics | `GET /api/diagnostics` (zip, secrets removed), `GET /api/diag/memory[?refs=<type>]` (one probe at a time: a second one meanwhile answers `429`) |
 
@@ -1242,8 +1255,10 @@ start with preflight blockers answers `needs_force` with the report in
 `preflight`, a start whose preflight could not run says why in
 `preflight_note`, and one that passes with warnings answers with
 `preflight_warnings`. `ok: true` from a start means the version was deployed
-and recorded, not that it set up: the scheduled health verdict, in `smoke_test`,
-is what tells you that, and `note` says when no verdict is coming (the version
+and recorded, not that it set up: `smoke_test` in the answer says when the
+health verdict is due (after the restart, when one is needed), the verdict
+itself appears in `GET /api/status` under `smoke_test.last`, and `note` says
+when no verdict is coming (the version
 was already deployed and running, or the smoke test is off). `POST /api/backups/<name>/restore` takes `force` too: a
 backup that does not record its Home Assistant version answers `needs_force`
 when `.storage` is restored. `POST /api/services/call` is bounded like the MQTT
@@ -1280,9 +1295,10 @@ progress (50): try again later`.
   Overview; some changes (a new version of a loaded integration, YAML) only take
   effect at a restart.
 - **Restart process does nothing.** A restart is refused while the manager is
-  busy: an install, start, stop or uninstall, a backup, a patch being applied,
-  a Home Assistant version change, the self-check right after boot, or a
-  restart already under way. The page shows the error. Wait for it to finish
+  busy: an install, start, stop or uninstall, an import, a full rollback, a
+  restore being scheduled or cancelled, a backup, a patch being applied, a Home
+  Assistant version change, the self-check right after boot, or a restart
+  already under way. The page shows the error. Wait for it to finish
   and restart again. A restart that fails before anything stops (the state
   file cannot be written on a full volume, for example) is refused the same
   way, with the reason. Once a restart is accepted, the process gives Home

@@ -36,7 +36,7 @@ async def _locked(make_coro, installer=None):
         if installer is None:
             return await make_coro()
         if installer.busy:
-            raise ValueError("another action is running (start, stop or install): wait for it to finish")
+            raise ValueError("another action is running (an install, start, stop, import, restore or full rollback): wait for it to finish")
         installer.busy = True
         try:
             return await make_coro()

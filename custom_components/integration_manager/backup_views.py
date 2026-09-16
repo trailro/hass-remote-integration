@@ -169,7 +169,7 @@ class BackupActionView(ManagerView):
                 return self.json({"ok": True})
             if action == "restore":
                 if self.installer.busy:
-                    return self.json({"ok": False, "error": "an install/start is running: try again in a moment"})
+                    return self.json({"ok": False, "error": "another action is running (an install, start, stop, import, restore or full rollback): try again in a moment"})
                 parts = body.get("parts")
                 if parts is not None and not (isinstance(parts, list) and all(isinstance(x, str) for x in parts)):
                     return self.json({"ok": False, "error": "parts must be a list"})
@@ -216,7 +216,7 @@ class BackupActionView(ManagerView):
                 from .views import _HA_CHANGE_LOCK, _ha_change_lock_taken
 
                 if _ha_change_lock_taken() or self.installer.busy:
-                    return self.json({"ok": False, "error": "a Home Assistant version change or an install is running: try again in a moment"})
+                    return self.json({"ok": False, "error": "a Home Assistant version change or another action is running (an install, start, stop, import, restore or full rollback): try again in a moment"})
                 async with _HA_CHANGE_LOCK:
                     self.installer.busy = True
                     try:
@@ -272,7 +272,7 @@ class RestoreCancelView(ManagerView):
         from .views import _HA_CHANGE_LOCK, _ha_change_lock_taken
 
         if _ha_change_lock_taken() or self.installer.busy:
-            return self.json({"ok": False, "error": "a Home Assistant version change, a full rollback or an install is running: try again in a moment"})
+            return self.json({"ok": False, "error": "a Home Assistant version change or another action is running (an install, start, stop, import, restore or full rollback): try again in a moment"})
         async with _HA_CHANGE_LOCK:
             self.installer.busy = True
             try:

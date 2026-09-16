@@ -212,7 +212,7 @@ async def async_change_ha_version(installer: Installer, updater: HaUpdater, targ
             # the switch is done only when .storage came back with it (entrypoint.apply_config_changes)
             raise ValueError(f"switching to Home Assistant {target} with a backup needs its .storage: restore everything, or a selection with .storage")
         if installer.busy:
-            raise ValueError("an install/start is running: try again in a moment")
+            raise ValueError("another action is running (an install, start, stop, import, restore or full rollback): try again in a moment")
         installer.busy = True  # right away: nothing may start an install while this change is prepared
         try:
             if mode != "keep" and await hass.async_add_executor_job(_manual_restore_pending, cfg):
