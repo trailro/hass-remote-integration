@@ -15,6 +15,9 @@ raised the session generation and before it deleted the cookie; the page went
 to /login all the same, so the user took every session for ended while all of
 them stayed valid.
 
+C1: DELETE /api/flow/<id> and /api/options/<flow_id> were the only changes
+without the JSON body or X-Requested-With gate.
+
 Every test fails on the tree before the fix unless its docstring says it pins
 behaviour that already held.
 """
@@ -39,7 +42,7 @@ from urllib.parse import urlencode
 from aiohttp.test_utils import make_mocked_request
 
 import logbuffer
-from custom_components.integration_manager import auth as auth_mod, diagnostics, logfiles_page, logs_page
+from custom_components.integration_manager import auth as auth_mod, diagnostics, logfiles_page, logs_page, views
 from tests.fakes import FakeInstaller
 from tests.test_r10_access_log import OlderLinesMaskedTest, _logger, _messages
 
@@ -338,3 +341,19 @@ class LogoutVolumeRefusedTest(unittest.TestCase):
         reloaded.load_revoked()
         self.assertFalse(reloaded.valid_session(cookie))
 
+
+
+# ----- C1 -----------------------------------------------------------------------------------------
+
+class FlowAbortGateTest(unittest.TestCase):
+
+    def test_an_abort_needs_the_header(self):
+        for view_cls, method in ((views.FlowResourceView, "abort"), (views.OptionsResourceView, "options_abort")):
+            for headers, status in (({}, 400), ({"X-Requested-With": "other"}, 400), ({"X-Requested-With": "fetch"}, 200)):
+                with self.subTest(view=view_cls.__name__, headers=headers):
+                    aborted = []
+                    flows = SimpleNamespace(**{method: aborted.append})
+                    request = make_mocked_request("DELETE", "/api/flow/F1", headers={"Host": "10.0.0.2:8222", **headers})
+                    resp = asyncio.run(view_cls(flows).delete(request, flow_id="F1"))
+                    self.assertEqual(resp.status, status)
+                    self.assertEqual(aborted, ["F1"] if status == 200 else [])
