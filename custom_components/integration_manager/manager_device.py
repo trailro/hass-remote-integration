@@ -580,8 +580,7 @@ class ManagerDevice:
         return {"ok": True, "note": f"Home Assistant {target}, backup {result['backup']}", "restart": True}
 
     async def _do_restart(self) -> dict[str, Any]:
-        if self.installer.busy:
-            raise ValueError("another action is running (an install, start, stop, import, restore or full rollback)")
+        # like the restart after an install: async_action waits for a running install, start or backup to finish
         return {"ok": True, "restart": True}
 
     async def _do_backup(self) -> dict[str, Any]:
