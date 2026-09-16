@@ -5,7 +5,8 @@ and the log.  D2: an entity moved into a device whose config is over the broker'
 every 5 s for good.  C11: a whitespace-only call payload ran the service with no data.
 C13: a live discovery-prefix change swept every retained entity document, not only the discovery configs.  C14: a call
 payload was parsed up to four times on paho's thread.  C15: an event added off the loop (paho's thread) waited up to
-5 s for the timeline's backlog.  Every test fails on the tree
+5 s for the timeline's backlog.  C16: clearing an excluded entity this process never published still published an empty
+document and counted it.  Every test fails on the tree
 before its fix."""
 
 import asyncio
@@ -637,6 +638,44 @@ class EventsOffTheLoopTest(unittest.TestCase):
             else:
                 self.store.add("mqtt", f"m{i}")
         self.assertEqual([r["message"] for r in self.store.recent()], [f"m{i}" for i in range(20)])
+
+
+class ClearNeverPublishedTest(unittest.TestCase):
+    """C16: a reload or a stop removes the state of every entity, the excluded ones included."""
+
+    def _pub(self):
+        pub = camp._publisher(exclude_integrations=["integration_manager", "hidden_integration"])
+        pub.stats["cleared"] = 0
+        pub._pending_clears = set()
+        pub.rules = SimpleNamespace(for_entity=lambda eid: {"exclude": True} if eid == "sensor.ruled_out" else {})
+        platforms = {"sensor.ruled_out": "demo", "sensor.other": "hidden_integration", "sensor.kept": "demo"}
+        patcher = mock.patch.object(mp, "platform_of", side_effect=lambda _hass, eid: platforms.get(eid))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return pub
+
+    def test_an_excluded_entity_never_published_is_not_cleared(self):
+        pub = self._pub()
+        for eid in ("sensor.ruled_out", "sensor.other"):
+            pub._clear(eid)
+        self.assertEqual(pub._client.published, [])
+        self.assertEqual(pub.stats["cleared"], 0)
+        pub._connected = False
+        pub._clear("sensor.ruled_out")
+        self.assertEqual(pub._pending_clears, set())
+
+    def test_an_entity_that_is_not_excluded_is_still_cleared(self):
+        """a document an earlier process published may still be retained"""
+        pub = self._pub()
+        pub._clear("sensor.kept")
+        self.assertEqual(pub._client.published, [(f"{BASE}/demo/sensor/kept", "", 1, True)])
+        self.assertEqual(pub.stats["cleared"], 1)
+
+    def test_a_published_entity_excluded_since_is_cleared(self):
+        pub = self._pub()
+        pub._topics["sensor.ruled_out"] = f"{BASE}/demo/sensor/ruled_out"
+        pub._clear("sensor.ruled_out")
+        self.assertEqual(pub._client.published, [(f"{BASE}/demo/sensor/ruled_out", "", 1, True)])
 
 
 if __name__ == "__main__":

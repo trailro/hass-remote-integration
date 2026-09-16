@@ -2702,6 +2702,10 @@ class MqttPublisher:
             integ = self._integration_of(entity_id)
             if integ is None:
                 return  # never published by us (or already cleared with the registry entry): nothing to clear
+            if self._excluded_now(entity_id):
+                # never published by this process: its document was cleared when it was excluded, or by the orphan
+                # sweep when that happened while the container was down (a reload or a stop reaches here for every one)
+                return
             topic = self._topic_for(entity_id, integ)
         self._last_hash.pop(topic, None)  # a re-included entity must be published again, changed or not
         if self._publish(topic, None, qos=1):
