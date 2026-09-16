@@ -165,7 +165,9 @@ def _open_inner(path: str, compressed: bool, password: str | None):
 
 def _inspect(config_dir: str, tar_path: str, out_dir: str, password: str | None, domains: set[str]) -> dict[str, Any]:
     try:
-        outer = tarfile.open(tar_path, "r:")  # a plain tar, as Home Assistant writes it: no xz/bz2 bomb unpacked on the fly
+        # a plain tar, as Home Assistant writes it: no xz/bz2 bomb unpacked on the fly; extended headers bounded from
+        # the first one on, which tarfile reads while it opens the archive
+        outer = tarfile.open(tar_path, "r:", tarinfo=_BoundedTarInfo)
     except tarfile.ReadError as err:
         raise ValueError(f"not a Home Assistant backup (an uncompressed .tar is expected): {err}") from None
     with outer:
