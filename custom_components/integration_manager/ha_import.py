@@ -18,6 +18,7 @@ creates its entities, optionally the store files are copied first.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -101,12 +102,35 @@ def inspect_backup(config_dir: str, password: str | None, domains: set[str]) -> 
 
 MAX_EXTRACT_BYTES = 2 * 1024**3  # what an import may unpack onto the volume (registries and the integration's stores)
 MAX_INNER_BYTES = 2 * 1024**3  # the inner homeassistant.tar(.gz) copied out of the upload: never more than an upload may be
+# What reading the configuration archive may decompress in all, the files it skips included: tarfile inflates a
+# skipped member to get past it, so 4 GB of zeros in a 4 MB upload pinned a thread (and the import lock) for as
+# long as a 4 GB file, and at the upload cap for about an hour.  Not a flat cap: the recorder database is in the
+# archive too and is legitimately several GB, but real data does not compress 20:1; the floor keeps a small
+# backup with a large, sparse database importable.
+MAX_UNPACK_RATIO = 20
+MAX_EXT_HEADER_BYTES = 1024**2  # a pax or GNU long-name header holds a path and a few attributes
 MAX_META_BYTES = 1024**2  # backup.json is a few KB
 MAX_MEMBERS = 100_000  # a configuration has a few thousand files; every header read costs memory, empty members cost no bytes
 
 
-class TooManyMembers(ValueError):
+class Refused(ValueError):
+    """A backup this import does not read by its own rule: said as it is, not as a wrong key or a corrupt archive."""
+
+
+class TooManyMembers(Refused):
     pass
+
+
+class _BoundedTarInfo(tarfile.TarInfo):
+    """tarfile reads the data of a pax or GNU long-name header into memory whole, inside next(), before any size
+    limit here sees a member: one claiming 512 MB (half a megabyte compressed) took a gigabyte of memory, so one
+    at the upload cap ends the container."""
+
+    def _proc_member(self, tarfile_):
+        if self.type in (tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK, tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.SOLARIS_XHDTYPE) and self.size > MAX_EXT_HEADER_BYTES:
+            # not a tarfile.HeaderError: next() turns those into a ReadError, or into a silent end of the archive
+            raise Refused(f"the backup holds a {self.size} byte extended tar header: not a Home Assistant backup this import reads")
+        return super()._proc_member(tarfile_)
 
 
 def _members(tar: tarfile.TarFile):
@@ -120,6 +144,20 @@ def _members(tar: tarfile.TarFile):
             raise TooManyMembers(f"the backup holds more than {MAX_MEMBERS} files: not a Home Assistant backup this import reads")
         yield member
 ENTRY_ID_RE = re.compile(r"[A-Za-z0-9]+")  # as ImportApplyView: an entry id is matched against and substituted into store file names
+
+
+@contextlib.contextmanager
+def _open_inner(path: str, compressed: bool, password: str | None):
+    """The configuration archive, with extended headers bounded.  securetar passes no tarinfo class on: a plain
+    archive is opened the way it opens one (tarfile, r: or r:gz), so its first header is bounded too; an encrypted
+    one gets the class once open, which leaves only its first header as tarfile reads it."""
+    if password is None:
+        with tarfile.open(path, "r:gz" if compressed else "r:", tarinfo=_BoundedTarInfo) as tar:
+            yield tar
+        return
+    with securetar.SecureTarFile(path, gzip=compressed, password=password) as tar:
+        tar.tarinfo = _BoundedTarInfo
+        yield tar
 
 
 def _inspect(config_dir: str, tar_path: str, out_dir: str, password: str | None, domains: set[str]) -> dict[str, Any]:
@@ -152,12 +190,18 @@ def _inspect(config_dir: str, tar_path: str, out_dir: str, password: str | None,
         with tempfile.NamedTemporaryFile(dir=out_dir, suffix=".inner", delete=False) as tmp:
             shutil.copyfileobj(outer.extractfile(inner_member), tmp)
             inner_path = tmp.name
-    too_big = False
+    too_big = unpack_too_big = False
+    unpack_budget = max(MAX_EXTRACT_BYTES, inner_member.size * MAX_UNPACK_RATIO)
     try:
         try:
-            with securetar.SecureTarFile(inner_path, gzip=compressed, password=(password or None) if meta.get("protected") else None) as tar:
+            with _open_inner(inner_path, compressed, (password or None) if meta.get("protected") else None) as tar:
                 total = 0
                 for member in _members(tar):
+                    # the offset of the next header: this member's data is inflated only when the loop asks for
+                    # the next one, so a member that would cross the budget is never decompressed
+                    if tar.offset > unpack_budget:
+                        unpack_too_big = True
+                        break
                     rel = _strip(member.name)
                     if not member.isfile() or ".." in rel.split("/") or not _wanted(rel, domains):
                         continue
@@ -170,12 +214,15 @@ def _inspect(config_dir: str, tar_path: str, out_dir: str, password: str | None,
                     src = tar.extractfile(member)
                     with open(dest, "wb") as fh:
                         shutil.copyfileobj(src, fh)
-        except TooManyMembers:
+        except Refused:
             raise
         except Exception as err:  # noqa: BLE001 - wrong key / corrupt archive
             raise ValueError(f"cannot read the backup contents (wrong encryption key?): {type(err).__name__}: {err}") from None
     finally:
         os.remove(inner_path)
+    if unpack_too_big:
+        raise ValueError(f"the Home Assistant configuration archive in this backup unpacks to more than {MAX_UNPACK_RATIO} times its "
+                         f"size (and more than {MAX_EXTRACT_BYTES // 1024**3} GB): not imported")
     if too_big:
         raise ValueError(f"the configuration in this backup unpacks to more than {MAX_EXTRACT_BYTES // 1024**3} GB: not imported")
     summary = _summarize(out_dir, meta, domains)
