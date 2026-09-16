@@ -475,8 +475,8 @@ def _arm_stop_watchdog(timeout: float = STOP_WATCHDOG_S) -> threading.Thread:
             _LOGGER.critical("JSON saves still pending: exiting without them")
         # the timeline's own writing thread, for the same reason: os._exit skips the atexit drain
         events = sys.modules.get("custom_components.integration_manager.events")
-        if events is not None:
-            events.drain(WATCHDOG_DRAIN_S)
+        if events is not None and not events.drain(WATCHDOG_DRAIN_S):
+            _LOGGER.critical("timeline events still pending: exiting without them")
         # the line waits in the log queue behind whatever holds the listener up (a blocked stderr):
         # give it a moment, then write it to process.log directly
         if not logbuffer.flush_queue(LOG_FLUSH_S) and (handler := logbuffer.find()) is not None:
@@ -682,7 +682,8 @@ def _pinned_ports(data) -> list[int]:
 
 
 def drop_foreign_http_port(config_dir: str, port: int) -> int | None:
-    """Remove .storage/http when it pins a port that is not ours, and say which one it was.
+    """Remove .storage/http when it pins a port that is not ours, and say which one it was (None when it pinned
+    none: also for a store nested too deep to read, which is removed as well).
 
     Home Assistant keeps the port it was set up with in that store, and the store travels inside a backup.
     Restoring one taken on another HRI_PORT - from a second container, which one container per integration
@@ -695,20 +696,21 @@ def drop_foreign_http_port(config_dir: str, port: int) -> int | None:
     a failed boot (entrypoint.py counts one before every exec) and three of them send a perfectly good Home
     Assistant version into a rollback for what is a port problem."""
     path = os.path.join(config_dir, ".storage", "http")
+    foreign: int | None = None
     try:
         foreign = next((p for p in _pinned_ports(read_json(path, None)) if p != port), None)
+        if foreign is None:
+            return None
+        what = f"pins port {foreign} instead of {port} (a restored backup from another container?)"
     except RecursionError:
         # a hand-written store nested too deep to walk says nothing we can trust, and would end the boot here
-        foreign = "an unreadable store"
-    if foreign is None:
-        return None
+        what = "is nested too deep to read which port it pins"
     try:
         os.remove(path)
     except OSError as err:
-        _LOGGER.error("%s pins port %s instead of %s and could not be removed: %s", path, foreign, port, err)
+        _LOGGER.error("%s %s and could not be removed: %s", path, what, err)
         return None
-    _LOGGER.warning("%s pinned port %s instead of %s (a restored backup from another container?): removed it, "
-                    "Home Assistant writes it again for port %s", path, foreign, port, port)
+    _LOGGER.warning("%s %s: removed it, Home Assistant writes it again for port %s", path, what, port)
     return foreign
 
 

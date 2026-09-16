@@ -43,7 +43,8 @@ _TORN_ID = re.compile(r'\{"id":\s*(\d+)')  # the id at the start of a record who
 # its mask hides, and a client may put a credential in any URL (HA's signed paths: authSig).  Those values are masked
 # before a record is written, so they never reach process.log or the container log.
 _URL_QUERY = re.compile(r"([^\s\"'?#]*)\?([^\s\"'#]+)")
-_LOG_SEARCH_PATHS = ("/api/logs", "/api/log_files/tail")
+_URL_ORIGIN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://[^/]*")
+_LOG_SEARCH_PATHS = ("/api/logs", "/api/log_files/tail")  # the paths themselves: not /x/api/logs, not /api/logs/level
 # on the log search endpoints every value is masked but these, in the form the pages send them
 _LOG_SEARCH_PLAIN = {
     "level": re.compile(r"[A-Za-z]{1,10}"),
@@ -53,14 +54,26 @@ _LOG_SEARCH_PLAIN = {
     "id": re.compile(r"[0-9a-f]{32}"),
     "prefix": re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,199}"),  # a logger name
 }
-# elsewhere, a parameter named like a credential (each of these is also a literal the Log files page's search looks
-# for before it runs the scrubber on a line: logfiles_page._RULE_LITERALS)
-_CREDENTIAL_PARAM = re.compile(r"token|pass|pwd|secret|sig|key|code|session|cookie|credential", re.I)
+# names ending in "key" that are known not to be secrets (diagnostics masks every other *key the same way)
+PLAIN_KEYS = r"(?:translation|sort|primary)_key"
+# elsewhere, a parameter named like a credential: a name holding one of the long words anywhere, or a word of the
+# name - cut at "_", "-", ".", a digit and a camelCase hump (authSig, APIKey) - that is one of the short ones, which
+# inside a longer word are ordinary (zipcode, keyword, design, monkey).  Each word holds a literal the Log files
+# page's search looks for before it runs the scrubber on a line: logfiles_page._RULE_LITERALS
+_CREDENTIAL_PARAM = re.compile(
+    r"(?i:token|secret|passw|passphrase|credential|cookie|signature|pwd)"
+    r"|(?:^|(?<=[^A-Za-z])|(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z]))"
+    r"(?i:pass|passcode|passkey|sig|key|apikey|code|session|sessionid)(?![a-z])")
+_PLAIN_PARAM = re.compile(PLAIN_KEYS, re.I)
+
+
+def _is_log_search(path: str) -> bool:
+    return _URL_ORIGIN.sub("", unquote_plus(path)).rstrip("/") in _LOG_SEARCH_PATHS
 
 
 def _mask_query(match: re.Match[str]) -> str:
     path, query = match.group(1), match.group(2)
-    search = unquote_plus(path).rstrip("/").endswith(_LOG_SEARCH_PATHS)
+    search = _is_log_search(path)
     parts = []
     for part in query.split("&"):
         name, sep, value = part.partition("=")
@@ -72,7 +85,7 @@ def _mask_query(match: re.Match[str]) -> str:
                 plain = _LOG_SEARCH_PLAIN.get(name_text)
                 if plain is None or not plain.fullmatch(value):
                     part = f"{name}=***"
-            elif _CREDENTIAL_PARAM.search(name_text):
+            elif _CREDENTIAL_PARAM.search(name_text) and not _PLAIN_PARAM.fullmatch(name_text):
                 part = f"{name}=***"
         parts.append(part)
     return f"{path}?{'&'.join(parts)}"
@@ -209,12 +222,15 @@ class FileLogHandler(logging.Handler):
         since_id: int = 0,
         limit: int = 500,
         keep: Callable[[dict[str, Any]], bool] | None = None,
+        cursor: Callable[[int], None] | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         """Matching records, chronological.  Without since_id: the newest
         `limit`.  With since_id (a follower catching up): the OLDEST `limit`
         newer than since_id, so nothing is skipped; truncated=True tells the
         client to poll again immediately.  Reads from the end, so the usual
-        page load parses only the tail of the newest file.
+        page load parses only the tail of the newest file.  With since_id it
+        reads forward from there a line at a time, and holds the page, not
+        the records newer than since_id.
 
         ``keep`` is the caller's last word on a record that passed the other
         filters, asked before the record counts toward ``limit`` (the Logs
@@ -230,54 +246,120 @@ class FileLogHandler(logging.Handler):
         value.  With both ``text`` and ``keep``, a record whose text does not
         contain ``text`` is never returned, but ``keep`` is still asked about
         it, with its message and traceback left out, so what the caller learns
-        from being asked is the same whether a masked value held the text or not."""
+        from being asked is the same whether a masked value held the text or not.
+
+        ``cursor`` is told, once, where a follower continues: the id of the
+        newest record read, whatever the level and logger filters made of it
+        (with since_id and a full page, of the record read before the first one
+        that did not fit).  A filter that matches nothing still moves it, so a
+        follower does not read the same records on every poll."""
         text = text.lower()
         out: list[dict[str, Any]] = []
-        newer: list[tuple[dict[str, Any], bool]] = []  # with since_id: (record, matched), newest first
         truncated = False
-        done = False
-        for p in self._files():
-            try:
-                with open(p, encoding="utf-8", errors="replace") as fh:
-                    lines = fh.read().splitlines()
-            except OSError:
-                continue
-            for line in reversed(lines):
-                try:
-                    rec = json.loads(line)
-                except ValueError:
-                    continue  # a line still being written, or a torn one
-                if rec.get("id", 0) <= since_id:
-                    done = True
-                    break
-                if rec.get("levelno", 0) < min_level:
-                    continue
-                if prefixes and not str(rec.get("logger", "")).startswith(prefixes):
-                    continue
-                matched = not text or text in str(rec.get("message", "")).lower() or text in str(rec.get("logger", "")).lower()
-                if not matched:
-                    if keep is None:
+        newest = since_id
+
+        def candidate(rec: dict[str, Any]) -> tuple[dict[str, Any], bool] | None:
+            """(record, matched) for a record the level and logger filters let through."""
+            if rec.get("levelno", 0) < min_level:
+                return None
+            if prefixes and not str(rec.get("logger", "")).startswith(prefixes):
+                return None
+            matched = not text or text in str(rec.get("message", "")).lower() or text in str(rec.get("logger", "")).lower()
+            if not matched:
+                if keep is None:
+                    return None
+                rec = {**rec, "message": "", "exc": None}
+            return rec, matched
+
+        if not since_id:
+            for p in self._files():
+                lines = _read_lines(p)
+                done = False
+                for line in reversed(lines):
+                    rec = _record(line)
+                    if rec is None:
+                        continue  # a line still being written, or a torn one
+                    if rec.get("id", 0) <= 0:
+                        done = True
+                        break
+                    newest = max(newest, rec["id"])
+                    if (c := candidate(rec)) is None or keep is not None and not keep(c[0]) or not c[1]:
                         continue
-                    rec = {**rec, "message": "", "exc": None}
-                if since_id:
-                    newer.append((rec, matched))
-                    continue
-                if keep is not None and not keep(rec) or not matched:
-                    continue
-                out.append(rec)
-                if len(out) >= limit:
-                    done = True
+                    out.append(c[0])
+                    if len(out) >= limit:
+                        done = True
+                        break
+                if done:
                     break
-            if done:
-                break
-        out.reverse()
-        for rec, matched in reversed(newer):
-            if len(out) >= limit:
-                truncated = True
-                break
-            if (keep is None or keep(rec)) and matched:
-                out.append(rec)
+            out.reverse()
+        else:
+            # oldest first from the line after since_id, a line at a time: what is held is the page, not the log
+            files: list[Any] = []
+            try:
+                for p in self._files():
+                    try:
+                        fh = open(p, encoding="utf-8", errors="replace")
+                    except OSError:
+                        continue
+                    files.append(fh)
+                    if _first_id(fh) <= since_id:
+                        break  # this file holds since_id: the older ones hold nothing newer
+                for fh in reversed(files):
+                    fh.seek(0)
+                    for line in fh:
+                        if (rid := _line_id(line)) is not None and rid <= since_id:
+                            continue
+                        if (rec := _record(line)) is None:
+                            continue  # a line still being written (its id is not passed: it is shown once it is whole)
+                        if (c := candidate(rec)) is not None:
+                            if len(out) >= limit:
+                                truncated = True
+                                break
+                            if (keep is None or keep(c[0])) and c[1]:
+                                out.append(c[0])
+                        newest = rec.get("id", newest)
+                    if truncated:
+                        break
+            finally:
+                for fh in files:
+                    fh.close()
+        if cursor is not None:
+            cursor(newest)
         return out, truncated
+
+
+def _read_lines(path: str) -> list[str]:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read().split("\n")  # not splitlines: a message may hold U+2028, which json.dumps leaves as it is
+    except OSError:
+        return []
+
+
+def _record(line: str) -> dict[str, Any] | None:
+    try:
+        rec = json.loads(line)
+    except ValueError:
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def _first_id(fh: Any) -> int:
+    """The id of the first record line of an open file (0 for a file with none)."""
+    for line in fh:
+        if (rid := _line_id(line)) is not None:
+            return rid
+    return 0
+
+
+def _line_id(line: str) -> int | None:
+    """The id of a record line without parsing it (the handler writes the id first), None for a line that is
+    no record.  Only to find where the records newer than since_id begin: a torn record's id is in file order
+    like any other."""
+    if (m := _TORN_ID.match(line)) is not None:
+        return int(m.group(1))
+    rec = _record(line)
+    return None if rec is None else rec.get("id", 0)
 
 
 def install(path: str) -> FileLogHandler:

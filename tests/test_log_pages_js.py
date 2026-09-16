@@ -46,6 +46,25 @@ class LogPagesTest(unittest.TestCase):
         after = self.out["logfiles"]["after_restart"]
         self.assertEqual(after, {"selected": "id-alpha-restarted", "shown": "contents of alpha"})
 
+    def test_a_truncated_follow_reads_on_at_once_and_stops_at_the_bound(self):
+        """R11: fetchLogs did not act on truncated, so a follower 60k records
+        behind gained one page of 200 every 3 s (~15 minutes)."""
+        catch_up = self.out["logs_catch_up"]
+        self.assertEqual(catch_up["behind"], {"reads": 4, "last_since": 601, "notice": False})
+        self.assertEqual(catch_up["never"]["reads"], 26)  # one read and CATCH_UP more, then the next tick
+        self.assertTrue(catch_up["never"]["notice"])
+
+    def test_after_a_restart_the_selection_is_found_again_by_its_label(self):
+        """R11 N15: no option had the old id and the browser selected the first
+        file, silently."""
+        restart = self.out["logfiles_restart"]
+        self.assertEqual(restart["unique"], {"selected": "b-restarted", "shown": "contents of b", "note": ""})
+
+    def test_a_label_several_files_show_is_not_resolved_silently(self):
+        shared = self.out["logfiles_restart"]["shared"]
+        self.assertEqual((shared["selected"], shared["shown"]), ("a-restarted", "contents of a"))
+        self.assertIn("2 files show logs/session-token=***", shared["note"])
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
