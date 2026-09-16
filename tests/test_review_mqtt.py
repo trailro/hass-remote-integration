@@ -106,8 +106,8 @@ class ReloadLockTest(unittest.TestCase):
         async def scenario():
             pub = object.__new__(mp.MqttPublisher)
             pub._conn_lock = asyncio.Lock()
-            pub.config = mock.Mock(discovery_enabled=True)
-            new = mock.Mock(discovery_enabled=True)
+            pub.config = mock.Mock(discovery_enabled=True, exclude_integrations=[])
+            new = mock.Mock(discovery_enabled=True, exclude_integrations=[])
             pub.hass = mock.Mock()
             pub.hass.async_add_executor_job = mock.AsyncMock(return_value=new)
             await pub._conn_lock.acquire()  # a reconnect holds the lock

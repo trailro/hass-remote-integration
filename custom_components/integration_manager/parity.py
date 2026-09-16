@@ -14,7 +14,7 @@ comparison is by unique id:
 Cutover = enable discovery, wait for the parent to create the entities,
 compare; undo = discovery off + every retained discovery config of this
 identity cleared (the parent removes the entities, the retained state
-documents stay)."""
+documents stay), except the manager device's while manager_discovery is on."""
 
 from __future__ import annotations
 
@@ -39,6 +39,10 @@ from .http_util import ManagerView, with_body
 _LOGGER = logging.getLogger(__name__)
 WS_TIMEOUT = 20
 WS_MAX_MSG = 256 * 1024 * 1024  # a large parent's entity registry list is several MB (aiohttp's default cap is 4 MB)
+
+
+class ParentCommandFailed(ValueError):
+    """The parent answered the command with an error (an older parent without it, say): it was reached."""
 
 
 class ParentHA:
@@ -77,11 +81,11 @@ class ParentHA:
                           if data.get("id") != i or data.get("type") != "result":
                               continue
                           if not data.get("success"):
-                              raise ValueError(f"{cmd.get('type')}: {(data.get('error') or {}).get('message', 'failed')}")
+                              raise ParentCommandFailed(f"{cmd.get('type')}: {(data.get('error') or {}).get('message', 'failed')}")
                           out.append(data.get("result"))
                           break
         except (ClientError, OSError, asyncio.TimeoutError, TypeError, ValueError) as err:
-            if isinstance(err, ValueError) and "parent" in str(err):
+            if isinstance(err, ParentCommandFailed) or (isinstance(err, ValueError) and "parent" in str(err)):
                 raise
             raise ValueError(f"cannot reach the parent at {self.url}: {type(err).__name__}: {err}") from None
         return out
@@ -195,19 +199,18 @@ class ParityView(ManagerView):
         self.hass = hass
         self.installer = installer
         self.publisher = publisher
-        self.last: dict[str, Any] | None = None
 
     async def get(self, request: web.Request) -> web.Response:
         if request.headers.get("X-Requested-With") != "fetch":
             # it connects to the parent Home Assistant with the stored token: not something any web page may trigger
             return self.json_message("X-Requested-With: fetch required", status_code=400)
         try:
-            self.last = await compute_parity(self.hass, self.installer, self.publisher, light=request.query.get("light") == "1")
+            parity = await compute_parity(self.hass, self.installer, self.publisher, light=request.query.get("light") == "1")
         except ValueError as err:
             return self.json({"ok": False, "error": str(err)})
         except Exception as err:  # noqa: BLE001
             return self.json({"ok": False, "error": f"{type(err).__name__}: {err}"})
-        return self.json({"ok": True, **self.last})
+        return self.json({"ok": True, **parity})
 
 
 class ParityActionView(ManagerView):
@@ -240,6 +243,17 @@ class ParityActionView(ManagerView):
             todo = [by_id[x] for x in ids if x in by_id]
             if not todo:
                 return self.json({"ok": True, "removed": [], "note": "nothing to remove (not orphans of ours)"})
+            if not self.publisher.config.discovery_enabled:
+                # one component is removed by re-announcing its device without it, which discovery off forbids (the
+                # manager device excepted while manager_discovery announces it); the empty config left instead
+                # removes the whole device on the parent, siblings included
+                manager_id = f"{self.publisher.base_topic}_manager"
+                blocked = [o["parent_entity_id"] for o in todo
+                           if not (self.publisher.config.manager_discovery and o.get("discovery_id") == manager_id)]
+                if blocked:
+                    return self.json({"ok": False, "error": f"discovery is off: {', '.join(blocked[:5])}{'…' if len(blocked) > 5 else ''} "
+                                                            "can only be removed on its own while discovery is on (turning discovery "
+                                                            "off removes every entity this container announced from the main Home Assistant)"})
             # Removing the entity from the parent's registry would make its MQTT
             # integration publish an empty DEVICE config (removing every sibling).
             # The documented way is the removal form for that one component.
@@ -287,12 +301,15 @@ class CutoverView(ManagerView):
             if entries:
                 out.append(f"the main Home Assistant still has {len(entries)} config entr{'y' if len(entries) == 1 else 'ies'} of {domain}: "
                            "remove the integration there first (disabling keeps its entity ids, and the MQTT entities would get _2 ids)")
-        except Exception:  # noqa: BLE001 - an older parent without the command: the loaded components tell less, but something
+        except ParentCommandFailed:  # an older parent without the command: the loaded components tell less, but something
             if domain in components:
                 out.append(f"the main Home Assistant still runs {domain}: remove it there first, or every entity exists twice")
+        except Exception as err:  # noqa: BLE001 - a check that did not run is not a check that passed
+            out.append(f"the config entries of {domain} on the main Home Assistant could not be checked ({err})")
         try:
             (registry,) = await client.commands([{"type": "config/entity_registry/list"}])
-        except Exception:  # noqa: BLE001
+        except Exception as err:  # noqa: BLE001
+            out.append(f"the entity ids registered on the main Home Assistant could not be checked ({err})")
             return out
         held = {e.get("entity_id"): e.get("platform") for e in registry if e.get("platform") != "mqtt"}
         announced = sorted({c.get("default_entity_id") for dev in self.publisher.discovery_preview() for c in dev["components"].values()
@@ -317,7 +334,9 @@ class CutoverView(ManagerView):
                 problems.append(f"health is {s['health']}: {s['health_reason']}")
             if not s["mqtt_connected"]:
                 problems.append("MQTT is not connected")
-            if s["parent_configured"] and not body.get("force"):
+            # force skips only the checks on the main Home Assistant, and says so in the answer and on the timeline
+            forced = bool(body.get("force")) and s["parent_configured"]
+            if s["parent_configured"] and not forced:
                 try:
                     (cfg,) = await _parent_client(self.hass, self.installer).commands([{"type": "get_config"}])
                 except Exception as err:  # noqa: BLE001
@@ -334,8 +353,9 @@ class CutoverView(ManagerView):
                 await self.publisher.async_save({"discovery_enabled": True})
                 await self.publisher.async_reload_config()  # no reconnect: the parent would see every entity flap to unavailable
             n = await self.publisher.async_republish_all(full=True)
-            events.emit("cutover", f"discovery enabled on the parent: {n} documents republished")
-            return self.json({"ok": True, "republished": n, **self._status()})
+            events.emit("cutover", f"discovery enabled on the parent: {n} documents republished"
+                        + (" (forced: the checks on the main Home Assistant were skipped)" if forced else ""), forced=forced)
+            return self.json({"ok": True, "republished": n, "forced": forced, **self._status()})
         if action == "undo":
             if s["discovery_enabled"]:
                 await self.publisher.async_save({"discovery_enabled": False})
@@ -346,8 +366,12 @@ class CutoverView(ManagerView):
                 return self.json({"ok": False, "error": f"discovery disabled, but the retained configs could not be cleared: {err}; "
                                                     "retried at the next MQTT connection", **self._status()})
             self.publisher.undiscover_done()
-            events.emit("cutover", f"undo: discovery disabled, {cleared} retained configs cleared")
-            return self.json({"ok": True, "cleared_discovery_configs": cleared, **self._status()})
+            # the manager device is not entity discovery: it follows manager_discovery, and removing it here would
+            # only drop its customisations on the main HA before the next health tick announces it again
+            kept = bool(self.publisher.config.manager_discovery)
+            events.emit("cutover", f"undo: discovery disabled, {cleared} retained configs cleared"
+                        + (" (the manager device stays: manager_discovery is on)" if kept else ""))
+            return self.json({"ok": True, "cleared_discovery_configs": cleared, "manager_device_kept": kept, **self._status()})
         return self.json_message("unknown action", status_code=400)
 
 

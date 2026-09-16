@@ -30,6 +30,9 @@ class MqttRules:
     def __init__(self, path: str) -> None:
         self.path = path
         self.rules: dict[str, dict[str, Any]] = {}
+        # (the rules dict they were taken from, its glob patterns in the order they apply): for_entity runs for every
+        # entity on every republish, and sorting the patterns each time costs more than the matching
+        self._globs: tuple[dict[str, dict[str, Any]], list[str]] | None = None
         self.load()
 
     def load(self) -> None:
@@ -101,14 +104,15 @@ class MqttRules:
             self.rules[entity_id] = cur
         else:
             self.rules.pop(entity_id, None)
+        self._globs = None  # changed in place: the identity check in for_entity does not see it
         return cur
 
     def for_entity(self, entity_id: str) -> dict[str, Any]:
         out: dict[str, Any] = {}
-        for pattern in sorted(self.rules):
-            if pattern == entity_id:
-                continue
-            if any(ch in pattern for ch in "*?[") and fnmatch.fnmatchcase(entity_id, pattern):
+        if self._globs is None or self._globs[0] is not self.rules:
+            self._globs = (self.rules, [p for p in sorted(self.rules) if any(ch in p for ch in "*?[")])
+        for pattern in self._globs[1]:
+            if pattern != entity_id and fnmatch.fnmatchcase(entity_id, pattern):
                 out.update(self.rules[pattern])
         if entity_id in self.rules:
             out.update(self.rules[entity_id])
