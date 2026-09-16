@@ -559,6 +559,12 @@ class MqttPublisher:
         self._unsub.append(
             self.hass.bus.async_listen(er.EVENT_ENTITY_REGISTRY_UPDATED, self._on_registry)
         )
+        # A device renamed (or removed) here changes the device block of its
+        # discovery config only; the entity registry stays silent, so nothing
+        # else would refresh discovery before the hourly full republish.
+        self._unsub.append(
+            self.hass.bus.async_listen(dr.EVENT_DEVICE_REGISTRY_UPDATED, self._on_device_registry)
+        )
         self._arm_republish_timer()
         self._unsub.append(async_track_time_interval(self.hass, self._on_health_timer, timedelta(seconds=HEALTH_INTERVAL_S)))
         # the verdict follows the integration at once (its entry loading at boot, a
@@ -1049,8 +1055,11 @@ class MqttPublisher:
     def _handle_message(self, msg) -> None:
         if getattr(msg, "retain", False):
             # a command published with retain would run again at every
-            # (re)subscription: physical effects must never replay
-            _LOGGER.warning("MQTT: ignoring retained command on %s (commands must not be retained)", msg.topic)
+            # (re)subscription: physical effects must never replay.  Left on
+            # the broker it would also arrive again at every connect, so the
+            # topic is cleared here and not only when our identity moves.
+            _LOGGER.warning("MQTT: ignoring retained command on %s (commands must not be retained), clearing it", msg.topic)
+            self._publish(msg.topic, None, qos=1)
             return
         manager_prefix = self._manager_cmd_base() + "/"
         if msg.topic.startswith(manager_prefix):
@@ -1077,6 +1086,12 @@ class MqttPublisher:
             self._finish(self._remember("cmd", f"{domain}.{object_id}/{field}", ""), "ignored", "empty payload")
             return
         rec = self._remember("cmd", f"{domain}.{object_id}/{field}", payload)
+        if problem := _payload_problem(payload):
+            # unparsed like an oversized call: a JSON command (siren, alarm) would be read
+            # anyway, and the state it sets is retained and re-asserted at every republish
+            _LOGGER.warning("MQTT command on %s rejected: payload %s", msg.topic, problem)
+            self._finish(rec, "rejected", f"bad payload: {problem}")
+            return
         if f"{domain}.{object_id}" not in self._topics:
             self._finish(rec, "rejected", "not an entity this container publishes")
             return
@@ -2132,9 +2147,10 @@ class MqttPublisher:
         drops the key entirely."""
         if not self._connected or self._moving:
             return  # the map keeps it; the next full republish sends the removal form
-        for disc_id, comps in self._discovery_map.items():
+        for disc_id, comps in list(self._discovery_map.items()):
             if entity_id not in comps:
                 continue
+            groups = None
             block = self._blocks.get(disc_id)
             if block is None:
                 groups, _ = self._group_by_device()
@@ -2142,6 +2158,18 @@ class MqttPublisher:
             if block is None:
                 return  # device vanished entirely: the full republish clears its config
             remaining = {eid: c for eid, c in comps.items() if eid != entity_id}
+            if not remaining:
+                if groups is None:
+                    groups, _ = self._group_by_device()
+                if disc_id not in groups:
+                    # Last entity of a device that is gone from here too (a deleted
+                    # config entry): a config carrying nothing but the removal form
+                    # leaves an empty device on the consumer until the next full
+                    # republish, an hour away by default.
+                    if self._publish(self._discovery_topic(disc_id), None, qos=1):
+                        self._discovery_map.pop(disc_id, None)
+                        self._blocks.pop(disc_id, None)
+                    return
             # _publish_device_discovery adds the removal form for entity_id itself
             self._publish_device_discovery(disc_id, block, remaining)
             return
@@ -2214,14 +2242,25 @@ class MqttPublisher:
             if state is not None and not disabled:
                 self._publish_state(state)
             # Registry metadata changed (name, device, class...): refresh
-            # discovery once the burst is over (an integration adding 100
-            # entities fires 100 events), not per event.
+            # discovery once the burst is over, not per event.
             if self.config.discovery_enabled:
-                if self._registry_timer is not None:
-                    self._registry_timer.cancel()
-                self._registry_timer = self.hass.loop.call_later(
-                    3, lambda: self.hass.async_create_task(self._async_discovery_refresh())
-                )
+                self._schedule_discovery_refresh()
+
+    @callback
+    def _on_device_registry(self, _event: Event) -> None:
+        """A device's name, model or parent appears in the discovery device
+        block, nowhere in the entity documents: without this the retained
+        config keeps the old name until the next full republish."""
+        if self.config.discovery_enabled and self._connected:
+            self._schedule_discovery_refresh()
+
+    def _schedule_discovery_refresh(self) -> None:
+        """Debounced: an integration adding 100 entities fires 100 events."""
+        if self._registry_timer is not None:
+            self._registry_timer.cancel()
+        self._registry_timer = self.hass.loop.call_later(
+            3, lambda: self.hass.async_create_task(self._async_discovery_refresh())
+        )
 
     def _clear(self, entity_id: str) -> None:
         if not entity_id:

@@ -143,8 +143,10 @@ def build_component(
 
     comp = _common(entry, state, doc_topic, prefix)
     if domain in _COMMAND_ONLY:
+        # no state to mirror, but availability is its own topic on these
+        # platforms: keep both entries, or a button stays pressable while the
+        # source entity behind it is unavailable
         comp.pop("state_topic", None)
-        comp["availability"] = comp["availability"][:1]
 
     if domain == "sensor":
         comp["value_template"] = _STATE_TPL
