@@ -22,10 +22,13 @@ from plain HTTP traffic. These are:
 
 - with a password set: any way to use the UI or the API without it, such as a
   path the check misses, a forged or replayed session after the password
-  changed or after a logout, or guessing faster than the lockout allows;
+  changed or after a logout, or guessing faster than the lockout allows; also
+  while `HRI_PASSWORD_FILE` is empty or unreadable, which must refuse every
+  password;
 
 - a way around the protections that do exist: the Host header guard against
-  DNS rebinding, the JSON requirement for state-changing requests, the absence
+  DNS rebinding, the JSON requirement for state-changing requests and the
+  `X-Requested-With: fetch` requirement on the requests the README lists, the absence
   of CORS on the manager's routes;
 - secrets (MQTT password, GitHub token, the main Home Assistant's token,
   backup encryption keys) exposed through the API, the logs, the timeline, the
@@ -45,7 +48,8 @@ from plain HTTP traffic. These are:
 - with MQTT `tls` on and `tls_insecure` off: a connection to a broker whose
   certificate is not verified, or that does not name the host;
 - path traversal or unsafe archive handling in backups, restores, imports,
-  patches or log files;
+  patches or log files, including a log file listing or tail that reaches a file
+  other than a log through a symbolic or hard link;
 - anything that lets a page on another origin make the manager do something.
 
 Problems in Home Assistant itself or in the integrations you run belong to

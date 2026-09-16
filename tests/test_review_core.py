@@ -275,7 +275,7 @@ class RestartBusyTest(unittest.IsolatedAsyncioTestCase):
         inst, res = await self._action_with_restart("check_updates", {"ok": True, "note": "found 1.2"})
         self.assertNotIn(("restart",), inst.log)
         self.assertTrue(res["ok"])
-        self.assertEqual(res["note"], "found 1.2; restart skipped: an install/start is still running")
+        self.assertEqual(res["note"], "found 1.2; restart skipped: another action is still running")
 
 
 class SchedulerTimerTest(unittest.IsolatedAsyncioTestCase):

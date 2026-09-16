@@ -518,7 +518,7 @@ class ManagerDevice:
                     break
                 await asyncio.sleep(0.5)
             if self.installer.busy:  # restarting would kill it half-way
-                failed = "restart skipped: an install/start is still running"
+                failed = "restart skipped: another action is still running"
             else:
                 failed = "" if (rr := await self.installer.restart()).get("ok") else (rr.get("error") or "the restart did not start")
             if failed:
@@ -581,7 +581,7 @@ class ManagerDevice:
 
     async def _do_restart(self) -> dict[str, Any]:
         if self.installer.busy:
-            raise ValueError("an install/start is running")
+            raise ValueError("another action is running (an install, start, stop, import, restore or full rollback)")
         return {"ok": True, "restart": True}
 
     async def _do_backup(self) -> dict[str, Any]:

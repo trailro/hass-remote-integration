@@ -277,7 +277,7 @@ class BuildPrepareView(ManagerView):
             from .views import _HA_CHANGE_LOCK, _ha_change_lock_taken
 
             if _ha_change_lock_taken() or self.installer.busy:
-                return self.json({"ok": False, "error": "a Home Assistant version change or an install is running: try again in a moment", "steps": steps})
+                return self.json({"ok": False, "error": "a Home Assistant version change or another action is running (an install, start, stop, import, restore or full rollback): try again in a moment", "steps": steps})
             try:
                 async with _HA_CHANGE_LOCK:  # held across both writes: a change scheduled in between would be overwritten
                     dropped = await self.installer.hass.async_add_executor_job(self.updater.cancel_config_change)
