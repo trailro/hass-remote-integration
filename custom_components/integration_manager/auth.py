@@ -152,14 +152,18 @@ class Auth:
 
     def revoke_all(self) -> None:
         """Blocking: every session issued until now ends, also one issued in
-        the same second as an earlier logout.  Written first: a revocation
-        that did not reach the disk would come undone at a restart."""
+        the same second as an earlier logout.  Written to the volume so it
+        holds across a restart; when the write fails (a full or read-only
+        volume) the sessions still end now, and the OSError tells the caller
+        that they are valid again after a restart."""
         generation = max(int(time.time()) + 1, self.generation + 1)
-        if self.revoked_path:
-            with open(self.revoked_path + ".tmp", "w", encoding="utf-8") as fh:
-                fh.write(str(generation))
-            os.replace(self.revoked_path + ".tmp", self.revoked_path)
-        self.generation = generation
+        try:
+            if self.revoked_path:
+                with open(self.revoked_path + ".tmp", "w", encoding="utf-8") as fh:
+                    fh.write(str(generation))
+                os.replace(self.revoked_path + ".tmp", self.revoked_path)
+        finally:
+            self.generation = generation
 
     # ----- brute-force brake -------------------------------------------------
 
@@ -343,12 +347,18 @@ class LogoutView(ManagerView):
 
     @with_body
     async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
+        response = self.json({"ok": True})
         if self.auth is not None and self.auth.enabled:
             try:
                 await request.app["hass"].async_add_executor_job(self.auth.revoke_all)
             except OSError as err:
-                return self.json({"ok": False, "error": f"logout could not be recorded on the volume: {err}"}, status_code=500)
-        response = self.json({"ok": True})
+                # every session has ended all the same, this browser's cookie is deleted below: only a restart undoes it
+                _LOGGER.error("logout not recorded on the volume (%s): every session ended, but the ones issued before "
+                              "it are valid again after a restart", err)
+                response = self.json({"ok": False, "error": f"logged out, but the logout could not be recorded on the volume ({err}): "
+                                                            "every session has ended, and the ones issued before it are valid again "
+                                                            "after the container restarts (log out again once the volume is fixed)"},
+                                     status_code=500)
         response.del_cookie(COOKIE, path="/")
         response.del_cookie(LEGACY_COOKIE, path="/")
         return response

@@ -10,6 +10,11 @@ when its path was spelled the canonical way: ``GET /API/logs?q=hunter2``,
 ``//api/logs``, ``/api/logs;x`` (none of which the router takes to a log view)
 went to process.log verbatim, and the pages showed them and searched them.
 
+m15: a logout the volume refused (full, read-only) answered 500 before it
+raised the session generation and before it deleted the cookie; the page went
+to /login all the same, so the user took every session for ended while all of
+them stayed valid.
+
 Every test fails on the tree before the fix unless its docstring says it pins
 behaviour that already held.
 """
@@ -34,7 +39,7 @@ from urllib.parse import urlencode
 from aiohttp.test_utils import make_mocked_request
 
 import logbuffer
-from custom_components.integration_manager import diagnostics, logfiles_page, logs_page
+from custom_components.integration_manager import auth as auth_mod, diagnostics, logfiles_page, logs_page
 from tests.fakes import FakeInstaller
 from tests.test_r10_access_log import OlderLinesMaskedTest, _logger, _messages
 
@@ -290,3 +295,46 @@ class SearchPathSpellingsInOlderLinesTest(unittest.TestCase):
                     self.assertEqual(right, wrong)  # rows, lines read, the whole body byte for byte
         status, body = self.tail(lines=5, q="q=***&file=***")
         self.assertEqual(len(json.loads(body)["lines"]), 5)  # what the mask leaves is still found
+
+
+# ----- m15 ----------------------------------------------------------------------------------------
+
+class LogoutVolumeRefusedTest(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = _tmp(self)
+
+    def logout(self, auth):
+        request = SimpleNamespace(headers={}, query={}, content_type="application/json", json=mock.AsyncMock(return_value={}),
+                                  app={"hass": SimpleNamespace(async_add_executor_job=_job)})
+        return asyncio.run(auth_mod.LogoutView(auth).post(request))
+
+    def test_the_sessions_end_and_the_answer_says_until_when(self):
+        auth = auth_mod.Auth("pw", b"k" * 32, os.path.join(self.tmp, "gone", "auth_revoked"))  # the write fails: no such directory
+        cookie = auth.new_session()
+        self.assertTrue(auth.valid_session(cookie))
+        with self.assertLogs(auth_mod._LOGGER, logging.ERROR) as logs:
+            resp = self.logout(auth)
+        self.assertIn("valid again after a restart", logs.output[0])
+        self.assertFalse(auth.valid_session(cookie))
+        self.assertTrue(auth.valid_session(auth.new_session()))
+        body = json.loads(resp.body)
+        self.assertFalse(body["ok"])
+        self.assertIn("valid again after the container restarts", body["error"])
+        for name in (auth_mod.COOKIE, auth_mod.LEGACY_COOKIE):
+            self.assertIn(name, resp.cookies)
+            self.assertEqual(resp.cookies[name]["max-age"], "0")
+            self.assertEqual(resp.cookies[name].value, "")
+
+    def test_a_recorded_logout_answers_as_before(self):
+        """Pins behaviour that already held."""
+        auth = auth_mod.Auth("pw", b"k" * 32, os.path.join(self.tmp, "auth_revoked"))
+        cookie = auth.new_session()
+        resp = self.logout(auth)
+        self.assertEqual((resp.status, json.loads(resp.body)), (200, {"ok": True}))
+        self.assertFalse(auth.valid_session(cookie))
+        self.assertEqual(resp.cookies[auth_mod.COOKIE]["max-age"], "0")
+        reloaded = auth_mod.Auth("pw", b"k" * 32, auth.revoked_path)
+        reloaded.load_revoked()
+        self.assertFalse(reloaded.valid_session(cookie))
+

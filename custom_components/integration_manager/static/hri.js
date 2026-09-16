@@ -42,6 +42,9 @@ async function startIntegration(body){
  return r;
 }
 
+// a logout the volume could not record still ended every session, until a restart: said before leaving the page
+async function logout(e){e.preventDefault(); const r=await post('/api/logout'); if(!r.ok) alert(r.error||r.message||'log out failed'); location.href='/login';}
+
 // top bar chips + the integration-specific log-files item
 document.addEventListener('DOMContentLoaded',()=>{
 (async()=>{try{
@@ -54,7 +57,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   +`<span class="chip ${m.enabled?(m.connected?'ok':'bad'):''}"><span class="dot"></span>MQTT <b>${m.enabled?(m.connected?'connected':'disconnected'):'off'}</b></span>`
   +(s.restart_required?'<span class="chip warn"><span class="dot"></span><b>restart required</b></span>':'')
   +(s.notifications?`<a class="chip warn" href="/" style="text-decoration:none" title="persistent notifications of the integration"><span class="dot"></span><b>${s.notifications}</b> notification${s.notifications>1?'s':''}</a>`:'');
- if(s.auth){ el.insertAdjacentHTML('beforeend','<a class="chip" href="#" id="tb-logout" title="end this browser session" style="text-decoration:none">log out</a>'); document.getElementById('tb-logout').onclick=async e=>{e.preventDefault(); await post('/api/logout'); location.href='/login';}; }
+ if(s.auth){ el.insertAdjacentHTML('beforeend','<a class="chip" href="#" id="tb-logout" title="end this browser session" style="text-decoration:none">log out</a>'); document.getElementById('tb-logout').onclick=logout; }
 }catch(e){}})();
 (async()=>{try{
  // the log-files item is integration-specific: show it only when the running
