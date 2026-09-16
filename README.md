@@ -723,6 +723,16 @@ hass_<domain>/manager/result                        outcome of a manager action,
 - **Entity document**: state, attributes, `last_changed`, `last_updated`,
   `last_reported`, and the registry metadata (unique id, name, device class,
   unit, icon, category, device).
+- **Document size**: a document over 1 MiB, or over the maximum packet size the
+  broker announces when it speaks MQTT 5, is skipped rather than sent: a broker
+  that refuses an oversized packet closes the connection, and the client would
+  replay the same document on every reconnect until nothing else gets through.
+  A skipped document is named in the log and on the timeline, and counted in
+  `GET /api/mqtt/status` (`oversized_skipped`, `last_oversized`); the MQTT page
+  shows the last one next to the connection state.
+- **Stopping the integration** clears the retained service catalog, so the main
+  HA is not left with services that cannot be called; a later start publishes it
+  again. The entity documents stay, marked unavailable.
 - **Discovery** (off by default): one retained config per device. Entities of
   every domain that has an MQTT platform become native entities with working
   commands; the rest (cameras, media players, weather, …) are mirrored as
