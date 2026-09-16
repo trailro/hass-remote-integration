@@ -115,28 +115,58 @@ def log(msg: str) -> None:
         pass  # a full disk must not stop the boot: the UI is where space gets freed
 
 
+# what ha_updater.set_desired writes: a version from ha.json goes into venv paths (removed before an install), pip's
+# argv and the constraints URL, so anything else in it is not a version
+VERSION_RE = re.compile(r"\d{4}\.\d{1,2}\.\d+(?:b\d+)?")
+VERSION_KEYS = ("desired", "current", "previous", "fallback_from", "proven")
+
+
+def valid_version(value) -> bool:
+    return isinstance(value, str) and VERSION_RE.fullmatch(value) is not None
+
+
+def _recovered_current() -> str | None:
+    current = None
+    link = os.path.join(CONFIG_DIR, "venv-current")
+    if os.path.islink(link):
+        current = os.path.basename(os.readlink(link))[5:]
+    if not valid_version(current) or not venv_ok(current):
+        current = next(iter(reversed(installed_versions())), None)
+    return current
+
+
 def load_state() -> dict:
     """Missing file = fresh volume.  Present but unparsable = torn write:
     never treat that as fresh (it would reinstall the image default and
     prune the venv that was running); the returned dict then carries
-    ``_corrupt`` (never saved: save_state strips it)."""
+    ``_corrupt`` (never saved: save_state strips it).  A version field that is
+    not a Home Assistant version is dropped (as absent); an invalid current is
+    recovered from the volume the same way, pruning disabled."""
     try:
         with open(HA_FILE, encoding="utf-8") as fh:
             data = json.load(fh)
         if not isinstance(data, dict):
             raise ValueError("not a JSON object")
-        return data
     except FileNotFoundError:
         return {}
     except (OSError, ValueError):
-        current = None
-        link = os.path.join(CONFIG_DIR, "venv-current")
-        if os.path.islink(link):
-            current = os.path.basename(os.readlink(link))[5:]
-        if not current or not venv_ok(current):
-            current = next(iter(reversed(installed_versions())), None)
+        current = _recovered_current()
         log(f"ha.json is unreadable; recovered current={current} from the volume, pruning disabled this boot")
         return {"current": current, "desired": current, "last_error": "ha.json was corrupt and has been rebuilt", "_corrupt": True}
+    bad = [k for k in VERSION_KEYS if data.get(k) and not valid_version(data[k])]
+    for key, fields in (("change", ("to",)), ("recovery", ("for", "from"))):
+        if isinstance(data.get(key), dict) and any(data[key].get(f) and not valid_version(data[key][f]) for f in fields):
+            bad.append(key)
+    if not bad:
+        return data
+    for k in bad:
+        data.pop(k, None)
+    log(f"ha.json: {', '.join(bad)} not a Home Assistant version, ignored")
+    if "current" in bad:
+        data["current"] = _recovered_current()
+        data["_corrupt"] = True
+        log(f"ha.json: recovered current={data['current']} from the volume, pruning disabled this boot")
+    return data
 
 
 def _count(value) -> int:
