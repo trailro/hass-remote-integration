@@ -245,8 +245,19 @@ class WorkflowTest(unittest.TestCase):
         top = wf.split("\njobs:", 1)[0]
         self.assertNotIn("contents: write", top)  # only the upload job may write releases
         self.assertEqual(wf.count("contents: write"), 1)
-        # a stable release (published + released) is built once, on released; a pre-release on published
-        self.assertIn("if: github.event_name != 'release' || github.event.action == 'released' || github.event.release.prerelease", wf)
+        # a stable release (published + released) is built once, on released; a pre-release on published;
+        # a manual run builds unless it only updates the Docker Hub overview
+        self.assertIn("if: (github.event_name != 'release' && !inputs.readme_only) || github.event.action == 'released' || github.event.release.prerelease", wf)
+        # one build pushes to both registries, and Docker Hub needs its token before anything is built
+        self.assertIn("ghcr.io/${{ github.repository }}", wf)
+        self.assertIn("DOCKERHUB_IMAGE: docker.io/trailro26/hass-remote-integration", wf)
+        self.assertIn("${{ env.DOCKERHUB_IMAGE }}", wf)
+        image_job = wf.split("\n  image:", 1)[1].split("\n  compose:", 1)[0]
+        self.assertLess(image_job.index("Docker Hub token present"), image_job.index("docker/build-push-action"))
+        # the overview follows only the newest stable release, after a successful build or on its own
+        overview = wf.split("\n  dockerhub-overview:", 1)[1]
+        self.assertIn("needs.image.result == 'success' || (needs.image.result == 'skipped' && inputs.readme_only)", overview)
+        self.assertIn("steps.newest.outputs.enable == 'true'", overview)
         for line in wf.splitlines():
             if line.strip().startswith(("- uses:", "uses:")):
                 self.assertRegex(line, r"@[0-9a-f]{40}\b", line)
