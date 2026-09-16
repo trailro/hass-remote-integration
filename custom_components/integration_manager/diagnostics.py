@@ -66,14 +66,44 @@ def scrub(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [scrub(v) for v in value]
     if isinstance(value, str):
-        value = _PEM.sub(lambda m: f"-----BEGIN {m.group(1)}-----***-----END {m.group(1)}-----", value)
-        value = _COOKIE_TEXT.sub(lambda m: m.group(1) + (m.group(2)[0] + "***" + m.group(2)[0] if m.group(2)[:1] in ('"', "'") else "***"), value)
-        value = _SECRET_TEXT.sub(lambda m: m.group(1) + (m.group(2)[0] + "***" + m.group(2)[0] if m.group(2)[:1] in ('"', "'") else "***"), value)
-        value = _AUTH_TEXT.sub(lambda m: m.group(1) + (m.group(2)[0] + "***" + m.group(2)[0] if m.group(2)[:1] in ('"', "'") else "***"), value)
-        # a token, not "Basic information": anything but a plain word (base64 without padding is often letters only)
-        value = _BEARER.sub(lambda m: m.group(0) if re.fullmatch(r"[A-Z]?[a-z]+", m.group(2)) else f"{m.group(1)} ***", value)
-        return _GH_TOKEN.sub("***", _URL_CRED.sub(r"\1***@", value))
+        return _scrub_one_line_rules(_PEM.sub(lambda m: f"-----BEGIN {m.group(1)}-----***-----END {m.group(1)}-----", value))
     return value
+
+
+def _scrub_one_line_rules(value: str) -> str:
+    """Every rule whose match stays within one line; the PEM block is the one
+    that spans lines and is masked by the caller."""
+    value = _COOKIE_TEXT.sub(lambda m: m.group(1) + (m.group(2)[0] + "***" + m.group(2)[0] if m.group(2)[:1] in ('"', "'") else "***"), value)
+    value = _SECRET_TEXT.sub(lambda m: m.group(1) + (m.group(2)[0] + "***" + m.group(2)[0] if m.group(2)[:1] in ('"', "'") else "***"), value)
+    value = _AUTH_TEXT.sub(lambda m: m.group(1) + (m.group(2)[0] + "***" + m.group(2)[0] if m.group(2)[:1] in ('"', "'") else "***"), value)
+    # a token, not "Basic information": anything but a plain word (base64 without padding is often letters only)
+    value = _BEARER.sub(lambda m: m.group(0) if re.fullmatch(r"[A-Z]?[a-z]+", m.group(2)) else f"{m.group(1)} ***", value)
+    return _GH_TOKEN.sub("***", _URL_CRED.sub(r"\1***@", value))
+
+
+def _mask_pem_in_place(match: re.Match[str]) -> str:
+    """A PEM block masked without changing how many lines it occupies: the
+    marker on the first line, ``***`` for every further line it covered."""
+    return f"-----BEGIN {match.group(1)}-----***-----END {match.group(1)}-----" + "\n***" * match.group(0).count("\n")
+
+
+def scrub_lines(texts: list[str]) -> list[str]:
+    """scrub() for callers that hold the text split up - a file's lines, a
+    buffer's records - and show it that way.
+
+    A PEM block spans lines, so scrubbing each piece on its own can never match
+    it: the BEGIN line comes back masked while the key body on the lines after
+    it is printed verbatim, which reads as masked and is not.  The pieces are
+    scrubbed as one text and come back with the newlines they went in with, so
+    the caller keeps one element per element and its line numbering."""
+    masked = _PEM.sub(_mask_pem_in_place, "\n".join(texts)).split("\n")
+    lines = [_scrub_one_line_rules(line) for line in masked]
+    out, at = [], 0
+    for text in texts:
+        count = text.count("\n") + 1
+        out.append("\n".join(lines[at:at + count]))
+        at += count
+    return out
 
 
 def _dump(obj: Any) -> str:

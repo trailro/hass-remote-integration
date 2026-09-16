@@ -150,6 +150,12 @@ def _log_files(config_dir: str, installer, entry_paths: list[str]) -> list[dict[
             st = os.stat(real)
         except OSError:
             return  # rotated away between the listing and the stat
+        if st.st_nlink > 1:
+            # a hard link is a second name for one file, so nothing about the path says whether this
+            # is a log or secrets.yaml under a .log name (realpath cannot tell them apart the way it
+            # does for a symlink).  Rotation by rename or by copy leaves one link, so a file with
+            # more than one was linked on purpose and nothing legitimate is lost by skipping it.
+            return
         seen[rel] = {"name": rel, "path": real, "bytes": st.st_size, "mtime": st.st_mtime, "active": now - st.st_mtime < ACTIVE_S, "source": source}
 
     for p in entry_paths:
@@ -223,10 +229,10 @@ def _tail(path: str, lines: int, needle: str) -> tuple[list[str], int]:
 
 def _tail_masked(path: str, lines: int, needle: str) -> tuple[list[str], int]:
     """_tail with secrets masked by the diagnostics scrubber (the rules of the zip)."""
-    from .diagnostics import scrub  # diagnostics imports this module
+    from .diagnostics import scrub_lines  # diagnostics imports this module
 
     found, scanned = _tail(path, lines, needle)
-    return [scrub(text) for text in found], scanned
+    return scrub_lines(found), scanned
 
 
 def _format_lines(fmt: dict[str, Any], raw_lines: list[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
@@ -279,6 +285,10 @@ class LogFilesView(ManagerView):
         self.installer = installer
 
     async def get(self, request: web.Request) -> web.Response:
+        if request.headers.get("X-Requested-With") != "fetch":
+            # the names and sizes of the files, from a walk of the config dir: for this UI, like the tail,
+            # not for a request any page can make
+            return self.json_message("X-Requested-With: fetch required", status_code=400)
         files = await self.hass.async_add_executor_job(_log_files, self.hass.config.config_dir, self.installer, _entry_paths(self.hass, self.installer.running))
         return self.json([{k: v for k, v in f.items() if k != "path"} for f in files])
 

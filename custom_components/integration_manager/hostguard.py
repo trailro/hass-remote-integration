@@ -44,14 +44,16 @@ def install_host_guard(hass: HomeAssistant, installer) -> None:
     @web.middleware
     async def host_guard(request: web.Request, handler):
         extra = {re.sub(r":\d+$", "", x.strip().lower()) for x in str(installer.settings.data.get("allowed_hosts") or "").split(",") if x.strip()}  # the Host header is compared without its port
+        # the two refusals below answer before the handler, so they carry the policy themselves
         if not _host_ok(request.headers.get("Host", ""), extra):
-            return web.Response(status=403, content_type="text/plain",
+            return web.Response(status=403, content_type="text/plain", headers={"Content-Security-Policy": CSP},
                                 text=f"Host {request.headers.get('Host', '')!r} is not allowed (DNS rebinding guard). "
                                      "Use the IP address, a .local/.lan name, or add the name to allowed_hosts in the settings.")
         if request.path == "/api/onboarding" or request.path.startswith("/api/onboarding/"):
             # an integration that depends on frontend or panel_custom loads HA's onboarding, whose user
             # creation is open while no user exists and reads text/plain bodies (no CORS preflight)
-            return web.Response(status=403, content_type="text/plain", text="Home Assistant's onboarding is not available on this port.")
+            return web.Response(status=403, content_type="text/plain", headers={"Content-Security-Policy": CSP},
+                                text="Home Assistant's onboarding is not available on this port.")
         try:
             response = await handler(request)
         except web.HTTPException as err:  # a raised 404/redirect is an answer too

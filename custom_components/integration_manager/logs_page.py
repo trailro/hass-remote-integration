@@ -21,7 +21,7 @@ from aiohttp import web
 from .ui import load_template, render
 from homeassistant.core import HomeAssistant
 
-from .diagnostics import scrub
+from .diagnostics import scrub_lines
 from .http_util import ManagerView
 from homeassistant.loader import async_get_custom_components
 
@@ -38,14 +38,20 @@ _LOGGER_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)
 MAX_LOGGER_NAME = 200
 MAX_NEW_LOGGERS = 50
 _NEW_LOGGERS: set[str] = set()
+ROOT_LOGGER = "root"
 
 
 def _query_masked(handler, **kwargs: Any) -> tuple[list[dict[str, Any]], bool]:
-    """handler.query with message and traceback masked by the diagnostics scrubber."""
+    """handler.query with message and traceback masked by the diagnostics
+    scrubber, over all the records at once: a PEM block printed line by line
+    becomes one record per line, and no record on its own matches it."""
     recs, truncated = handler.query(**kwargs)
-    for rec in recs:
-        rec["message"] = scrub(rec.get("message"))
-        rec["exc"] = scrub(rec.get("exc"))
+    fields = ("message", "exc")
+    masked = scrub_lines([str(rec.get(f) or "") for rec in recs for f in fields])
+    for i, rec in enumerate(recs):
+        for j, field in enumerate(fields):
+            if rec.get(field):
+                rec[field] = masked[i * len(fields) + j]
     return recs, truncated
 
 LOGS_HTML = load_template("logs")
@@ -181,6 +187,13 @@ class LogLevelView(ManagerView):
         level = body.get("level")
         if not name:
             return self.json_message("logger required", status_code=400)
+        if name == ROOT_LOGGER:
+            # getLogger("root") is the root logger itself (since 3.9), not a logger called "root":
+            # CRITICAL there silences the whole process log, including the line recording the change,
+            # and no page lists it to put it back.  Clearing cannot undo it either - NOTSET is not the
+            # INFO that run.py sets at boot.  Raising one noisy integration logger names that logger.
+            return self.json_message("the root logger cannot be set here: it would silence every logger at once "
+                                     "(set the level of the integration's own logger instead)", status_code=400)
         if level is not None and str(level).upper() not in LEVELS:
             return self.json_message("bad level", status_code=400)
         handler = logbuffer.find() if logbuffer else None
