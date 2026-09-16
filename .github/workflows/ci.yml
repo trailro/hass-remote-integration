@@ -28,6 +28,10 @@ jobs:
         run: python -c "import json; [json.load(open(f)) for f in ('registry.json', 'custom_components/integration_manager/manifest.json')]"
       - name: JavaScript
         run: for f in custom_components/integration_manager/static/*.js; do node --check "$f"; done
+      - name: Config form behaviour
+        # runs the page's own field()/collect() under node: the container the unit tests
+        # run in has none, so these skip there and are covered here instead
+        run: python -m unittest tests.test_camp_config_js -v
       - name: Shell
         run: sh -n verify.sh
       - name: Compose files
