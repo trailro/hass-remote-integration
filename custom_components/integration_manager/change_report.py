@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Callable
 from typing import Any
 
 from aiohttp import web
@@ -96,13 +97,41 @@ def _current_key(key: str, rec: dict[str, Any], after: dict[str, Any]) -> str:
     return new if domain and new in after else key
 
 
+def _rekey(b: dict[str, Any], new_key: Callable[[str, Any], str]) -> dict[str, Any]:
+    """Rename before-keys through `new_key`, refusing any move onto a key
+    another entry already holds: a silent collapse would drop an entity from
+    both sides of the comparison and understate what the switch changed."""
+    taken = set(b)
+    out: dict[str, Any] = {}
+    for k, v in b.items():
+        moved = new_key(k, v)
+        if moved != k and moved in taken:
+            moved = k
+        taken.add(moved)
+        out[moved] = v
+    return out
+
+
+def _shape_key(b: dict[str, Any], a: dict[str, Any]) -> Callable[[str, Any], str]:
+    """An entity that only gained or lost its unique id changes key shape
+    ("eid:<entity_id>" <-> "uid:<domain>:<unique_id>") without being a
+    different entity: without both directions it reads as one removed and one
+    added, and the report calls a switch breaking that broke nothing."""
+    paired: dict[str, str] = {}
+    for mine, theirs in (("eid:", "uid:"), ("uid:", "eid:")):
+        # only keys the other snapshot does not hold: a match is then unambiguous, and the
+        # target is free, so no two entities can want the same key
+        cand = {v.get("entity_id"): k for k, v in a.items() if k.startswith(theirs) and k not in b and isinstance(v, dict)}
+        paired.update({k: cand[v["entity_id"]] for k, v in b.items()
+                       if k.startswith(mine) and k not in a and isinstance(v, dict) and v.get("entity_id") in cand})
+    return lambda k, _v: paired.get(k, k)
+
+
 def build(pending: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     before = pending.get("before") or {}
     b, a = before.get("entities") or {}, after.get("entities") or {}
-    b = {_current_key(k, v, a): v for k, v in b.items()}
-    # an entity that only gained a unique id is the same entity, not one removed and one added
-    gained = {v.get("entity_id"): k for k, v in a.items() if k.startswith("uid:") and k not in b and isinstance(v, dict)}
-    b = {(gained.get(v.get("entity_id"), k) if k.startswith("eid:") and k not in a and isinstance(v, dict) else k): v for k, v in b.items()}
+    b = _rekey(b, lambda k, v: _current_key(k, v, a))
+    b = _rekey(b, _shape_key(b, a))
     bs, as_ = before.get("services") or {}, after.get("services") or {}
     both = sorted(set(a) & set(b))
     changed = []
