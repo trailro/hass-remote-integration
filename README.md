@@ -1211,6 +1211,17 @@ A few things that shaped the code, useful if you read it:
   Assistant's camera component wants; nothing else is added for a particular
   integration. The preflight does not check them. A missing library shows up
   when the integration loads.
+- Renaming an entity here recreates it on the consuming Home Assistant. The
+  discovery `unique_id` is derived from the entity id, so a rename looks like a
+  different entity to the consumer: the old one is deleted and a new one is
+  created, without the area, the custom name and the hidden flag it was given
+  there. Rename before cutover, or leave the entity alone and set the name the
+  consumer sees with an MQTT rule.
+- An entity hidden here stays visible on the consuming Home Assistant. MQTT
+  discovery has no `hidden` option, and the MQTT rules have no such field; the
+  registry's `hidden` flag is published in the entity document, but nothing on
+  the other side reads it. `enabled_by_default: false` (an MQTT rule) is the
+  only way to keep an entity out of the way there.
 - The code checks read the source only. Modules imported dynamically
   (`importlib`, `__import__`), code that behaves differently on this Python at
   run time, and incompatibilities inside requirements are caught by the smoke
