@@ -125,6 +125,7 @@ CALL_MAX_DEPTH = 64
 # QoS 1 message on every automatic reconnect: one oversized document loops the bridge and stops everything
 # else, a new client (Reconnect) being the only way out.  1 MiB is what EMQX and HiveMQ accept by default
 # (mosquitto is far more generous); an MQTT 5 broker's announced maximum wins over it.
+MANAGER_RESULT_WAIT_S = 5  # the executor may be wedged: the action must not wait on the broker forever
 PUBLISH_MAX_BYTES = 1024 * 1024
 PUBLISH_OVERHEAD_BYTES = 32  # fixed header, topic length, packet id and properties, on top of topic + payload
 # Topic segments of our own under the base topic: an integration with one of these names gets its documents under
@@ -2177,8 +2178,17 @@ class MqttPublisher:
             return
         info = c.publish(f"{self.base_topic}/manager/result", _dumps(result), qos=1, retain=False)
         doc = c.publish(self._manager_topic(), _dumps(self.manager.document()), qos=1, retain=True) if self.manager else None
+        # paho already holds both messages, so delivery does not depend on this wait; the executor job does,
+        # and a wedged pool would hang the action's task for good, which is how a restart came to answer "ok"
+        # and never happen. The wait is bounded here, not only inside wait_for_publish.
+        task = self.hass.async_create_task(self.hass.async_add_executor_job(
+            lambda: [i.wait_for_publish(3) for i in (info, doc) if i is not None]))
+        done, _ = await asyncio.wait({task}, timeout=MANAGER_RESULT_WAIT_S)
+        if not done:
+            _LOGGER.warning("MQTT: the result of a manager action may not have reached the broker in time")
+            return
         try:
-            await self.hass.async_add_executor_job(lambda: [i.wait_for_publish(3) for i in (info, doc) if i is not None])
+            task.result()
         except (RuntimeError, ValueError) as err:  # the connection dropped in between: the action itself still completes
             _LOGGER.warning("MQTT: the result of a manager action may not have reached the broker: %s", err)
 
