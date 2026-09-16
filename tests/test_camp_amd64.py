@@ -1,5 +1,6 @@
-"""Test campaign findings: a backup that carries the pinned http port and the crash loop a restore of it left
-behind, a preflight blocker that hides the missing compiler, and the install page answering 200 on every path."""
+"""Test campaign findings: a restored .storage/http that crash-loops the container, a preflight blocker that
+hides the missing compiler, the install page answering 200 on every path, and an install budget on the wall
+clock instead of on progress."""
 
 import asyncio
 import importlib
@@ -8,7 +9,9 @@ import json
 import os
 import shutil
 import socket
+import subprocess
 import tempfile
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -20,7 +23,6 @@ import backupkit
 import run
 from custom_components.integration_manager import preflight
 from tests.test_r3_install import _hass, _preflight_installer
-
 
 # what pip really writes when it resolves scipy without a compiler (35 lines; the compiler is on line 15)
 SCIPY_STDERR = """  error: subprocess-exited-with-error
@@ -199,6 +201,30 @@ class StatusPageIsNotHealthyTest(unittest.TestCase):
         self.assertIn("text/html", headers["Content-Type"])
         self.assertIn("http-equiv=refresh", body)
         self.assertIn("pip install homeassistant==2026.9.2", body)
+
+
+class PipBudgetFollowsProgressTest(unittest.TestCase):
+    """A slow but progressing install used to be killed by the wall clock and lose the whole venv."""
+
+    def setUp(self):
+        self.ep = importlib.import_module("entrypoint")
+        self.out = open(os.path.join(_tmp(self), "pip.log"), "w", encoding="utf-8")
+        self.addCleanup(self.out.close)
+
+    def test_an_install_that_keeps_writing_is_not_killed(self):
+        t0 = time.monotonic()
+        self.ep._run_pip(["sh", "-c", "for i in 1 2 3 4 5 6 7 8; do echo Collecting package-$i; sleep 0.2; done"],
+                         self.out, idle_timeout=0.6)
+        self.assertGreater(time.monotonic() - t0, 0.6)  # longer than the budget, and it still finished
+
+    def test_a_silent_install_still_ends(self):
+        with self.assertRaises(subprocess.TimeoutExpired):
+            self.ep._run_pip(["sh", "-c", "sleep 30"], self.out, idle_timeout=0.5)
+
+    def test_pip_is_not_quiet(self):
+        """-q printed nothing at all for a whole install: no progress for the page, none for the budget."""
+        src = inspect.getsource(self.ep.install) + inspect.getsource(self.ep.ensure_extra_requirements)
+        self.assertFalse('"-q"' in src, "pip -q writes nothing at all: no progress for the page and none for the budget")
 
 
 if __name__ == "__main__":
