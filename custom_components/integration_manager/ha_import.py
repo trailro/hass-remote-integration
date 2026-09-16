@@ -848,16 +848,16 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
             merged = await hass.async_add_executor_job(_build_map, out_dir, domain, entry_id)
             aligner.merge_map(merged)
         await hass.config_entries.async_add(entry)
-        if running and not entry.disabled_by and entry.state not in _KEEP_STATES and not _reauth_pending(hass, entry):
+        not_loaded = running and not entry.disabled_by and entry.state not in _KEEP_STATES and not _reauth_pending(hass, entry)
+        if not_loaded:
             reason = entry.reason or entry.state.value
             await hass.config_entries.async_remove(entry.entry_id)
-            _undo()
-            raise ValueError(f"the entry did not load ({reason}); it was removed again, fix the options and retry")
-    except ValueError:
-        raise
-    except Exception as err:  # noqa: BLE001
+    except Exception as err:  # noqa: BLE001 - a ValueError too: the copy and the alignment map are undone for any failure
         _undo()
         raise ValueError(f"{type(err).__name__}: {err}") from None
+    if not_loaded:
+        _undo()
+        raise ValueError(f"the entry did not load ({reason}); it was removed again, fix the options and retry")
     # Done with the other instance's .storage (it holds every integration's
     # credentials): removed right away once imported (apply_all keeps it until
     # its last entry).  A failed import keeps it for the retry; Clear removes it.

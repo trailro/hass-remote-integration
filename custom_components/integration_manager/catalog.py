@@ -88,7 +88,17 @@ class Catalog:
         if not isinstance(data, dict):
             return []
         self.fetched_at = data.get("fetched_at")
-        return data.get("rows") if isinstance(data.get("rows"), list) else []
+        # a file edited by hand (or written by another version) must not turn every search into a 500: search
+        # reads these keys without a default
+        return [r for r in data.get("rows") if _valid_row(r)] if isinstance(data.get("rows"), list) else []
+
+
+_ROW_TEXT = ("domain", "repo", "name", "description", "last_updated")
+
+
+def _valid_row(row: Any) -> bool:
+    return (isinstance(row, dict) and all(isinstance(row.get(k), str) for k in _ROW_TEXT)
+            and isinstance(row.get("topics"), list) and all(isinstance(t, str) for t in row["topics"]))
 
 
 def search(rows: list[dict[str, Any]], query: str, registry: dict[str, Any], installed: set[str]) -> tuple[list[dict[str, Any]], int]:
