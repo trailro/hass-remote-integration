@@ -356,5 +356,59 @@ class CollidingFileNamesTest(unittest.TestCase):
         self.assertIn("contents of alpha", body)
 
 
+# ----- also: the Log files search asked about a password one guess at a time ---------------------
+
+class LogFileSearchOnMaskedTextTest(unittest.TestCase):
+    """_tail searched the text with key material masked and the one-line rules
+    ran on the survivors, so a search inside a password returned the line
+    ``password=***`` exactly while the guess matched: the oracle the search on
+    masked text is there to close."""
+
+    def setUp(self):
+        self.path = os.path.join(_tmp(self), "app.log")
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write("2026-09-16 10:00:14 INFO [probe] login password=hunter2syn\n"
+                     "2026-09-16 10:00:15 INFO [probe] Authorization: Bearer abcdefSYNTHETIC123\n"
+                     "2026-09-16 10:00:16 INFO [probe] hunter2syn is also a word here\n")
+
+    def test_a_search_inside_a_password_returns_no_masked_row(self):
+        for guess in ("hunter", "hunter2s", "=hunter", "abcdefSYN"):
+            with self.subTest(guess=guess):
+                found, _ = logfiles_page._tail_masked(self.path, 50, guess)
+                self.assertNotIn("***", "\n".join(found))
+
+    def test_a_match_outside_the_masked_part_is_still_found(self):
+        found, _ = logfiles_page._tail_masked(self.path, 50, "hunter2syn")
+        self.assertEqual(found, ["2026-09-16 10:00:16 INFO [probe] hunter2syn is also a word here"])
+        found, _ = logfiles_page._tail_masked(self.path, 50, "password")
+        self.assertEqual(found, ["2026-09-16 10:00:14 INFO [probe] login password=***"])
+
+    def test_the_window_is_filled_past_the_lines_the_mask_removes(self):
+        with open(self.path, "a", encoding="utf-8") as fh:
+            for i in range(100):
+                fh.write(f"2026-09-16 10:01:00 INFO [probe] retry {i} password=hunter2syn\n")
+        found, _ = logfiles_page._tail_masked(self.path, 1, "hunter2syn")
+        self.assertEqual(found, ["2026-09-16 10:00:16 INFO [probe] hunter2syn is also a word here"])
+
+    def test_a_search_that_every_line_matches_only_inside_a_password_stays_bounded(self):
+        """The worst case of the extra rules: every scanned line matched, none
+        once masked, up to the scan budget."""
+        line = "2026-09-16 10:00:00.123 WARNING (MainThread) [custom_components.demo] retry password=needle%d\n"
+        with open(self.path, "w", encoding="utf-8") as fh:
+            for i in range(80_000):  # ~7 MB
+                fh.write(line % i)
+        logfiles_page._tail_masked(self.path, 50, "")  # warm the page cache
+        t0 = time.perf_counter()
+        found, scanned = logfiles_page._tail_masked(self.path, 50, "needle")
+        spent = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        logfiles_page._tail_masked(self.path, 50, "nothing matches this")
+        baseline = time.perf_counter() - t0
+        self.assertEqual(found, [])
+        self.assertLessEqual(scanned, logfiles_page.MAX_MASKED_OUT + 1000)  # stopped by the budget, not the file's end
+        self.assertLess(spent, 2.0, f"{scanned} lines matched only inside a password: {spent * 1000:.0f} ms "
+                        f"(a search matching nothing: {baseline * 1000:.0f} ms)")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

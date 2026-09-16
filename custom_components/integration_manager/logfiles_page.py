@@ -38,6 +38,9 @@ NOT_OURS = ("home-assistant.log", "OZW_Log", "ha-install.log")
 DEFAULT_LINES = 50
 MAX_LINES = 5000
 MAX_SCAN_BYTES = 32 * 1024 * 1024  # a filter that matches nothing must not read a 7-day log
+# lines the filter matched only inside a value the mask removes: each costs the one-line rules (~35 us), so a
+# search inside the password of every line stops here (~0.7 s) instead of at the byte budget
+MAX_MASKED_OUT = 20_000
 
 FORMAT_KEYS = ("pattern", "hide", "dim", "color_by", "colors")
 FORMAT_COLORS = ("ok", "warn", "bad", "accent", "muted")
@@ -217,12 +220,17 @@ def _tail(path: str, lines: int, needle: str) -> tuple[list[str], int]:
     then decides on the masked text, and finds nothing where a key was.
     Masking the scanned lines and not scrubbing them is what keeps the cost:
     it is a length test and one substring test per line, so a tail of a 99 MB
-    log stays in the milliseconds."""
-    from .diagnostics import mask_key_material_lines  # diagnostics imports this module
+    log stays in the milliseconds.  A line the needle matches is masked by the
+    one-line rules as well (a password, a token, a cookie) and has to match
+    again: a search for "hunter" otherwise returned ``password=***`` for as
+    long as the guess was a prefix of the password.  Only matching lines pay
+    for those rules, and the scan stops after MAX_MASKED_OUT lines that
+    matched only inside a masked value."""
+    from .diagnostics import _scrub_one_line_rules, mask_key_material_lines  # diagnostics imports this module
 
     needle = needle.lower()
     found: list[str] = []
-    scanned = 0
+    scanned = masked_out = 0
     in_block = False  # inside a key block whose END marker a newer block already passed
     with open(path, "rb") as fh:
         fh.seek(0, os.SEEK_END)
@@ -230,7 +238,7 @@ def _tail(path: str, lines: int, needle: str) -> tuple[list[str], int]:
         buf = b""
         block = 64 * 1024
         scanned_bytes = 0
-        while pos > 0 and len(found) < lines and scanned_bytes < MAX_SCAN_BYTES:
+        while pos > 0 and len(found) < lines and scanned_bytes < MAX_SCAN_BYTES and masked_out < MAX_MASKED_OUT:
             step = min(block, pos)
             scanned_bytes += step
             pos -= step
@@ -246,13 +254,18 @@ def _tail(path: str, lines: int, needle: str) -> tuple[list[str], int]:
                 scanned += 1
                 if needle and needle not in text.lower():
                     continue
+                if needle and needle not in _scrub_one_line_rules(text).lower():
+                    masked_out += 1
+                    if masked_out >= MAX_MASKED_OUT:
+                        break
+                    continue
                 found.append(text)
                 if len(found) >= lines:
                     break
-        if pos == 0 and buf.strip() and len(found) < lines and scanned_bytes < MAX_SCAN_BYTES + block:
+        if pos == 0 and buf.strip() and len(found) < lines and scanned_bytes < MAX_SCAN_BYTES + block and masked_out < MAX_MASKED_OUT:
             text = mask_key_material_lines([buf.decode("utf-8", errors="replace")], in_block)[0][0]
             scanned += 1
-            if not needle or needle in text.lower():
+            if not needle or (needle in text.lower() and needle in _scrub_one_line_rules(text).lower()):
                 found.append(text)
     found.reverse()
     return found, scanned
@@ -263,12 +276,15 @@ def _tail_masked(path: str, lines: int, needle: str) -> tuple[list[str], int]:
 
     _tail has already masked key material, which is the part the search must
     not be able to select on; the rest of the rules (a password in a line, a
-    bearer token, a cookie) match within one line and run here, on the lines
-    that survived the search, not on everything the scan read."""
+    bearer token, a cookie) match within one line; _tail searched the text
+    they leave, and they run here on the lines that survived the search, not
+    on everything the scan read.  The window is masked as one text, which can
+    mask more than the lines did one by one (a BEGIN line the search kept
+    above lines that look like a body), so the search is asked once more."""
     from .diagnostics import scrub_lines  # diagnostics imports this module
 
     found, scanned = _tail(path, lines, needle)
-    return scrub_lines(found), scanned
+    return [line for line in scrub_lines(found) if needle.lower() in line.lower()], scanned
 
 
 def _format_lines(fmt: dict[str, Any], raw_lines: list[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
