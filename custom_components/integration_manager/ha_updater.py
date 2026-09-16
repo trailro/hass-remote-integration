@@ -65,6 +65,14 @@ class HaUpdater:
             pass
         return sorted(out, key=_key)
 
+    def _venv_for_this_python(self, version: str) -> bool:
+        """What entrypoint.venv_ok checks: installed completely, for the Python this image runs."""
+        if not re.fullmatch(r"\d{4}\.\d{1,2}\.\d+(b\d+)?", version):
+            return False
+        venv = self.hass.config.path(f"venv-{version}")
+        site = os.path.join(venv, "lib", f"python{sys.version_info[0]}.{sys.version_info[1]}", "site-packages", "homeassistant", "__init__.py")
+        return all(os.path.isfile(p) for p in (os.path.join(venv, ".ok"), os.path.join(venv, "bin", "python"), site))
+
     async def available(self, force: bool = False) -> dict[str, Any]:
         now = time.monotonic()
         if not force and self._cache and now - self._cache[0] < CACHE_S:
@@ -75,12 +83,14 @@ class HaUpdater:
                 resp.raise_for_status()
                 raw = await resp.read()
             data = await self.hass.async_add_executor_job(json.loads, raw)  # several MB: not on the loop
-            stable = sorted((v for v, files in data["releases"].items() if _STABLE.match(v) and files), key=_key)
+            # a release whose files are all yanked was withdrawn by Home Assistant: never offered, installed or the newest
+            releases = {v: kept for v, files in data["releases"].items() if (kept := _installable_files(files))}
+            stable = sorted((v for v in releases if _STABLE.match(v)), key=_key)
             latest = stable[-1] if stable else None
-            self._releases = {v: (files[0].get("requires_python") if files else None) for v, files in data["releases"].items()}
+            self._releases = {v: files[0].get("requires_python") for v, files in releases.items()}
             info = {
                 "latest_stable": latest,
-                "latest_published": (data["releases"][latest][0]["upload_time"][:10] if latest else None),
+                "latest_published": (releases[latest][0]["upload_time"][:10] if latest else None),
                 "requires_python": data["info"].get("requires_python"),
                 "recent": stable[-8:],
                 "error": "",
@@ -150,8 +160,14 @@ class HaUpdater:
         """Raise ValueError unless ``version`` exists on PyPI, is not older
         than the image's baseline and supports this Python."""
         version = version.strip()
-        await self.available()
-        if self._releases and version not in self._releases:
+        avail = await self.available()
+        if not self._releases:
+            # without the release list neither that the version exists nor the Python it needs is known: the
+            # entrypoint would spend minutes in pip, or install a version this image's Python cannot run.  A venv
+            # already installed for this Python needs neither (the entrypoint boots it as it is)
+            if not await self.hass.async_add_executor_job(self._venv_for_this_python, version):
+                raise ValueError(f"cannot check Home Assistant {version} against PyPI ({avail.get('error') or 'no release list'}): try again")
+        elif version not in self._releases:
             raise ValueError(f"{version} is not a Home Assistant release on PyPI")
         floor = os.environ.get("HA_VERSION_DEFAULT")
         if floor and _key(version) < _key(floor):
@@ -211,6 +227,10 @@ class HaUpdater:
             dropped.append("clean start")
         return dropped
 
+
+
+def _installable_files(files: Any) -> list[dict[str, Any]]:
+    return [f for f in files if isinstance(f, dict) and not f.get("yanked")] if isinstance(files, list) else []
 
 
 _key = ha_vkey
