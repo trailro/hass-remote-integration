@@ -21,6 +21,7 @@ import re
 import secrets
 import time
 from typing import Any
+from urllib.parse import unquote_plus
 
 try:
     import regex as _regex  # matching with a time limit; the stdlib re has none
@@ -43,8 +44,9 @@ MAX_SCAN_BYTES = 32 * 1024 * 1024  # a filter that matches nothing must not read
 # where a search stops says nothing about what the rules hide
 MAX_MASKED_OUT = 20_000
 # what the one-line rules of diagnostics._scrub_one_line_rules need to find before they change a line: a line
-# holding none of these comes out of them unchanged, so the search skips them for it.  A rule added there needs its
-# literal here (the tests compare the two)
+# holding none of these, as it is or percent-decoded (logbuffer.mask_query_secrets decides on the decoded name and
+# path: ?%73ession=), comes out of them unchanged, so the search skips them for it.  A rule added there needs its
+# literal here (the tests list every rule the function runs, and compare the two)
 _RULE_LITERALS = ("pass", "token", "secret", "credential", "psk", "hmac", "key", "webhook_id", "cloudhook_url", "pin",
                   "sig", "code", "otp", "pwd", "_pw", "session", "irk", "ltk", "csrk", "cookie", "authorization",
                   "bearer", "basic", "://", "gh", "github_pat_",
@@ -56,6 +58,9 @@ _FOLD = str.maketrans({"\u017f": "s", "\u0131": "i", "\u0130": "i", "\u212a": "k
 
 def _rules_may_change(text: str) -> bool:
     folded = text.translate(_FOLD).lower()
+    if "%" in text:
+        # decoded as well as raw: decoding can also take a literal apart (%ab + asic is not "basic" any more)
+        folded += "\n" + unquote_plus(text).translate(_FOLD).lower()
     return any(k in folded for k in _RULE_LITERALS)
 
 

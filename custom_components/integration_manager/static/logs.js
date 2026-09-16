@@ -1,8 +1,9 @@
 let groups=[], gOn=new Set(), lastId=0, shown=0, gen=0, following=false, resetting=0;
 const MAX_ROWS=200;  // the list keeps the newest lines only: following live drops the oldest
+const CATCH_UP=25;  // follow reads in a row while the server has more new lines than one read holds (truncated), then the next tick
 function prefixes(){ return groups.filter(g=>gOn.has(g.name)).flatMap(g=>g.loggers); }
 function line(r){ return `<span class="l ${esc(r.level)}"><span class="ts">${esc(r.ts.slice(0,10)+' '+r.ts.slice(11))}</span> ${esc(r.level.padEnd(7))} <span class="lg">${esc(r.logger)}</span> ${esc(r.message)}${r.exc?`<span class="exc">${esc(r.exc)}</span>`:''}</span>`; }
-async function fetchLogs(reset){
+async function fetchLogs(reset, more=0){
  // a reset (new filter) invalidates every answer still on its way; follow polls never overlap
  if(reset){ gen++; resetting++; } else if(following||resetting) return;  // a follow poll during a reset would append with the old lastId
  const mine=gen; if(!reset) following=true;
@@ -17,11 +18,13 @@ async function fetchLogs(reset){
  if(r.records.length) out.insertAdjacentHTML('beforeend',r.records.map(line).join(''));
  // the cursor also moves past records the search examined and did not show: a page of them would otherwise be asked for again on every poll
  lastId=Math.max(lastId,r.cursor||0,...r.records.map(x=>x.id));
- if(r.truncated&&!reset) out.insertAdjacentHTML('beforeend','<span class="l WARNING">… more new lines than fit in one read; continuing at the next</span>');
+ const again=r.truncated&&!reset&&more<CATCH_UP&&$('#follow').checked;
+ if(r.truncated&&!reset&&!again) out.insertAdjacentHTML('beforeend','<span class="l WARNING">… more new lines than fit in one read; continuing at the next</span>');
  const rows=out.children; while(rows.length>MAX_ROWS) rows[0].remove();
  shown=rows.length;
  if(reset||atBottom) out.scrollTop=out.scrollHeight;
  $('#n').textContent=`${shown} shown (newest ${MAX_ROWS} at most)`;
+ if(again) return fetchLogs(false, more+1);  // at once: a follower far behind would otherwise gain one read every 3 s
 }
 async function loadGroups(){
  groups=await (await fetch('/api/logs/loggers')).json();

@@ -15,6 +15,7 @@ import re
 import shutil
 import sys
 import tempfile
+import textwrap
 import time
 import unittest
 from types import SimpleNamespace
@@ -98,15 +99,61 @@ class LogFileSearchBudgetTest(unittest.TestCase):
         self.assertLess(time.perf_counter() - t0, 2.0)
 
 
+def _rules_run_by(fn, seen=None):
+    """Every module-level name a function reads to decide what it masks - patterns, tables, the decoding it does -
+    as ``module.name``, following the functions of diagnostics and logbuffer it calls or hands to another (the
+    callback of a ``.sub``).  Counting only the ``.sub(`` calls of _scrub_one_line_rules missed every rule behind
+    logbuffer.mask_query_secrets, the percent-decoding of a parameter name among them (R11 N2)."""
+    import logbuffer
+
+    ours = {diagnostics.__name__, logbuffer.__name__}
+    seen = set() if seen is None else seen
+    found = set()
+    scope = fn.__globals__
+    for node in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(fn)))):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and inspect.ismodule(scope.get(node.value.id)):
+            owner, name = scope[node.value.id], node.attr
+        elif isinstance(node, ast.Name) and node.id in scope and not inspect.ismodule(scope[node.id]):
+            owner, name = sys.modules[fn.__module__], node.id
+        else:
+            continue
+        obj = getattr(owner, name, None)
+        if inspect.isclass(obj):
+            continue  # an annotation
+        label = f"{owner.__name__}.{name}"
+        found.add(label)
+        if inspect.isfunction(obj) and obj.__module__ in ours and label not in seen:
+            seen.add(label)
+            found |= _rules_run_by(obj, seen)
+    return found
+
+
 class LogFileSearchPrefilterTest(unittest.TestCase):
     """The literals the search checks before it runs the one-line rules: a line the rules change must never be
     skipped, or the search would decide on its raw text again."""
 
     def test_the_rules_are_the_ones_the_literals_were_written_for(self):
-        src = inspect.getsource(diagnostics._scrub_one_line_rules)
-        self.assertEqual(sorted(set(re.findall(r"\b(_[A-Z_]+)\.sub\(", src))),
-                         ["_AUTH_TEXT", "_BEARER", "_COOKIE_TEXT", "_GH_TOKEN", "_SECRET_TEXT", "_URL_CRED"],
-                         "a new one-line rule: add what it needs to find to logfiles_page._RULE_LITERALS")
+        self.assertEqual(sorted(_rules_run_by(diagnostics._scrub_one_line_rules)), [
+            "custom_components.integration_manager.diagnostics._AUTH_TEXT",
+            "custom_components.integration_manager.diagnostics._BEARER",
+            "custom_components.integration_manager.diagnostics._COOKIE_TEXT",
+            "custom_components.integration_manager.diagnostics._GH_TOKEN",
+            "custom_components.integration_manager.diagnostics._SECRET_TEXT",
+            "custom_components.integration_manager.diagnostics._SECRET_TEXT_HINT",
+            "custom_components.integration_manager.diagnostics._URL_CRED",
+            "logbuffer._CREDENTIAL_PARAM",
+            "logbuffer._LOG_SEARCH_PATHS",
+            "logbuffer._LOG_SEARCH_PLAIN",
+            "logbuffer._PLAIN_PARAM",
+            "logbuffer._URL_ORIGIN",
+            "logbuffer._URL_QUERY",
+            "logbuffer._is_log_search",
+            "logbuffer._mask_query",
+            "logbuffer.mask_query_secrets",
+            "logbuffer.unquote_plus",
+            "re.fullmatch",
+        ], "a rule of the one-line rules changed: logfiles_page._RULE_LITERALS must find every line it changes, as "
+           "written and percent-decoded (extend the corpus in tests/test_r11_logs.py with its cases)")
 
     def test_every_line_the_rules_change_passes_the_prefilter(self):
         from tests.test_r3_web import ScrubCasesTest

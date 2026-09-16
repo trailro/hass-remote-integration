@@ -29,7 +29,7 @@ from .logfiles_page import _entry_paths, _log_files
 from .memdiag import snapshot as memory_snapshot
 
 # names ending in "key" that are known not to be secrets (everything else ending in "key" is masked)
-_PLAIN_KEYS = r"(?:translation|sort|primary)_key"
+_PLAIN_KEYS = logbuffer.PLAIN_KEYS
 _SECRET_KEY = re.compile(
     r"(password|passwd|passphrase|token|secret|credential|bearer|cookie|psk|hmac|passkey|bindkey|authorization|webhook_id|cloudhook_url|pin_code|signature"
     r"|(api|access|private|local|encryption|device|client|master|app|user|shared|signing|session|auth|link|network|aes|ssl)[_-]?key"
@@ -49,8 +49,11 @@ _SECRET_TEXT_HINT = re.compile(r"[a-z]['\"]?\s*[=:]", re.I)
 _AUTH_TEXT = re.compile(r"(authorization['\"]?\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|(?:[A-Za-z-]+\s+)?[^'\",\s}]+)", re.I)
 # Cookie / Set-Cookie: every cookie of the header, to the end of the line
 _COOKIE_TEXT = re.compile(r"(\b(?:set-)?cookie['\"]?\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\r\n]+)", re.I)
-# a whole PEM block; a truncated one (a cut log tail) up to the first character that cannot be base64
-_PEM = re.compile(r"-----BEGIN ([A-Z0-9 ]+)-----[\s\S]*?(?:-----END \1-----|(?=[^A-Za-z0-9+/=\s\\])|\Z)")
+# a whole PEM block.  A truncated one (a cut log tail): the rest of the BEGIN line, and the lines under it that are
+# nothing but base64; the first line that is not ends it before its first character (a log line under a BEGIN line
+# that never got its END marker is not body, and shows the same whatever else the window holds)
+_PEM = re.compile(r"-----BEGIN ([A-Z0-9 ]+)-----(?:[A-Za-z0-9+/=\s\\]*?-----END \1-----"
+                  r"|[A-Za-z0-9+/=\\ \t]*(?:\r?\n[ \t]*[A-Za-z0-9+/=\\]+[ \t]*(?=\r?\n|\Z))*)")
 # a line that is nothing but base64: the body of a key whose BEGIN line the caller never saw
 # (a search that selected this line alone, the start of a tail window, a page boundary).  40
 # characters is shorter than any line of a real key body and longer than the identifiers that
@@ -102,16 +105,10 @@ def _scrub_one_line_rules(value: str) -> str:
 
 def _mask_pem_in_place(match: re.Match[str]) -> str:
     """A PEM block masked without changing how many lines it occupies: the
-    marker on the first line, ``***`` for every further line it covered.
-
-    A match that ends on a newline covered no text on the line after it - the
-    body was masked before this ran, and the rule stops at the first character
-    that cannot be base64, so ``***`` is where it stops.  That line keeps what
-    it has instead of collecting a second ``***``."""
-    lines = match.group(0).count("\n")
-    open_line = 1 if match.group(0).endswith("\n") else 0
-    return (f"-----BEGIN {match.group(1)}-----***-----END {match.group(1)}-----"
-            + "\n***" * (lines - open_line) + "\n" * open_line)
+    marker on the first line, ``***`` for every further line it covered
+    (below the BEGIN line a match covers whole lines, or ends on an END
+    marker)."""
+    return f"-----BEGIN {match.group(1)}-----***-----END {match.group(1)}-----" + "\n***" * match.group(0).count("\n")
 
 
 def mask_key_material_lines(lines: list[str], in_block: bool = False) -> tuple[list[str], bool]:

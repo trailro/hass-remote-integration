@@ -118,4 +118,54 @@ const out = {};
   out.logfiles = { labels: p.$('#file').options.length, opened, after_restart: { selected: p.$('#file').value, shown: tb() } };
 }
 
+// ----- logs.js: a follower far behind reads on while the answers say truncated --------------------
+{
+  const rec = (id) => ({ id, ts: '2026-09-16T10:00:00.000', level: 'INFO', logger: 'custom_components.probe', message: 'line ' + id, exc: null });
+  const base = { capacity: '2 MB', path: '/config/integration_manager/process.log' };
+  const run = async (lastPage) => {
+    // pages of 200 from since_id=1; every page up to lastPage is truncated (lastPage=Infinity: the server never catches up)
+    const p = page('logs.js', ['fetchLogs'], url => {
+      if (url.pathname === '/api/logs/loggers') return { body: [] };
+      const since = Number(url.searchParams.get('since_id')), n = since ? Math.floor(since / 200) : 0;
+      if (!since) return { body: { ...base, records: [rec(1)], truncated: false, cursor: 1 } };
+      return { body: { ...base, records: [rec(since + 200)], truncated: n < lastPage, cursor: since + 200 } };
+    });
+    p.$('#level').value = 'DEBUG'; p.$('#q').value = ''; p.$('#follow').checked = true;
+    await settle(); await settle();
+    await p.api.fetchLogs(true);
+    p.requests.length = 0;
+    await p.api.fetchLogs(false);  // one tick of the 3 s timer
+    return { reads: p.requests.length, last_since: Number(new URL(p.requests.at(-1), 'http://hri').searchParams.get('since_id')),
+      notice: p.$('#out').rows.some(r => r.text.includes('more new lines than fit')) };
+  };
+  out.logs_catch_up = { behind: await run(3), never: await run(Infinity) };
+}
+
+// ----- logfiles.js: the selection after a restart, found again by its label ----------------------
+{
+  const run = async (listing, choose) => {
+    const contents = Object.fromEntries(listing.map(f => [f.id, 'contents of ' + f.id]));
+    const p = page('logfiles.js', ['loadFiles', 'load'], url => {
+      if (url.pathname === '/api/log_files') return { body: listing };
+      if (url.pathname === '/api/settings') return { body: {} };
+      const hits = listing.filter(f => f.id === url.searchParams.get('id'));
+      if (hits.length !== 1) return { status: 404, body: { message: 'unknown file' } };
+      return { body: { path: '/config/' + hits[0].name, bytes: 1, total_lines_scanned: 1, columns: [], format_error: null,
+        lines: [{ raw: contents[hits[0].id], cells: null, color: null }] } };
+    });
+    await settle(); await settle(); await settle();
+    p.$('#file').value = choose;
+    await p.api.load();
+    listing = listing.map(f => ({ ...f, id: f.id + '-restarted' }));
+    for (const f of listing) contents[f.id] = contents[f.id.replace('-restarted', '')];
+    await p.api.load();
+    return { selected: p.$('#file').value, shown: (p.$('#tb').innerHTML.match(/<td[^>]*>([^<]*)<\/td>/) || [])[1], note: p.$('#fmterr').textContent };
+  };
+  const file = (id, name) => ({ id, name, bytes: 1024, active: true, source: 'config root' });
+  out.logfiles_restart = {
+    unique: await run([file('a', 'first.log'), file('b', 'second.log')], 'b'),
+    shared: await run([file('a', 'logs/session-token=***'), file('b', 'logs/session-token=***'), file('c', 'other.log')], 'b'),
+  };
+}
+
 console.log(JSON.stringify(out));

@@ -1,12 +1,18 @@
-let files=[];
+let files=[], selNote='';  // selNote: why the selection may not be the file chosen before
 // example for Home Assistant style lines: 2026-01-01 12:00:00.123 WARNING (MainThread) [custom_components.demo] text
 const EXAMPLE={pattern:'^(?P<time>\\S+ \\S+) (?P<level>[A-Z]+) \\((?P<thread>[^)]*)\\) \\[(?P<logger>[^\\]]+)\\] (?P<message>.*)$',
  hide:['thread'], dim:['time','logger'], color_by:'level', colors:{WARNING:'warn',ERROR:'bad',CRITICAL:'bad',DEBUG:'muted'}};
 async function loadFiles(){
+ const sel=$('#file'), cur=sel.value, was=files.find(f=>f.id===cur);
  files=await (await fetch('/api/log_files',{headers:{'X-Requested-With':'fetch'}})).json();
- const sel=$('#file'), cur=sel.value;
- // the value is the file's id: two names can mask to the same label
- sel.innerHTML=files.map(f=>`<option value="${esc(f.id)}" ${f.id===cur?'selected':''}>${esc(f.name)} (${(f.bytes/1024).toFixed(0)} KB${f.active?', active':''}${f.source?', '+esc(f.source):''})</option>`).join('');
+ // the value is the file's id: two names can mask to the same label.  Ids are new after a restart: the file chosen
+ // before is found again by its label, which only says which file it was while no other file shows that label
+ let pick=files.find(f=>f.id===cur);
+ if(!pick&&was){
+  const same=files.filter(f=>f.name===was.name); pick=same[0];
+  selNote=same.length>1?`${same.length} files show ${was.name} and the page could not tell which one was selected (the manager restarted): the first is shown, choose again if it is not the one`:'';
+ }
+ sel.innerHTML=files.map(f=>`<option value="${esc(f.id)}" ${pick&&f.id===pick.id?'selected':''}>${esc(f.name)} (${(f.bytes/1024).toFixed(0)} KB${f.active?', active':''}${f.source?', '+esc(f.source):''})</option>`).join('');
  if(!files.length) sel.innerHTML='<option value="">(the running integration writes no log file)</option>';
 }
 let LOADING=false, AGAIN=false;
@@ -18,7 +24,7 @@ async function loadNow(){
  if(resp.status===404){ await loadFiles(); if($('#file').value!==was) AGAIN=true; }
  $('#path').textContent=r.path||'—'; $('#size').textContent=r.bytes!=null?`${(r.bytes/1024).toFixed(0)} KB · ${r.total_lines_scanned} lines read`:'';
  $('#ts').textContent=new Date().toLocaleTimeString(); $('#n').textContent=`${(r.lines||[]).length} lines`;
- $('#fmterr').textContent=r.format_error?'the stored format is ignored: '+r.format_error:'';
+ $('#fmterr').textContent=[selNote, r.format_error?'the stored format is ignored: '+r.format_error:''].filter(Boolean).join(' · ');
  const cols=r.columns||[], span=Math.max(1,cols.length);
  $('#th').innerHTML=cols.length?cols.map(c=>`<th>${esc(c.name)}</th>`).join(''):'<th>line</th>';
  const wrap=document.querySelector('.wrap'); const atBottom=wrap.scrollTop+wrap.clientHeight>=wrap.scrollHeight-20;
@@ -39,7 +45,7 @@ $('#fmtsave').onclick=async()=>{
  if(r.ok){ await loadFormat(); load(); }
 };
 $('#fmtexample').onclick=()=>{ $('#fmt').value=JSON.stringify(EXAMPLE,null,2); $('#fmtmsg').textContent='example inserted, not saved yet'; };
-['#file','#lines'].forEach(s=>$(s).addEventListener('change',load)); let qt; $('#q').addEventListener('input',()=>{clearTimeout(qt); qt=setTimeout(load,350);});
+$('#file').addEventListener('change',()=>{selNote='';}); ['#file','#lines'].forEach(s=>$(s).addEventListener('change',load)); let qt; $('#q').addEventListener('input',()=>{clearTimeout(qt); qt=setTimeout(load,350);});
 setInterval(()=>{ if($('#follow').checked) load().catch(()=>{}); },5000);
 setInterval(loadFiles,60000);
 loadFiles().then(load); loadFormat();
