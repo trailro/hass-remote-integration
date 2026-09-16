@@ -817,7 +817,12 @@ hass_<domain>/manager/result                        outcome of a manager action,
   no command, service call or manager action reaches the container: the
   refused topics and the broker's reason are logged once, put on the timeline,
   and shown in `subscribe_error` and `connect_error` of `GET /api/mqtt/status`
-  while the connection stays up. The MQTT client library's own messages are
+  while the connection stays up. `status` turns `online` only once the broker
+  has answered the subscription, so a command the main Home Assistant sends the
+  moment the device becomes available is received; a refused subscription still
+  turns it `online` (the documents keep flowing), and a broker that has not
+  answered within 10 seconds gets `online` anyway, reported like a refusal
+  until the answer comes. The MQTT client library's own messages are
   logged under `custom_components.integration_manager.mqtt_publisher.paho`
   (INFO and above; DEBUG gives a packet trace, which names topics and sizes but
   never the password or a payload).
