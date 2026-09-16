@@ -1,9 +1,10 @@
-"""Review round 12 (m7): the boot's status server answers on the manager port until the exec."""
+"""Review round 12 (m7, m16): the boot's status server, and Home Assistant versions from ha.json."""
 
 import json
 import os
 import shutil
 import socket
+import subprocess
 import tempfile
 import unittest
 import urllib.error
@@ -140,6 +141,39 @@ class BootStatusServerTest(BootBase):
         self.assertEqual(len(pages), 1)
         self.assertEqual(pages[0][0], 503)
         self.assertTrue(json.loads(pages[0][1])["restore_failed"])
+
+
+class HaJsonVersionTest(BootBase):
+    """m16: desired/current from ha.json went unchecked into venv paths (removed before an install) and pip."""
+
+    def test_a_desired_that_is_a_path_is_ignored_and_nothing_outside_is_removed(self):
+        victim = os.path.join(os.path.dirname(self.cfg), f"victim-{os.path.basename(self.cfg)}")
+        os.makedirs(victim)
+        self.addCleanup(shutil.rmtree, victim, True)
+        open(os.path.join(victim, "keep"), "w").close()
+        make_venv(self.cfg, A)
+        self.write({"current": A, "desired": f"{A}/../../{os.path.basename(victim)}"})
+        with mock.patch.object(self.ep.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "venv")), mock.patch.object(self.ep, "log"):
+            self.assertEqual(self.boot(), A)
+        self.assertTrue(os.path.isfile(os.path.join(victim, "keep")))
+        self.assertEqual(self.state()["desired"], A)
+
+    def test_an_invalid_current_is_recovered_from_the_volume_and_nothing_is_pruned(self):
+        make_venv(self.cfg, A)
+        make_venv(self.cfg, B)
+        self.write({"current": "../../etc", "previous": "x/y", "change": {"to": "../z", "mode": "keep"}})
+        with mock.patch.object(self.ep, "log"):
+            self.assertEqual(self.boot(), B)
+        state = self.state()
+        self.assertEqual(state["current"], B)
+        self.assertNotIn("previous", state)
+        self.assertNotIn("change", state)
+        self.assertTrue(os.path.isdir(os.path.join(self.cfg, f"venv-{A}")))  # pruning disabled for this boot
+
+    def test_valid_versions_and_a_beta_are_kept(self):
+        state = {"current": A, "desired": "2026.10.0b1", "previous": B, "proven": A}
+        self.write(state)
+        self.assertEqual({k: v for k, v in self.ep.load_state().items() if k in state}, state)
 
 
 if __name__ == "__main__":

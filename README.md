@@ -1314,7 +1314,8 @@ progress (50): try again later`.
   page and every `/api/` path answer `503` with a `Retry-After: 5`, and under
   `/api/` with a JSON body naming the phase and how long the install has been
   going, so a healthcheck does not call the container healthy while there is no
-  manager API yet. A slow install
+  manager API yet. A version in `integration_manager/ha.json` that is not a Home
+  Assistant version number (edited by hand) is ignored and logged. A slow install
   runs as long as it keeps making progress; an install that writes nothing at
   all for 15 minutes is taken for hung and fails: the container starts the Home
   Assistant version it already had, or, on a first start, exits and Docker
