@@ -51,7 +51,7 @@ MAX_MASKED_OUT = 20_000
 _RULE_LITERALS = ("pass", "token", "secret", "credential", "psk", "hmac", "key", "webhook_id", "cloudhook_url", "pin",
                   "sig", "code", "otp", "pwd", "_pw", "session", "irk", "ltk", "csrk", "cookie", "authorization",
                   "bearer", "basic", "://", "gh", "github_pat_",
-                  "/api/log")  # an access line of a log search: its q= and file= values are masked (logbuffer)
+                  "api")  # an access line of a log search, in any spelling of its path: its values are masked (logbuffer)
 # the rules are case-insensitive, and re's IGNORECASE takes four characters beyond ASCII for letters: lower() alone
 # leaves the long s and the dotless i as they are, and turns the dotted I into "i" plus a combining dot
 _FOLD = str.maketrans({"\u017f": "s", "\u0131": "i", "\u0130": "i", "\u212a": "k"})

@@ -43,7 +43,7 @@ _TORN_ID = re.compile(r'\{"id":\s*(\d+)')  # the id at the start of a record who
 # its mask hides, and a client may put a credential in any URL (HA's signed paths: authSig).  Those values are masked
 # before a record is written, so they never reach process.log or the container log.
 _URL_QUERY = re.compile(r"([^\s\"'?#]*)\?([^\s\"'#]+)")
-_URL_ORIGIN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://[^/]*")
+_URL_ORIGIN = re.compile(r"^(?:[A-Za-z][A-Za-z0-9+.-]*:)?//[^/]*")  # http://host, or //host (a scheme-relative URL)
 _LOG_SEARCH_PATHS = ("/api/logs", "/api/log_files/tail")  # the paths themselves: not /x/api/logs, not /api/logs/level
 # on the log search endpoints every value is masked but these, in the form the pages send them
 _LOG_SEARCH_PLAIN = {
@@ -68,7 +68,22 @@ _PLAIN_PARAM = re.compile(PLAIN_KEYS, re.I)
 
 
 def _is_log_search(path: str) -> bool:
-    return _URL_ORIGIN.sub("", unquote_plus(path)).rstrip("/") in _LOG_SEARCH_PATHS
+    """A search path in any spelling: the access log writes the request line of every request, whether or not the
+    router takes it to a log view (it takes the canonical path, percent-encoded letters and an absolute URI; not
+    /API/logs, //api/logs, /api/logs;x, /api//logs or /x/../api/logs), so they are all read as the path: case
+    folded, ;parameters, empty and dot segments dropped, with and without a leading //host."""
+    path = unquote_plus(path)
+    for candidate in (path, _URL_ORIGIN.sub("", path)):
+        segments: list[str] = []
+        for segment in candidate.lower().split("/"):
+            segment = segment.partition(";")[0]
+            if segment == "..":
+                segments = segments[:-1]
+            elif segment not in ("", "."):
+                segments.append(segment)
+        if "/" + "/".join(segments) in _LOG_SEARCH_PATHS:
+            return True
+    return False
 
 
 def _mask_query(match: re.Match[str]) -> str:

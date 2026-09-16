@@ -1088,7 +1088,9 @@ What is in place:
   log. Before a line is written, the search text of the Logs and Log files
   pages, the `file` a tail asks for, and URL parameters named like a credential
   (`access_token`, `authSig`, …) become `***`, so searching for your own secret
-  does not write it to disk; lines written by an earlier version are masked where
+  does not write it to disk. A search path counts in any spelling (`/API/logs`,
+  `//api/logs`, `/api/logs;x`, `/x/../api/logs`), including the ones the
+  server answers with 404 but still logs; lines written by an earlier version are masked where
   they are shown and in the diagnostics zip. A parameter name counts as a
   credential when it holds `token`, `secret`, `password` and the like anywhere,
   or `pass`, `sig`, `key`, `code` or `session` as a word of its own (`authSig`,

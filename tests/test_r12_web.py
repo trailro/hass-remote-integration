@@ -5,13 +5,20 @@ on the event loop: the regex package writes a counted repeat out once per copy,
 so ``(?P<a>a{60000}){60000}`` (22 characters) ran 23 s and was killed for its
 memory.  Matching had a time limit, compiling none.
 
+m14: the log searches' q= and file= values were masked in an access line only
+when its path was spelled the canonical way: ``GET /API/logs?q=hunter2``,
+``//api/logs``, ``/api/logs;x`` (none of which the router takes to a log view)
+went to process.log verbatim, and the pages showed them and searched them.
+
 Every test fails on the tree before the fix unless its docstring says it pins
 behaviour that already held.
 """
 
 import asyncio
 import json
+import logging
 import os
+import random
 import resource
 import shutil
 import subprocess
@@ -26,8 +33,10 @@ from urllib.parse import urlencode
 
 from aiohttp.test_utils import make_mocked_request
 
-from custom_components.integration_manager import logfiles_page
+import logbuffer
+from custom_components.integration_manager import diagnostics, logfiles_page, logs_page
 from tests.fakes import FakeInstaller
+from tests.test_r10_access_log import OlderLinesMaskedTest, _logger, _messages
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -169,3 +178,115 @@ class TailCompilesInTheExecutorTest(unittest.TestCase):
         self.assertIsNone(body["format_error"])
         self.assertEqual(body["lines"][0]["cells"], ["2026-09-17 10:00:00", "WARNING", "probe", "hello"])
         self.assertEqual(threads, [False])  # compiled once, and not on the thread the event loop runs on
+
+
+# ----- m14 ----------------------------------------------------------------------------------------
+
+SECRET = "R12W-hunter2-5c1e"  # synthetic
+WRONG = "R12W-zzzzzzz-0000"
+SPELLINGS = ("/API/logs", "//api/logs", "/api/logs;x", "/api//logs", "/api/./logs", "/x/../api/logs", "///api/logs/",
+             "/Api/Logs;a=b/", "//10.0.0.2:8222/api/logs", "/api/log_files//tail", "/API/LOG_FILES/TAIL;jsessionid=1",
+             "/api/%4Cogs;x", "http://10.0.0.2:8222//api/logs")
+
+
+def _access_line(path, text, n=0):
+    return f'172.17.0.1 [17/Sep/2026:10:00:{n % 60:02d} +0000] "GET {path}?level=DEBUG&q={text}&file=logs/{text}.log HTTP/1.1" 404 14 "-" "curl/8.7.1"'
+
+
+class SearchPathSpellingsTest(unittest.TestCase):
+
+    def test_every_spelling_is_masked(self):
+        for path in SPELLINGS:
+            with self.subTest(path=path):
+                self.assertEqual(logbuffer.mask_query_secrets(_access_line(path, SECRET)),
+                                 f'172.17.0.1 [17/Sep/2026:10:00:00 +0000] "GET {path}?level=DEBUG&q=***&file=*** HTTP/1.1" 404 14 "-" "curl/8.7.1"')
+
+    def test_other_paths_are_still_left_alone(self):
+        """Pins behaviour that already held."""
+        for path in ("/x/api/logs", "//x/y/api/logs", "/api/logs/level", "/api/logs/loggers", "/api/hassio/app/api/logs",
+                     "/api/logs/x/../../status", "/api/log_files/tail/x"):
+            with self.subTest(path=path):
+                line = f'"GET {path}?level=DEBUG&q=text&page=2 HTTP/1.1" 404'
+                self.assertEqual(logbuffer.mask_query_secrets(line), line)
+
+    def test_they_never_reach_process_log(self):
+        path = os.path.join(_tmp(self), "process.log")
+        handler = logbuffer.FileLogHandler(path)
+        self.addCleanup(handler.close)
+        logger = _logger(self, "hri.test.r12.access", handler)
+        for i, spelling in enumerate(SPELLINGS):
+            logger.info("%s", _access_line(spelling, SECRET, i))
+        messages = _messages(path)
+        self.assertEqual(len(messages), len(SPELLINGS))
+        self.assertFalse([m for m in messages if SECRET in m], messages)
+
+    def test_a_line_is_the_same_for_a_right_and_a_wrong_guess(self):
+        for path in SPELLINGS:
+            with self.subTest(path=path):
+                self.assertEqual(logbuffer.mask_query_secrets(_access_line(path, SECRET)),
+                                 logbuffer.mask_query_secrets(_access_line(path, WRONG)))
+
+    def test_the_log_files_prefilter_finds_every_line_they_mask(self):
+        """The Log files search skips the one-line rules for a line holding none of their literals: every line the
+        rules change must hold one, or the search decides on the raw text again."""
+        rng = random.Random(12)
+        parts = ["/", "//", "/api", "api", "API", "Api", "%61pi", "/logs", "logs", "/log_files", "/tail", ";x", ";", ".", "..",
+                 "/x", "http://h", "//h", "%2F", "?q=v1", "&file=v2", "=", "%3B", "LOGS", "l%6Fgs"]
+        corpus = ["GET " + "".join(rng.choice(parts) for _ in range(rng.randint(3, 12))) + "?q=v1" for _ in range(30_000)]
+        corpus += [_access_line(p, SECRET) for p in SPELLINGS]
+        changed = [line for line in corpus if diagnostics._scrub_one_line_rules(line) != line]
+        self.assertGreater(len(changed), 100)  # the corpus is not vacuous
+        self.assertEqual([line for line in changed if not logfiles_page._rules_may_change(line)], [])
+
+
+class SearchPathSpellingsInOlderLinesTest(unittest.TestCase):
+    """Lines an older version wrote: the Logs page and the Log files page answer a right guess like a wrong one."""
+
+    def setUp(self):
+        cfg = _tmp(self)
+        self.path = os.path.join(cfg, "process.log")
+        with open(self.path, "w", encoding="utf-8") as fh, open(os.path.join(cfg, "probe.log"), "w", encoding="utf-8") as probe:
+            n = 0
+            for rnd in range(20):
+                for spelling in SPELLINGS:
+                    n += 1
+                    for message in (f"routine poll {n}", _access_line(spelling, SECRET, n)):
+                        fh.write(json.dumps({"id": n, "ts": "2026-09-17T10:00:00.000", "level": "INFO", "levelno": 20,
+                                             "logger": "aiohttp.access", "message": message, "exc": None}) + "\n")
+                        probe.write(f"2026-09-17 10:00:00 INFO [aiohttp.access] {message}\n")
+                        n += 1
+        self.handler = logbuffer.FileLogHandler(self.path)
+        self.addCleanup(self.handler.close)
+        self.installer = FakeInstaller()
+        self.installer.settings = SimpleNamespace(data={})
+        self.hass = SimpleNamespace(config=SimpleNamespace(config_dir=cfg), async_add_executor_job=_job)
+
+    api = OlderLinesMaskedTest.api
+
+    def tail(self, **params):
+        request = make_mocked_request("GET", "/api/log_files/tail?" + urlencode(params),
+                                      headers={"Host": "10.0.0.2:8222", "X-Requested-With": "fetch"})
+        resp = asyncio.run(logfiles_page.LogFileTailView(self.hass, self.installer).get(request))
+        return resp.status, resp.body
+
+    def test_the_logs_page_shows_them_masked(self):
+        text = "\n".join(r["message"] for r in self.api(limit=2000)["records"])
+        self.assertIn("q=***&file=***", text)
+        self.assertNotIn(SECRET, text)
+
+    def test_the_logs_page_answers_a_right_guess_like_a_wrong_one(self):
+        for size in (len(SECRET), 9, 6):
+            for params in ({"since_id": 0}, {"since_id": 0, "limit": 5}, {"since_id": 3, "limit": 5}):
+                with self.subTest(size=size, **params):
+                    self.assertEqual(self.api(q=SECRET[:size], **params), self.api(q=WRONG[:size], **params))
+
+    def test_the_log_files_page_answers_a_right_guess_like_a_wrong_one(self):
+        for size in (len(SECRET), 9, 6):
+            for lines in (5, 50, 5000):
+                with self.subTest(size=size, lines=lines):
+                    right, wrong = self.tail(lines=lines, q=SECRET[:size]), self.tail(lines=lines, q=WRONG[:size])
+                    self.assertEqual(right[0], 200)
+                    self.assertEqual(json.loads(right[1])["lines"], [])
+                    self.assertEqual(right, wrong)  # rows, lines read, the whole body byte for byte
+        status, body = self.tail(lines=5, q="q=***&file=***")
+        self.assertEqual(len(json.loads(body)["lines"]), 5)  # what the mask leaves is still found
