@@ -2,7 +2,8 @@
 and paho's own log was never enabled.  m4: "online" went out before the SUBSCRIBE, so a command sent at the availability
 flip was lost.  m5: the value of a text entity in password mode was kept in clear in the command history, the status
 and the log.  D2: an entity moved into a device whose config is over the broker's maximum rescheduled the discovery pass
-every 5 s for good.  C11: a whitespace-only call payload ran the service with no data.  Every test fails on the tree
+every 5 s for good.  C11: a whitespace-only call payload ran the service with no data.
+C13: a live discovery-prefix change swept every retained entity document, not only the discovery configs.  Every test fails on the tree
 before its fix."""
 
 import asyncio
@@ -487,6 +488,53 @@ class WhitespaceCallTest(unittest.TestCase):
                 topic, answer, _qos, retain = pub._client.published[-1]
                 self.assertEqual((topic, retain), (f"{BASE}/result/script/turn_on", False))
                 self.assertFalse(json.loads(answer)["ok"])
+
+
+class LivePrefixMoveTest(unittest.TestCase):
+    """C13: the documents live under the base topic, which a new discovery prefix does not move."""
+
+    def _move(self, new_prefix="homeassistant", new_base=BASE):
+        from custom_components.integration_manager import discovery as disc
+
+        pub = camp._publisher(enabled=False, discovery_prefix="homeassistant")
+        pub._key_provider = lambda: new_base
+        pub._last_wanted = new_base
+        pub._pending_clears, pub._discovery_map, pub._blocks = set(), {}, {}
+        pub._registry_timer = pub._services_timer = None
+        pub._republish_interval = pub.config.republish_interval_s
+        new = mp.MqttConfig(enabled=False, discovery_prefix=new_prefix)
+        pub._load = lambda: new
+        pub._disconnect = lambda publish_offline=True: None
+        pub.publish_health = lambda: None
+        retained = {
+            f"{BASE}/demo/sensor/x": json.dumps({"published_at": "t", "integration": "demo"}).encode(),
+            "homeassistant/device/hass_camp_dev/config": json.dumps({"origin": disc.origin(BASE + "_")}).encode(),
+        }
+        scanned, cleared = [], []
+
+        def scan(_self, _suffix, topics, min_s=2.0):
+            scanned.extend(t for t, _q in topics)
+            return {t: p for t, p in retained.items()
+                    if any(mqtt.topic_matches_sub(sub, t) for sub, _q in topics)}
+
+        async def executor(func, *args):
+            return func(*args)
+
+        pub.hass.async_add_executor_job = executor
+        with mock.patch.object(mp.MqttPublisher, "_retained_scan", scan), \
+                mock.patch.object(mp.MqttPublisher, "_clear_topics", lambda _self, _suffix, topics: cleared.extend(topics)), \
+                mock.patch.object(mp.MqttPublisher, "_remember_identity"):
+            asyncio.run(pub._async_reconnect_locked())
+        return scanned, cleared
+
+    def test_a_new_prefix_clears_only_the_discovery_configs(self):
+        scanned, cleared = self._move(new_prefix="ha2")
+        self.assertEqual(cleared, ["homeassistant/device/hass_camp_dev/config"])
+        self.assertNotIn(f"{BASE}/#", scanned)
+
+    def test_a_new_base_topic_still_clears_the_documents(self):
+        _scanned, cleared = self._move(new_base="hass_other")
+        self.assertEqual(set(cleared), {f"{BASE}/demo/sensor/x", "homeassistant/device/hass_camp_dev/config"})
 
 
 if __name__ == "__main__":

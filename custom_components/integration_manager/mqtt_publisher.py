@@ -830,7 +830,9 @@ class MqttPublisher:
             for m in (self._topics, self._last_hash, self._discovery_map, self._blocks):
                 m.clear()
             self._services_published.clear()
-            cleared = await self.hass.async_add_executor_job(self._clear_retained_under, self.base_topic, self.config.discovery_prefix)
+            # a new discovery prefix alone moves only the discovery configs: the documents stay where they are
+            base_moved = self.wanted_base_topic is not None and self.wanted_base_topic != self._live_base
+            cleared = await self.hass.async_add_executor_job(self._clear_retained_under, self.base_topic, self.config.discovery_prefix, base_moved)
             swept = cleared is not None
             _LOGGER.info("MQTT: cleared %s retained topics left under the old names by earlier runs", cleared)
         if moved and swept:
