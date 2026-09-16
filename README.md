@@ -703,7 +703,9 @@ Two formats: a `*.py` module with `apply(ctx)` and `status(ctx)` (robust,
 because it can find code by pattern), or a unified diff `*.patch` (applied only
 when its context matches, never leaves broken Python behind; a hunk that only
 adds or removes lines without a single context line, as `diff -U0` makes, is
-refused because it cannot be located). Two optional
+refused because it cannot be located; each hunk is looked for from its own line
+shifted by the hunks before it, like GNU patch, and a hunk whose lines occur in
+more than one place about as near is refused as ambiguous). Two optional
 headers retire a patch on its own:
 
 ```python

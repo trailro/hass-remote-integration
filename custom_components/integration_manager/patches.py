@@ -269,13 +269,11 @@ def _hunk_report(text: str, ctx: PatchContext) -> list[dict[str, Any]]:
             continue
         with open(target, encoding="utf-8", errors="replace") as fh:
             lines = fh.read().split("\n")
-        for h in fp.hunks:
-            hint = h.old_start - 1
-            hr: dict[str, Any] = {"header": f"@@ -{h.old_start},{h.old_n} @@", "state": "not applicable", "line": None}
-            state, at = _locate(lines, h)
-            if state != "not applicable":
-                hr.update(state=state, line=at + 1)
-            elif h.old_lines:
+        for h, state, at, hint in _walk(lines, fp.hunks):
+            hr: dict[str, Any] = {"header": f"@@ -{h.old_start},{h.old_n} @@", "state": state, "line": None}
+            if state in ("applied", "pending"):
+                hr["line"] = at + 1
+            elif state == "not applicable" and h.old_lines:
                 at = _closest(lines, h.old_lines, hint)
                 found = lines[at:at + len(h.old_lines)]
                 hr["line"] = at + 1
@@ -386,30 +384,52 @@ def _resolve(path: str, ctx: PatchContext) -> str | None:
     return None
 
 
-def _find(lines: list[str], needle: list[str], hint: int) -> int:
-    """Index where `needle` occurs in `lines`, nearest to `hint`, else -1."""
+def _find(lines: list[str], needle: list[str], hint: int) -> tuple[int, bool]:
+    """(index where `needle` occurs in `lines` nearest to `hint`, else -1;
+    whether another occurrence is about as near).  Another occurrence at no
+    more than twice the distance makes the choice a guess: the hint is only
+    as good as the file matches the diff's base."""
     n = len(needle)
     if n == 0:
-        return -1
-    best = -1
-    for i in range(0, len(lines) - n + 1):
-        if lines[i:i + n] == needle and (best == -1 or abs(i - hint) < abs(best - hint)):
-            best = i
-    return best
+        return -1, False
+    found = sorted((abs(i - hint), i) for i in range(0, len(lines) - n + 1) if lines[i:i + n] == needle)
+    if not found:
+        return -1, False
+    ambiguous = len(found) > 1 and found[0][0] > 0 and found[1][0] <= 2 * found[0][0]
+    return found[0][1], ambiguous
 
 
-def _locate(lines: list[str], h: _Hunk) -> tuple[str, int]:
-    """("applied" | "pending" | "not applicable", index).  When both the
-    original block and the patched block occur, the one nearer the hunk's
-    own line decides: a matching line in another function is not this fix."""
-    hint = h.old_start - 1
-    new_at = _find(lines, h.new_lines, hint)
-    old_at = _find(lines, h.old_lines, hint) if h.old_lines != h.new_lines else -1
+def _locate(lines: list[str], h: _Hunk, hint: int) -> tuple[str, int]:
+    """("applied" | "pending" | "ambiguous" | "not applicable", index).  When
+    both the original block and the patched block occur, the one nearer the
+    hunk's own line decides: a matching line in another function is not this
+    fix.  ``hint`` is where the hunk should be, after the earlier hunks."""
+    new_at, new_amb = _find(lines, h.new_lines, hint)
+    old_at, old_amb = _find(lines, h.old_lines, hint) if h.old_lines != h.new_lines else (-1, False)
     if old_at >= 0 and (new_at < 0 or abs(old_at - hint) < abs(new_at - hint)):
-        return "pending", old_at
+        return ("ambiguous", -1) if old_amb else ("pending", old_at)
     if new_at >= 0:
-        return "applied", new_at
+        return ("ambiguous", -1) if new_amb else ("applied", new_at)
     return "not applicable", -1
+
+
+def _walk(lines: list[str], hunks: list[_Hunk], apply: bool = False) -> list[tuple[_Hunk, str, int, int]]:
+    """Locate every hunk in order, as GNU patch does: each one is searched
+    from its own line moved by where the previous one was found and by the
+    lines that one added or removed.  With ``apply`` the pending hunks are
+    applied to ``lines`` as they are found.  Returns (hunk, state, index, hint)."""
+    out = []
+    offset = 0
+    for h in hunks:
+        hint = h.old_start - 1 + offset
+        state, at = _locate(lines, h, hint)
+        if state == "pending" and apply:
+            lines[at:at + len(h.old_lines)] = h.new_lines
+            state = "patched"
+        if state in ("pending", "applied", "patched"):
+            offset = at - (h.old_start - 1) + (0 if state == "pending" else len(h.new_lines) - len(h.old_lines))
+        out.append((h, state, at, hint))
+    return out
 
 
 def _diff_status(text: str, ctx: PatchContext) -> str:
@@ -419,8 +439,7 @@ def _diff_status(text: str, ctx: PatchContext) -> str:
         if target is None:
             return f"absent ({fp.path} not found)"
         lines = _read_text(target).split("\n")
-        for h in fp.hunks:
-            states.append(_locate(lines, h)[0])
+        states.extend(state for _h, state, _at, _hint in _walk(lines, fp.hunks))
     if not states:
         return "empty"
     if all(s == "applied" for s in states):
@@ -441,13 +460,11 @@ def _diff_apply(text: str, ctx: PatchContext) -> str:
             return f"absent ({fp.path} not found)"
         original = prepared[target][1] if target in prepared else _read_text(target)  # two sections for one file
         lines = original.split("\n")
-        for h in fp.hunks:
-            state, i = _locate(lines, h)
-            if state == "applied":
-                continue
-            if state != "pending":
+        for _h, state, _at, _hint in _walk(lines, fp.hunks, apply=True):
+            if state == "ambiguous":
+                return f"not applicable (a hunk matches more than one place in {fp.path})"
+            if state not in ("applied", "patched"):
                 return f"not applicable (context changed in {fp.path})"
-            lines[i:i + len(h.old_lines)] = h.new_lines
         prepared[target] = (prepared[target][0] if target in prepared else original, "\n".join(lines))
     for target, (_orig, patched) in prepared.items():
         if target.endswith(".py"):
