@@ -99,20 +99,25 @@ Footprint: roughly 170–210 MB of RAM with a typical integration running, and a
 
 ## Quick start
 
-The image, [`ghcr.io/trailro/hass-remote-integration`](https://github.com/trailro/hass-remote-integration/pkgs/container/hass-remote-integration),
-is published on GitHub Container Registry for `amd64` and `arm64` (a Raspberry
-Pi with a 64-bit OS, Apple silicon, most NAS boxes), from 0.9.0 on:
+The image is built for `amd64` and `arm64` (a Raspberry Pi with a 64-bit OS,
+Apple silicon, most NAS boxes) and published to two registries. Both get every
+release with the same tags (`<version>`, `<major>.<minor>`, `latest`) and the
+same digest, so use whichever you prefer:
+
+| Registry | Image | Since |
+|---|---|---|
+| GitHub Container Registry (the default) | [`ghcr.io/trailro/hass-remote-integration`](https://github.com/trailro/hass-remote-integration/pkgs/container/hass-remote-integration) | 0.9.0 |
+| Docker Hub | [`trailro26/hass-remote-integration`](https://hub.docker.com/r/trailro26/hass-remote-integration) | 0.16.0 |
 
 ```bash
 docker pull ghcr.io/trailro/hass-remote-integration:latest
-```
-
-From 0.16.0 on the same image, with the same tags and digest, is also on Docker
-Hub as [`trailro26/hass-remote-integration`](https://hub.docker.com/r/trailro26/hass-remote-integration):
-
-```bash
+# or
 docker pull trailro26/hass-remote-integration:latest
 ```
+
+Docker Hub limits how often a host that is not logged in may pull; GitHub
+Container Registry does not for a public image. Either is fine for installing
+and updating one container.
 
 All you need to run it is the compose file of the latest release, in a
 directory of its own:
@@ -128,6 +133,7 @@ Put your settings in a `.env` file next to `docker-compose.yml`:
 TZ=Europe/Berlin          # your time zone
 HRI_PORT=8087             # port of the UI
 # HRI_VERSION=0.16.0      # optional: pin a release (default: latest)
+# HRI_REGISTRY=docker.io/trailro26  # optional: pull from Docker Hub (default: ghcr.io/trailro)
 # HRI_PASSWORD=...        # optional: require a password for the UI and API
 ```
 
@@ -1114,6 +1120,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | `HRI_PORT` | `8087` | Port of the UI and API; a changed port is picked up at the next boot, and one pinned in `.storage/http` by an older setup or a restored backup is dropped |
 | `HRI_NAME` | `hass-remote-integration` | Container and volume name |
 | `HRI_VERSION` | `latest` | Image tag Compose pulls, for example `0.16.0` |
+| `HRI_REGISTRY` | `ghcr.io/trailro` | Where Compose pulls the image from: `ghcr.io/trailro` (GitHub Container Registry) or `docker.io/trailro26` (Docker Hub); the same image either way. A `docker-compose.yml` from 0.16.0 or older ignores it and pulls from GitHub Container Registry: download the file again to use it |
 | `TZ` | `UTC` | Time zone; an unknown zone falls back to UTC, with an error in the log |
 | `HA_VERSION_LATEST` | `1` | `0` installs the image's baseline HA on a fresh volume instead of the newest |
 | `HRI_DEV_SRC` | `./dev-src` | Dev mode: directory mounted at `/dev-src` |
