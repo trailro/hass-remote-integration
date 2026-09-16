@@ -113,10 +113,37 @@ def _sync_manager_component() -> None:
     shutil.copytree(MANAGER_SRC, dst)
 
 
+def _sweep_deploy_leftovers() -> None:
+    """Before the loader scans custom_components: a deploy killed half-way leaves ``<domain>.deploying`` and
+    ``<domain>.replaced``, both with the domain's manifest, and the loader keys integrations by that domain, so
+    either could stand in for the real directory.  A set-aside copy whose directory is gone (killed between the
+    two renames) goes back; the reconcile deploys the wanted version again."""
+    root = os.path.join(CONFIG_DIR, "custom_components")
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(root, name)
+        if not name.endswith((".deploying", ".replaced")) or os.path.islink(path) or not os.path.isdir(path):
+            continue
+        target = path.rsplit(".", 1)[0]
+        try:
+            if name.endswith(".replaced") and not os.path.lexists(target):
+                os.replace(path, target)
+                _LOGGER.warning("%s put back (a deploy stopped between its two renames)", target)
+                continue
+            _LOGGER.warning("removing %s, left by a deploy that did not finish", path)
+            shutil.rmtree(path)
+        except OSError as err:
+            _LOGGER.error("could not clean %s: %s", path, err)
+
+
 async def _boot() -> int:
     booted: list = []  # the HomeAssistant object, once it exists
     _install_boot_signal_handlers(asyncio.current_task(), lambda: booted[0] if booted else None)
     os.makedirs(os.path.join(CONFIG_DIR, "custom_components"), exist_ok=True)
+    _sweep_deploy_leftovers()
     _sync_manager_component()
     # Like the stock image (WORKDIR /config): the loader imports the
     # namespace package `custom_components` once and then drops the config
