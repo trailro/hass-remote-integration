@@ -671,6 +671,15 @@ def registry_devices(reg: Any) -> list[Any]:
     return [d for d in (reg.async_get(x) if isinstance(x, str) else x for x in devs) if d is not None]
 
 
+def other_entry_ids(dom: dict[str, Any], entry_id: str | None) -> list[str]:
+    """The domain's other entry ids, as store file names are matched against
+    them.  Malformed ones are dropped here too, not only from apply_all's todo
+    list: an id the backup spells "" or "." is a substring of every file name
+    and would skip the whole store of the entry being imported."""
+    return [e["entry_id"] for e in dom.get("entries", []) or []
+            if isinstance(e.get("entry_id"), str) and ENTRY_ID_RE.fullmatch(e["entry_id"]) and e["entry_id"] != entry_id]
+
+
 def storage_for_entry(files: list[str], entry_id: str | None, other_ids: list[str], first_of_domain: bool) -> list[str]:
     """The domain's store files one entry's import may write.  Files named
     after another entry of the backup come with that entry; files named after
@@ -749,8 +758,7 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
     moved: list[str] = []    # originals set aside as .pre-import (recorded BEFORE the move: a failed copy must still restore them)
     merged: dict[str, Any] = {"entities": {}, "devices": {}}
 
-    to_copy = storage_for_entry(dom.get("storage_files", []), original_id,
-                                [e["entry_id"] for e in dom.get("entries", []) if e.get("entry_id") and e["entry_id"] != original_id],
+    to_copy = storage_for_entry(dom.get("storage_files", []), original_id, other_entry_ids(dom, original_id),
                                 first_of_domain=not hass.config_entries.async_entries(domain))
 
     def _copy() -> None:
