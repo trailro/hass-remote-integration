@@ -3,6 +3,9 @@
 m15: a logout the volume refused ended every session only until a restart, and
 the page went to /login without a word.
 
+C3: the call form put the target's entity domains, read from an integration's
+services.yaml, into the page as markup.
+
 Needs node, which the container the unit tests run in does not have: it skips there and runs wherever node is
 installed (a developer machine, CI).  Every test fails on the tree before the fix."""
 
@@ -35,3 +38,7 @@ class PagesTest(unittest.TestCase):
 
     def test_a_recorded_logout_leaves_without_a_word(self):
         self.assertEqual(self.out["logout"]["recorded"], {"alerts": [], "sent": ["/api/logout"], "href": "/login"})
+
+    def test_the_target_domains_are_text(self):
+        self.assertEqual(self.out["target_domains"], {
+            "images": 0, "label": "target entity_id(s) comma separated · <img src=x onerror=alert(1)>/light, switch"})
