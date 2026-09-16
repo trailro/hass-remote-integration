@@ -22,14 +22,26 @@ MAX_UPLOAD = 2 * 1024 * 1024 * 1024  # HA backups with media can be big; .storag
 _IMPORT_LOCK = asyncio.Lock()
 
 
-async def _locked(coro):
+async def _locked(make_coro, installer=None):
     """apply / apply_all one at a time: one's cleanup deletes the extracted
-    backup the other is still reading, and two applies of one entry race."""
+    backup the other is still reading, and two applies of one entry race.
+    ``installer``: the import also takes the busy flag start and stop take, and
+    reads the running integration only under it — an import decides there whether
+    the entry is stored enabled, so a stop finishing while it runs would leave an
+    enabled entry (set up by Home Assistant) behind a manager that reports the
+    integration as stopped."""
     if _IMPORT_LOCK.locked():
-        coro.close()
         raise ValueError("an import is already running: wait for it to finish")
     async with _IMPORT_LOCK:
-        return await coro
+        if installer is None:
+            return await make_coro()
+        if installer.busy:
+            raise ValueError("another action is running (start, stop or install): wait for it to finish")
+        installer.busy = True
+        try:
+            return await make_coro()
+        finally:
+            installer.busy = False
 
 
 _REBUILD_MSG = "a Home Assistant downgrade with a clean start is scheduled and uses the import area: restart first"
@@ -150,12 +162,16 @@ class ImportApplyView(ManagerView):
         data, options = body.get("data"), body.get("options")
         if data is not None and not isinstance(data, dict) or options is not None and not isinstance(options, dict):
             return self.json({"ok": False, "error": "data/options must be JSON objects"})
-        try:
+
+        def do_apply():  # what runs is read inside _locked, under the flag a start or a stop takes
             running = self.installer.running if self.installer else None
             installed = set(self.installer.state.installed) if self.installer else set()
-            result = await _locked(ha_import.apply(self.hass, self.aligner, domain, entry_id, data, options,
-                                           bool(body.get("align", True)), bool(body.get("copy_storage", False)),
-                                           running=(domain == running), installed=(domain in installed)))
+            return ha_import.apply(self.hass, self.aligner, domain, entry_id, data, options,
+                                   bool(body.get("align", True)), bool(body.get("copy_storage", False)),
+                                   running=(domain == running), installed=(domain in installed))
+
+        try:
+            result = await _locked(do_apply, self.installer)
             if result.get("suspended") and self.installer:
                 self.installer.mark_suspended(result["entry_id"])
         except ValueError as err:
@@ -200,9 +216,13 @@ class ImportApplyAllView(ManagerView):
         domains = body.get("domains")
         if domains is not None and not (isinstance(domains, list) and all(isinstance(d, str) and re.fullmatch(r"[a-z0-9_]+", d) for d in domains)):
             return self.json({"ok": False, "error": "domains must be a list of domain names"})
+
+        def do_apply_all():
+            return ha_import.apply_all(self.hass, self.aligner, domains, bool(body.get("align", True)), bool(body.get("copy_storage", True)),
+                                       self.installer.running, set(self.installer.state.installed))
+
         try:
-            result = await _locked(ha_import.apply_all(self.hass, self.aligner, domains, bool(body.get("align", True)), bool(body.get("copy_storage", True)),
-                                               self.installer.running, set(self.installer.state.installed)))
+            result = await _locked(do_apply_all, self.installer)
             for row in result.get("imported", []):
                 if row.get("suspended"):
                     self.installer.mark_suspended(row["entry_id"])
