@@ -516,7 +516,7 @@ class TlsErrorReportTest(unittest.TestCase):
                 pub._on_disconnect(None, None, None, "Unspecified error")
         self.assertEqual((len(logs.output), emit.call_count), (1, 1))
         self.assertIn("TLS listener", pub.stats["connect_error"])
-        pub._on_connect(mock.Mock(), None, None, 0)
+        pub._on_connect(mock.Mock(**{"subscribe.return_value": (0, 1)}), None, None, 0)
         with mock.patch.object(mp.events, "emit") as emit, self.assertLogs(mp._LOGGER, "WARNING"):
             pub._on_disconnect(None, None, None, "Unspecified error")  # after a real connection it is news again
         emit.assert_called_once()

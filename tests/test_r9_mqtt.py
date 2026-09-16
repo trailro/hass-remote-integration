@@ -70,7 +70,7 @@ class ProtocolTest(unittest.TestCase):
         pub._replace_client_soon = replaced.append
         client = pub._new_client(BASE)
         client.publish = mock.Mock()
-        client.subscribe = mock.Mock()
+        client.subscribe = mock.Mock(return_value=(0, 1))
         pub._on_connect(client, None, None, 0, SimpleNamespace(ReceiveMaximum=5))
         self.assertEqual(replaced, [client])
         client.publish.assert_not_called()
@@ -78,7 +78,7 @@ class ProtocolTest(unittest.TestCase):
         self.assertFalse(pub._connected)
         again = pub._new_client(BASE)
         self.assertEqual(again.max_inflight_messages, 5)
-        again.publish, again.subscribe = mock.Mock(), mock.Mock()
+        again.publish, again.subscribe = mock.Mock(), mock.Mock(return_value=(0, 1))
         pub._on_connect(again, None, None, 0, SimpleNamespace(ReceiveMaximum=5))  # the window fits now
         self.assertEqual(replaced, [client])
         self.assertTrue(pub._connected)
@@ -86,7 +86,7 @@ class ProtocolTest(unittest.TestCase):
     def test_subscriptions_keep_the_retain_flag_and_skip_our_own_messages(self):
         pub = self._pub()
         client = pub._new_client(BASE)
-        client.publish, client.subscribe = mock.Mock(), mock.Mock()
+        client.publish, client.subscribe = mock.Mock(), mock.Mock(return_value=(0, 1))
         pub._on_connect(client, None, None, 0, SimpleNamespace())
         (topics,), _ = client.subscribe.call_args
         self.assertEqual({t for t, _o in topics}, {f"{BASE}/cmd/#", f"{BASE}/call/#", f"{BASE}/manager/cmd/+"})
@@ -99,7 +99,7 @@ class ProtocolTest(unittest.TestCase):
     def test_the_announced_maximum_packet_size_is_used(self):
         pub = self._pub()
         client = pub._new_client(BASE)
-        client.publish, client.subscribe = mock.Mock(), mock.Mock()
+        client.publish, client.subscribe = mock.Mock(), mock.Mock(return_value=(0, 1))
         pub._on_connect(client, None, None, 0, SimpleNamespace(MaximumPacketSize=2048))
         pub._client = camp.FakeClient()
         self.assertFalse(pub._publish(f"{BASE}/demo/sensor/big", "x" * 3000))
