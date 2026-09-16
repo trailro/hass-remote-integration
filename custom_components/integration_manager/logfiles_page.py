@@ -13,9 +13,12 @@ is shown whole."""
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import time
 from typing import Any
 
@@ -45,6 +48,10 @@ MATCH_BUDGET_S = 2.0  # per request: a pattern too slow for the lines on screen 
 MAX_MATCH_CHARS = 4096
 
 LOGFILES_HTML = load_template("logfiles")
+# the key of the file ids, new on every start: an id is a keyed hash of the file's real name, so the page can
+# select a file whose masked name it shares with another without the real name ever reaching the page, and
+# nobody can test a guess of that name against an id
+_FILE_ID_KEY = secrets.token_bytes(32)
 
 
 def clean_log_format(value: Any) -> tuple[dict[str, Any], str | None]:
@@ -188,6 +195,14 @@ def _log_files(config_dir: str, installer, entry_paths: list[str]) -> list[dict[
     return out
 
 
+def _file_id(name: str) -> str:
+    """The id of a listed file: what the Log files page selects a file by.
+    It only names a file of the listing it is resolved against (the tail
+    view compares it with the id of every file _log_files returns), so it
+    cannot reach a file the listing does not offer."""
+    return hmac.new(_FILE_ID_KEY, name.encode("utf-8", "surrogateescape"), hashlib.sha256).hexdigest()[:32]
+
+
 def _tail(path: str, lines: int, needle: str) -> tuple[list[str], int]:
     """Last `lines` lines matching `needle`, reading the file backwards in
     blocks so a 7-day log is never loaded whole.
@@ -315,7 +330,10 @@ class LogFilesView(ManagerView):
         files = await self.hass.async_add_executor_job(_log_files, self.hass.config.config_dir, self.installer, _entry_paths(self.hass, self.installer.running))
         # a name comes from the config dir (an integration that names its log file after what it
         # connects to) and from the registry's log_dir: scrubbed like the lines inside the file
-        return self.json([{**{k: v for k, v in f.items() if k != "path"}, "name": scrub(f["name"])} for f in files])
+        # two names can mask to the same text (logs/session-token=alpha.log, logs/session-token=beta.log): the
+        # page selects a file by its id, the masked name is only its label
+        return self.json([{**{k: v for k, v in f.items() if k != "path"}, "name": scrub(f["name"]), "id": _file_id(f["name"])}
+                          for f in files])
 
 
 class LogFileTailView(ManagerView):
@@ -339,11 +357,20 @@ class LogFileTailView(ManagerView):
         files = await self.hass.async_add_executor_job(_log_files, self.hass.config.config_dir, self.installer, _entry_paths(self.hass, self.installer.running))
         if not files:
             return self.json({"path": None, "bytes": None, "columns": [], "lines": [], "total_lines_scanned": 0, "format_error": fmt_error})
-        wanted = q.get("file") or files[0]["name"]
-        # the listing shows scrubbed names, so that is what comes back here
-        chosen = next((f for f in files if wanted in (f["name"], scrub(f["name"]))), None)
-        if chosen is None:  # never open arbitrary paths
+        # never open arbitrary paths: a file of this listing, by its id (the page) or by the masked name the
+        # listing shows (an API caller).  Not by its real name: the listing never gives that out, and accepting
+        # it would confirm a guess of what the mask hides
+        if q.get("id"):
+            matches = [f for f in files if _file_id(f["name"]) == q["id"]]
+        elif q.get("file"):
+            matches = [f for f in files if scrub(f["name"]) == q["file"]]
+        else:
+            matches = files[:1]
+        if not matches:
             return self.json_message("unknown file", status_code=404)
+        if len(matches) > 1:
+            return self.json_message("several log files show this name: select the file by its id", status_code=409)
+        chosen = matches[0]
         try:
             raw_lines, scanned = await self.hass.async_add_executor_job(_tail_masked, chosen["path"], lines, q.get("q", ""))
         except OSError as err:

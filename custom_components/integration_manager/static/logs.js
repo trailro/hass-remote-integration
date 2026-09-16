@@ -14,7 +14,9 @@ async function fetchLogs(reset){
  $('#cap').textContent=r.capacity; $('#path').textContent=r.path||''; $('#ts').textContent=new Date().toLocaleTimeString();
  const out=$('#out'); if(reset){out.innerHTML='';shown=0;}
  const atBottom=out.scrollTop+out.clientHeight>=out.scrollHeight-20;
- if(r.records.length){ out.insertAdjacentHTML('beforeend',r.records.map(line).join('')); lastId=Math.max(lastId,...r.records.map(x=>x.id)); }
+ if(r.records.length) out.insertAdjacentHTML('beforeend',r.records.map(line).join(''));
+ // the cursor also moves past records the search examined and did not show: a page of them would otherwise be asked for again on every poll
+ lastId=Math.max(lastId,r.cursor||0,...r.records.map(x=>x.id));
  if(r.truncated&&!reset) out.insertAdjacentHTML('beforeend','<span class="l WARNING">… more new lines than fit in one read; continuing at the next</span>');
  const rows=out.children; while(rows.length>MAX_ROWS) rows[0].remove();
  shown=rows.length;

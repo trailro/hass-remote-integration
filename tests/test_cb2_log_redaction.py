@@ -260,37 +260,37 @@ class LogsPageQueryTest(unittest.TestCase):
         return Handler()
 
     def test_a_search_for_bytes_of_the_body_returns_no_body(self):
-        out, _ = logs_page._query_masked(self._handler(), text="MIIF")
+        out, _, _ = logs_page._query_masked(self._handler(), text="MIIF")
         self.assertNotIn(BODY1, "\n".join(r["message"] for r in out))
 
     def test_a_search_for_bytes_of_the_body_returns_nothing_at_all(self):
         self.assertEqual(logs_page._query_masked(self._handler(), text="MIIF")[0], [])
 
     def test_a_page_that_starts_below_the_begin_record_masks_the_body(self):
-        out, _ = logs_page._query_masked(self._handler(), since_id=2, limit=2)
+        out, _, _ = logs_page._query_masked(self._handler(), since_id=2, limit=2)
         joined = "\n".join(r["message"] for r in out)
         self.assertNotIn(BODY1, joined)
         self.assertNotIn(BODY2, joined)
 
     def test_the_newest_records_window_starting_inside_the_block_masks_the_body(self):
-        out, _ = logs_page._query_masked(self._handler(), limit=3)
+        out, _, _ = logs_page._query_masked(self._handler(), limit=3)
         self.assertNotIn(BODY2, "\n".join(r["message"] for r in out))
 
     def test_an_ordinary_search_still_works(self):
-        out, _ = logs_page._query_masked(self._handler(), text="after the key")
+        out, _, _ = logs_page._query_masked(self._handler(), text="after the key")
         self.assertEqual([r["message"] for r in out], [PEM[-1]])
 
     def test_a_search_on_the_logger_name_still_works(self):
-        out, _ = logs_page._query_masked(self._handler(), text="probe")
+        out, _, _ = logs_page._query_masked(self._handler(), text="probe")
         self.assertEqual(len(out), len(PEM))
 
     def test_a_block_inside_one_record_is_still_masked(self):
         self.recs = [{"id": 1, "logger": "probe", "message": "\n".join(PEM[1:5]), "exc": None}]
-        out, _ = logs_page._query_masked(self._handler())
+        out, _, _ = logs_page._query_masked(self._handler())
         self.assertNotIn(BODY1, out[0]["message"])
 
     def test_a_key_split_across_records_by_the_logger_is_still_masked(self):
-        out, _ = logs_page._query_masked(self._handler())
+        out, _, _ = logs_page._query_masked(self._handler())
         self.assertNotIn(BODY1, "\n".join(r["message"] for r in out))
         self.assertIn("after the key", out[-1]["message"])
 
