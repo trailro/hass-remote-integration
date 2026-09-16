@@ -37,7 +37,18 @@ import backupkit  # /app/backupkit.py: apply a restore scheduled from the UI
 from jsonio import fsync_dir, ha_vkey, vkey, write_json
 
 CONFIG_DIR = os.environ.get("HRI_CONFIG", "/config")
-PORT = int(os.environ.get("HRI_PORT", "8087"))
+
+
+def _parse_port(raw: str) -> int | None:
+    """None for a value that is not a TCP port: main() says so in the log instead of a traceback at import."""
+    try:
+        port = int(raw)
+    except ValueError:
+        return None
+    return port if 0 < port < 65536 else None
+
+
+PORT = _parse_port(os.environ.get("HRI_PORT", "8087"))
 DEFAULT_VERSION = os.environ.get("HA_VERSION_DEFAULT", "2026.8.3")
 EXTRA_REQUIREMENTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "requirements.txt")  # installed next to homeassistant
 MAX_BOOT_FAILURES = 3
@@ -826,6 +837,9 @@ def main() -> None:
     global _boot_server
     restrict_umask()  # first: inherited by everything created from here on, and by the exec'd Home Assistant
     os.makedirs(STATE_DIR, exist_ok=True)  # before the first log() call
+    if PORT is None:
+        log(f"HRI_PORT={os.environ.get('HRI_PORT')!r} is not a TCP port (1-65535): fix the container's environment; not starting")
+        sys.exit(2)
     _phase("checking the volume")
     _boot_server = start_status_server()
     try:
