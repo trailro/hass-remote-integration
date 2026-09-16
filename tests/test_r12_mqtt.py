@@ -1,5 +1,6 @@
 """Twelfth review, MQTT side.  m3: a SUBACK refusing the command topics left the connection "connected" with no error,
-and paho's own log was never enabled.  Every test fails on the tree before its fix."""
+and paho's own log was never enabled.  m4: "online" went out before the SUBSCRIBE, so a command sent at the availability
+flip was lost.  Every test fails on the tree before its fix."""
 
 import socket
 import threading
@@ -260,6 +261,87 @@ class SubscribeDoubleTest(unittest.TestCase):
         with mock.patch.object(mp.events, "emit"), self.assertLogs(mp._LOGGER, "ERROR"):
             pub._on_subscribe(client, None, 7, _suback(0x80, 0x80, 0x80))
         self.assertIn("Unspecified error", pub.stats["subscribe_error"])
+
+
+class OnlineAfterSubackTest(_LiveTest):
+    """m4: the main HA sends commands as soon as the device turns available; they must find the subscription in place."""
+
+    def _online(self, broker):
+        return broker.published(f"{BASE}/status")
+
+    def test_online_waits_for_the_suback(self):
+        broker = _Mqtt5Broker()
+        broker.suback_gate.clear()
+        with mock.patch.object(mp.events, "emit"):
+            pub = self.connect(broker)
+            self.assertTrue(_until(lambda: any(r[0] == "subscribe" for r in broker.received)))
+            time.sleep(0.3)
+            self.assertEqual(self._online(broker), [], "online went out before the broker acknowledged the subscription")
+            broker.suback_gate.set()
+            self.assertTrue(_until(lambda: self._online(broker)))
+        kinds = [r[0] if r[0] != "publish" else r[1] for r in broker.received]
+        self.assertLess(kinds.index("subscribe"), kinds.index(f"{BASE}/status"))
+        self.assertEqual(self._online(broker), [("publish", f"{BASE}/status", b"online", True)])
+        self.assertEqual(pub.stats["subscribe_error"], "")
+
+    def test_a_refused_subscription_still_goes_online(self):
+        broker = _Mqtt5Broker(suback_code=NOT_AUTHORIZED)
+        with mock.patch.object(mp.events, "emit"), self.assertLogs(mp._LOGGER, "ERROR"):
+            pub = self.connect(broker)
+            self.assertTrue(_until(lambda: self._online(broker)))
+        self.assertIn("Not authorized", pub.stats["subscribe_error"])
+
+    def test_a_broker_that_never_acknowledges_gets_online_after_the_wait(self):
+        broker = _Mqtt5Broker(answer_suback=False)
+        with mock.patch.object(mp.events, "emit"):
+            pub = self.connect(broker)
+            self.assertTrue(_until(lambda: pub.hass.loop.call_later.called))
+            time.sleep(0.3)
+            self.assertEqual(self._online(broker), [])
+            delay, overdue, *args = pub.hass.loop.call_later.call_args.args
+            self.assertEqual(delay, mp.SUBACK_WAIT_S)
+            with self.assertLogs(mp._LOGGER, "ERROR"):
+                overdue(*args)
+            self.assertTrue(_until(lambda: self._online(broker)))
+            self.assertIn("did not acknowledge", pub.stats["subscribe_error"])
+            overdue(*args)  # once
+            time.sleep(0.2)
+        self.assertEqual(len(self._online(broker)), 1)
+
+
+class OverdueDoubleTest(unittest.TestCase):
+    def _connect(self, pub, client):
+        pub._client = client
+        pub._on_connect(client, None, None, 0, None)
+        return pub.hass.loop.call_later.call_args.args
+
+    def test_a_late_suback_clears_the_overdue_error_without_a_second_online(self):
+        pub = camp._publisher()
+        client = SubscribeDoubleTest.Client()
+        _delay, overdue, *args = self._connect(pub, client)
+        with mock.patch.object(mp.events, "emit"), self.assertLogs(mp._LOGGER, "ERROR"):
+            overdue(*args)
+        pub._on_subscribe(client, None, 7, _suback(1, 1, 1))
+        self.assertEqual(pub.stats["subscribe_error"], "")
+        self.assertEqual([p for p in client.published if p[0] == f"{BASE}/status"], [(f"{BASE}/status", "online", 1, True)])
+
+    def test_the_timer_of_a_replaced_client_does_nothing(self):
+        pub = camp._publisher()
+        old = SubscribeDoubleTest.Client()
+        _delay, overdue, *args = self._connect(pub, old)
+        new = SubscribeDoubleTest.Client()
+        self._connect(pub, new)
+        overdue(*args)
+        self.assertEqual(old.published, [])
+        self.assertEqual(pub.stats["subscribe_error"], "")
+
+    def test_nothing_goes_online_while_stopping(self):
+        pub = camp._publisher()
+        client = SubscribeDoubleTest.Client()
+        self._connect(pub, client)
+        pub._stopping = True
+        pub._on_subscribe(client, None, 7, _suback(1, 1, 1))
+        self.assertEqual(client.published, [])
 
 
 if __name__ == "__main__":

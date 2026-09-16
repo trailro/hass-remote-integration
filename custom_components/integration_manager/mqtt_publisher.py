@@ -73,6 +73,9 @@ from .mqtt_rules import MqttRules
 from .services_catalog import service_rows
 
 TLS_CHECK_INTERVAL_S = 60  # at most one diagnostic handshake per minute while paho keeps failing to connect
+# "online" waits for the SUBACK, so a command the main HA sends at the availability flip is not lost; a broker that never
+# answers the SUBSCRIBE gets it after this long anyway (state mirroring works without the subscription)
+SUBACK_WAIT_S = 10
 DROP_AFTER_CONNECT_S = 10  # a disconnect within this of a CONNACK: the broker dropped us, the settings are not the problem
 
 _LOGGER = logging.getLogger(__name__)
@@ -396,7 +399,8 @@ class MqttPublisher:
     _receive_max = 0
     # _calls is iterated and changed on paho's thread and changed on the loop (a call refused for the in-flight cap)
     _calls_lock = threading.Lock()
-    _subscribing: tuple[Any, Any, list[str]] | None = None  # (client, mid, topics) of the SUBSCRIBE waiting for its SUBACK
+    _subscribing: list[Any] | None = None  # [client, mid, topics, online announced] of the SUBSCRIBE waiting for its SUBACK
+    _subscribing_lock = threading.Lock()  # the SUBACK (paho thread) and its overdue timer (loop) race for it
     _last_subscribe_error = ""  # the refusal already logged: repeated only after a subscription succeeded
 
     def __init__(self, hass: HomeAssistant, key_provider=None, health_provider=None, rules_provider=None) -> None:
@@ -1115,7 +1119,8 @@ class MqttPublisher:
 
     def _disconnect(self, publish_offline: bool = True) -> None:
         c, self._client = self._client, None
-        self._subscribing = None
+        with self._subscribing_lock:
+            self._subscribing = None
         if c is None:
             self._live_base = self._live_prefix = None
             return
@@ -1162,7 +1167,6 @@ class MqttPublisher:
         self.stats["subscribe_error"] = ""
         self.stats["protocol"] = "MQTT 5" if v5 else "MQTT 3.1.1"
         self._tls_checked_at, self._tls_error, self._last_disconnect = 0.0, "", ""
-        client.publish(self._status_topic(), "online", qos=1, retain=True)
         # Commands from the consuming HA: <base>/cmd/<domain>/<object_id>/<field>
         # and generic service calls: <base>/call/<domain>/<service>
         topics = [f"{self._cmd_base()}/#", f"{self._call_base()}/#", f"{self._manager_cmd_base()}/+"]
@@ -1174,10 +1178,17 @@ class MqttPublisher:
             rc, mid = client.subscribe([(t, options) for t in topics])
         else:
             rc, mid = client.subscribe([(t, 1) for t in topics])
-        self._subscribing = (client, mid, topics)
         if rc != mqtt.MQTT_ERR_SUCCESS:
-            self._subscribing = None
+            with self._subscribing_lock:
+                self._subscribing = None
             self._subscribe_failed(f"the subscription could not be sent ({mqtt.error_string(rc)})")
+            self._announce_online(client)
+        else:
+            # "online" once the broker acknowledged the subscription (_on_subscribe): a command sent at the availability
+            # flip would otherwise arrive before it and be lost
+            with self._subscribing_lock:
+                self._subscribing = [client, mid, topics, False]
+            self.hass.loop.call_soon_threadsafe(lambda: self.hass.loop.call_later(SUBACK_WAIT_S, self._suback_overdue, client, mid))
         _LOGGER.info("MQTT connected to %s:%s", self.config.host, self.config.port)
         events.emit("mqtt", f"connected to {self.config.host}:{self.config.port} as {self.base_topic}")
         # Runs in paho's thread: hop onto the HA loop for the full publish.  A
@@ -1196,15 +1207,37 @@ class MqttPublisher:
     def _on_subscribe(self, client, userdata, mid, reason_codes, properties=None) -> None:
         """Paho thread: the SUBACK.  A broker whose ACL allows publishing but not subscribing refuses the topics here, and
         only here: the connection stays up and state mirroring works while no command reaches this container."""
-        pending = self._subscribing
-        if pending is None or pending[0] is not client or pending[1] != mid:
-            return  # an earlier connection's
-        self._subscribing = None
+        with self._subscribing_lock:
+            pending = self._subscribing
+            if pending is None or pending[0] is not client or pending[1] != mid:
+                return  # an earlier connection's
+            self._subscribing = None
         refused = [f"{topic} ({code})" for topic, code in zip(pending[2], reason_codes) if getattr(code, "is_failure", False)]
         if refused:
             self._subscribe_failed(f"the broker refused the subscription to {', '.join(refused)}")
         else:
             self._last_subscribe_error = ""
+            if pending[3]:  # announced by the overdue timer, which reported a SUBACK that did come after all
+                self.stats["subscribe_error"] = self.stats["connect_error"] = ""
+        if not pending[3]:
+            # a refusal too: the documents still flow, and an offline device would hide them for nothing
+            self._announce_online(client)
+
+    def _suback_overdue(self, client: mqtt.Client, mid: Any) -> None:
+        """Loop: no SUBACK after SUBACK_WAIT_S."""
+        with self._subscribing_lock:
+            pending = self._subscribing
+            if pending is None or pending[0] is not client or pending[1] != mid or pending[3]:
+                return
+            pending[3] = True
+        if client is not self._client or not self._connected:
+            return
+        self._subscribe_failed(f"the broker did not acknowledge the subscription within {SUBACK_WAIT_S} s")
+        self._announce_online(client)
+
+    def _announce_online(self, client: mqtt.Client) -> None:
+        if not self._stopping:
+            client.publish(self._status_topic(), "online", qos=1, retain=True)
 
     def _subscribe_failed(self, reason: str) -> None:
         message = (f"{reason}: commands, service calls and manager actions from the main Home Assistant do not reach this "
