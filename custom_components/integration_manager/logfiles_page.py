@@ -13,6 +13,7 @@ is shown whole."""
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import hmac
 import json
@@ -71,6 +72,10 @@ MAX_COLUMNS = 30
 MAX_COLORS = 50
 MATCH_BUDGET_S = 2.0  # per request: a pattern too slow for the lines on screen falls back to whole lines
 MAX_MATCH_CHARS = 4096
+# compiling has no time limit: the regex package writes out a counted repeat once per copy ((?P<a>a{60000}){60000},
+# 22 characters, ran 23 s and was killed for its memory).  A pattern is refused when its elements, each counted once
+# per copy the repeats around it make, add up to more than this (~5 ms to compile at the limit, whatever the element)
+MAX_PATTERN_WEIGHT = 10_000
 
 LOGFILES_HTML = load_template("logfiles")
 # the key of the file ids, new on every start: an id is a keyed hash of the file's real name, so the page can
@@ -86,7 +91,9 @@ def clean_log_format(value: Any) -> tuple[dict[str, Any], str | None]:
     expression matched at the start of each line, whose named groups become
     the columns in order; ``hide`` lists groups not shown, ``dim`` groups
     shown muted; ``color_by`` names the group whose value picks the row
-    colour from ``colors`` (value -> one of FORMAT_COLORS)."""
+    colour from ``colors`` (value -> one of FORMAT_COLORS).
+
+    Blocking: it compiles the pattern (cached per pattern)."""
     if value is None or value == "" or value == {}:
         return {}, None
     if isinstance(value, str):
@@ -104,10 +111,9 @@ def clean_log_format(value: Any) -> tuple[dict[str, Any], str | None]:
         return {}, "pattern is required"
     if len(pattern) > MAX_PATTERN:
         return {}, f"pattern is longer than {MAX_PATTERN} characters"
-    try:
-        rx = (_regex or re).compile(pattern)
-    except (re.error, getattr(_regex, "error", re.error)) as err:
-        return {}, f"pattern does not compile: {err}"
+    rx, error = _compiled(pattern)
+    if error:
+        return {}, error
     groups = sorted(rx.groupindex, key=rx.groupindex.get)
     if not groups:
         return {}, "pattern needs at least one named group, (?P<name>...)"
@@ -136,6 +142,61 @@ def clean_log_format(value: Any) -> tuple[dict[str, Any], str | None]:
             return {}, "colors needs color_by"
         out["colors"] = {str(k): c for k, c in colors.items()}
     return out, None
+
+
+def _pattern_weight(pattern: str, limit: int) -> int:
+    """Blocking: the elements of ``pattern`` as the regex package parses it,
+    each counted once per copy the repeats around it make ({n} and {m,n}
+    make n, {m,} makes m, {0} one), counting stopped once past ``limit``.
+
+    The package's own parser, not a scan of the text: it is the lexer the
+    compile uses, so a count spelled ``{6 0 0 0 0}`` in verbose mode, a brace
+    in a character class or an escaped one reads here as it reads there."""
+    core = _regex._regex_core
+    source = core.Source(pattern)
+    info = core.Info(0, source.char_type, {})
+    source.ignore_space = bool(info.flags & core.VERBOSE)
+    try:
+        tree = core._parse_pattern(source, info)
+    except core._UnscopedFlagSet:  # a global flag after the start: parsed again with it set, as the compile does
+        source = core.Source(pattern)
+        info = core.Info(info.global_flags, source.char_type, {})
+        source.ignore_space = bool(info.flags & core.VERBOSE)
+        tree = core._parse_pattern(source, info)
+    total = 0
+    stack = [(tree, 1)]
+    while stack and total <= limit:
+        node, copies = stack.pop()
+        total += copies
+        if isinstance(node, core.GreedyRepeat):  # lazy and possessive repeats are subclasses
+            copies *= max(1, node.min_count if node.max_count is None else node.max_count)
+        for name, value in vars(node).items():
+            if name != "_key":
+                stack.extend((child, copies) for child in (value if isinstance(value, (list, tuple)) else (value,))
+                             if isinstance(child, core.RegexBase))
+    return total
+
+
+@functools.lru_cache(maxsize=16)
+def _compiled(pattern: str) -> tuple[Any, str | None]:
+    """Blocking: (compiled pattern, None) or (None, why not), cached per
+    pattern (the Log files page formats with the stored one on every poll)."""
+    try:
+        if _regex is not None:  # the stdlib re compiles a counted repeat as one instruction
+            try:
+                weight = _pattern_weight(pattern, MAX_PATTERN_WEIGHT)
+            except (AttributeError, TypeError) as err:
+                # the parser is internal to the regex package, which is not pinned: a release that changed it must
+                # not let every pattern through unchecked
+                return None, f"pattern cannot be checked with this version of the regex package ({type(err).__name__}: {err})"
+            if weight > MAX_PATTERN_WEIGHT:
+                return None, (f"pattern repeats too much: with its counted repeats ({{n}}, {{m,n}}) written out it is longer "
+                              f"than {MAX_PATTERN_WEIGHT} elements (use * or + for a field of any length)")
+        return (_regex or re).compile(pattern), None
+    except (re.error, getattr(_regex, "error", re.error), ValueError) as err:  # ValueError: conflicting flags, (?aL)
+        return None, f"pattern does not compile: {err}"
+    except RecursionError:
+        return None, "pattern does not compile: groups nested too deeply"
 
 
 def _entry_paths(hass, domain: str | None) -> list[str]:
@@ -329,7 +390,9 @@ def _format_lines(fmt: dict[str, Any], raw_lines: list[str]) -> tuple[list[dict[
     if _regex is None:  # the stdlib re cannot be stopped mid-match: no formatting rather than a hung server
         return [], [{"raw": raw, "cells": None, "color": None} for raw in raw_lines], \
             "formatting needs the regex package, missing from this Home Assistant venv: restart the container to install it"
-    rx = _regex.compile(fmt["pattern"])
+    rx, error = _compiled(fmt["pattern"])
+    if rx is None:
+        return [], [{"raw": raw, "cells": None, "color": None} for raw in raw_lines], error
     hide, dim = set(fmt.get("hide") or ()), set(fmt.get("dim") or ())
     shown = [g for g in sorted(rx.groupindex, key=rx.groupindex.get) if g not in hide]
     color_by, colors = fmt.get("color_by"), fmt.get("colors") or {}
@@ -401,7 +464,7 @@ class LogFileTailView(ManagerView):
             lines = max(1, min(int(q.get("lines", DEFAULT_LINES) or DEFAULT_LINES), MAX_LINES))
         except ValueError:
             return self.json_message("lines must be an integer", status_code=400)
-        fmt, fmt_error = clean_log_format(self.installer.settings.data.get("log_format"))
+        fmt, fmt_error = await self.hass.async_add_executor_job(clean_log_format, self.installer.settings.data.get("log_format"))
         files = await self.hass.async_add_executor_job(_log_files, self.hass.config.config_dir, self.installer, _entry_paths(self.hass, self.installer.running))
         if not files:
             return self.json({"path": None, "bytes": None, "columns": [], "lines": [], "total_lines_scanned": 0, "format_error": fmt_error})
