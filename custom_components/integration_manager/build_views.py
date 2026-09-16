@@ -274,10 +274,10 @@ class BuildPrepareView(ManagerView):
         if ha and not ha_changes and ha_state.get("pending"):
             # the running version was chosen explicitly: an older intention to
             # move to another version at the next restart contradicts it
-            from .views import _HA_CHANGE_LOCK
+            from .views import _HA_CHANGE_LOCK, _ha_change_lock_taken
 
-            if _HA_CHANGE_LOCK.locked():
-                return self.json({"ok": False, "error": "a Home Assistant version change is being prepared: try again in a moment", "steps": steps})
+            if _ha_change_lock_taken() or self.installer.busy:
+                return self.json({"ok": False, "error": "a Home Assistant version change or an install is running: try again in a moment", "steps": steps})
             try:
                 async with _HA_CHANGE_LOCK:  # held across both writes: a change scheduled in between would be overwritten
                     dropped = await self.installer.hass.async_add_executor_job(self.updater.cancel_config_change)

@@ -1243,10 +1243,10 @@ class Installer:
         else:
             self._smoke_waiting.pop((domain, tag), None)
             waited = 0.0
-        from .views import _HA_CHANGE_LOCK
+        from .views import _ha_change_lock_taken
 
         # a full rollback is refused while a version change's lock is held (a switch being cancelled holds it without busy)
-        busy = self.busy or _HA_CHANGE_LOCK.locked()
+        busy = self.busy or _ha_change_lock_taken()
         hung = still_setting_up and not busy and self.hass.is_running and waited > max(self.SETUP_WAIT_S, self.settings.int_("smoke_test_s", 0, 86400))
         if (busy or not self.hass.is_running or still_setting_up) and not hung:
             # an install/start in progress, or (at boot) HA not started / the entry
@@ -1593,7 +1593,7 @@ class Installer:
     async def rollback_full(self, domain: str | None = None, rejected: bool = False) -> dict[str, Any]:
         """Previous version AND the backup taken before the switch (registries,
         config entry as it was), applied at the restart the caller triggers."""
-        from .views import _HA_CHANGE_LOCK
+        from .views import _ha_change_lock_taken
 
         if self._rollback_running:
             # an automatic one overlapping a manual one, or a double click: the second schedule would drop the
@@ -1603,7 +1603,7 @@ class Installer:
         # reserved.  Without them a change prepared between the check and the schedule replaced this restore, or was
         # replaced by it, and both answered ok.  Refused, never waited for; the smoke test defers its verdict while
         # either is held, so the automatic rollback is not refused by them
-        if _HA_CHANGE_LOCK.locked() or self.busy:
+        if _ha_change_lock_taken() or self.busy:
             return {"ok": False, "error": "a Home Assistant version change or an install is running: try again in a moment"}
         self._rollback_running = True  # before the first await
         self.busy = True
@@ -1630,13 +1630,13 @@ class Installer:
         # keep what the rollback needs before calling it
         prev_tag, backup = rec["previous_tag"], rec["pre_update_backup"]
         zip_path = os.path.join(self.config_dir, backupkit.BACKUP_DIR, backup)  # backups live in <config>/backups
-        if not os.path.isfile(zip_path):
-            return {"ok": False, "error": f"the pre-update backup {backup} no longer exists (deleted?); only a plain start of {prev_tag} is possible"}
-        if prev_tag not in rec.get("versions", {}):
-            return {"ok": False, "error": f"previous version {prev_tag} is no longer in the version store"}
         from .views import _HA_CHANGE_LOCK
 
-        async with _HA_CHANGE_LOCK:  # free: rollback_full checked it, with no await since
+        async with _HA_CHANGE_LOCK:  # free: rollback_full checked it, with no await since (every check that awaits is inside)
+            if not await self.hass.async_add_executor_job(os.path.isfile, zip_path):
+                return {"ok": False, "error": f"the pre-update backup {backup} no longer exists (deleted?); only a plain start of {prev_tag} is possible"}
+            if prev_tag not in rec.get("versions", {}):
+                return {"ok": False, "error": f"previous version {prev_tag} is no longer in the version store"}
             try:
                 # validate BEFORE switching files/pip back: a corrupt zip must not leave a half rollback
                 await self.hass.async_add_executor_job(backupkit.validate, zip_path)
@@ -1929,6 +1929,7 @@ class Installer:
             # the restore did not happen (dropped for the Home Assistant version that booted, cancelled by
             # hand, failed): the configuration is still the one the version in state.json runs on
             _LOGGER.warning("the interrupted full rollback of %s to %s is dropped: %s was not restored", domain, tag, backup)
+            self.state.rollback_backup = self.state.rollback_at = None  # no restore of it is coming: pruned as any other again
             self.state.last_error = f"the full rollback of {domain} to {tag} was interrupted and {backup} was not restored: {domain} stays on {rec.get('running_tag')}"
             self._save_state()
             events.emit("error", self.state.last_error, domain=domain, tag=tag)
@@ -1949,15 +1950,23 @@ class Installer:
                     domain=domain, tag=tag)
 
     def release_rollback_backup(self, last_restore: Any) -> bool:
-        """Boot: the backup a full rollback restores is protected until that restore succeeded.  ha.json keeps the
-        last outcome for good, so "a restore succeeded" alone is any restore of any earlier day: only an outcome of
-        this backup, applied after the rollback was recorded, is it (a volume from before rollback_at: the name)."""
+        """Boot: the backup a full rollback restores is protected until that restore is over.  Succeeded: ha.json
+        keeps the last outcome for good, so "a restore succeeded" alone is any restore of any earlier day; only an
+        outcome of this backup, applied after the rollback was recorded, is it (a volume from before rollback_at:
+        the name).  Did not happen (dropped by the entrypoint for the version that boots, cancelled, failed and
+        put back): the rollback's schedule is gone from the volume and no restore of it is coming either.  While
+        that schedule is still there (a restore kept for a retry), an older outcome of the same backup releases
+        nothing."""
+        import backupkit
+
         backup = self.state.rollback_backup
-        if not backup or not isinstance(last_restore, dict) or not last_restore.get("ok") or last_restore.get("backup") != backup:
+        if not backup:
             return False
-        if str(last_restore.get("at") or "") < str(self.state.rollback_at or ""):
+        restored = isinstance(last_restore, dict) and last_restore.get("ok") and last_restore.get("backup") == backup \
+            and str(last_restore.get("at") or "") >= str(self.state.rollback_at or "")
+        if not restored and backupkit.pending(self.config_dir) and (backupkit._pending_meta(self.config_dir) or {}).get("name") == backup:  # noqa: SLF001
             return False
-        self.state.rollback_backup = self.state.rollback_at = None  # restored: the regular pruning applies to it again
+        self.state.rollback_backup = self.state.rollback_at = None  # the regular pruning applies to it again
         self._save_state()
         return True
 

@@ -46,20 +46,31 @@ def _write_member(out, name, size, typ=tarfile.REGTYPE, fill=None):
     out.write(bytes((512 - size % 512) % 512))
 
 
-def _ha_backup(cfg, members, protected=False):
+def _ha_backup(cfg, members, protected=False, first=()):
     """integration_manager/import.tar as Home Assistant writes it; ``members``: (name, size, type, fill) in the
-    inner homeassistant.tar.gz, after the config entries of a "demo" integration."""
+    inner homeassistant.tar.gz, after the config entries of a "demo" integration (``first``: before them).
+    ``protected``: encrypted with securetar for the key "key", as Home Assistant encrypts it."""
+    import securetar
+
     from custom_components.integration_manager import ha_import
 
     inner = os.path.join(cfg, "inner.tar.gz")
     entries = json.dumps({"version": 1, "data": {"entries": [{"entry_id": "abc", "domain": "demo", "title": "Demo",
                                                               "data": {}, "options": {}}]}}).encode()
     with gzip.open(inner, "wb", compresslevel=6) as g:
+        for name, size, typ, fill in first:
+            _write_member(g, name, size, typ, fill)
         _write_member(g, "data/.storage/core.config_entries", len(entries), fill=lambda k: entries[:k])
         for name, size, typ, fill in members:
             _write_member(g, name, size, typ, fill)
         _write_member(g, "data/.storage/core.entity_registry", 0)
         g.write(bytes(1024))
+    if protected:
+        with open(inner, "rb") as src, open(inner + ".enc", "wb") as out, \
+                securetar.SecureTarEncryptStream(src, create_version=3, derived_key_id=None, plaintext_size=os.path.getsize(inner),
+                                                 root_key_context=securetar.SecureTarRootKeyContext("key")) as enc:
+            shutil.copyfileobj(enc, out)
+        os.replace(inner + ".enc", inner)
     path = os.path.join(cfg, ha_import.IMPORT_TAR)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with tarfile.open(path, "w") as tf:
@@ -117,9 +128,7 @@ class ImportUnpackBudgetTest(unittest.TestCase):
     def test_an_oversized_long_name_header_is_refused_in_an_encrypted_backup_too(self):
         _ha_backup(self.cfg, [("././@LongLink", 8 * 1024**2, tarfile.GNUTYPE_LONGNAME, None), ("data/x", 0, tarfile.REGTYPE, None)],
                    protected=True)
-        # stands in for securetar's decryption: what the import gets back is a tarfile it did not open itself
-        with mock.patch.object(self.ha_import.securetar, "SecureTarFile", lambda path, gzip, password: tarfile.open(path, "r|gz")), \
-                self.assertRaises(ValueError) as ctx:
+        with self.assertRaises(ValueError) as ctx:
             self.ha_import.inspect_backup(self.cfg, "key", {"demo"})
         self.assertIn("extended tar header", str(ctx.exception))
 

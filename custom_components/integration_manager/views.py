@@ -175,6 +175,13 @@ class HaStatusView(ManagerView):
 _HA_CHANGE_LOCK = asyncio.Lock()
 
 
+def _ha_change_lock_taken() -> bool:
+    """_HA_CHANGE_LOCK cannot be taken without waiting: held, or released to a caller waiting for it that has not
+    resumed yet (asyncio's lock goes to that caller first, while ``locked()`` already says False).  What takes the
+    lock checks this and busy, then takes it with no await in between: refused, never queued behind another."""
+    return _HA_CHANGE_LOCK.locked() or any(not w.cancelled() for w in (_HA_CHANGE_LOCK._waiters or ()))  # noqa: SLF001
+
+
 def _manual_restore_pending(config_dir: str) -> bool:
     return backupkit.pending(config_dir) and not backupkit.pending_for_version(config_dir)
 
@@ -190,7 +197,7 @@ async def async_change_ha_version(installer: Installer, updater: HaUpdater, targ
     boots, in either direction.  Raises ValueError; OSError passes through."""
     hass = installer.hass
     cfg = hass.config.config_dir
-    if _HA_CHANGE_LOCK.locked():
+    if _ha_change_lock_taken():
         raise ValueError("a Home Assistant version change, a restore or a full rollback is being prepared: try again in a moment")
     async with _HA_CHANGE_LOCK:
         if mode not in ("keep", "restore", "rebuild"):
@@ -303,7 +310,7 @@ class HaActionView(ManagerView):
                 desired = (await hass.async_add_executor_job(self.updater._read)).get("desired")
                 if not desired or desired == HA_VERSION:
                     raise ValueError(f"Home Assistant {target} is already running")
-                if self.installer.busy or _HA_CHANGE_LOCK.locked():
+                if self.installer.busy or _ha_change_lock_taken():
                     raise ValueError("an install/start or a version change is running: try again in a moment")
                 async with _HA_CHANGE_LOCK:  # held across both writes: a change scheduled in between would be overwritten
                     dropped = await hass.async_add_executor_job(self.updater.cancel_config_change)
