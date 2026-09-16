@@ -2,6 +2,7 @@
 
 import asyncio
 import unittest
+import unittest.mock
 from types import SimpleNamespace
 
 from custom_components.integration_manager import manager_device as md
@@ -174,12 +175,39 @@ class ActionTest(unittest.IsolatedAsyncioTestCase):
         kinds = [e[0] for e in dev.installer.log]
         self.assertLess(kinds.index("restart"), kinds.index("result"))
 
-    async def test_restart_refused_while_busy(self):
+    async def test_restart_waits_for_a_running_action(self):
+        """m18: a bare restart waits for a running install, start or backup like the restart after an install does."""
         dev = device()
         dev.installer.busy = True
-        res = await dev.async_action("restart")
+        waited = []
+        real_sleep = asyncio.sleep
+
+        async def sleep(seconds):
+            waited.append(seconds)
+            if len(waited) == 3:
+                dev.installer.busy = False  # the install finished
+            await real_sleep(0)
+
+        with unittest.mock.patch.object(md.asyncio, "sleep", sleep):
+            res = await dev.async_action("restart")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(len(waited), 3)
+        self.assertIn("restart", [e[0] for e in dev.installer.log])
+
+    async def test_restart_skipped_when_the_action_outlasts_the_wait(self):
+        dev = device()
+        dev.installer.busy = True
+        waited = []
+
+        async def sleep(seconds):
+            waited.append(seconds)
+
+        with unittest.mock.patch.object(md.asyncio, "sleep", sleep):
+            res = await dev.async_action("restart")
         self.assertFalse(res["ok"])
-        self.assertNotIn(("restart",), dev.installer.log)
+        self.assertEqual(res["error"], "restart skipped: another action is still running")
+        self.assertEqual(sum(waited), 300)
+        self.assertNotIn("restart", [e[0] for e in dev.installer.log])
 
     async def test_unexpected_error(self):
         dev = device()
