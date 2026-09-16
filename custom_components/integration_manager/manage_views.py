@@ -31,7 +31,8 @@ class RunView(ManagerView):
     """POST /api/run/start {domain, tag?, force?} | POST /api/run/stop: the ONE
     running integration.  The MQTT publisher follows the identity.  A start of
     another version runs its preflight first (or reuses a recent one): blockers
-    refuse the start with ``needs_force`` and the report, unless ``force``."""
+    refuse the start with ``needs_force`` and the report, unless ``force``; a
+    gate that passes with warnings carries them in ``preflight_warnings``."""
 
     url = "/api/run/{action}"
 
@@ -54,6 +55,9 @@ class RunView(ManagerView):
             res = await self.installer.start(domain, tag)
             if gate and gate.get("skipped") and not gate["skipped"].startswith(("same version", "dev build")):
                 res["preflight_note"] = gate["skipped"]
+            # a gate that passes still has something to say: without this the warnings never reach whoever starts it
+            if gate and (gate.get("report") or {}).get("warnings"):
+                res["preflight_warnings"] = gate["report"]["warnings"]
             if force and res.get("ok"):
                 events.emit("start", f"{domain} {res.get('tag')} started with preflight blockers overridden", domain=domain, tag=res.get("tag"))
         elif action == "stop":
