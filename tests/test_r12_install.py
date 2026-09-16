@@ -5,7 +5,10 @@ import errno
 import json
 import os
 import shutil
+import sys
 import tempfile
+import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -199,6 +202,40 @@ class BootSweepTest(unittest.TestCase):
     def test_no_custom_components_yet(self):
         self.sweep()
         self.assertFalse(os.path.exists(self.cc))
+
+
+class StopWatchdogBudgetTest(unittest.TestCase):
+    """m6: every drain the watchdog runs counts against Docker's 240 s stop_grace_period."""
+
+    def test_budget_counts_every_drain(self):
+        from homeassistant.core import STOPPING_STAGE_SHUTDOWN_TIMEOUT
+
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docker-compose.yml"),
+                  encoding="utf-8") as fh:
+            self.assertIn("stop_grace_period: 240s", fh.read())
+        drain_s, flush_s = 0.3, 0.3
+
+        def stuck(timeout):  # like writer.drain / events.drain / flush_queue when nothing gets written: waits it all
+            threading.Event().wait(timeout)
+            return False
+
+        slept = []
+        with mock.patch.object(run, "_stop_watchdog", None), mock.patch.object(run.threading, "Thread") as thread:
+            run._arm_stop_watchdog(run.STOP_WATCHDOG_S)
+        watch = thread.call_args.kwargs["target"]
+        fakes = {"custom_components.integration_manager.writer": SimpleNamespace(drain=stuck),
+                 "custom_components.integration_manager.events": SimpleNamespace(drain=stuck)}
+        with mock.patch.dict(sys.modules, fakes), mock.patch.object(run, "WATCHDOG_DRAIN_S", drain_s), \
+                mock.patch.object(run, "LOG_FLUSH_S", flush_s), mock.patch.object(run.time, "sleep", slept.append), \
+                mock.patch.object(run.logbuffer, "flush_queue", stuck), mock.patch.object(run.logbuffer, "find", return_value=None), \
+                mock.patch.object(run.os, "_exit", side_effect=SystemExit), self.assertLogs(run._LOGGER, "CRITICAL"):
+            start = time.monotonic()
+            with self.assertRaises(SystemExit):
+                watch()
+            spent = time.monotonic() - start
+        self.assertEqual(slept, [run.STOP_WATCHDOG_S])
+        self.assertLess(spent, drain_s + flush_s + 0.15)  # the drains share WATCHDOG_DRAIN_S, the log gets LOG_FLUSH_S
+        self.assertLess(STOPPING_STAGE_SHUTDOWN_TIMEOUT + run.STOP_WATCHDOG_S + run.WATCHDOG_DRAIN_S + run.LOG_FLUSH_S, 240)
 
 
 if __name__ == "__main__":

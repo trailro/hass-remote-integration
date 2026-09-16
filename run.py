@@ -88,7 +88,8 @@ WRITER_DRAIN_S = 10  # at exit: the manager's JSON saves still queued
 LOG_FLUSH_S = 5  # at exit: log lines still queued
 # Docker's stop_grace_period (compose file, README) is 240 s from SIGTERM.  On the signal path the watchdog is
 # armed at EVENT_HOMEASSISTANT_STOP, which HA fires after its first stop stage (shutdown jobs, up to 20 s); when
-# it fires it drains the JSON writer and the log queue (5 s each) before exiting: 20 + 205 + 5 + 5 = 235 s.
+# it fires it drains the JSON writer and the timeline (5 s together) and the log queue (5 s) before exiting:
+# 20 + 205 + 5 + 5 = 235 s.
 # HA's remaining stages (100 + 60 + 30 s) plus run.py's own exit (task cancel 5, executor 10, writer 10,
 # log queue 10) could reach ~245 s in the worst case: the watchdog cuts that before Docker's SIGKILL.
 # A restart asked for from the manager arms it itself (hass.data["hri_stop_watchdog"]) before it calls
@@ -497,12 +498,13 @@ def _arm_stop_watchdog(timeout: float = STOP_WATCHDOG_S) -> threading.Thread:
         time.sleep(timeout)
         msg = f"still not stopped {int(timeout)} s after the stop was asked for: exiting hard"
         _LOGGER.critical(msg)
+        deadline = time.monotonic() + WATCHDOG_DRAIN_S  # one budget for both drains: see STOP_WATCHDOG_S
         writer = sys.modules.get("custom_components.integration_manager.writer")
         if writer is not None and not writer.drain(WATCHDOG_DRAIN_S):
             _LOGGER.critical("JSON saves still pending: exiting without them")
         # the timeline's own writing thread, for the same reason: os._exit skips the atexit drain
         events = sys.modules.get("custom_components.integration_manager.events")
-        if events is not None and not events.drain(WATCHDOG_DRAIN_S):
+        if events is not None and not events.drain(max(0.0, deadline - time.monotonic())):
             _LOGGER.critical("timeline events still pending: exiting without them")
         # the line waits in the log queue behind whatever holds the listener up (a blocked stderr):
         # give it a moment, then write it to process.log directly
