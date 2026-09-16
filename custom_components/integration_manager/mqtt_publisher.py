@@ -1531,9 +1531,13 @@ class MqttPublisher:
         self.hass.loop.call_soon_threadsafe(lambda: self.hass.async_create_task(self.manager.async_action(action, rec)))
 
     def _answer_rejected(self, action: str, error: str) -> None:
-        """Paho thread: the sender of a refused manager command gets told why on <base>/manager/result."""
-        result = {"ok": False, "action": action[:40], "error": error}
-        self.hass.loop.call_soon_threadsafe(lambda: self.hass.async_create_task(self.async_publish_manager_result(result)))
+        """Paho thread: the sender of a refused manager command gets told why on <base>/manager/result.  One
+        non-retained publish: nothing changed, so the retained manager document is not sent again, and nothing
+        waits for the broker (anyone who may publish under the base topic can send these)."""
+        c = self._client
+        if c is None or not self._connected:
+            return
+        c.publish(f"{self.base_topic}/manager/result", _dumps({"ok": False, "action": action[:40], "error": error}), qos=1, retain=False)
 
     def _remember(self, kind: str, what: str, data: Any, call_id: Any = None) -> dict[str, Any]:
         text = json.dumps(data, default=str) if not isinstance(data, str) else data

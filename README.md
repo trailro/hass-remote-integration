@@ -950,7 +950,9 @@ hass_<domain>/manager/result                        outcome of a manager action,
   restart is refused for another reason, the restart is skipped and the result
   says so. The result goes out once the restart is really under way, so an `ok`
   on `manager/result` means the process is going down and not only that the
-  command was accepted. While an action runs, a second one is answered
+  command was accepted. A refused command (an unknown action, a wrong payload,
+  or `manager_commands` off) gets `ok: false` and the reason on
+  `manager/result`, and nothing else is published. While an action runs, a second one is answered
   `<action> is still running (<n> s)`; one that never returns stops holding the
   others after 30 minutes. Anyone who can publish under the base topic can use
   them, so turn this on only on a broker with credentials.
