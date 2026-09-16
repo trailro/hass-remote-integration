@@ -211,12 +211,14 @@ def status_host_ok(host: str) -> bool:
             extra_raw = str((json.load(fh) or {}).get("allowed_hosts") or "")
     except (OSError, ValueError, AttributeError):
         extra_raw = ""
-    extra = {re.sub(r":\d+$", "", x.strip().lower()) for x in extra_raw.split(",") if x.strip()}
+    # a fully qualified name may end in one dot (foo.local.): the same host, as hostguard treats it
+    extra = {re.sub(r":\d+$", "", x.strip().lower()).removesuffix(".") for x in extra_raw.split(",") if x.strip()}
     h = (host or "").strip().lower()
     if h.startswith("["):
         h = h[1:].split("]", 1)[0]
     elif h.count(":") == 1:
         h = h.split(":", 1)[0]
+    h = h.removesuffix(".")
     if not h:
         return False
     if h in ("localhost", socket.gethostname().lower()) or h in extra:

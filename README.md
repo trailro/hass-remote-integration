@@ -978,7 +978,8 @@ What is in place:
 - A host-header guard against DNS rebinding: requests are served for IP
   addresses, `localhost` and local names (`.local`, `.lan`, `.home`,
   `.internal`, `.localdomain`, `.home.arpa`); add other names under *allowed host names* on
-  **System**.
+  **System**. A name written with its trailing dot (`hri.local.`) counts as the
+  same name.
 - State-changing requests need JSON or an explicit header, so a web page on
   another origin cannot trigger them; neither can it trigger the expensive
   reads (see *API*).
@@ -991,7 +992,8 @@ What is in place:
   the page. Listing them needs `X-Requested-With: fetch`, like reading a tail.
 - A `Content-Security-Policy` on every response: scripts only from the
   manager's own static files (no inline script), no plugins, no framing by
-  other pages, no `<base>` rewrites. Inline style attributes are allowed.
+  other pages, no `<base>` rewrites. Inline style attributes are allowed, and
+  so is the login page's own `<style>` element.
 - Secrets (MQTT password, GitHub token, parent HA token) are write-only in the
   UI, stored in files readable only by the owner, and never logged or included
   in the diagnostics zip. The diagnostics zip, the log file tails, the records on
@@ -1008,6 +1010,8 @@ What is in place:
   The searches on the Logs and Log files pages run on the masked text, so
   looking for part of a key finds nothing: a row that appeared only while the
   search matched the key would let it be read out one character at a time.
+  For the same reason, how far a search on the Log files page reads and how
+  long it takes do not depend on what the masking hides.
   A key is recognised from its `-----END …-----` marker or from the shape of
   its own lines, so a search result or a tail that starts in the middle of a
   block is masked too; key material with no marker anywhere in the window and
