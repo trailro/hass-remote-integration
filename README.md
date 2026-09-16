@@ -106,6 +106,13 @@ Pi with a 64-bit OS, Apple silicon, most NAS boxes), from 0.9.0 on:
 docker pull ghcr.io/trailro/hass-remote-integration:latest
 ```
 
+From 0.16.0 on the same image, with the same tags and digest, is also on Docker
+Hub as [`trailro26/hass-remote-integration`](https://hub.docker.com/r/trailro26/hass-remote-integration):
+
+```bash
+docker pull trailro26/hass-remote-integration:latest
+```
+
 All you need to run it is the compose file of the latest release, in a
 directory of its own:
 
@@ -1337,8 +1344,10 @@ CI runs on every push to `main` and every pull request: syntax checks, then,
 natively on both `amd64` and `arm64`, an image build, a boot on a fresh volume,
 the discovery schema test and the unit tests. Publishing
 a release builds the `amd64` and `arm64` image and pushes it to
-`ghcr.io/trailro/hass-remote-integration` (`<version>`, `<major>.<minor>` and,
-for a stable release, `latest`).
+`ghcr.io/trailro/hass-remote-integration` and to Docker Hub as
+`trailro26/hass-remote-integration` (`<version>`, `<major>.<minor>` and, for the
+newest stable release, `latest`; the Docker Hub push needs the `DOCKERHUB_TOKEN`
+repository secret).
 
 Inside the container the Home Assistant venv is `/config/venv-current/bin/python`
 (the image's own `python3` does not have Home Assistant).
