@@ -1032,6 +1032,12 @@ What is in place:
   For the same reason, what a search answers besides its rows (the Logs page's
   `cursor` and `truncated`, how far a search on the Log files page reads) and
   how long it takes do not depend on what the masking hides.
+  The web server logs every request line to `process.log` and the container
+  log. Before a line is written, the search text of the Logs and Log files
+  pages, the `file` a tail asks for, and URL parameters named like a credential
+  (`access_token`, `authSig`, …) become `***`, so searching for your own secret
+  does not write it to disk; lines written by an earlier version are masked where
+  they are shown and in the diagnostics zip.
   A key is recognised from its `-----END …-----` marker or from the shape of
   its own lines, so a search result or a tail that starts in the middle of a
   block is masked too; key material with no marker anywhere in the window and
