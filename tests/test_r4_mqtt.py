@@ -527,6 +527,7 @@ class CleanupTest(unittest.TestCase):
         pub = object.__new__(mp.MqttPublisher)
         pub.config = mp.MqttConfig()
         pub._saved = {}
+        pub._key_provider = lambda: "hass_demo"
         cfg = pub._validated({"host": "  broker  ", "discovery_prefix": " ha "})
         self.assertEqual((cfg.host, cfg.discovery_prefix), ("broker", "ha"))
 
