@@ -143,6 +143,7 @@ class State:
     suspended_entries: list[str] | None = None     # entry ids the manager disabled (stop, switch, flow or import for another integration); None = not recorded yet
     smoke_announced: str | None = None             # "at" of the failed smoke verdict already raised as a notification
     last_restore_reported: str | None = None      # "at" of the restore outcome already put on the timeline
+    pending_rollback: dict[str, Any] | None = None  # {domain, tag, backup}: a full rollback whose restore is scheduled but whose start did not finish
 
 
 _NONE = type(None)
@@ -151,6 +152,7 @@ _STATE_TYPES: dict[str, tuple[type, ...]] = {
     "pending_smoke": (dict, _NONE), "pending_start": (dict, _NONE), "last_smoke": (dict, _NONE), "last_release_check": (int,),
     "rollback_backup": (str, _NONE), "release_updates": (dict,), "pending_change": (dict, _NONE), "ha_error_reported": (str, _NONE),
     "suspended_entries": (list, _NONE), "smoke_announced": (str, _NONE), "last_restore_reported": (str, _NONE),
+    "pending_rollback": (dict, _NONE),
 }
 
 
@@ -331,6 +333,10 @@ class Installer:
         if ps is not None and not (isinstance(ps.get("domain"), str) and isinstance(ps.get("tag"), (str, _NONE)) and isinstance(ps.get("ha"), (str, _NONE))):
             _LOGGER.warning("state.json: dropping the deferred start %r (malformed)", str(ps)[:120])
             state.pending_start = None
+        pr = state.pending_rollback
+        if pr is not None and not all(isinstance(pr.get(k), str) for k in ("domain", "tag", "backup")):
+            _LOGGER.warning("state.json: dropping the interrupted rollback %r (malformed)", str(pr)[:120])
+            state.pending_rollback = None
         installed = state.installed if isinstance(state.installed, dict) else {}
         state.installed = {}
         for domain, rec in installed.items():
@@ -1528,6 +1534,12 @@ class Installer:
             return {"ok": False, "error": f"the pre-update backup is unusable ({err}); only a plain start of {prev_tag} is possible"}
         if backupkit.pending(self.config_dir):
             return {"ok": False, "error": "a restore is scheduled for the next restart: restart (or cancel it in the Backup card) first"}
+        # written BEFORE the restore is scheduled, because state.json is what the restore does NOT bring back:
+        # killed between the schedule and the state start() writes at its end, the next boot would restore the
+        # old files and .storage while state.json still names the rejected version, and the boot reconcile
+        # would deploy that version over the restored configuration.  _apply_pending_rollback finishes it there.
+        self.state.pending_rollback = {"domain": domain, "tag": prev_tag, "backup": backup}
+        self._save_state()
         try:
             # scheduled BEFORE the files change: a kill between the two then restores the backup at the next boot
             # (its custom_components are the old code), never boots the old code on the migrated .storage.
@@ -1536,15 +1548,22 @@ class Installer:
             zip_name = os.path.basename(await self.hass.async_add_executor_job(
                 backupkit.schedule_restore, self.config_dir, backup, ["storage", "custom_components"], None, True))
         except (ValueError, OSError) as err:
+            self.state.pending_rollback = None  # nothing is scheduled: there is no rollback to finish at a boot
+            self._save_state()
             return {"ok": False, "error": f"the backup could not be scheduled, nothing was changed: {err}"}
         try:
             res = await self.start(domain, prev_tag, own_restore=zip_name)  # start() refuses other scheduled restores, not this one
         except BaseException:
             await self.hass.async_add_executor_job(self._cancel_own_restore, zip_name)
+            self.state.pending_rollback = None
+            self._save_state()
             raise
         if not res.get("ok"):
             await self.hass.async_add_executor_job(self._cancel_own_restore, zip_name)
+            self.state.pending_rollback = None
+            self._save_state()
             return res
+        self.state.pending_rollback = None  # start() recorded the rollback's tag: nothing is left half done
         self.state.pending_change = None  # a rollback is not a version change to report
         if rejected:
             # start() recorded the version the smoke test just rejected as "previous", with a backup of its broken
@@ -1747,7 +1766,46 @@ class Installer:
         finally:
             self.busy = False
 
+    def _apply_pending_rollback(self) -> None:
+        """A full rollback whose restore was scheduled but whose start() never
+        finished (the process was killed in between).  The restore brought the old
+        files and .storage back; state.json is not part of a rollback's restore and
+        still names the version the rollback left, so the deploy below would put it
+        back over the configuration that was just restored."""
+        intent = self.state.pending_rollback
+        if not intent:
+            return
+        domain, tag, backup = intent["domain"], intent["tag"], intent["backup"]
+        ha_state = jsonio.read_json(os.path.join(self.state_dir, "ha.json"), {}) or {}
+        last = ha_state.get("last_restore") if isinstance(ha_state, dict) else None
+        restored = isinstance(last, dict) and last.get("ok") and last.get("backup") == backup
+        rec = self.state.installed.get(domain) or {}
+        self.state.pending_rollback = None
+        if not restored or tag not in (rec.get("versions") or {}):
+            # the restore did not happen (dropped for the Home Assistant version that booted, cancelled by
+            # hand, failed): the configuration is still the one the version in state.json runs on
+            _LOGGER.warning("the interrupted full rollback of %s to %s is dropped: %s was not restored", domain, tag, backup)
+            self.state.last_error = f"the full rollback of {domain} to {tag} was interrupted and {backup} was not restored: {domain} stays on {rec.get('running_tag')}"
+            self._save_state()
+            events.emit("error", self.state.last_error, domain=domain, tag=tag)
+            return
+        rec["running_tag"] = tag
+        # what came back is the state from before the update, so there is nothing behind it to roll back to
+        # (the start that was killed is where a new way back would have been recorded)
+        rec["previous_tag"], rec["pre_update_backup"] = None, None
+        self.state.domain = domain
+        self.state.rollback_backup = None  # restored: the regular pruning applies to that backup again
+        if isinstance(self.state.pending_change, dict) and self.state.pending_change.get("domain") == domain:
+            self.state.pending_change = None
+        # a verdict for the version that now runs, never another rollback (as after a completed one)
+        self.state.pending_smoke = {"domain": domain, "tag": tag, "can_rollback": False}
+        self.state.last_action = f"full rollback of {domain} to {tag} completed at this boot: {backup} was restored"
+        self._save_state()
+        events.emit("rollback", f"{domain} back to {tag}; {backup} restored (the rollback was interrupted and finished at this boot)",
+                    domain=domain, tag=tag)
+
     async def _reconcile(self) -> None:
+        self._apply_pending_rollback()  # before anything is deployed: it decides which tag this boot runs
         domain = self.state.domain
         rec = self.state.installed.get(domain or "", {})
         tag = rec.get("running_tag")
