@@ -13,6 +13,7 @@ class FakeInstaller:
         self.updates = dict(updates or {})
         self._spec = spec or {}
         self.busy = False
+        self.restart_result = {"ok": True}
         self.log = log if log is not None else []
 
     def spec(self, domain):
@@ -23,6 +24,7 @@ class FakeInstaller:
 
     async def restart(self):
         self.log.append(("restart",))
+        return self.restart_result
 
 
 class FakeUpdater:

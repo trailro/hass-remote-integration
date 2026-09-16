@@ -79,6 +79,10 @@ MANAGER_REPO = "trailro/hass-remote-integration"
 MAX_RELEASES = 20  # newer releases remembered for the banner
 VERSION_CHECK_S = 12 * 3600
 MIN_INTERVAL_S = {"backup": 600, "check_updates": 300}  # a flood of presses must not rotate every backup away
+# An action that never returns (a backup whose executor job queues behind an exhausted pool) held the lock
+# for good, and every later command was refused with "X is still running".  Longer than any real action:
+# an install with its smoke test is bounded by smoke_test_s, an HA upgrade by its download and pip run.
+ACTION_MAX_S = 1800
 RUNS_FILE = "manager_actions.json"  # when each action last ran: a restart must not reset the limits
 LAG_TICK_S = 1.0
 HISTORY_FILE = "resource_history.json"
@@ -237,6 +241,7 @@ class ManagerDevice:
         self._lag = LoopLag(hass)
         self._action_lock = asyncio.Lock()
         self._running: str | None = None
+        self._running_since = 0.0
         self._unsub: list[Any] = []
         self._history: deque[list[Any]] = deque()  # [epoch s, memory, cpu, lag mean, lag max, volume used %]
         self._history_loaded = False
@@ -471,13 +476,20 @@ class ManagerDevice:
     async def async_action(self, action: str, rec: dict[str, Any] | None = None) -> dict[str, Any]:
         if action not in MANAGER_ACTIONS:
             res: dict[str, Any] = {"ok": False, "error": f"unknown action {action!r}"}
-        elif self._action_lock.locked():
-            res = {"ok": False, "error": f"{self._running} is still running"}
+        elif self._action_lock.locked() and (held := time.monotonic() - self._running_since) < ACTION_MAX_S:
+            res = {"ok": False, "error": f"{self._running} is still running ({int(held)} s)"}
         elif (wait := self._limit_wait(action)) > 0:
             res = {"ok": False, "error": f"{action} ran moments ago: try again in {int(wait) + 1} s"}
         else:
+            if self._action_lock.locked():
+                # it is hung, not slow: it keeps whatever it holds, but a fresh lock stops it refusing
+                # every command for the rest of this process
+                _LOGGER.error("manager action %s has been running for over %s s: it no longer blocks new actions",
+                              self._running, ACTION_MAX_S)
+                self._action_lock = asyncio.Lock()
             async with self._action_lock:
                 self._running = action
+                self._running_since = time.monotonic()
                 self._last_run[action] = time.time()  # wall clock, kept on disk (a monotonic clock restarts with the process)
                 try:
                     if self._runs_file:
@@ -497,31 +509,35 @@ class ManagerDevice:
         restart = bool(res.pop("restart", False))
         started = res.pop("started", None)
         res = {"action": action, **res, "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
-        self.last_action = res
-        if rec is not None:
-            self.publisher._finish(rec, "ok" if res.get("ok") else "failed", res.get("error"))  # noqa: SLF001
-        # outcome first: the reconnect after a start and the restart would drop it
-        await self.publisher.async_publish_manager_result(res)
-        if started is not None:
-            await self.publisher.async_after_start(started)
-        events.emit("mqtt", f"manager action {action} from MQTT: "
-                    + (("ok" + (f", {res['note']}" if res.get("note") else "") + ("; restarting" if restart else "")) if res.get("ok") else f"failed: {res.get('error')}"),
-                    action=action)
         if restart:
+            # The restart goes first, and the result says what really happened.  Announcing it first told the
+            # consuming HA "ok" and then waited for the broker in the executor: with the pool exhausted that
+            # wait never returned, installer.restart() was never reached and nothing ever stopped.
             for _ in range(600):  # an install or start clicked meanwhile finishes first (at most 5 min)
                 if not self.installer.busy:
                     break
                 await asyncio.sleep(0.5)
             if self.installer.busy:  # restarting would kill it half-way
-                skipped = "restart skipped: an install/start is still running"
-                res = {**res, "note": f"{res['note']}; {skipped}" if res.get("note") else skipped}
+                failed = "restart skipped: an install/start is still running"
+            else:
+                failed = "" if (rr := await self.installer.restart()).get("ok") else (rr.get("error") or "the restart did not start")
+            if failed:
+                restart = False
+                res = {**res, "note": f"{res['note']}; {failed}" if res.get("note") else failed}
                 if action == "restart":
-                    res.update(ok=False, error=skipped)
-                self.last_action = res
-                events.emit("mqtt", f"manager action {action} from MQTT: {skipped}", action=action)
-                await self.publisher.async_publish_manager_result(res)
-                return res
-            await self.installer.restart()
+                    res.update(ok=False, error=failed)
+        self.last_action = res
+        if rec is not None:
+            self.publisher._finish(rec, "ok" if res.get("ok") else "failed", res.get("error"))  # noqa: SLF001
+        # before the publish: a stop already under way, or a broker that never confirms, must not cost the timeline
+        events.emit("mqtt", f"manager action {action} from MQTT: "
+                    + (("ok" + (f", {res['note']}" if res.get("note") else "") + ("; restarting" if restart else "")) if res.get("ok") else f"failed: {res.get('error')}"),
+                    action=action)
+        # the publish hands both messages to paho before its first await, so they still reach the broker
+        # while HA stops; what it waits for afterwards is only the confirmation
+        await self.publisher.async_publish_manager_result(res)
+        if started is not None:
+            await self.publisher.async_after_start(started)
         return res
 
     async def _do_install_integration(self) -> dict[str, Any]:

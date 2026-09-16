@@ -143,7 +143,7 @@ class ActionTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertEqual(dev._running, "backup")
         second = await dev.async_action("restart")
-        self.assertEqual(second["error"], "backup is still running")
+        self.assertTrue(second["error"].startswith("backup is still running"), second["error"])
         self.assertNotIn(("restart",), dev.installer.log)
         release.set()
         self.assertTrue((await first)["ok"])
@@ -164,13 +164,15 @@ class ActionTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await dev.async_action("restart"))["ok"])
         self.assertTrue((await dev.async_action("restart"))["ok"])
 
-    async def test_restart_result_before_restart(self):
+    async def test_restart_before_result(self):
+        """The result said ok before anything stopped, and the publish it went
+        out in could hang: the restart comes first now."""
         dev = device()
         res = await dev.async_action("restart")
         self.assertEqual((res["action"], res["ok"]), ("restart", True))
         self.assertNotIn("restart", {k for k in res if k != "action"})
         kinds = [e[0] for e in dev.installer.log]
-        self.assertLess(kinds.index("result"), kinds.index("restart"))
+        self.assertLess(kinds.index("restart"), kinds.index("result"))
 
     async def test_restart_refused_while_busy(self):
         dev = device()
