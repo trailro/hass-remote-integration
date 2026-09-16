@@ -34,6 +34,7 @@ def publisher(commands=True, manager=True):
     pub.manager = FakeManager() if manager else None
     pub._live_base = BASE
     pub._key_provider = lambda: BASE
+    pub._client, pub._connected, pub._moving = None, False, False  # never connected: what it publishes goes nowhere
     tasks = []
     pub.hass = SimpleNamespace(loop=FakeLoop(), async_create_task=tasks.append, tasks=tasks)
     return pub
@@ -99,7 +100,7 @@ class ManagerCommandTest(unittest.TestCase):
         with self.assertLogs("custom_components.integration_manager.mqtt_publisher", "WARNING"):
             pub._handle_message(SimpleNamespace(topic=f"{BASE}/manager/cmd/restart", payload=b"restart", retain=True))
         self.assertEqual(pub.history, [])
-        self.assertEqual(pub.hass.loop.calls, [])
+        self.assertEqual(pub.hass.loop.calls, [])  # the action never runs; the topic itself is cleared, see test_camp_entities
 
 
 class ManagerResultTest(unittest.IsolatedAsyncioTestCase):
