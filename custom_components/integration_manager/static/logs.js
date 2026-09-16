@@ -40,7 +40,9 @@ async function loadGroups(){
   t.appendChild(tr);
  }
 }
-['#level','#q'].forEach(s=>$(s).addEventListener('input',()=>fetchLogs(true)));
+$('#level').addEventListener('input',()=>fetchLogs(true));
+// a search masks and reads every record until the page fills, whatever it looks for: not on every keystroke
+let qt; $('#q').addEventListener('input',()=>{clearTimeout(qt); qt=setTimeout(()=>fetchLogs(true),350);});
 $('#clear').onclick=()=>{$('#out').innerHTML='';shown=0;$('#n').textContent='0 shown'};
 setInterval(()=>{ if($('#follow').checked) fetchLogs(false).catch(()=>{}); },3000);
 setInterval(loadGroups,30000);
