@@ -23,6 +23,7 @@ import logging
 import logging.handlers
 import os
 import queue
+import re
 import threading
 import time
 from typing import Any, Callable
@@ -33,6 +34,7 @@ KEEP = 2  # process.log.1, process.log.2
 # limit; a full queue drops new records and counts them, and the count is logged once the listener runs again
 QUEUE_MAX = 50_000
 _TAIL = 8192  # bytes read from the end of a file to find the last id
+_TORN_ID = re.compile(r'\{"id":\s*(\d+)')  # the id at the start of a record whose line a crash cut short
 
 
 class FileLogHandler(logging.Handler):
@@ -46,6 +48,20 @@ class FileLogHandler(logging.Handler):
         self._fh = open(path, "a", encoding="utf-8")
         self._size = self._fh.tell()
         self._ids = itertools.count(self._last_id() + 1)  # ids keep growing across restarts
+        if self._size and not self._ends_with_newline():
+            # a crash cut the last record short: the next one starts on a line of its own instead of joining
+            # that line, which no query can read (the torn bytes stay, skipped like any line that is not JSON)
+            self._fh.write("\n")
+            self._fh.flush()
+            self._size += 1
+
+    def _ends_with_newline(self) -> bool:
+        try:
+            with open(self.path, "rb") as fh:
+                fh.seek(-1, os.SEEK_END)
+                return fh.read(1) == b"\n"
+        except OSError:
+            return True  # unreadable: nothing to repair that can be seen, and the log must still open
 
     @property
     def capacity(self) -> str:
@@ -72,6 +88,9 @@ class FileLogHandler(logging.Handler):
                             try:
                                 return int(json.loads(line)["id"])
                             except (ValueError, KeyError, TypeError):
+                                # a torn record: a page may have shown it before the crash cut it short, so its id is not given out again
+                                if (torn := _TORN_ID.match(line)) is not None:
+                                    return int(torn.group(1))
                                 continue
                         if start == 0:
                             break
@@ -152,7 +171,12 @@ class FileLogHandler(logging.Handler):
         page searches the masked text, which this module cannot produce: it
         is imported before the component is).  It is asked newest first
         without since_id, and oldest first with it, never about more records
-        than it takes to fill the page."""
+        than it takes to fill the page.
+
+        ``text`` searches the raw message.  A caller whose ``keep`` searches
+        the masked text passes no ``text``: which records reach ``keep``, and
+        so how far the page reaches and how long the answer takes, would
+        otherwise depend on whether a guess matched inside a masked value."""
         text = text.lower()
         out: list[dict[str, Any]] = []
         truncated = False
