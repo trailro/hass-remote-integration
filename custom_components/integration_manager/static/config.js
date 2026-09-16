@@ -160,18 +160,24 @@ $('#yamlsave').onclick=async()=>{ const r=await post(`api/yaml/${encodeURICompon
 function flowNote(x){ const running=!!(x&&x.running); $('#start').disabled=!running; $('#flownote').innerHTML=running?`Runs the integration's own config flow in-process (no HA frontend). Entries created here are enabled because <b>${esc(DOM)}</b> is running.`:`The config flow needs the integration's code loaded: <b>start ${esc(DOM||'it')}</b> first. Settings can also be imported from a Home Assistant backup on the manager page (stored disabled until started).`; }
 
 function optionsOf(sel){ return (sel.options||[]).map(o=>typeof o==='object'?{value:o.value,label:o.label??o.value}:{value:o,label:o}); }
-function field(f){
+function ph(text,vals){ return (typeof text==='string'&&vals)?text.replace(/\{(\w+)\}/g,(m,k)=>vals[k]!==undefined&&vals[k]!==null?String(vals[k]):m):text; }
+function hint(text,vals){ const d=document.createElement('div'); d.className='mut'; d.style.fontSize='12px'; d.textContent=ph(text,vals); return d; }
+function partInput(value,min){ const i=document.createElement('input'); i.type='number'; if(min!=null) i.min=min; i.step=1; i.style.width='4.5em'; i.value=value; return i; }
+function field(f,t,p){
+  t=t||{};
   if(f.type==='expandable'){  // a form section: its fields are sent as one object under the section's name
+    const st=(t.sections||{})[f.name]||{};
     const sec=document.createElement('fieldset'); sec.dataset.name=f.name; sec.dataset.kind='section'; sec.style.cssText='border:1px solid #30363d;border-radius:6px;margin:8px 0;padding:6px 10px';
-    const lg=document.createElement('legend'); lg.textContent=f.name; sec.appendChild(lg);
-    (Array.isArray(f.schema)?f.schema:[]).forEach(c=>sec.appendChild(field(c)));
+    const lg=document.createElement('legend'); lg.textContent=st.name||f.name; sec.appendChild(lg);
+    if(st.description) sec.appendChild(hint(st.description,p));
+    (Array.isArray(f.schema)?f.schema:[]).forEach(c=>sec.appendChild(field(c,st,p)));
     const e=document.createElement('div'); e.className='err'; sec._err=e; sec.appendChild(e); return sec;
   }
   const sv=(f.description||{}).suggested_value;
   const name=f.name, req=f.required?' *':'', dflt=(sv!==undefined&&sv!==null)?sv:f.default;
   const sel=f.selector||{}; const kind=Object.keys(sel)[0];
   const wrap=document.createElement('div'); wrap.dataset.name=name;
-  const lab=document.createElement('label'); lab.textContent=name+req; wrap.appendChild(lab);
+  const lab=document.createElement('label'); lab.textContent=((t.data||{})[name]||name)+req; wrap.appendChild(lab);
   let el;
   if(kind==='boolean' || f.type==='boolean'){ el=document.createElement('input'); el.type='checkbox'; el.checked=!!dflt; el.style.width='auto'; wrap.dataset.kind='boolean'; }
   else if(kind==='select' || f.options || f.type==='multi_select'){
@@ -185,17 +191,49 @@ function field(f){
       const dv=Array.isArray(dflt)?dflt.map(String):[String(dflt)];
       opts.forEach(o=>{const op=new Option(o.label,o.value); if(dv.includes(String(o.value))) op.selected=true; el.appendChild(op);}); }
   }else if(kind==='number' || f.type==='integer' || f.type==='float'){
-    el=document.createElement('input'); el.type='number'; wrap.dataset.kind=(f.type==='integer'||(sel.number&&sel.number.step===1))?'integer':'number';
-    const n=sel.number||{}; if(n.min!=null) el.min=n.min; if(n.max!=null) el.max=n.max; el.step=n.step??'any'; if(dflt!=null) el.value=dflt;
+    const n=sel.number||{};
+    const slider=n.mode==='slider'&&n.min!=null&&n.max!=null;  // a range without both ends has no scale to draw
+    el=document.createElement('input'); el.type=slider?'range':'number'; wrap.dataset.kind=(f.type==='integer'||n.step===1)?'integer':'number';
+    if(n.min!=null) el.min=n.min; if(n.max!=null) el.max=n.max; el.step=n.step??'any';
+    if(dflt!=null) el.value=dflt; else if(slider) el.value=n.min;
+    if(n.unit_of_measurement) lab.textContent+=` (${n.unit_of_measurement})`;
+    if(slider){ const out=document.createElement('span'); out.className='mut'; out.style.marginLeft='8px';
+      const show=()=>{out.textContent=el.value+(n.unit_of_measurement?' '+n.unit_of_measurement:'');}; show(); el.oninput=show; wrap._after=out; }
   }else if(kind==='object'){ el=document.createElement('textarea'); wrap.dataset.kind='object'; el.value=dflt!=null?JSON.stringify(dflt,null,2):'{}'; }
-  else if(kind==='text' || f.type==='string' || kind===undefined){
-    const t=sel.text||{}; if(t.multiline){ el=document.createElement('textarea'); } else { el=document.createElement('input'); el.type=t.type==='password'?'password':'text'; }
+  else if(kind==='constant'){
+    // nothing to fill in: the schema fixes the value, and refuses anything else.
+    // It still has to be sent, so collect() reads it off the element, not off an input.
+    const c=sel.constant||{}; wrap.dataset.kind='constant'; wrap._const=c.value;
+    el=document.createElement('div'); el.className='mut'; el.textContent=String(c.label??c.value);
+  }else if(kind==='duration'){
+    // one object out of several inputs, the fields HA's own duration selector shows
+    const d=sel.duration||{}, cur=(dflt&&typeof dflt==='object')?dflt:{};
+    wrap.dataset.kind='duration'; el=document.createElement('div'); el.className='row'; const parts={};
+    for(const [u,on] of [['days',!!d.enable_day],['hours',true],['minutes',true],['seconds',d.enable_second!==false]]){
+      if(!on) continue;
+      const box=document.createElement('label'); box.className='mut'; box.style.cssText='font-size:12px;display:inline-flex;gap:4px;align-items:center';
+      const i=partInput(Number(cur[u])||0,d.allow_negative?null:0); parts[u]=i;
+      box.appendChild(document.createTextNode(u)); box.appendChild(i); el.appendChild(box);
+    }
+    wrap._parts=parts;
+  }else if(kind==='time' || kind==='date' || kind==='datetime'){
+    el=document.createElement('input'); el.type=kind==='datetime'?'datetime-local':kind; wrap.dataset.kind=kind;
+    if(kind!=='date') el.step=1;  // without it the browser drops the seconds HA validates against
+    if(dflt!=null) el.value=kind==='datetime'?String(dflt).replace(' ','T'):dflt;
+  }else if(kind==='color_rgb'){
+    el=document.createElement('input'); el.type='color'; wrap.dataset.kind='color'; el.style.padding='0';
+    const rgb=Array.isArray(dflt)?dflt:[0,0,0]; el.value='#'+rgb.map(v=>Math.max(0,Math.min(255,Number(v)||0)).toString(16).padStart(2,'0')).join('');
+  }else if(kind==='text' || f.type==='string' || kind===undefined){
+    const t2=sel.text||{}; if(t2.multiline){ el=document.createElement('textarea'); } else { el=document.createElement('input'); el.type=t2.type==='password'?'password':'text'; }
     if(dflt!=null) el.value=dflt; wrap.dataset.kind='text';
   }else{ el=document.createElement('textarea'); wrap.dataset.kind='object'; el.value=dflt!=null?JSON.stringify(dflt,null,2):''; lab.textContent+=` (selector "${kind}" unsupported, JSON)`; }
   wrap._el=el; wrap.appendChild(el);  // references, not ids: field names may hold characters a selector cannot
+  if(wrap._after) wrap.appendChild(wrap._after);
+  const desc=(t.data_description||{})[name]; if(desc) wrap.appendChild(hint(desc,p));
   const e=document.createElement('div'); e.className='err'; wrap._err=e; wrap.appendChild(e);
   return wrap;
 }
+
 function collect(root){
   const out={}; root=root||$('#form');
   for(const w of root.querySelectorAll(':scope > [data-name]')){
@@ -209,37 +247,57 @@ function collect(root){
     else if(k==='integer'){ if(el.value==='') continue; v=parseInt(el.value,10); }
     else if(k==='number'){ if(el.value==='') continue; v=parseFloat(el.value); }
     else if(k==='object'){ if(el.value.trim()==='') continue; v=JSON.parse(el.value); }
+    else if(k==='constant'){ if(w._const===undefined) continue; v=w._const; }
+    else if(k==='duration'){ v={}; for(const u in w._parts) v[u]=parseInt(w._parts[u].value,10)||0; }
+    else if(k==='time'){ if(el.value==='') continue; v=el.value.length===5?el.value+':00':el.value; }  // HH:MM from a browser that ignored step
+    else if(k==='date'){ if(el.value==='') continue; v=el.value; }
+    else if(k==='datetime'){ if(el.value==='') continue; v=el.value.replace('T',' '); }
+    else if(k==='color'){ const m=/^#(..)(..)(..)$/.exec(el.value); if(!m) continue; v=[1,2,3].map(g=>parseInt(m[g],16)); }
     else { if(el.value==='') continue; v=el.value; }
     out[n]=v;
   }
   return out;
 }
+// The integration's own translations/en.json, sliced to this step by the API:
+// a flow result names schema keys, step ids and error keys, and only these turn
+// them into the sentences HA's frontend shows.  Missing key -> the raw key.
+function stepTr(r){ const st=(r.translations||{}).step||{}; return st[r.step_id]||{}; }
+function trOf(r,group,key){ const g=(r.translations||{})[group]||{}; return (typeof key==='string'&&g[key])?ph(g[key],r.description_placeholders):null; }
+function stepHead(r,fallback){
+  const t=stepTr(r), p=r.description_placeholders;
+  $('#steptitle').textContent=t.title?ph(t.title,p):fallback;
+  $('#desc').textContent=t.description?ph(t.description,p):(p?JSON.stringify(p,null,1):'');
+  return t;
+}
+function progressTitle(r){ return `In progress: ${r.step_id}`+(r.progress_action?' · '+(trOf(r,'progress',r.progress_action)||r.progress_action):''); }
 function render(r){
   $('#flowid').textContent=r.flow_id?`flow ${r.flow_id.slice(0,8)}… · ${r.handler||''}`:'';
   $('#abort').disabled=!r.flow_id;
   const card=$('#stepcard'); card.hidden=false;
   $('#form').innerHTML=''; $('#baseerr').textContent=''; $('#desc').textContent=''; $('#submit').dataset.external='';
   if(r.type==='form'){
-    $('#steptitle').textContent=`Step: ${r.step_id}`+(r.last_step===true?' (last)':'');
-    if(r.description_placeholders) $('#desc').textContent=JSON.stringify(r.description_placeholders,null,1);
-    (Array.isArray(r.data_schema)?r.data_schema:[]).forEach(f=>$('#form').appendChild(field(f)));
-    const errs=r.errors||{}; for(const [k,v] of Object.entries(errs)){ if(k==='base') $('#baseerr').textContent=v; else {const w=[...$('#form').querySelectorAll('[data-name]')].find(x=>x.dataset.name===k); if(w&&w._err) w._err.textContent=typeof v==='string'?v:JSON.stringify(v);} }
+    const t=stepHead(r,`Step: ${r.step_id}`); if(r.last_step===true) $('#steptitle').textContent+=' (last)';
+    (Array.isArray(r.data_schema)?r.data_schema:[]).forEach(f=>$('#form').appendChild(field(f,t,r.description_placeholders)));
+    const errs=r.errors||{}; for(const [k,v] of Object.entries(errs)){ const msg=typeof v==='string'?(trOf(r,'error',v)||v):JSON.stringify(v);
+      if(k==='base') $('#baseerr').textContent=msg; else {const w=[...$('#form').querySelectorAll('[data-name]')].find(x=>x.dataset.name===k); if(w&&w._err) w._err.textContent=msg;} }
     $('#submit').hidden=false; $('#submit').textContent='Submit';
   }else if(r.type==='menu'){
-    $('#steptitle').textContent=`Menu: ${r.step_id}`; const w=document.createElement('div'); w.className='radio'; w.dataset.name='next_step_id'; w.dataset.kind='radio';
+    const t=stepHead(r,`Menu: ${r.step_id}`); const mlab=t.menu_options||{};
+    const w=document.createElement('div'); w.className='radio'; w.dataset.name='next_step_id'; w.dataset.kind='radio';
     const mo=r.menu_options||[]; const opts=Array.isArray(mo)?mo.map(o=>[String(o),String(o)]):Object.entries(mo).map(([k,v])=>[k,String(v??k)]);  // HA allows a list of step ids or {step_id: label}
-    opts.forEach(([v,lab],i)=>{const l=document.createElement('label');l.innerHTML=`<input type="radio" name="r_next_step_id" value="${esc(v)}" ${i===0?'checked':''}> ${esc(lab)}`;w.appendChild(l);});
+    opts.forEach(([v,lab],i)=>{const l=document.createElement('label');l.innerHTML=`<input type="radio" name="r_next_step_id" value="${esc(v)}" ${i===0?'checked':''}> ${esc(mlab[v]||lab)}`;w.appendChild(l);});
     $('#form').appendChild(w); $('#submit').hidden=false; $('#submit').textContent='Continue';
   }else if(r.type==='create_entry'){
     $('#steptitle').innerHTML=`<span class="ok">Entry created</span>: ${esc(r.title||'')}`; $('#desc').textContent=(r.manager_note?r.manager_note+'\n':'')+`entry_id: ${r.result?.entry_id||r.entry_id||'?'}`; $('#submit').hidden=true; flow=null; $('#abort').disabled=true; entries(); load();
   }else if(r.type==='abort'){
-    $('#steptitle').innerHTML=`<span class="warn">Aborted</span>: ${esc(r.reason||'')}`; $('#desc').textContent=JSON.stringify(r.description_placeholders||{}); $('#submit').hidden=true; flow=null; $('#abort').disabled=true;
+    const msg=trOf(r,'abort',r.reason);
+    $('#steptitle').innerHTML=`<span class="warn">Aborted</span>: ${esc(msg||r.reason||'')}`; $('#desc').textContent=msg?`reason: ${r.reason}`:JSON.stringify(r.description_placeholders||{}); $('#submit').hidden=true; flow=null; $('#abort').disabled=true;
   }else if(r.type==='progress'){
     // the integration works in the background (discovery, pairing, a login): HA
     // advances the flow when its task finishes; ask for the current step until
     // it is no longer a progress step
-    $('#steptitle').textContent=`In progress: ${r.step_id}${r.progress_action?' · '+r.progress_action:''}`;
-    $('#desc').textContent=(r.description_placeholders?JSON.stringify(r.description_placeholders,null,1)+'\n':'')+'waiting for the integration… (checked every 2 s; Abort stops it)';
+    $('#steptitle').textContent=progressTitle(r);
+    $('#desc').textContent=(trOf(r,'progress',r.progress_action)?'':(r.description_placeholders?JSON.stringify(r.description_placeholders,null,1)+'\n':''))+'waiting for the integration… (checked every 2 s; Abort stops it)';
     $('#submit').hidden=true; pollProgress();
   }else if(r.type==='progress_done'){
     // older progress API (async_show_progress without a task): HA hands back
@@ -260,7 +318,7 @@ function pollProgress(delay=2000){
   PROGRESS_T=setTimeout(async()=>{ if(!flow) return;
     try{ const url=flow.kind==='config'?`api/flow/${flow.id}`:`api/options/${flow.id}`; const r=await post(url,{user_input:null});
       if(r.message){ $('#baseerr').textContent=r.message; return; }
-      if(r.type==='progress'){ $('#steptitle').textContent=`In progress: ${r.step_id}${r.progress_action?' · '+r.progress_action:''}`; pollProgress(); } else render(r);
+      if(r.type==='progress'){ $('#steptitle').textContent=progressTitle(r); pollProgress(); } else render(r);
     }catch(e){ $('#baseerr').textContent='progress check failed: '+e.message; }
   },delay);
 }

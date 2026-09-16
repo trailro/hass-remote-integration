@@ -210,7 +210,12 @@ Choose whichever fits the integration, on the **Integration** page:
 
 - **Config flow**: runs the integration's own setup dialog, like HA's
   frontend would (the integration must be started first, because the flow is
-  its code).
+  its code). Field labels, menu entries, errors and abort reasons come from
+  the integration's `translations/en.json`, the same file HA's frontend
+  reads; an integration that ships none shows the raw schema keys. Selectors
+  render as the control they describe (sliders with their unit, durations,
+  dates and times, colours, read-only constants); one the page does not know
+  falls back to a JSON textarea saying so.
 - **YAML config**: for integrations configured in `configuration.yaml`, paste
   what would go under `<domain>:`. It is validated on save and applied at boot.
   When a later release imports that YAML into a config entry, a notification

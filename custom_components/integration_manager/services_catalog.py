@@ -98,6 +98,19 @@ def _response(supports: SupportsResponse, desc: dict[str, Any]) -> str | None:
     return None
 
 
+async def integration_translations(hass: HomeAssistant, domain: str) -> dict[str, Any]:
+    """``translations/en.json`` of an integration, {} when it ships none.
+
+    Shares the mtime cache above with the services catalog: the flow renderer
+    asks for the same file on every step, and both pages read it often enough
+    that parsing it each time showed up in the profile."""
+    try:
+        integration = await loader.async_get_integration(hass, domain)
+    except (loader.IntegrationNotFound, HomeAssistantError, OSError, ValueError):
+        return {}
+    return await hass.async_add_executor_job(_optional, str(integration.file_path / "translations" / "en.json"), _load_json)
+
+
 async def service_rows(hass: HomeAssistant) -> list[dict[str, Any]]:
     registered = hass.services.async_services()
     out: list[dict[str, Any]] = []
