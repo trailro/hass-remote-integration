@@ -35,6 +35,8 @@ import shutil
 import site
 import stat
 import sys
+import tempfile
+import threading
 import time
 import zipfile
 from dataclasses import asdict, dataclass, field
@@ -76,6 +78,17 @@ CORRUPT_STATE_KEEP = 3  # state.json.corrupt-<stamp> copies kept; the older ones
 
 def tag_ok(tag: Any) -> bool:
     return isinstance(tag, str) and bool(_TAG_RE.match(tag)) and ".." not in tag
+
+
+_SAVE_LOCKS: dict[str, threading.Lock] = {}
+_SAVE_LOCKS_GUARD = threading.Lock()
+
+
+def save_lock(path: str) -> threading.Lock:
+    """One lock per file, for writes that run in the executor (two requests
+    are two executor jobs, on two threads)."""
+    with _SAVE_LOCKS_GUARD:
+        return _SAVE_LOCKS.setdefault(os.path.realpath(path), threading.Lock())
 
 
 def manager_domain_error(domain: Any) -> str | None:
@@ -1156,29 +1169,36 @@ class Installer:
     def yaml_write(self, domain: str, text: str) -> dict[str, Any]:
         """Validate with HA's loader (tags like !secret resolve against
         secrets.yaml) and store; empty text removes the file."""
-        path = self.yaml_path(domain)
-        if not text.strip():
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-            return {"keys": 0, "removed": True}
         from homeassistant.util.yaml import load_yaml
         from homeassistant.util.yaml.loader import Secrets
 
-        # validate from a file in the final directory: !secret walks up from
-        # the file's directory to <config>/secrets.yaml, exactly as at boot
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path + ".tmp", "w", encoding="utf-8") as fh:
-            fh.write(text if text.endswith("\n") else text + "\n")
-        try:
-            data = load_yaml(path + ".tmp", Secrets(self.hass.config.path()))
-            if not isinstance(data, dict):
-                raise ValueError(f"the content must be a mapping: what goes under '{domain}:' in configuration.yaml")
-        except Exception:
-            os.remove(path + ".tmp")
-            raise
-        os.replace(path + ".tmp", path)
+        path = self.yaml_path(domain)
+        # two saves are two executor jobs: one shared "<file>.tmp" let the second write into the file the first
+        # had just renamed into place, then fail on the missing temporary file
+        with save_lock(path):
+            if not text.strip():
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                return {"keys": 0, "removed": True}
+            # validate from a file in the final directory: !secret walks up from
+            # the file's directory to <config>/secrets.yaml, exactly as at boot
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=f".{domain}.yaml.", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(text if text.endswith("\n") else text + "\n")
+                data = load_yaml(tmp, Secrets(self.hass.config.path()))
+                if not isinstance(data, dict):
+                    raise ValueError(f"the content must be a mapping: what goes under '{domain}:' in configuration.yaml")
+                os.replace(tmp, path)
+            except BaseException:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise
         return {"keys": len(data), "removed": False}
 
     # ----- smoke test after a start ---------------------------------------
