@@ -1,4 +1,4 @@
-"""Test campaign: the copy taken before a restore is not protected from pruning."""
+"""Test campaign: the pre-restore copy's protection and the pre-2026.9 device registry shape."""
 
 import json
 import os
@@ -6,7 +6,9 @@ import tempfile
 import time
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
+from custom_components.integration_manager import devices_page, ha_import
 from custom_components.integration_manager.installer import Installer
 
 
@@ -34,6 +36,72 @@ class ProtectedPreRestoreTest(unittest.TestCase):
     def test_a_stale_copy_gives_its_keep_slot_back(self):
         inst = self._installer({"ok": True, "at": self._ago(30 * 86400), "backup": "src.zip", "pre_restore": "pre.zip"})
         self.assertNotIn("pre.zip", inst.protected_backups())
+
+
+def _device(device_id):
+    return SimpleNamespace(id=device_id, name=f"Device {device_id}", name_by_user=None, manufacturer="ACME", model="M",
+                           model_id=None, serial_number=None, sw_version=None, hw_version=None,
+                           identifiers={("hub", device_id)}, connections=set(), via_device_id=None, area_id=None,
+                           config_entries={"e1"}, disabled_by=None)
+
+
+class _OldRegistry:
+    """``DeviceRegistry.devices`` before HA 2026.9 is the id -> entry mapping
+    itself, so iterating it yields device ids; there are no child devices."""
+
+    def __init__(self, devices):
+        self._by_id = {d.id: d for d in devices}
+        self.devices = self._by_id
+
+    def async_get(self, device_id):
+        return self._by_id.get(device_id)
+
+
+class _NewRegistry(_OldRegistry):
+    """HA 2026.9+: a collection of entries, child devices next to them."""
+
+    def __init__(self, devices, children=()):
+        super().__init__(devices)
+        self._by_id.update({c.id: c for c in children})
+        self.devices = list(devices)
+        self.child_devices = list(children)
+
+
+class RegistryShapeTest(unittest.TestCase):
+    def _rows(self, registry):
+        hass = SimpleNamespace(states=SimpleNamespace(get=lambda _eid: None))
+        publisher = SimpleNamespace(prefix="hass", _discovery_topic=lambda did: f"hass/device/{did}/config")
+        with mock.patch.object(devices_page.dr, "async_get", return_value=registry), \
+                mock.patch.object(devices_page.er, "async_get", return_value=SimpleNamespace(entities={})), \
+                mock.patch.object(devices_page.ar, "async_get", return_value=SimpleNamespace()), \
+                mock.patch.object(devices_page.disc, "device_block", lambda *a: ("d", {})):
+            return devices_page.device_rows(hass, publisher)
+
+    def test_the_device_page_reads_the_old_registry(self):
+        self.assertEqual([r["id"] for r in self._rows(_OldRegistry([_device("a"), _device("b")]))], ["a", "b"])
+
+    def test_the_device_page_still_reads_the_new_registry(self):
+        rows = self._rows(_NewRegistry([_device("a")], [_device("c")]))
+        self.assertEqual([r["id"] for r in rows], ["a", "c"])
+
+    def _aligned(self, registry):
+        aligner = ha_import.RegistryAligner.__new__(ha_import.RegistryAligner)
+        aligner.hass = SimpleNamespace(states=SimpleNamespace(get=lambda _eid: None))
+        aligner.maps = {}
+        aligner.prune_satisfied = lambda: 0
+        aligner._save = lambda: None
+        seen = []
+        aligner.align_device = lambda device_id: bool(seen.append(device_id))
+        with mock.patch.object(ha_import.dr, "async_get", return_value=registry), \
+                mock.patch.object(ha_import.er, "async_get", return_value=SimpleNamespace(entities={})):
+            aligner.align_existing()
+        return seen
+
+    def test_import_alignment_walks_the_old_registry(self):
+        self.assertEqual(self._aligned(_OldRegistry([_device("a"), _device("b")])), ["a", "b"])
+
+    def test_import_alignment_still_walks_the_new_registry(self):
+        self.assertEqual(self._aligned(_NewRegistry([_device("a")], [_device("c")])), ["a", "c"])
 
 
 if __name__ == "__main__":

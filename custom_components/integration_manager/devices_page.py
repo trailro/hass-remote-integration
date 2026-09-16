@@ -17,6 +17,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
 from . import discovery as disc
+from .ha_import import registry_devices
 from .mqtt_publisher import MqttPublisher, _json_default
 from .http_util import ManagerView, with_body
 
@@ -32,8 +33,7 @@ def device_rows(hass: HomeAssistant, publisher: MqttPublisher) -> list[dict[str,
         if entry.device_id:
             by_device.setdefault(entry.device_id, []).append(entry)
     rows: list[dict[str, Any]] = []
-    children = list(getattr(dev_reg, "child_devices", []) or [])  # HA 2026.9+: zones etc. under a parent device
-    for dev in list(dev_reg.devices) + children:  # iterating yields entries; .values()/[] are deprecated lookups
+    for dev in registry_devices(dev_reg):  # entries, whichever shape the registry has; child devices last
         child = disc.is_child_device(dev)
         entries = sorted(by_device.get(dev.id, []), key=lambda e: e.entity_id)
         integrations = sorted({e.platform for e in entries}) or ["—"]
