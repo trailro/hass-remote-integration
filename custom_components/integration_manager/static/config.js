@@ -162,6 +162,7 @@ function flowNote(x){ const running=!!(x&&x.running); $('#start').disabled=!runn
 function optionsOf(sel){ return (sel.options||[]).map(o=>typeof o==='object'?{value:o.value,label:o.label??o.value}:{value:o,label:o}); }
 function ph(text,vals){ return (typeof text==='string'&&vals)?text.replace(/\{(\w+)\}/g,(m,k)=>vals[k]!==undefined&&vals[k]!==null?String(vals[k]):m):text; }
 function hint(text,vals){ const d=document.createElement('div'); d.className='mut'; d.style.fontSize='12px'; d.textContent=ph(text,vals); return d; }
+const DURATION_UNITS=['days','hours','minutes','seconds','milliseconds'];  // HA's DurationSelector
 function partInput(value,min){ const i=document.createElement('input'); i.type='number'; if(min!=null) i.min=min; i.step=1; i.style.width='4.5em'; i.value=value; return i; }
 function field(f,t,p){
   t=t||{};
@@ -183,12 +184,16 @@ function field(f,t,p){
   else if(kind==='select' || f.options || f.type==='multi_select'){
     const raw=f.options; const opts=kind==='select'?optionsOf(sel.select):Array.isArray(raw)?raw.map(o=>Array.isArray(o)?{value:o[0],label:o[1]}:(o&&typeof o==='object')?{value:o.value,label:o.label??o.value}:{value:o,label:o}):Object.entries(raw||{}).map(([v,l])=>({value:v,label:l}));
     const mode=kind==='select'&&sel.select&&sel.select.mode;
+    // multiple is a property of the value, not of the presentation: a list-mode select that takes several
+    // values is a set of checkboxes, and sends a list, exactly like the dropdown it is drawn differently from
+    const multi=(kind==='select'&&sel.select&&sel.select.multiple)||f.type==='multi_select';
+    const dv=Array.isArray(dflt)?dflt.map(String):[String(dflt)];
     const vmap={}; opts.forEach(o=>{vmap[String(o.value)]=o.value;}); wrap._values=vmap;  // the HTML value is a string; send what the schema offered
-    if(mode==='list'){ wrap.dataset.kind='radio'; el=document.createElement('div'); el.className='radio';
-      opts.forEach(o=>{const l=document.createElement('label'); l.innerHTML=`<input type="radio" name="r_${esc(name)}" value="${esc(o.value)}" ${String(dflt)===String(o.value)?'checked':''}> ${esc(o.label)}`; el.appendChild(l);});
-    }else{ el=document.createElement('select'); const multi=(kind==='select'&&sel.select&&sel.select.multiple)||f.type==='multi_select'; wrap.dataset.kind=multi?'multiselect':'select';
+    if(mode==='list'){ wrap.dataset.kind=multi?'checklist':'radio'; el=document.createElement('div'); el.className='radio';
+      opts.forEach(o=>{const l=document.createElement('label'); const on=multi?dv.includes(String(o.value)):String(dflt)===String(o.value);
+        l.innerHTML=`<input type="${multi?'checkbox':'radio'}" name="r_${esc(name)}" value="${esc(o.value)}" ${on?'checked':''}> ${esc(o.label)}`; el.appendChild(l);});
+    }else{ el=document.createElement('select'); wrap.dataset.kind=multi?'multiselect':'select';
       if(multi){ el.multiple=true; el.size=Math.min(opts.length,8); } else if(!f.required) el.appendChild(new Option('—',''));
-      const dv=Array.isArray(dflt)?dflt.map(String):[String(dflt)];
       opts.forEach(o=>{const op=new Option(o.label,o.value); if(dv.includes(String(o.value))) op.selected=true; el.appendChild(op);}); }
   }else if(kind==='number' || f.type==='integer' || f.type==='float'){
     const n=sel.number||{};
@@ -209,13 +214,16 @@ function field(f,t,p){
     // one object out of several inputs, the fields HA's own duration selector shows
     const d=sel.duration||{}, cur=(dflt&&typeof dflt==='object')?dflt:{};
     wrap.dataset.kind='duration'; el=document.createElement('div'); el.className='row'; const parts={};
-    for(const [u,on] of [['days',!!d.enable_day],['hours',true],['minutes',true],['seconds',d.enable_second!==false]]){
+    for(const [u,on] of [['days',!!d.enable_day],['hours',true],['minutes',true],['seconds',d.enable_second!==false],['milliseconds',!!d.enable_millisecond]]){
       if(!on) continue;
       const box=document.createElement('label'); box.className='mut'; box.style.cssText='font-size:12px;display:inline-flex;gap:4px;align-items:center';
       const i=partInput(Number(cur[u])||0,d.allow_negative?null:0); parts[u]=i;
       box.appendChild(document.createTextNode(u)); box.appendChild(i); el.appendChild(box);
     }
     wrap._parts=parts;
+    // a unit the schema does not let this form show still belongs to the value: submitting an untouched form
+    // must not turn {milliseconds: 500} into zero
+    wrap._kept={}; for(const u of DURATION_UNITS) if(!(u in parts)&&cur[u]!=null&&Number.isFinite(Number(cur[u]))) wrap._kept[u]=Number(cur[u]);
   }else if(kind==='time' || kind==='date' || kind==='datetime'){
     el=document.createElement('input'); el.type=kind==='datetime'?'datetime-local':kind; wrap.dataset.kind=kind;
     if(kind!=='date') el.step=1;  // without it the browser drops the seconds HA validates against
@@ -257,13 +265,14 @@ function collect(root){
     const orig=x=>(w._values&&Object.prototype.hasOwnProperty.call(w._values,x))?w._values[x]:x;
     if(k==='boolean') v=el.checked;
     else if(k==='radio'){const c=w.querySelector('input[type=radio]:checked'); if(!c) continue; v=orig(c.value);}
+    else if(k==='checklist'){ v=[...w.querySelectorAll('input[type=checkbox]:checked')].map(c=>orig(c.value)); }
     else if(k==='select'){ v=el.value; if(v==='') continue; v=orig(v); }
     else if(k==='multiselect'){ v=[...el.selectedOptions].map(o=>orig(o.value)); }
     else if(k==='integer'){ if(el.value==='') continue; v=num(el.value,n,true); }
     else if(k==='number'){ if(el.value==='') continue; v=num(el.value,n,false); }
     else if(k==='object'){ if(el.value.trim()==='') continue; try{ v=JSON.parse(el.value); }catch(err){ throw new FieldError(n,'invalid JSON: '+err.message); } }
     else if(k==='constant'){ if(w._const===undefined) continue; v=w._const; }
-    else if(k==='duration'){ v={}; for(const u in w._parts) v[u]=w._parts[u].value===''?0:num(w._parts[u].value,n,true); }
+    else if(k==='duration'){ v={...w._kept}; for(const u in w._parts) v[u]=w._parts[u].value===''?0:num(w._parts[u].value,n,true); }
     else if(k==='time'){ if(el.value==='') continue; v=el.value.length===5?el.value+':00':el.value; }  // HH:MM from a browser that ignored step
     else if(k==='date'){ if(el.value==='') continue; v=el.value; }
     else if(k==='datetime'){ if(el.value==='') continue; v=el.value.replace('T',' '); }
@@ -308,10 +317,18 @@ function render(r){
     opts.forEach(([v,lab],i)=>{const l=document.createElement('label');l.innerHTML=`<input type="radio" name="r_next_step_id" value="${esc(v)}" ${i===0?'checked':''}> ${esc(mlab[v]||lab)}`;w.appendChild(l);});
     $('#form').appendChild(w); $('#submit').hidden=false; $('#submit').textContent='Continue';
   }else if(r.type==='create_entry'){
-    $('#steptitle').innerHTML=`<span class="ok">Entry created</span>: ${esc(r.title||'')}`; $('#desc').textContent=(r.manager_note?r.manager_note+'\n':'')+`entry_id: ${r.result?.entry_id||r.entry_id||'?'}`; $('#submit').hidden=true; flow=null; $('#abort').disabled=true; entries(); load();
+    // an options flow ends with create_entry too, but it creates no entry: it saved the entry's options
+    const opt=flow&&flow.kind==='options', id=r.result?.entry_id||r.entry_id||'';
+    $('#steptitle').innerHTML=opt?`<span class="ok">Options saved</span>${r.title?': '+esc(r.title):''}`:`<span class="ok">Entry created</span>: ${esc(r.title||'')}`;
+    $('#desc').textContent=(r.manager_note?r.manager_note+'\n':'')+(opt?'':`entry_id: ${id||'?'}`); $('#submit').hidden=true; flow=null; done(); entries(); load();
   }else if(r.type==='abort'){
     const msg=trOf(r,'abort',r.reason);
-    $('#steptitle').innerHTML=`<span class="warn">Aborted</span>: ${esc(msg||r.reason||'')}`; $('#desc').textContent=msg?`reason: ${r.reason}`:JSON.stringify(r.description_placeholders||{}); $('#submit').hidden=true; flow=null; $('#abort').disabled=true;
+    // reauth_successful / reconfigure_successful are how a flow says it finished its job; only the flow
+    // machinery calls that an abort, and showing it as one reads as a failure
+    const good=/_successful$/.test(String(r.reason||''));
+    $('#steptitle').innerHTML=good?`<span class="ok">Done</span>: ${esc(msg||r.reason||'')}`:`<span class="warn">Aborted</span>: ${esc(msg||r.reason||'')}`;
+    $('#desc').textContent=msg?`reason: ${r.reason}`:JSON.stringify(r.description_placeholders||{}); $('#submit').hidden=true; flow=null; done();
+    if(good){ entries(); load(); }
   }else if(r.type==='progress'){
     // the integration works in the background (discovery, pairing, a login): HA
     // advances the flow when its task finishes; ask for the current step until
@@ -332,6 +349,8 @@ function render(r){
     $('#steptitle').textContent='External step done · continuing…'; $('#submit').hidden=true; pollProgress(0);
   }else{ $('#steptitle').textContent=`Result: ${r.type}`; $('#desc').textContent=JSON.stringify(r,null,1); $('#submit').hidden=true; }
 }
+// a finished flow has no id to act on any more: the chip kept naming it, so the page read as if it were still open
+function done(){ $('#abort').disabled=true; $('#flowid').textContent='finished'; }
 let PROGRESS_T=null;
 function pollProgress(delay=2000){
   clearTimeout(PROGRESS_T);
@@ -360,6 +379,10 @@ async function entries(){
     if(a==='reconfigure'){ const r=await post('api/flow/start',{domain:DOM,source:'reconfigure',entry_id:id}); if(r.message||!r.flow_id){log('error: '+(r.message||r.reason||'no flow'));return;} flow={id:r.flow_id,kind:'config'}; render(r); } });
   let prog=[]; try{ prog=await (await fetch('api/flow/progress')).json(); }catch(e){}
   const pb=$('#flowsprogress'); if(!pb) return; pb.innerHTML='';
-  for(const f of (Array.isArray(prog)?prog:[]).filter(f=>f.handler===DOM&&f.source!=='user')){ const b=document.createElement('button'); b.textContent=`Continue ${f.source||'flow'}${f.step_id?' · '+f.step_id:''}`; b.onclick=async()=>{ const r=await post(`api/flow/${f.flow_id}`,{user_input:null}); if(r.message){log('error: '+r.message);return;} flow={id:f.flow_id,kind:'config'}; render(r); }; pb.appendChild(b); pb.appendChild(document.createTextNode(' ')); }
+  // two reauth flows are two buttons: without the entry they belong to they are the same button twice
+  const titles={}; for(const e of r) titles[e.entry_id]=e.title;
+  for(const f of (Array.isArray(prog)?prog:[]).filter(f=>f.handler===DOM&&f.source!=='user')){ const b=document.createElement('button');
+    const who=f.entry_id?(titles[f.entry_id]||f.entry_id.slice(0,8)+'…'):'';
+    b.textContent=`Continue ${f.source||'flow'}${who?' · '+who:''}${f.step_id?' · '+f.step_id:''}`; b.onclick=async()=>{ const r=await post(`api/flow/${f.flow_id}`,{user_input:null}); if(r.message){log('error: '+r.message);return;} flow={id:f.flow_id,kind:'config'}; render(r); }; pb.appendChild(b); pb.appendChild(document.createTextNode(' ')); }
 }
 load().catch(e=>log('error: '+e.message));

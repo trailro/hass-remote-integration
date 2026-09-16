@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -65,7 +66,10 @@ class InterruptedFullRollbackTest(unittest.TestCase):
         return snapshot
 
     def _boot_after(self, state, last_restore):
-        """The boot reconcile on that state, with what the entrypoint recorded about the restore."""
+        """The boot reconcile on that state, with what the entrypoint recorded about the restore.  The
+        outcome is stamped now: it belongs to the boot after the intent, not to some earlier restore of the
+        same archive (which the intent's own stamp now tells apart)."""
+        last_restore = {**last_restore, "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
         self._write_state(state)
         jsonio.write_json(os.path.join(self.cfg, "integration_manager", "ha.json"), {"last_restore": last_restore})
         inst = Installer(_hass(self.cfg))
@@ -87,14 +91,14 @@ class InterruptedFullRollbackTest(unittest.TestCase):
 
     def test_the_boot_after_the_kill_keeps_the_restored_version(self):
         killed = self._state_when_the_restore_was_scheduled()
-        inst, deployed = self._boot_after(killed, {"ok": True, "backup": BACKUP, "at": "2026-09-16T10:00:00"})
+        inst, deployed = self._boot_after(killed, {"ok": True, "backup": BACKUP})
         self.assertEqual(deployed, ["v1"], "the rejected version was deployed over the restored configuration")
         self.assertEqual(inst.running_tag, "v1")
         self.assertIsNone(inst.state.installed["hub"].get("pre_update_backup"))
 
     def test_a_restore_that_did_not_happen_leaves_the_running_version_alone(self):
         killed = self._state_when_the_restore_was_scheduled()
-        inst, deployed = self._boot_after(killed, {"ok": False, "backup": BACKUP, "at": "2026-09-16T10:00:00"})
+        inst, deployed = self._boot_after(killed, {"ok": False, "backup": BACKUP})
         self.assertEqual(deployed, ["v2"], "nothing was restored: the version that runs is still the new one")
         self.assertEqual(inst.running_tag, "v2")
 

@@ -499,6 +499,23 @@ def _install_excepthooks() -> None:
     threading.excepthook = thread_hook
 
 
+def _registry_integrations(path: str) -> dict:
+    """The ``integrations`` map of a registry file, {} for anything else.
+    The user registry is documented as hand-editable, so every shape has to
+    come up: a list, a string, a number under "integrations".  The manager
+    has its own copy of this (installer.py): this runs before Home Assistant
+    is imported, and the component is not importable here."""
+    data = read_json(path, {})
+    if data is None or data == {}:
+        return {}
+    integrations = data.get("integrations") if isinstance(data, dict) else None
+    if isinstance(integrations, dict):
+        return integrations
+    _LOGGER.error("%s is ignored: it must be {\"integrations\": {\"<domain>\": {...}}}, not %s",
+                  path, type(integrations if isinstance(data, dict) else data).__name__)
+    return {}
+
+
 def _quiet_loggers() -> list[str]:
     """Loggers the registry marks as chatty for the running integration: the
     image's registry.json, overridden by the user registry on the volume."""
@@ -507,7 +524,7 @@ def _quiet_loggers() -> list[str]:
         return []
     spec: dict = {}
     for path in ("/app/registry.json", os.path.join(CONFIG_DIR, "integration_manager", "registry.json")):
-        own = ((read_json(path, {}) or {}).get("integrations") or {}).get(domain)
+        own = _registry_integrations(path).get(domain)
         if isinstance(own, dict):
             spec.update(own)
     raw = spec.get("quiet_loggers")
@@ -735,6 +752,19 @@ def main() -> int:
     logbuffer.activate_queue()  # stderr and process.log written by one thread, not by whoever logs; only this thread logs yet
     _install_excepthooks()
     _install_import_tracer()
+    rc = 1
+    # From here on nothing may leave the process without a logged reason: the
+    # log queue is only flushed by _exit, so an exception escaping main() used
+    # to kill the container with an empty log while the entrypoint retried the
+    # boot for ever (a wrong type in the hand-edited registry.json did it).
+    try:
+        rc = _boot_with_logging()
+    except BaseException:  # noqa: BLE001
+        _LOGGER.critical("hass-remote-integration crashed", exc_info=True)
+    _exit(rc)
+
+
+def _boot_with_logging() -> int:
     # chatty loggers (the registry's quiet_loggers) would flood the
     # container log at INFO; it gets only their problems.
     for name in _quiet_loggers():
@@ -758,12 +788,7 @@ def main() -> int:
         from homeassistant import block_async_io
 
         block_async_io.enable()
-    rc = 1
-    try:
-        rc = _run_loop(_boot)
-    except BaseException:  # noqa: BLE001
-        _LOGGER.critical("hass-remote-integration crashed", exc_info=True)
-    _exit(rc)
+    return _run_loop(_boot)
 
 
 def _exit(rc: int) -> None:
