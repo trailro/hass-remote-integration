@@ -380,7 +380,11 @@ rollback* on the Integration page brings back the previous version together
 with the config as it was before the update; its restart is
 smoke-tested too, without a further automatic rollback. One full rollback runs at
 a time: a second one (a double click, or a manual one while the automatic one
-runs) is refused. After an automatic
+runs) is refused. A full rollback is also refused while a Home Assistant version change, an
+install or a restore is being prepared, and while a switch with a configuration
+restore or a clean start is scheduled; the smoke test's automatic rollback waits
+for the first two instead. Once a full rollback has scheduled its restore, a
+restore by hand is refused until the restart finishes it. After an automatic
 rollback there is no Full rollback target: the version the smoke test rejected
 is never offered again that way.
 
