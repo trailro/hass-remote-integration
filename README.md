@@ -361,8 +361,11 @@ to confirm, and says why in its result. Through the API, `POST /api/run/start`
 answers `needs_force` with the report, and `force: true` starts anyway.
 Starting the version that is already deployed, a dev build, an integration
 without a GitHub repository, a rollback and a restore skip the preflight. A
-preflight that cannot run (the stored copy is gone, for example) does not stop the
-start; the API result then says why in `preflight_note`. The manager backs up,
+preflight that cannot run (GitHub is unreachable, for example) does not stop the
+start; the API result then says why in `preflight_note`, and a start that passes
+with warnings carries them in `preflight_warnings`. A stored copy with no
+`manifest.json` for the domain is the exception: that is not a transient failure
+but a copy there is no point deploying, and it blocks like any other. The manager backs up,
 switches, restarts if needed, smoke-tests, and rolls back on its own if the new
 version does not set up; a degraded version is kept and reported. *Full
 rollback* on the Integration page brings back the previous version together
@@ -461,12 +464,16 @@ three have to support that Python:
   the image's Python (a syntax error is a blocker naming the file and line, and
   so is a file over 5 MB or one too deeply nested for the parser),
   except in the top-level folders `tests`, `test`, `scripts`, `tools`, `docs`
-  and `examples`, which Home Assistant does not load. It also warns about
-  imports of standard modules that Python has removed (`imp`, `distutils`,
-  `asyncore`, `telnetlib` and the rest of PEP 594), unless the import sits in a
-  `try` whose `except` catches `ImportError` or something broader
+  and `examples`, which Home Assistant does not load. An import of a standard
+  module that Python has removed (`imp`, `distutils`, `asyncore`, `telnetlib`
+  and the rest of PEP 594) is a blocker when nothing the version brings can
+  provide it: neither the manifest's requirements nor the packages pip resolves
+  for them is named after the module or is one of the shims that put it back
+  (`standard-imghdr`, `legacy-cgi`). When one of them is, it stays a warning,
+  because a shim is a real pattern. Either way the import is ignored when it
+  sits in a `try` whose `except` catches `ImportError` or something broader
   (`ModuleNotFoundError`, `Exception`, `BaseException`, a bare `except`), or
-  something installed provides the module.
+  when the module turns out to be installed here after all.
 
 What the preflight cannot see is caught by the smoke test after the switch:
 a version that does not set up is rolled back automatically.
@@ -1100,8 +1107,9 @@ exist yet (a library imported later) needs a dotted Python name, and at most
 `GET /api/summary` includes `manager_update`: the running release and the
 newer ones the banner shows. `POST /api/run/start` takes `force`; without it, a
 start with preflight blockers answers `needs_force` with the report in
-`preflight`, and a start whose preflight could not run says why in
-`preflight_note`. `POST /api/backups/<name>/restore` takes `force` too: a
+`preflight`, a start whose preflight could not run says why in
+`preflight_note`, and one that passes with warnings answers with
+`preflight_warnings`. `POST /api/backups/<name>/restore` takes `force` too: a
 backup that does not record its Home Assistant version answers `needs_force`
 when `.storage` is restored.
 
