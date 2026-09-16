@@ -298,6 +298,15 @@ class ManagerDevice:
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("hass-remote-integration release check failed: %s", err)
         await self.updater.available(force=force)  # records its own error
+        self._note_ha_latest()
+        self._remember_latest()
+
+    def _note_ha_latest(self) -> None:
+        """What the last PyPI check found, no request here (a check from the UI fills the same cache); a failed check
+        (latest_stable None) keeps what was known.  Memory only: saved by the version check and the resource sample."""
+        ha_info = self.updater._cache[1] if self.updater._cache else {}  # noqa: SLF001
+        if ha_info.get("latest_stable"):
+            self._ha_latest = ha_info["latest_stable"]
 
     def newer_manager_releases(self) -> list[dict[str, str]]:
         """Releases newer than this container's manager, from the last check (no request here)."""
@@ -309,6 +318,8 @@ class ManagerDevice:
         lag_avg, lag_max = self._lag.take()
         data = await self.hass.async_add_executor_job(self._sample_blocking)
         self.resources = {**data, "loop_lag_ms": lag_avg, "loop_lag_max_ms": lag_max}
+        self._note_ha_latest()
+        self._remember_latest()  # every minute: a version the UI's check found reaches the file without a getter writing it
         await self._record(time.time())
 
     # ----- history -------------------------------------------------------------
@@ -432,11 +443,7 @@ class ManagerDevice:
         spec = inst.spec(domain) if domain else {}
         repo = spec.get("repo")
         integ_latest = self.integration_latest()
-        ha_info = self.updater._cache[1] if self.updater._cache else {}  # noqa: SLF001 - what the last PyPI check found, no request here
-        if ha_info.get("latest_stable"):
-            if ha_info["latest_stable"] != self._ha_latest:
-                self._ha_latest = ha_info["latest_stable"]  # a failed check (latest_stable None) keeps what was known
-                self._remember_latest()
+        self._note_ha_latest()
         ha_latest = self._ha_latest
         return {
             "manager_version": self.version,
