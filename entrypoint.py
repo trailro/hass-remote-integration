@@ -499,7 +499,19 @@ def prune(keep: set[str]) -> None:
 
 def clean_import_leftovers() -> None:
     """An uploaded HA backup / its extracted .storage (another instance's
-    secrets) must not survive a restart that interrupted an import."""
+    secrets) must not survive a restart that interrupted an import.  Nor an
+    original an import set aside as .storage/<store>.pre-import (the import
+    runs inside Home Assistant, so none is in progress at boot): put back, as
+    the import undoes a failure."""
+    storage = os.path.join(CONFIG_DIR, ".storage")
+    for aside in glob.glob(os.path.join(glob.escape(storage), "*.pre-import")):
+        if os.path.islink(aside) or not os.path.isfile(aside):
+            continue
+        try:
+            os.replace(aside, aside[:-len(".pre-import")])
+            log(f"put back .storage/{os.path.basename(aside)[:-len('.pre-import')]}: an interrupted import had set it aside")
+        except OSError as err:
+            log(f"could not put back .storage/{os.path.basename(aside)} ({err})")
     rebuild = os.path.isfile(REBUILD_FILE)
     for rel in ("import.tar", "import.tar.tmp", "import-extracted"):
         if rel == "import-extracted" and rebuild:
