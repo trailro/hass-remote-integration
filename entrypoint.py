@@ -30,6 +30,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 
 import backupkit  # /app/backupkit.py: apply a restore scheduled from the UI
@@ -40,6 +41,7 @@ PORT = int(os.environ.get("HRI_PORT", "8087"))
 DEFAULT_VERSION = os.environ.get("HA_VERSION_DEFAULT", "2026.8.3")
 EXTRA_REQUIREMENTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "requirements.txt")  # installed next to homeassistant
 MAX_BOOT_FAILURES = 3
+STATUS_RETRY_AFTER_S = 5  # the install page refreshes itself this often; clients polling /api/ may do the same
 STATE_DIR = os.path.join(CONFIG_DIR, "integration_manager")
 HA_FILE = os.path.join(STATE_DIR, "ha.json")
 LOG_FILE = os.path.join(STATE_DIR, "ha-install.log")
@@ -223,6 +225,12 @@ def status_host_ok(host: str) -> bool:
         return h.endswith(SAFE_HOST_SUFFIXES)
 
 
+def install_status() -> dict:
+    """The install status for an /api/ caller (a healthcheck, a script waiting for the manager API)."""
+    return {**_status, "elapsed": int(time.time() - _status["started"]), "installing": True,
+            "error": "Home Assistant is still installing; the manager API is not up yet"}
+
+
 def password_configured() -> bool:
     return bool(os.environ.get("HRI_PASSWORD", "").strip() or os.environ.get("HRI_PASSWORD_FILE", "").strip())
 
@@ -231,6 +239,12 @@ class _StatusHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         if not status_host_ok(self.headers.get("Host", "")):
             self.send_error(403, "Host not allowed (DNS rebinding guard)")
+            return
+        # Nothing here is the manager API: while Home Assistant installs, /api/status, /api/diag/health and
+        # any healthcheck used to get this HTML page with a 200 and call the container healthy for the whole
+        # install.  503 says what is true, and the page is served with it too - browsers render the body.
+        if urllib.parse.urlsplit(self.path).path.startswith("/api/"):
+            self._send(503, "application/json", json.dumps(install_status()).encode())
             return
         try:
             with open(LOG_FILE, "rb") as fh:  # last 64 KB only, the file may be long
@@ -250,9 +264,13 @@ class _StatusHandler(http.server.BaseHTTPRequestHandler):
             f"<p>phase: <b>{html.escape(str(_status['phase']))}</b> · {int(time.time() - _status['started'])} s so far · this page refreshes itself</p>"
             f"<pre style='font:12px ui-monospace;color:#8b98a5;white-space:pre-wrap'>{html.escape(tail)}</pre>"
         ).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self._send(503, "text/html; charset=utf-8", body)
+
+    def _send(self, code: int, content_type: str, body: bytes) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Retry-After", str(STATUS_RETRY_AFTER_S))
         self.end_headers()
         self.wfile.write(body)
 

@@ -1,13 +1,17 @@
 """Test campaign findings: a backup that carries the pinned http port and the crash loop a restore of it left
-behind, a preflight blocker that hides the missing compiler."""
+behind, a preflight blocker that hides the missing compiler, and the install page answering 200 on every path."""
 
 import asyncio
+import importlib
 import inspect
 import json
 import os
 import shutil
+import socket
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
 import zipfile
 from types import SimpleNamespace
 from unittest import mock
@@ -151,6 +155,50 @@ class PipReasonSurvivesLongOutputTest(unittest.TestCase):
         self.assertIn("requirements cannot be resolved", blockers)
         self.assertIn("gcc", blockers)
         self.assertNotIn("metadata-generation-failed", blockers)
+
+
+class StatusPageIsNotHealthyTest(unittest.TestCase):
+    """While Home Assistant installs, every path answered 200 with the progress page."""
+
+    def setUp(self):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        self.cfg = _tmp(self)
+        os.environ.update(HRI_CONFIG=self.cfg, HRI_PORT=str(port))
+        self.addCleanup(lambda: [os.environ.pop(k, None) for k in ("HRI_CONFIG", "HRI_PORT")])
+        os.makedirs(os.path.join(self.cfg, "integration_manager"))
+        self.ep = importlib.import_module("entrypoint")
+        importlib.reload(self.ep)
+        self.addCleanup(importlib.reload, self.ep)
+        self.ep._status.update(phase="pip install homeassistant==2026.9.2", version="2026.9.2")
+        self.srv = self.ep.start_status_server()
+        self.addCleanup(self.ep.stop_status_server, self.srv)
+        self.url = f"http://127.0.0.1:{port}"
+
+    def get(self, path):
+        try:
+            with urllib.request.urlopen(self.url + path, timeout=5) as resp:
+                return resp.status, dict(resp.headers), resp.read().decode()
+        except urllib.error.HTTPError as err:
+            with err:
+                return err.code, dict(err.headers), err.read().decode()
+
+    def test_api_paths_answer_503_with_json(self):
+        for path in ("/api/status", "/api/diag/health"):
+            code, headers, body = self.get(path)
+            self.assertEqual(code, 503, path)
+            self.assertEqual(headers["Content-Type"], "application/json")
+            self.assertEqual(headers["Retry-After"], str(self.ep.STATUS_RETRY_AFTER_S))
+            self.assertEqual(json.loads(body)["version"], "2026.9.2")
+
+    def test_the_page_still_renders_but_is_not_a_200(self):
+        code, headers, body = self.get("/")
+        self.assertEqual(code, 503)
+        self.assertEqual(headers["Retry-After"], str(self.ep.STATUS_RETRY_AFTER_S))
+        self.assertIn("text/html", headers["Content-Type"])
+        self.assertIn("http-equiv=refresh", body)
+        self.assertIn("pip install homeassistant==2026.9.2", body)
 
 
 if __name__ == "__main__":
