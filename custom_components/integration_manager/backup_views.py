@@ -223,6 +223,11 @@ class BackupActionView(ManagerView):
                         # the version checked above is still the one that boots next (a change prepared meanwhile)
                         if (await self.hass.async_add_executor_job(backupkit.boot_version, cfg) or HA_VERSION) != boot:
                             return self.json({"ok": False, "error": "the Home Assistant version that boots next changed meanwhile: check System and try again"})
+                        # a full rollback already recorded the previous version: another restore in place of its own would
+                        # boot that older code on the configuration the newer version migrated
+                        rollback = getattr(getattr(self.installer, "state", None), "rollback_backup", None)
+                        if rollback and (await self.hass.async_add_executor_job(backupkit._pending_meta, cfg) or {}).get("name") == rollback:  # noqa: SLF001
+                            return self.json({"ok": False, "error": f"a full rollback restores {rollback} at the next restart: restart to finish it before restoring another backup"})
                         if cancel_switch:
                             await self.hass.async_add_executor_job(backupkit.validate, path)
                             await self.hass.async_add_executor_job(self.updater.cancel_config_change)

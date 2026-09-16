@@ -191,7 +191,7 @@ async def async_change_ha_version(installer: Installer, updater: HaUpdater, targ
     hass = installer.hass
     cfg = hass.config.config_dir
     if _HA_CHANGE_LOCK.locked():
-        raise ValueError("another Home Assistant version change is being prepared: try again in a moment")
+        raise ValueError("a Home Assistant version change, a restore or a full rollback is being prepared: try again in a moment")
     async with _HA_CHANGE_LOCK:
         if mode not in ("keep", "restore", "rebuild"):
             raise ValueError("config must be keep, restore or rebuild")

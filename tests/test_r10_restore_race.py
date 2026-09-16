@@ -84,6 +84,15 @@ class RestoreByHandVersusVersionChangeTest(unittest.TestCase):
         self.installer = SimpleNamespace(hass=self.hass, busy=False, running=None, running_tag=None, protected_backups=set,
                                          settings=SimpleNamespace(backup_keep=50), async_backup=async_backup)
 
+    def test_a_restore_by_hand_does_not_replace_a_full_rollbacks_own_restore(self):
+        backupkit.schedule_restore(self.cfg, "running.zip", force=True)  # what _rollback_full schedules
+        self.installer.state = SimpleNamespace(rollback_backup="running.zip")
+        result = asyncio.run(self.restore_by_hand())
+        self.assertFalse(result["ok"])
+        self.assertIn("full rollback", result["error"])
+        self.assertEqual(backupkit._pending_meta(self.cfg)["name"], "running.zip")  # noqa: SLF001
+        self.assertFalse(self.installer.busy)
+
     # ----- the two requests -----
 
     async def restore_by_hand(self, body=None, name="manual.zip"):
