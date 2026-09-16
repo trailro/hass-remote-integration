@@ -41,6 +41,8 @@ PORT = int(os.environ.get("HRI_PORT", "8087"))
 DEFAULT_VERSION = os.environ.get("HA_VERSION_DEFAULT", "2026.8.3")
 EXTRA_REQUIREMENTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "requirements.txt")  # installed next to homeassistant
 MAX_BOOT_FAILURES = 3
+PIP_IDLE_TIMEOUT_S = 15 * 60  # pip writes a line per package: nothing at all for this long is a hang, not a slow download
+PIP_POLL_S = 5
 STATUS_RETRY_AFTER_S = 5  # the install page refreshes itself this often; clients polling /api/ may do the same
 STATE_DIR = os.path.join(CONFIG_DIR, "integration_manager")
 HA_FILE = os.path.join(STATE_DIR, "ha.json")
@@ -295,12 +297,35 @@ def stop_status_server(srv: http.server.ThreadingHTTPServer) -> None:
     srv.server_close()
 
 
-def _run_pip(cmd: list[str], out, timeout: float) -> None:
-    """subprocess.run(check=True, timeout=...), with pip in its own process group: a timeout kills the whole group,
-    also the build backends pip started (a kill of pip alone left those running)."""
+def _written(out) -> int:
+    try:
+        return os.fstat(out.fileno()).st_size
+    except OSError:
+        return -1
+
+
+def _run_pip(cmd: list[str], out, idle_timeout: float = PIP_IDLE_TIMEOUT_S) -> None:
+    """subprocess.run(check=True), with pip in its own process group: a kill takes the whole group, also the
+    build backends pip started (a kill of pip alone left those running).
+
+    The budget is on silence, not on the whole run: the fixed wall clock it replaced killed an install that was
+    still working (a small machine, a slow mirror, a big wheel) and then threw the venv away, so the retry
+    started from zero and ran into the same wall.  pip writes a line per package into ``out``, so the file
+    growing is progress; nothing written for ``idle_timeout`` is a hang and still ends the install."""
     with subprocess.Popen(cmd, stdout=out, stderr=subprocess.STDOUT, start_new_session=True) as proc:
         try:
-            rc = proc.wait(timeout=timeout)
+            written, deadline = -1, time.monotonic() + idle_timeout
+            poll = max(0.05, min(PIP_POLL_S, idle_timeout))  # never sleep past the deadline (a short budget in a test)
+            while True:
+                try:
+                    rc = proc.wait(timeout=poll)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                if (size := _written(out)) != written:
+                    written, deadline = size, time.monotonic() + idle_timeout
+                elif time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(cmd, idle_timeout)
         except BaseException:
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
@@ -324,7 +349,9 @@ def install(version: str) -> bool:
     try:
         log(f"creating venv {d}")
         subprocess.run([sys.executable, "-m", "venv", d], check=True)
-        pip = [os.path.join(d, "bin", "python"), "-m", "pip", "install", "--no-cache-dir", "-q"]
+        # not -q: pip's per-package lines are the only progress this install has - the status page tails them
+        # and _run_pip's idle budget counts them as "still working"
+        pip = [os.path.join(d, "bin", "python"), "-m", "pip", "install", "--no-cache-dir", "--progress-bar", "off"]
         _status["phase"] = "downloading HA constraints"
         constraints = os.path.join(d, "package_constraints.txt")
         with urllib.request.urlopen(CONSTRAINTS_URL.format(version=version), timeout=60) as resp, open(constraints, "wb") as out:
@@ -333,7 +360,8 @@ def install(version: str) -> bool:
         log(f"pip install homeassistant=={version} -r {EXTRA_REQUIREMENTS}")
         with open(LOG_FILE, "a", encoding="utf-8") as fh:
             # a hung download must not keep the boot on the status page forever: fails like any failed install
-            _run_pip([*pip, f"homeassistant=={version}", "-r", EXTRA_REQUIREMENTS, "-c", constraints], fh, timeout=30 * 60)
+            # (a slow one runs on: the budget is on silence, see _run_pip)
+            _run_pip([*pip, f"homeassistant=={version}", "-r", EXTRA_REQUIREMENTS, "-c", constraints], fh)
         # .ok makes the venv count as good (boot, fallback, prune): durable only after everything pip wrote is
         os.sync()
         with open(os.path.join(d, ".ok"), "w", encoding="utf-8") as fh:
@@ -380,14 +408,14 @@ def ensure_extra_requirements(version: str) -> None:
                 return
     except OSError:
         pass
-    cmd = [os.path.join(d, "bin", "python"), "-m", "pip", "install", "--no-cache-dir", "-q", "-r", EXTRA_REQUIREMENTS]
+    cmd = [os.path.join(d, "bin", "python"), "-m", "pip", "install", "--no-cache-dir", "--progress-bar", "off", "-r", EXTRA_REQUIREMENTS]
     constraints = os.path.join(d, "package_constraints.txt")
     if os.path.isfile(constraints):
         cmd += ["-c", constraints]
     log(f"installing the manager's requirements into the venv of Home Assistant {version}")
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as fh:
-            _run_pip(cmd, fh, timeout=900)  # killed half-way: the stamp is not written, the next boot runs it again
+            _run_pip(cmd, fh)  # killed half-way: the stamp is not written, the next boot runs it again
     except Exception as err:  # noqa: BLE001
         log(f"requirements install FAILED ({err}); booting with the venv as it is")
         return

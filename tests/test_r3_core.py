@@ -331,8 +331,8 @@ class EntrypointTest(unittest.TestCase):
             ep.main()
         self.assertEqual(seen, [2])
 
-    def test_pip_install_has_a_timeout(self):
-        """C8: a hung pip fails the install cleanly."""
+    def test_pip_install_has_an_idle_budget(self):
+        """C8: a hung pip fails the install cleanly - on silence now, not on the wall clock."""
         cfg = tempfile.mkdtemp()
         ep = self.ep(cfg)
         os.makedirs(ep.STATE_DIR, exist_ok=True)
@@ -341,16 +341,16 @@ class EntrypointTest(unittest.TestCase):
         def fake_run(cmd, **kw):
             calls.append(kw)
             if "homeassistant==2026.9.2" in cmd:
-                raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+                raise subprocess.TimeoutExpired(cmd, kw.get("timeout") or kw.get("idle_timeout"))
             os.makedirs(cmd[-1], exist_ok=True)  # the venv
             return subprocess.CompletedProcess(cmd, 0)
 
         resp = mock.MagicMock()
         resp.__enter__.return_value.read.return_value = b""
         with mock.patch.object(ep.subprocess, "run", fake_run), mock.patch.object(ep.urllib.request, "urlopen", return_value=resp), \
-                mock.patch.object(ep, "_run_pip", side_effect=lambda cmd, out, timeout: fake_run(cmd, timeout=timeout)):  # pip runs in its own process group
+                mock.patch.object(ep, "_run_pip", side_effect=lambda cmd, out, **kw: fake_run(cmd, **kw)):  # pip runs in its own process group
             self.assertFalse(ep.install("2026.9.2"))
-        self.assertGreaterEqual(calls[-1]["timeout"], 1800)
+        self.assertGreaterEqual(ep.PIP_IDLE_TIMEOUT_S, 600)  # the budget install() leaves to a silent pip
         self.assertFalse(os.path.exists(ep.venv_dir("2026.9.2")))
 
 

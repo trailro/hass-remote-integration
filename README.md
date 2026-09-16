@@ -1113,8 +1113,9 @@ when `.storage` is restored.
   downloads Home Assistant; a slow connection can take several minutes. The
   container log (`docker logs <name>`) shows pip's progress. While it runs the
   page and every `/api/` path answer `503` (the manager API does not exist
-  yet), so a healthcheck does not call the container healthy. An install that
-  has not finished after 30 minutes fails: the container starts the Home
+  yet), so a healthcheck does not call the container healthy. A slow install
+  runs as long as it keeps making progress; an install that writes nothing at
+  all for 15 minutes is taken for hung and fails: the container starts the Home
   Assistant version it already had, or, on a first start, exits and Docker
   starts it again.
 - **The page says Home Assistant is not started: a restore failed and could not

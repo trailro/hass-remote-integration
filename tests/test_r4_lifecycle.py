@@ -186,7 +186,7 @@ class PipProcessGroupTest(unittest.TestCase):
         ep = importlib.import_module("entrypoint")
         pidfile = os.path.join(tempfile.mkdtemp(), "pid")
         with open(os.devnull, "w") as out, self.assertRaises(subprocess.TimeoutExpired):
-            ep._run_pip(["sh", "-c", f"sleep 300 & echo $! > {pidfile}; wait"], out, timeout=1)
+            ep._run_pip(["sh", "-c", f"sleep 300 & echo $! > {pidfile}; wait"], out, idle_timeout=1)
         time.sleep(0.3)
         with open(pidfile) as fh:
             pid = int(fh.read())
@@ -202,7 +202,7 @@ class PipProcessGroupTest(unittest.TestCase):
     def test_failure_raises_called_process_error(self):
         ep = importlib.import_module("entrypoint")
         with open(os.devnull, "w") as out, self.assertRaises(subprocess.CalledProcessError):
-            ep._run_pip(["sh", "-c", "exit 3"], out, timeout=10)
+            ep._run_pip(["sh", "-c", "exit 3"], out, idle_timeout=10)
 
 
 class InstallMarkerTest(unittest.TestCase):
