@@ -984,7 +984,9 @@ secret) to require a password:
 - the browser gets a session cookie from the login page, valid for 30 days,
   and **log out** in the top bar ends every session of the UI, in all browsers,
   including one opened a moment before (each logout starts a new session
-  generation, signed into the cookie and kept across restarts and restores);
+  generation, signed into the cookie and kept across restarts and restores).
+  When the volume cannot record the logout (full or read-only), every session
+  still ends and the page says that they are valid again after a restart;
 - scripts send the password as `Authorization: Bearer <password>`;
 - after 5 wrong attempts from one address, that address is refused for 15
   minutes (for IPv6, the whole /64 it belongs to); after 30 wrong attempts
@@ -1270,7 +1272,7 @@ points:
 | Area | Endpoints |
 |---|---|
 | Status | `GET /api/status`, `GET /api/summary`, `GET /api/manager`, `GET /api/manager/history?hours=`, `GET /api/mqtt/status`, `GET /api/events`, `GET /api/notifications`, `POST /api/notifications/dismiss_all`, `POST /api/notifications/<id>/dismiss` |
-| Login | `POST /api/login` (`{"password": …}`, sets the session cookie; `503` with the reason while `HRI_PASSWORD_FILE` is empty or unreadable), `POST /api/logout` (ends every session) |
+| Login | `POST /api/login` (`{"password": …}`, sets the session cookie; `503` with the reason while `HRI_PASSWORD_FILE` is empty or unreadable), `POST /api/logout` (ends every session; `500` with `ok: false` when the volume could not record it, which ends them until a restart) |
 | Integration | `POST /api/install`, `GET /api/change_reports`, `POST /api/run/{start,stop,cancel_pending_start}`, `GET /api/releases`, `GET /api/releases/preview?domain=&tag=`, `POST /api/releases/preflight`, `POST /api/updates/check`, `POST /api/installed/<domain>/{uninstall,rollback_full,remove_version}`, `GET/POST /api/registry` |
 | Builder / dev | `GET /api/catalog?q=`, `GET /api/build/options`, `POST /api/build/{check,prepare}`, `GET /api/dev`, `POST /api/dev/install` |
 | Configuration | `POST /api/flow/start`, `GET /api/flow/progress`, `POST /api/flow/<id>`, `POST/DELETE /api/options/<flow_id>`, `GET/POST /api/yaml/<domain>`, `GET /api/entries`, `POST /api/entries/<entry_id>/{options,reload,delete}` |
