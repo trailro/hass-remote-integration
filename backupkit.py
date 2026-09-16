@@ -76,6 +76,9 @@ EXCLUDE_GLOBS = (
 )
 KEEP_DEFAULT = 5
 INFO_MAX = 64 * 1024  # backup-info.json is a few hundred bytes; a huge one is a zip bomb
+# files in a backup, as the Home Assistant backup import (ha_import.MAX_MEMBERS): a volume holds a few thousand, and
+# every member costs memory and time to read even when empty (500000 took 17 s and 286 MB to validate)
+MAX_MEMBERS = 100_000
 
 
 def _excluded(rel: str) -> bool:
@@ -121,6 +124,9 @@ def create(config_dir: str, label: str = "", storage_version: str | None = None)
         with os.fdopen(fd, "wb") as fh:
             with zipfile.ZipFile(fh, "w", zipfile.ZIP_DEFLATED) as zf:
                 for path, rel in iter_files(config_dir):
+                    if count >= MAX_MEMBERS:
+                        # not a backup that could be restored (validate refuses it): said now, not at the restore
+                        raise ValueError(f"the configuration holds more than {MAX_MEMBERS} files: no backup was made")
                     try:
                         zf.write(path, rel)
                     except FileNotFoundError:
@@ -184,20 +190,39 @@ def _allowed(rel: str) -> bool:
     return "/" not in rel and any(fnmatch.fnmatch(rel, g) for g in INCLUDE_ROOT_GLOBS)
 
 
+_DESCRIBED: dict[str, tuple[tuple[int, int], dict]] = {}  # path -> ((mtime_ns, size), record)
+_DESCRIBED_LOCK = threading.Lock()
+_DESCRIBED_MAX = 512
+
+
 def describe(config_dir: str, name: str) -> dict:
+    """Read once per file version: every GET /api/backups and every prune lists all backups, and opening a zip
+    reads its whole central directory."""
     path = os.path.join(config_dir, BACKUP_DIR, name)
+    st = os.stat(path)
+    key = (st.st_mtime_ns, st.st_size)
+    with _DESCRIBED_LOCK:
+        hit = _DESCRIBED.get(path)
+    if hit is not None and hit[0] == key:
+        return dict(hit[1])
     info = {}
     try:
         with zipfile.ZipFile(path) as zf:
-            if "backup-info.json" in zf.namelist() and zf.getinfo("backup-info.json").file_size <= INFO_MAX:
-                info = json.loads(zf.read("backup-info.json"))
-    except (OSError, zipfile.BadZipFile, ValueError):
+            meta = zf.getinfo("backup-info.json")  # not "in namelist()": a list of every member, at every listing
+            if meta.file_size <= INFO_MAX:
+                info = json.loads(zf.read(meta))
+    except (OSError, zipfile.BadZipFile, ValueError, KeyError):
         pass
     if not isinstance(info, dict):
         info = {}  # an edited or foreign backup-info.json must not break the list
-    return {"name": name, "bytes": os.path.getsize(path), "mtime": os.path.getmtime(path),
-            "created": info.get("created"), "label": info.get("label", ""), "files": info.get("files"),
-            "ha_version": known_ha_version(info.get("ha_version"))}
+    record = {"name": name, "bytes": st.st_size, "mtime": st.st_mtime,
+              "created": info.get("created"), "label": info.get("label", ""), "files": info.get("files"),
+              "ha_version": known_ha_version(info.get("ha_version"))}
+    with _DESCRIBED_LOCK:
+        if len(_DESCRIBED) >= _DESCRIBED_MAX:
+            _DESCRIBED.clear()
+        _DESCRIBED[path] = (key, record)
+    return dict(record)
 
 
 PARTIAL_STALE_S = 6 * 3600  # older than any backup takes to write: left by a process killed mid-backup
@@ -296,6 +321,8 @@ def validate(path: str) -> dict:
     least carries the state marker) with safe member paths."""
     try:
         with zipfile.ZipFile(path) as zf:
+            if len(zf.infolist()) > MAX_MEMBERS + 1:  # + backup-info.json; before anything walks the members
+                raise ValueError(f"the archive holds more than {MAX_MEMBERS} files: not a backup of this tool")
             names = zf.namelist()
             for n in names:
                 member = n[:-1] if n.endswith("/") else n
