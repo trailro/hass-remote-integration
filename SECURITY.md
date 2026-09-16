@@ -35,7 +35,8 @@ from plain HTTP traffic. These are:
   needs a case where something the scrubber does name comes out unmasked;
 - the text of a log search, or a credential in a request URL, written to
   `process.log` or the container log; a log search answer (rows, `cursor`,
-  truncation) that differs between a right and a wrong guess of a masked value;
+  truncation, the lines a Log files search read) that differs between a right
+  and a wrong guess of a masked value;
 - service calls over MQTT or from the UI that get past the deny list, or MQTT
   commands and service calls that reach entities the container does not
   publish through the target (entity, group, device, area, floor, label) or
