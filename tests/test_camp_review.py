@@ -1,4 +1,5 @@
-"""Test campaign: the pre-restore copy's protection and the pre-2026.9 device registry shape."""
+"""Test campaign: the pre-restore copy's protection, the pre-2026.9 device registry shape and a
+unique id lost between change-report snapshots."""
 
 import json
 import os
@@ -8,7 +9,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from custom_components.integration_manager import devices_page, ha_import
+from custom_components.integration_manager import change_report, devices_page, ha_import
 from custom_components.integration_manager.installer import Installer
 
 
@@ -102,6 +103,38 @@ class RegistryShapeTest(unittest.TestCase):
 
     def test_import_alignment_still_walks_the_new_registry(self):
         self.assertEqual(self._aligned(_NewRegistry([_device("a")], [_device("c")])), ["a", "c"])
+
+
+def _entity(entity_id, **kw):
+    return {"entity_id": entity_id, "name": entity_id, "unit_of_measurement": None, "device_class": None,
+            "state_class": None, "entity_category": None, **kw}
+
+
+class ChangeReportKeyShapeTest(unittest.TestCase):
+    def _build(self, before, after):
+        return change_report.build({"before": {"entities": before, "services": {}}}, {"entities": after, "services": {}})
+
+    def test_an_entity_that_lost_its_unique_id_is_the_same_entity(self):
+        report = self._build({"uid:sensor:u1": _entity("sensor.x")}, {"eid:sensor.x": _entity("sensor.x")})
+        self.assertEqual((report["entities_added"], report["entities_removed"]), ([], []))
+        self.assertFalse(report["breaking"])
+
+    def test_an_entity_that_gained_a_unique_id_is_still_the_same_entity(self):
+        report = self._build({"eid:sensor.x": _entity("sensor.x")}, {"uid:sensor:u1": _entity("sensor.x")})
+        self.assertEqual((report["entities_added"], report["entities_removed"]), ([], []))
+
+    def test_an_entity_that_really_went_away_is_still_reported(self):
+        report = self._build({"uid:sensor:u1": _entity("sensor.x")}, {"eid:sensor.y": _entity("sensor.y")})
+        self.assertEqual([e["entity_id"] for e in report["entities_removed"]], ["sensor.x"])
+        self.assertTrue(report["breaking"])
+
+    def test_two_entries_never_collapse_onto_one_key(self):
+        # a before-snapshot of an older manager ("uid:<unique_id>") next to one entity that already
+        # carries the current "uid:<domain>:<unique_id>" spelling of the same unique id
+        report = self._build({"uid:u1": _entity("sensor.x"), "uid:sensor:u1": _entity("sensor.y")},
+                             {"uid:sensor:u1": _entity("sensor.y")})
+        self.assertEqual(report["entities_before"], 2)
+        self.assertEqual([e["entity_id"] for e in report["entities_removed"]], ["sensor.x"])
 
 
 if __name__ == "__main__":
