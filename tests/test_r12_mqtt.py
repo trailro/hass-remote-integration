@@ -6,7 +6,8 @@ every 5 s for good.  C11: a whitespace-only call payload ran the service with no
 C13: a live discovery-prefix change swept every retained entity document, not only the discovery configs.  C14: a call
 payload was parsed up to four times on paho's thread.  C15: an event added off the loop (paho's thread) waited up to
 5 s for the timeline's backlog.  C16: clearing an excluded entity this process never published still published an empty
-document and counted it.  Every test fails on the tree
+document and counted it.  C17: a discovery prefix equal to or under the base topic was saved, and then blocked every
+connect as foreign data.  Every test fails on the tree
 before its fix."""
 
 import asyncio
@@ -676,6 +677,26 @@ class ClearNeverPublishedTest(unittest.TestCase):
         pub._topics["sensor.ruled_out"] = f"{BASE}/demo/sensor/ruled_out"
         pub._clear("sensor.ruled_out")
         self.assertEqual(pub._client.published, [(f"{BASE}/demo/sensor/ruled_out", "", 1, True)])
+
+
+class DiscoveryPrefixUnderBaseTest(unittest.TestCase):
+    def _pub(self, base=BASE):
+        pub = object.__new__(mp.MqttPublisher)
+        pub.config = mp.MqttConfig()
+        pub._saved = {}
+        pub._key_provider = lambda: base
+        return pub
+
+    def test_refused_at_save(self):
+        for prefix in (BASE, f"{BASE}/discovery", f" {BASE}/x ", f"{BASE}/"):
+            with self.subTest(prefix=prefix), self.assertRaisesRegex(ValueError, "discovery_prefix"):
+                self._pub()._validated({"discovery_prefix": prefix})
+
+    def test_a_prefix_beside_it_is_accepted(self):
+        for prefix in ("homeassistant", f"{BASE}_x", f"{BASE}2/x", "hass"):
+            with self.subTest(prefix=prefix):
+                self.assertEqual(self._pub()._validated({"discovery_prefix": prefix}).discovery_prefix, prefix)
+        self.assertEqual(self._pub(base=None)._validated({"discovery_prefix": BASE}).discovery_prefix, BASE)
 
 
 if __name__ == "__main__":

@@ -611,6 +611,9 @@ class MqttPublisher:
                 raise ValueError(f"{k} must not contain MQTT wildcards")
             if k in ("host", "discovery_prefix"):
                 v = v.strip()
+            if k == "discovery_prefix" and (base := self.wanted_base_topic) and (v == base or v.startswith(base + "/")):
+                # the connect would find the configs there and refuse the base topic as carrying foreign data
+                raise ValueError(f"discovery_prefix must not be the base topic {base} or under it")
             current[k] = v
         return MqttConfig(**current)
 

@@ -972,7 +972,8 @@ hass_<domain>/manager/result                        outcome of a manager action,
   back.
 - Before connecting, the container checks that no *foreign* retained data sits
   under its base topic, and refuses to connect if there is (override with
-  `force_base_topic`).
+  `force_base_topic`). A discovery prefix that is the base topic, or lies under
+  it, is refused when the MQTT settings are saved.
 - **TLS**: tick `tls` on the MQTT page (brokers usually take TLS on port
   8883). The broker's certificate is verified against the system CAs, or
   against `ca_certs`, a CA file inside `/config` (for example
