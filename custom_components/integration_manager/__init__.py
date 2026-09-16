@@ -105,7 +105,7 @@ def _restart_to_unload(installer: Installer, note: str) -> str:
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     events.EVENTS = events.Events(hass.config.path("integration_manager", "events.jsonl"))
     track_delayed_stores()  # before the integration is set up: backups write its pending saves
-    installer = Installer(hass)
+    installer = await hass.async_add_executor_job(Installer, hass)  # reads state.json and settings.json, sweeps the version store
     hass.data[DOMAIN] = installer
     writer.async_register(hass)  # the ordered JSON writer (settings, MQTT config/rules) drains at the final write
 
@@ -155,7 +155,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     publisher = MqttPublisher(hass, key_provider=lambda: installer.instance_key, health_provider=installer.health,
                               rules_provider=installer.settings.health_for)
     installer.health_source = publisher.build_health
-    manager_device = ManagerDevice(hass, installer, ha_updater, publisher)
+    manager_device = await hass.async_add_executor_job(ManagerDevice, hass, installer, ha_updater, publisher)  # reads its JSON files
     publisher.manager = manager_device
     manager_device.start()
     installer.on_domain_removed = publisher.async_clear_identity
@@ -168,7 +168,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     from homeassistant.const import __version__ as ha_version
 
-    ha_state = jsonio.read_json(hass.config.path("integration_manager", "ha.json"), {}) or {}
+    ha_state = await hass.async_add_executor_job(jsonio.read_json, hass.config.path("integration_manager", "ha.json"), {}) or {}
     last_restore = ha_state.get("last_restore") if isinstance(ha_state, dict) else None
     events.emit("boot", f"Home Assistant {ha_version}; running {installer.state.domain or 'nothing'} {installer.running_tag or ''}".strip()
                 + (f"; restart required" if installer.state.restart_required else ""), ha=ha_version)

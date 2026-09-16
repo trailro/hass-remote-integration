@@ -27,6 +27,9 @@ C5: ``Authorization: bearer <password>`` was not taken for the password (the
 scheme is case-insensitive), and ``HRI_PASSWORD`` from an .env file with CRLF
 line ends kept the CR, which no login form or header can carry.
 
+C9: the component's setup read state.json, settings.json, the manager device's
+files and ha.json on the event loop.
+
 Every test fails on the tree before the fix unless its docstring says it pins
 behaviour that already held.
 """
@@ -447,3 +450,50 @@ class PasswordFromTheEnvironmentTest(unittest.TestCase):
     def test_spaces_are_kept(self):
         """Pins behaviour that already held."""
         self.assertEqual(self.configured(" pw "), (" pw ", ""))
+
+
+# ----- C9 -----------------------------------------------------------------------------------------
+
+class _SetupReached(Exception):
+    pass
+
+
+class SetupReadsOffTheLoopTest(unittest.TestCase):
+
+    def test_the_json_files_are_read_in_the_executor(self):
+        import custom_components.integration_manager as component
+        from custom_components.integration_manager import auth, events, hostguard
+
+        tmp = _tmp(self)
+        on_loop = {}
+
+        def spy(name, real):
+            def call(*args, **kwargs):
+                on_loop[name] = threading.current_thread() is threading.main_thread()
+                return real(*args, **kwargs)
+            return call
+
+        def background_task(coro, name):
+            coro.close()
+
+        hass = SimpleNamespace(config=SimpleNamespace(config_dir=tmp, path=lambda *p: os.path.join(tmp, *p)), data={},
+                               async_add_executor_job=_job, async_create_background_task=background_task)
+        installer = mock.MagicMock()
+        installer.announce_smoke.side_effect = _SetupReached  # the first step after the reads
+        publisher = mock.MagicMock()
+        publisher.async_start = mock.AsyncMock()
+        old_events = events.EVENTS
+        self.addCleanup(setattr, events, "EVENTS", old_events)
+        with mock.patch.object(component, "Installer", side_effect=spy("Installer", lambda hass: installer)), \
+                mock.patch.object(component, "ManagerDevice", side_effect=spy("ManagerDevice", lambda *a: mock.MagicMock())), \
+                mock.patch.object(component.jsonio, "read_json", side_effect=spy("read_json", component.jsonio.read_json)), \
+                mock.patch.object(component, "track_delayed_stores"), mock.patch.object(component.writer, "async_register"), \
+                mock.patch.object(hostguard, "install_host_guard"), \
+                mock.patch.object(auth, "async_setup_auth", mock.AsyncMock(return_value=SimpleNamespace(enabled=False))), \
+                mock.patch.object(component, "HaUpdater"), mock.patch.object(component, "RegistryAligner"), \
+                mock.patch.object(component, "async_finish_rebuild", mock.MagicMock()), mock.patch.object(component, "FlowDriver"), \
+                mock.patch.object(component, "MqttPublisher", return_value=publisher), mock.patch.object(component, "Scheduler"), \
+                mock.patch.object(component.notifications, "async_watch"), mock.patch.object(events, "emit"):
+            with self.assertRaises(_SetupReached):
+                asyncio.run(component.async_setup(hass, {}))
+        self.assertEqual(on_loop, {"Installer": False, "ManagerDevice": False, "read_json": False})
