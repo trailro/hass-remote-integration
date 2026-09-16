@@ -2376,7 +2376,11 @@ class Installer:
         tmp, aside = target + ".deploying", target + ".replaced"
         shutil.rmtree(tmp, ignore_errors=True)
         shutil.rmtree(aside, ignore_errors=True)
-        shutil.copytree(src, tmp)
+        try:
+            shutil.copytree(src, tmp)
+        except BaseException:
+            shutil.rmtree(tmp, ignore_errors=True)  # a half copy holds the domain's manifest: the loader could pick it
+            raise
         had = os.path.isdir(target)
         if had:
             os.replace(target, aside)

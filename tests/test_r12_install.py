@@ -1,12 +1,19 @@
 """Review round 12: patches, install, dev mode, stop budget."""
 
 import difflib
+import errno
+import json
 import os
 import shutil
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
+import run
+from custom_components.integration_manager import installer as installer_mod
 from custom_components.integration_manager import patches
+from custom_components.integration_manager.installer import Installer
 
 TWIN = ["# twin", "def twin():", "    x = 0", "    return 1", "    y = 0", "# end", "pass"]
 INSERTED = [f"added_{i} = {i}" for i in range(60)]
@@ -103,6 +110,95 @@ class DiffOffsetTest(R12PatchCase):
         self.assertEqual(self.hunks(diff), ("not applicable", [("ambiguous", None)]))
         self.assertEqual(patches._diff_apply(diff, self.ctx), "not applicable")
         self.assertEqual(self.read(), drifted)
+
+
+class R12InstallerCase(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="hri-r12-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        os.makedirs(os.path.join(self.dir, "integration_manager"))
+        self.cc = os.path.join(self.dir, "custom_components")
+
+    def installer(self, state=None):
+        if state is not None:
+            with open(os.path.join(self.dir, "integration_manager", "state.json"), "w", encoding="utf-8") as fh:
+                json.dump(state, fh)
+        return Installer(SimpleNamespace(config=SimpleNamespace(config_dir=self.dir)))
+
+    def store(self, inst, domain, tag, version="1.0.0"):
+        src = inst._version_dir(domain, tag)
+        os.makedirs(src, exist_ok=True)
+        for name, text in (("manifest.json", json.dumps({"domain": domain, "version": version})),
+                           ("__init__.py", "X = 1\n"), ("sensor.py", "Y = 2\n")):
+            with open(os.path.join(src, name), "w", encoding="utf-8") as fh:
+                fh.write(text)
+        return src
+
+
+class DeployLeftoverTest(R12InstallerCase):
+    """M2: a copy that fails half-way leaves no second directory with the domain's manifest in custom_components."""
+
+    def test_disk_full_during_the_copy(self):
+        inst = self.installer()
+        self.store(inst, "demo", "1.0.0")
+        self.store(inst, "demo", "2.0.0", version="2.0.0")
+        inst._deploy("demo", "1.0.0")
+        real = shutil.copytree
+
+        def disk_full(src, dst, *a, **kw):
+            def copy(s, d, **k):
+                if os.path.basename(s) != "manifest.json":
+                    raise OSError(errno.ENOSPC, "No space left on device", d)
+                return shutil.copy2(s, d, **k)
+            return real(src, dst, *a, copy_function=copy, **kw)
+
+        with mock.patch.object(installer_mod.shutil, "copytree", disk_full):
+            with self.assertRaises(OSError):
+                inst._deploy("demo", "2.0.0")
+        self.assertEqual(os.listdir(self.cc), ["demo"])
+        self.assertEqual(inst.installed_manifest("demo")["version"], "1.0.0")
+
+
+class BootSweepTest(unittest.TestCase):
+    """M2: a deploy killed half-way is cleaned before Home Assistant scans custom_components."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="hri-r12-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.cc = os.path.join(self.dir, "custom_components")
+
+    def mkcomp(self, name, version):
+        os.makedirs(os.path.join(self.cc, name))
+        with open(os.path.join(self.cc, name, "manifest.json"), "w", encoding="utf-8") as fh:
+            json.dump({"domain": "demo", "version": version}, fh)
+
+    def sweep(self):
+        with mock.patch.object(run, "CONFIG_DIR", self.dir):
+            run._sweep_deploy_leftovers()
+
+    def version(self, name):
+        with open(os.path.join(self.cc, name, "manifest.json"), encoding="utf-8") as fh:
+            return json.load(fh)["version"]
+
+    def test_killed_during_the_copy(self):
+        self.mkcomp("demo", "1.0.0")
+        self.mkcomp("demo.deploying", "2.0.0")
+        self.mkcomp("demo.replaced", "0.9.0")
+        self.mkcomp("other", "1.0.0")
+        self.sweep()
+        self.assertEqual(sorted(os.listdir(self.cc)), ["demo", "other"])
+        self.assertEqual(self.version("demo"), "1.0.0")
+
+    def test_killed_between_the_two_renames(self):
+        self.mkcomp("demo.deploying", "2.0.0")
+        self.mkcomp("demo.replaced", "1.0.0")
+        self.sweep()
+        self.assertEqual(os.listdir(self.cc), ["demo"])
+        self.assertEqual(self.version("demo"), "1.0.0")  # the copy that ran; the reconcile deploys the new one again
+
+    def test_no_custom_components_yet(self):
+        self.sweep()
+        self.assertFalse(os.path.exists(self.cc))
 
 
 if __name__ == "__main__":
