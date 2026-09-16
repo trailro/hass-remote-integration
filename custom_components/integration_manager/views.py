@@ -429,6 +429,8 @@ class FlowResourceView(ManagerView):
             return self.json_message(f"{type(err).__name__}: {err}", status_code=500)
 
     async def delete(self, request: web.Request, flow_id: str) -> web.Response:
+        if request.headers.get("X-Requested-With") != "fetch":  # no JSON body to gate on: the header del() sends
+            return self.json_message("X-Requested-With: fetch required", status_code=400)
         try:
             self.flows.abort(flow_id)
         except data_entry_flow.UnknownFlow:
@@ -456,6 +458,8 @@ class OptionsResourceView(ManagerView):
             return self.json_message(f"{type(err).__name__}: {err}", status_code=500)
 
     async def delete(self, request: web.Request, flow_id: str) -> web.Response:
+        if request.headers.get("X-Requested-With") != "fetch":  # no JSON body to gate on: the header del() sends
+            return self.json_message("X-Requested-With: fetch required", status_code=400)
         try:
             self.flows.options_abort(flow_id)
         except data_entry_flow.UnknownFlow:

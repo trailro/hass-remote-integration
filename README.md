@@ -1262,7 +1262,8 @@ tails, logs or diagnostics, or run or store patch code, also need `X-Requested-W
 `/api/patch_editor` (reading, *Check* and *Save*), `/api/patches/<domain>` (and its `/upload`), `/api/backups/upload`,
 `/api/import/upload`, `/api/parity`, `/api/releases/preview`,
 `/api/diagnostics`, `/api/diag/memory` (also without `refs`), `/api/logs`,
-`/api/log_files` and `/api/log_files/tail`; without it they answer `400`.
+`/api/log_files` and `/api/log_files/tail`, and aborting a flow
+(`DELETE /api/flow/<id>`, `DELETE /api/options/<flow_id>`); without it they answer `400`.
 `?refresh=1` on `/api/releases` and `/api/ha` is ignored without it.
 `GET /api/status` answers without the header too (for monitors and
 `verify.sh`), but then from a copy at most 10 seconds old, since building it
@@ -1275,7 +1276,7 @@ points:
 | Login | `POST /api/login` (`{"password": …}`, sets the session cookie; `503` with the reason while `HRI_PASSWORD_FILE` is empty or unreadable), `POST /api/logout` (ends every session; `500` with `ok: false` when the volume could not record it, which ends them until a restart) |
 | Integration | `POST /api/install`, `GET /api/change_reports`, `POST /api/run/{start,stop,cancel_pending_start}`, `GET /api/releases`, `GET /api/releases/preview?domain=&tag=`, `POST /api/releases/preflight`, `POST /api/updates/check`, `POST /api/installed/<domain>/{uninstall,rollback_full,remove_version}`, `GET/POST /api/registry` |
 | Builder / dev | `GET /api/catalog?q=`, `GET /api/build/options`, `POST /api/build/{check,prepare}`, `GET /api/dev`, `POST /api/dev/install` |
-| Configuration | `POST /api/flow/start`, `GET /api/flow/progress`, `POST /api/flow/<id>`, `POST/DELETE /api/options/<flow_id>`, `GET/POST /api/yaml/<domain>`, `GET /api/entries`, `POST /api/entries/<entry_id>/{options,reload,delete}` |
+| Configuration | `POST /api/flow/start`, `GET /api/flow/progress`, `POST/DELETE /api/flow/<id>`, `POST/DELETE /api/options/<flow_id>`, `GET/POST /api/yaml/<domain>`, `GET /api/entries`, `POST /api/entries/<entry_id>/{options,reload,delete}` |
 | Patches | `GET /api/patches/<domain>`, `POST /api/patches/<domain>/upload`, `POST /api/patches/<domain>/<name>/{apply,delete}`, `GET /api/patch_editor/<domain>?name=`, `POST /api/patch_editor/<domain>/{check,save}` |
 | MQTT | `GET/POST /api/mqtt/config`, `GET/POST /api/mqtt/rules`, `POST /api/mqtt/{reconnect,republish}`, `GET /api/mqtt/discovery`, `GET /api/mqtt/commands` |
 | Entities | `GET /api/entities`, `POST /api/entities/<entity_id>/{rename,name,disable,enable,delete,mqtt_exclude,mqtt_include,mqtt_name}`, `GET /api/devices`, `POST /api/devices/<device_id>/{name,delete}`, `GET /api/services`, `POST /api/services/call` |
