@@ -100,7 +100,8 @@ def latest_stable() -> str | None:
             best = v
     return best
 
-_status = {"phase": "starting", "version": None, "started": time.time()}
+# "kind": what keeps Home Assistant from running - "install", or "restore_hold" (hold_after_failed_rollback)
+_status = {"phase": "starting", "version": None, "started": time.time(), "kind": "install"}
 
 
 def log(msg: str) -> None:
@@ -228,13 +229,26 @@ def status_host_ok(host: str) -> bool:
 
 
 def install_status() -> dict:
-    """The install status for an /api/ caller (a healthcheck, a script waiting for the manager API)."""
-    return {**_status, "elapsed": int(time.time() - _status["started"]), "installing": True,
-            "error": "Home Assistant is still installing; the manager API is not up yet"}
+    """The install status for an /api/ caller (a healthcheck, a script waiting for the manager API).  A monitor
+    that reads "installing" must not be told that for the minutes a failed restore holds the boot."""
+    held = _status.get("kind") == "restore_hold"
+    error = ("Home Assistant is not started: a restore failed and could not be put back; the manager API is not up"
+             if held else "Home Assistant is still installing; the manager API is not up yet")
+    return {**_status, "elapsed": int(time.time() - _status["started"]), "installing": not held, "restore_failed": held, "error": error}
 
 
 def password_configured() -> bool:
     return bool(os.environ.get("HRI_PASSWORD", "").strip() or os.environ.get("HRI_PASSWORD_FILE", "").strip())
+
+
+def _log_tail() -> str:
+    try:
+        with open(LOG_FILE, "rb") as fh:  # last 64 KB only, the file may be long
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 65536))
+            return "\n".join(fh.read().decode("utf-8", errors="replace").splitlines()[-40:])
+    except OSError:
+        return ""
 
 
 class _StatusHandler(http.server.BaseHTTPRequestHandler):
@@ -248,23 +262,23 @@ class _StatusHandler(http.server.BaseHTTPRequestHandler):
         if urllib.parse.urlsplit(self.path).path.startswith("/api/"):
             self._send(503, "application/json", json.dumps(install_status()).encode())
             return
-        try:
-            with open(LOG_FILE, "rb") as fh:  # last 64 KB only, the file may be long
-                fh.seek(0, os.SEEK_END)
-                fh.seek(max(0, fh.tell() - 65536))
-                tail = "\n".join(fh.read().decode("utf-8", errors="replace").splitlines()[-40:])
-        except OSError:
-            tail = ""
-        if password_configured():
+        if _status.get("kind") != "install":
+            tail = ""  # the log is of the last install, nothing to do with a restore that failed
+        elif password_configured():
             tail = "(the install log is shown after login, on the System page)"  # no login exists yet: show only the phase
+        else:
+            # without a password the manager shows the same log to anyone once it runs; until then this is the
+            # only place pip's progress appears (pip writes into the file, not into the container log)
+            tail = _log_tail()
         heading = _status.get("title") or f"Installing Home Assistant {_status['version']} …"
+        log_block = f"<pre style='font:12px ui-monospace;color:#8b98a5;white-space:pre-wrap'>{html.escape(tail)}</pre>" if tail else ""
         body = (
             "<!doctype html><meta charset=utf-8><meta http-equiv=refresh content=5>"
             f"<title>hass-remote-integration · {html.escape(heading)}</title>"
             "<body style='font:14px system-ui;background:#0f1418;color:#e6edf3;padding:24px'>"
             f"<h2>{html.escape(heading)}</h2>"
             f"<p>phase: <b>{html.escape(str(_status['phase']))}</b> · {int(time.time() - _status['started'])} s so far · this page refreshes itself</p>"
-            f"<pre style='font:12px ui-monospace;color:#8b98a5;white-space:pre-wrap'>{html.escape(tail)}</pre>"
+            f"{log_block}"
         ).encode()
         self._send(503, "text/html; charset=utf-8", body)
 
@@ -339,7 +353,7 @@ def _run_pip(cmd: list[str], out, idle_timeout: float = PIP_IDLE_TIMEOUT_S) -> N
 
 def install(version: str) -> bool:
     d = venv_dir(version)
-    _status.update(phase="preparing venv", version=version)
+    _status.update(phase="preparing venv", version=version, kind="install", title=None)
     try:  # one install per file: it used to grow forever (every pip run appended)
         with open(LOG_FILE, "w", encoding="utf-8") as fh:
             fh.write(f"# install of Home Assistant {version}, {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -450,12 +464,13 @@ def clean_import_leftovers() -> None:
             log(f"removed leftover {rel}")
 
 
-def reset_storage_for_rebuild(wanted: str, restored: bool) -> bool:
+def reset_storage_for_rebuild(wanted: str, restored: bool, storage_restored: bool = False) -> bool:
     """A downgrade with a clean start (scheduled from the manager): empty
     .storage before the older Home Assistant boots; the manager rebuilds
     the integration's configuration after the start.  Only for the version
     it was scheduled for, with its extracted source and a readable
-    pre-change backup.  True when .storage was emptied."""
+    pre-change backup.  True when .storage was emptied.  ``storage_restored``:
+    the restore applied at this boot replaced .storage."""
     try:
         with open(REBUILD_FILE, encoding="utf-8") as fh:
             plan = json.load(fh)
@@ -492,12 +507,13 @@ def reset_storage_for_rebuild(wanted: str, restored: bool) -> bool:
                 why = f"backup {plan.get('backup')} is not usable ({err})"
     if why:
         log(f"clean start dropped, the configuration is kept: {why}")
-        if switched:
+        if switched and not storage_restored:
             _put_aside_back(storage, aside)
         try:
             os.remove(REBUILD_FILE)
         except OSError:
             pass
+        _drop_set_aside(aside, storage_restored, plan)
         return False
     if not switched:
         # the pre-change backup and the import source were taken when the switch was scheduled: anything
@@ -544,6 +560,23 @@ def reset_storage_for_rebuild(wanted: str, restored: bool) -> bool:
             shutil.rmtree(old, ignore_errors=True)  # an earlier clean start's copy, only once this one is recorded
     log(f"clean start for Home Assistant {plan.get('to')}: .storage emptied, the integration is rebuilt after the boot (backup {plan.get('backup')})")
     return True
+
+
+def _drop_set_aside(aside: str, storage_restored: bool, plan: dict) -> None:
+    """The copy of .storage a dropped clean start leaves (emptied at an earlier boot, or not put back).  Nothing
+    removes it later: ha_import.drop_rebuild, which does once a rebuild finished, runs only while a plan exists."""
+    if not aside or not os.path.isdir(aside):
+        return
+    name = os.path.basename(aside)
+    also = f"backup {plan.get('boot_backup') or plan.get('backup')}"
+    if storage_restored:
+        # the restore replaced what it held; a stale copy of every integration's credentials and the auth tokens
+        # must not stay on the volume, the way a finished rebuild does not leave one
+        shutil.rmtree(aside, ignore_errors=True)
+        log(f"removed {name}: the restore replaced the configuration it held (that configuration is in {also})")
+    else:
+        log(f"{name} is kept: it holds the configuration from before the clean start, which this boot does not use "
+            f"(it is also in {also}); delete it once it is not needed")
 
 
 def _put_aside_back(storage: str, aside: str) -> None:
@@ -607,7 +640,7 @@ def hold_after_failed_rollback(result: dict | None, apply) -> dict | None:
                 log("the restore schedule was removed: starting Home Assistant on the configuration as it is")
                 break
             source = result["recovery_source"]
-            _status.update(title="Home Assistant is not started: a restore failed and could not be put back", version=None, started=time.time(),
+            _status.update(title="Home Assistant is not started: a restore failed and could not be put back", version=None, started=time.time(), kind="restore_hold",
                            phase=f"the configuration from before the restore is in backup {source}; retrying every {RESTORE_RETRY_S} s")
             if srv is None:
                 srv = start_status_server()
@@ -630,8 +663,6 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
     booting (a failed install or a fallback boots another one).  Returns the
     version to boot: if a downgrade's restore or clean start did not happen,
     the version the configuration still belongs to."""
-    from jsonio import ha_vkey
-
     for_version = backupkit.pending_for_version(CONFIG_DIR)
     if backupkit.pending(CONFIG_DIR) and for_version and for_version != wanted:
         backupkit.cancel_restore(CONFIG_DIR)
@@ -685,7 +716,8 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
                 return back
             log(f"restoring the configuration for the fallback to {wanted} failed and {back} is not installed; booting {wanted}")
             state.pop("recovery", None)
-    reset = reset_storage_for_rebuild(wanted, restored)
+    last = state.get("last_restore") if isinstance(state.get("last_restore"), dict) else {}
+    reset = reset_storage_for_rebuild(wanted, restored, restored and bool(last.get("ok")) and "storage" in (last.get("parts") or []))
     if not isinstance(change, dict):
         return wanted
     if change.get("to") != wanted:
@@ -694,7 +726,6 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
     mode = change.get("mode")
     # the change's own restore, with .storage (a restore scheduled by hand does not make a downgrade readable),
     # also when it was applied at a boot a power loss interrupted before ha.json recorded the change as applied
-    last = state.get("last_restore") if isinstance(state.get("last_restore"), dict) else {}
     own_now = restored and own_restore and "storage" in restore_parts and last.get("ok")
     own_before = (not restored and last.get("ok") and last.get("for_version") == wanted and "storage" in (last.get("parts") or [])
                   and str(last.get("at") or "") >= str(change.get("at") or ""))

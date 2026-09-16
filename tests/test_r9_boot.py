@@ -6,10 +6,16 @@ import io
 import json
 import os
 import shutil
+import socket
 import tarfile
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
 from unittest import mock
+
+import backupkit
+from tests.test_review_backup import _entrypoint, _volume
 
 
 def _tmp(test):
@@ -116,6 +122,132 @@ class ImportUnpackBudgetTest(unittest.TestCase):
         _ha_backup(self.cfg, [("data/configuration.yaml", 100, tarfile.REGTYPE, None)])
         summary = self.ha_import.inspect_backup(self.cfg, None, {"demo"})
         self.assertEqual(summary["domains"]["demo"]["entries"][0]["entry_id"], "abc")
+
+
+class HeldBootStatusTest(unittest.TestCase):
+    """F13, F14: while a failed restore holds the boot, the page showed the last install's log (to anyone, without
+    a password) and /api/ said installing: true for as long as the retries ran."""
+
+    def setUp(self):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            self.port = s.getsockname()[1]
+        self.cfg = _tmp(self)
+        env = {k: v for k, v in os.environ.items() if k not in ("HRI_PASSWORD", "HRI_PASSWORD_FILE")}
+        env.update(HRI_CONFIG=self.cfg, HRI_PORT=str(self.port))
+        patcher = mock.patch.dict(os.environ, env, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.ep = _entrypoint(self.cfg)
+        os.makedirs(self.ep.STATE_DIR)
+        with open(self.ep.LOG_FILE, "w", encoding="utf-8") as fh:
+            fh.write("# install of Home Assistant 2026.9.2\nCollecting homeassistant==2026.9.2\n")
+
+    def get(self, path):
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}", timeout=5) as resp:
+                return resp.status, resp.read().decode()
+        except urllib.error.HTTPError as err:
+            with err:
+                return err.code, err.read().decode()
+
+    def during_hold(self):
+        """The page and /api/status, fetched from the real hold while it waits for its retry."""
+        seen = {}
+
+        def sleep(_s):
+            seen["page"] = self.get("/")
+            seen["api"] = self.get("/api/status")
+
+        with mock.patch.object(self.ep.time, "sleep", sleep), mock.patch.object(backupkit, "pending", side_effect=[True, True]):
+            self.ep.hold_after_failed_rollback({"ok": False, "recovery_source": "pre-restore.zip"}, lambda: {"ok": True})
+        return seen
+
+    def test_the_hold_page_shows_no_install_log(self):
+        code, body = self.during_hold()["page"]
+        self.assertEqual(code, 503)
+        self.assertIn("could not be put back", body)
+        self.assertIn("pre-restore.zip", body)
+        self.assertNotIn("Collecting homeassistant", body)
+
+    def test_the_hold_page_shows_no_install_log_with_a_password_either(self):
+        os.environ["HRI_PASSWORD"] = "pw"
+        _code, body = self.during_hold()["page"]
+        self.assertNotIn("install log", body)
+        self.assertNotIn("Collecting homeassistant", body)
+
+    def test_the_api_says_what_holds_the_boot(self):
+        code, body = self.during_hold()["api"]
+        self.assertEqual(code, 503)
+        status = json.loads(body)
+        self.assertFalse(status["installing"])
+        self.assertTrue(status["restore_failed"])
+        self.assertIn("restore", status["error"])
+        self.assertNotIn("installing", status["error"])
+
+    def test_an_install_still_shows_its_log_without_a_password_and_says_installing(self):
+        self.ep._status.update(phase="pip install homeassistant==2026.9.2", version="2026.9.2")
+        srv = self.ep.start_status_server()
+        self.addCleanup(self.ep.stop_status_server, srv)
+        self.assertIn("Collecting homeassistant", self.get("/")[1])
+        status = json.loads(self.get("/api/status")[1])
+        self.assertTrue(status["installing"])
+        self.assertFalse(status["restore_failed"])
+        os.environ["HRI_PASSWORD"] = "pw"
+        self.assertNotIn("Collecting homeassistant", self.get("/")[1])
+
+
+class RestoreDuringCleanStartTest(unittest.TestCase):
+    """F15: a restore applied while a clean start waited for its rebuild dropped the plan and left the set-aside
+    .storage (auth tokens, every integration's credentials) on the volume for good."""
+
+    ASIDE = ".storage.pre-rebuild-20260101-000000"
+
+    def setUp(self):
+        self.cfg = _volume()
+        self.addCleanup(shutil.rmtree, self.cfg, True)
+        self.addCleanup(os.environ.pop, "HRI_CONFIG", None)
+        self.ep = _entrypoint(self.cfg)
+        with open(os.path.join(self.cfg, "custom_components", "x", "manifest.json"), "w", encoding="utf-8") as fh:
+            fh.write("{}")
+        self.pre = backupkit.create(self.cfg, "pre-change", storage_version="2026.9.2")["name"]
+        self.aside = os.path.join(self.cfg, self.ASIDE)
+        os.makedirs(self.aside)
+        with open(os.path.join(self.aside, "auth"), "w", encoding="utf-8") as fh:
+            fh.write("refresh tokens")
+        self.logged = []
+
+    def plan(self, stage):
+        with open(self.ep.REBUILD_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"stage": stage, "to": "2026.8.3", "backup": self.pre, "boot_backup": "boot.zip", "aside": self.ASIDE}, fh)
+
+    def boot(self, parts):
+        # the fallback's restore (restore_after_failed_change) of the pre-change backup, for the version it falls back to
+        backupkit.schedule_restore(self.cfg, self.pre, parts, for_version="2026.9.2", force=True)
+        state = {}
+        with mock.patch.object(self.ep, "log", self.logged.append):
+            self.ep.apply_config_changes(state, "2026.9.2", "2026.8.3")
+        self.assertTrue(state["last_restore"]["ok"], state["last_restore"])
+        self.assertFalse(os.path.isfile(self.ep.REBUILD_FILE))
+        return state
+
+    def test_the_set_aside_copy_goes_when_the_restore_replaced_storage(self):
+        self.plan("import")
+        self.boot(["storage"])
+        self.assertFalse(os.path.isdir(self.aside))
+        self.assertTrue(any(self.ASIDE in line and "removed" in line for line in self.logged), self.logged)
+
+    def test_a_copy_an_interrupted_switch_set_aside_goes_too_without_a_failed_put_back(self):
+        self.plan("renaming")  # killed after the rename, before "import" was recorded
+        self.boot(["storage"])
+        self.assertFalse(os.path.isdir(self.aside))
+        self.assertFalse([line for line in self.logged if "putting .storage back failed" in line], self.logged)
+
+    def test_a_restore_that_left_storage_alone_keeps_the_copy_and_says_where_it_is(self):
+        self.plan("import")
+        self.boot(["custom_components"])
+        self.assertTrue(os.path.isfile(os.path.join(self.aside, "auth")))
+        self.assertTrue(any(self.ASIDE in line and "boot.zip" in line for line in self.logged), self.logged)
 
 
 if __name__ == "__main__":
