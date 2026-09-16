@@ -473,6 +473,10 @@ def _arm_stop_watchdog(timeout: float = STOP_WATCHDOG_S) -> threading.Thread:
         writer = sys.modules.get("custom_components.integration_manager.writer")
         if writer is not None and not writer.drain(WATCHDOG_DRAIN_S):
             _LOGGER.critical("JSON saves still pending: exiting without them")
+        # the timeline's own writing thread, for the same reason: os._exit skips the atexit drain
+        events = sys.modules.get("custom_components.integration_manager.events")
+        if events is not None:
+            events.drain(WATCHDOG_DRAIN_S)
         # the line waits in the log queue behind whatever holds the listener up (a blocked stderr):
         # give it a moment, then write it to process.log directly
         if not logbuffer.flush_queue(LOG_FLUSH_S) and (handler := logbuffer.find()) is not None:
@@ -801,6 +805,9 @@ def _exit(rc: int) -> None:
     writer = sys.modules.get("custom_components.integration_manager.writer")  # only if the manager was ever set up
     if writer is not None and not writer.drain(WRITER_DRAIN_S):
         _LOGGER.error("JSON saves still pending %s s after the loop ended: exiting without them", WRITER_DRAIN_S)
+    events = sys.modules.get("custom_components.integration_manager.events")
+    if events is not None and not events.drain(WRITER_DRAIN_S):
+        _LOGGER.error("timeline events still pending %s s after the loop ended: exiting without them", WRITER_DRAIN_S)
     if logbuffer.stop_queue(LOG_FLUSH_S):
         logging.shutdown()  # skipped when a handler is stuck (a blocked stderr): flushing it would hang the exit
         sys.stdout.flush()
