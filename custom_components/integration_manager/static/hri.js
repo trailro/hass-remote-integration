@@ -4,8 +4,12 @@ const _hriFetch=window.fetch.bind(window);
 window.fetch=async(...a)=>{const r=await _hriFetch(...a); if(r.status===401&&location.pathname!=='/login') location.href='/login?next='+encodeURIComponent(location.pathname+location.search); return r;};
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-async function post(url,body){const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body||{})});return r.json();}
-async function del(url){const r=await fetch(url,{method:'DELETE'});return r.json();}
+// X-Requested-With on every call: the endpoints that run or store code (the patch editor) refuse a request without it.
+// A body that is not JSON (a proxy's or aiohttp's plain-text 500) comes back as an error object: r.json() threw, and
+// callers that await without a catch left their buttons disabled and their "checking…" text up for good
+async function _answer(r){const text=await r.text(); try{return JSON.parse(text);}catch(e){const error=`HTTP ${r.status}: ${text.trim().slice(0,200)||r.statusText||'no answer'}`; return {ok:false,error,message:error};}}
+async function post(url,body){return _answer(await fetch(url,{method:'POST',headers:{'content-type':'application/json','X-Requested-With':'fetch'},body:JSON.stringify(body||{})}));}
+async function del(url){return _answer(await fetch(url,{method:'DELETE',headers:{'X-Requested-With':'fetch'}}));}
 const log=m=>{console.log(m); const el=$('#flash'); if(el){el.textContent=m; clearTimeout(el._t); el._t=setTimeout(()=>{el.textContent=''},8000);}};
 function chipBar(sel,counts,on,after){ $(sel).innerHTML=Object.keys(counts).sort().map(k=>`<span class="tag ${on.has(k)?'on':''}" data-k="${esc(k)}">${esc(k)} ${counts[k]}</span>`).join('');
  document.querySelectorAll(sel+' .tag').forEach(t=>t.onclick=()=>{const k=t.dataset.k;on.has(k)?on.delete(k):on.add(k);after();}); }

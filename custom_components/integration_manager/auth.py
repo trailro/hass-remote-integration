@@ -267,9 +267,10 @@ async def async_setup_auth(hass: HomeAssistant) -> Auth:
             return await handler(request)
         legacy = request.cookies.get(LEGACY_COOKIE, "")
         if legacy and auth.valid_session(legacy):  # a session from before the port-specific name: moved over once
+            left = int(legacy.split(".", 1)[0]) - int(time.time())  # valid now, so >= 1; after a long handler it was 0, a Max-Age that deletes the cookie
             response = await handler(request)
             if isinstance(response, web.StreamResponse) and not response.prepared:
-                _set_session_cookie(response, request, legacy, max(0, int(legacy.split(".", 1)[0]) - int(time.time())))
+                _set_session_cookie(response, request, legacy, left)
             return response
         header = request.headers.get("Authorization", "")
         if header.startswith("Bearer "):

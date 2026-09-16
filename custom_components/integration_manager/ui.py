@@ -85,11 +85,11 @@ def topbar(active: str) -> str:
             f'<span class="spacer"></span><span id="tb-chips"></span></nav>')
 
 
-def render(html: str, active: str) -> str:
+def render(page_html: str, active: str) -> str:
     """Inject the stylesheets, the shared script and the bar into a page."""
     page = next((p for path, _, p in PAGES if path == active), "index")
     links = (f'<link rel="stylesheet" href="/static/hri.css?v={ASSET_VERSION}">'
              f'<link rel="stylesheet" href="/static/{page}.css?v={ASSET_VERSION}">')
-    out = html.replace("<!--css-->", links, 1)
+    out = page_html.replace("<!--css-->", links, 1)
     out = out.replace("<!--js-->", f'<script src="/static/{page}.js?v={ASSET_VERSION}"></script>', 1)
     return out.replace("<body>", f'<body><script src="/static/hri.js?v={ASSET_VERSION}"></script>' + topbar(active), 1)

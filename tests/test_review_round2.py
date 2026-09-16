@@ -1,6 +1,5 @@
 """Fixes from the second review round: leftover recovery, power loss after a restore, superseded recovery."""
 
-import importlib
 import json
 import os
 import sys
@@ -8,14 +7,13 @@ import tempfile
 import unittest
 
 from custom_components.integration_manager.ha_updater import HaUpdater
+from tests.fakes import entrypoint_for
 
 
 class BootDecisionsTest(unittest.TestCase):
     def setUp(self):
         self.cfg = tempfile.mkdtemp()
-        os.environ["HRI_CONFIG"] = self.cfg
-        sys.modules.pop("entrypoint", None)
-        self.ep = importlib.import_module("entrypoint")
+        self.ep = entrypoint_for(self, self.cfg)
         os.makedirs(os.path.join(self.cfg, "integration_manager"))
         for version in ("2026.8.3", "2026.9.2"):
             venv = os.path.join(self.cfg, f"venv-{version}")
@@ -24,10 +22,6 @@ class BootDecisionsTest(unittest.TestCase):
                 os.makedirs(os.path.join(venv, folder))
             for marker in (".ok", "bin/python", os.path.join(ha_pkg, "__init__.py")):
                 open(os.path.join(venv, marker), "w").close()
-
-    def tearDown(self):
-        os.environ.pop("HRI_CONFIG", None)
-        sys.modules.pop("entrypoint", None)
 
     def test_leftover_recovery_does_not_stop_a_switch_the_user_scheduled(self):
         state = {"recovery": {"backup": "old.zip", "from": "2026.9.2", "for": "2026.8.3"},

@@ -58,14 +58,15 @@ class ImportUploadView(ManagerView):
         self.hass = hass
 
     async def post(self, request: web.Request) -> web.Response:
+        # before the lock: a request refused for the header must not take it, and turn away a real upload meanwhile
+        if request.headers.get("X-Requested-With") != "fetch":
+            return self.json_message("X-Requested-With: fetch required", status_code=400)
         if _IMPORT_LOCK.locked():
             return self.json({"ok": False, "error": "an import or upload is running: wait for it to finish"})
         async with _IMPORT_LOCK:  # held for the whole upload: an apply starting meanwhile would read files this replaces
             return await self._post(request)
 
     async def _post(self, request: web.Request) -> web.Response:
-        if request.headers.get("X-Requested-With") != "fetch":
-            return self.json_message("X-Requested-With: fetch required", status_code=400)
         if _rebuild_staged(self.hass.config.config_dir):
             return self.json({"ok": False, "error": _REBUILD_MSG})
         reader = await request.multipart()

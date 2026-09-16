@@ -42,7 +42,7 @@ PATCH_DIR = os.path.join("integration_manager", "patches")
 BUNDLED_DIR = os.environ.get("HRI_BUNDLED_PATCHES", "/app/patches")  # shipped with the image, read-only
 _APPLIES_RE = re.compile(r"^\s*#\s*applies-to:\s*(.+?)\s*$", re.M)
 _VERSION_RE = re.compile(r"^\s*#\s*integration-version:\s*(.+?)\s*$", re.M)
-_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,80}\.(py|patch)$")
+_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,80}\.(py|patch)\Z")  # not "$": it matches before a final newline, and "x.py\n" names another file
 
 
 @dataclass
@@ -141,8 +141,10 @@ def _read_text(path: str) -> str:
 
 
 _LOAD_SEQ = itertools.count()
-# (patch, domain, running tag, site-packages, patch mtime, deployed dir mtime) -> status(ctx) of a .py patch: /api/status
-# polls every few seconds and must not import and run each module each time; any apply_all starts over
+# (patch, domain, running tag, site-packages, patch mtime, deployed dir mtime, site-packages mtime) -> status(ctx) of a
+# .py patch: /api/status polls every few seconds and must not import and run each module each time; any apply_all starts
+# over.  The site-packages directory's own mtime is in the key because pip installing, upgrading or removing a package
+# renames its dist-info directory there: a status read against the code pip replaced is not served afterwards
 _PY_STATUS: dict[tuple[Any, ...], str] = {}
 
 
@@ -185,7 +187,7 @@ def _run(config_dir: str, domain: str, site_packages: str, component_dir: str, r
             if name.endswith(".py") and apply:
                 st = str(_load_module(path).apply(ctx))
             elif name.endswith(".py"):
-                key = (path, domain, running_tag, site_packages, _mtime(path), _mtime(component_dir))
+                key = (path, domain, running_tag, site_packages, _mtime(path), _mtime(component_dir), _mtime(site_packages))
                 if (st := _PY_STATUS.get(key)) is None:
                     st = _PY_STATUS[key] = str(_load_module(path).status(ctx))
             else:

@@ -4,7 +4,6 @@ import asyncio
 import io
 import json
 import os
-import sys
 import tarfile
 import tempfile
 import threading
@@ -125,10 +124,6 @@ class NonVersionHaVersionTest(unittest.TestCase):
         self.cfg = _volume()
         _zip(self.cfg, "u.zip", {"ha_version": "unknown"})
 
-    def tearDown(self):
-        os.environ.pop("HRI_CONFIG", None)
-        sys.modules.pop("entrypoint", None)
-
     def test_not_a_version_counts_as_unknown(self):
         with self.assertRaises(backupkit.UnknownVersion):
             backupkit.schedule_restore(self.cfg, "u.zip")
@@ -144,7 +139,7 @@ class NonVersionHaVersionTest(unittest.TestCase):
         jsonio.write_json(os.path.join(self.cfg, backupkit.PENDING_META), {**meta, "ha_version": "unknown", "force": False})
         self.assertIsNone(backupkit.pending_ha_version(self.cfg))
         state = {}
-        _entrypoint(self.cfg).apply_config_changes(state, "2026.8.3", "2026.8.3")
+        _entrypoint(self, self.cfg).apply_config_changes(state, "2026.8.3", "2026.8.3")
         self.assertFalse(backupkit.pending(self.cfg))
         self.assertIn("not forced", state["last_error"])
 
@@ -202,10 +197,6 @@ class SymlinkRestoreTest(unittest.TestCase):
 class FailedRestoreNotRetriedTest(unittest.TestCase):
     """13"""
 
-    def tearDown(self):
-        os.environ.pop("HRI_CONFIG", None)
-        sys.modules.pop("entrypoint", None)
-
     def test_unrecorded_failure_is_marked_and_recorded_at_the_next_boot(self):
         cfg = _volume()
         _zip(cfg, "f.zip", {"ha_version": "2026.8.3"})
@@ -218,7 +209,7 @@ class FailedRestoreNotRetriedTest(unittest.TestCase):
         with mock.patch.object(backupkit, "validate") as validate:
             self.assertIsNone(backupkit.apply_pending(cfg, quiet, record=lambda r: False))
         validate.assert_not_called()
-        ep = _entrypoint(cfg)
+        ep = _entrypoint(self, cfg)
         state = {}
         ep.merge_applied_restore(state)
         self.assertFalse(state["last_restore"]["ok"])
@@ -249,14 +240,12 @@ class HoldAfterFailedRollbackTest(unittest.TestCase):
         self.patches = [mock.patch.object(backupkit.os, "replace", replace), mock.patch.object(backupkit, "_extract_to", extract)]
         for p in self.patches:
             p.start()
-        self.ep = _entrypoint(self.cfg)
+        self.ep = _entrypoint(self, self.cfg)
         self.srv = mock.Mock()
 
     def tearDown(self):
         for p in self.patches:
             p.stop()
-        os.environ.pop("HRI_CONFIG", None)
-        sys.modules.pop("entrypoint", None)
 
     def boot(self, during_sleep):
         sleeps = []

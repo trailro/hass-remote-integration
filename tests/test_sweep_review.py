@@ -1,34 +1,15 @@
 """Full sweep review: install page host rule, oversized hunks, backup ordering, restore retries, temp files."""
 
-import importlib
 import json
 import os
-import sys
 import tempfile
 import time
 import unittest
 import zipfile
-from unittest import mock
 
 import backupkit
 from custom_components.integration_manager import patches
-
-
-def _entrypoint(test, cfg):
-    """entrypoint imported for ``cfg``; the environment and the module other tests imported come back after the test."""
-    env = mock.patch.dict(os.environ, {"HRI_CONFIG": cfg})
-    env.start()
-    test.addCleanup(env.stop)
-    previous = sys.modules.pop("entrypoint", None)
-
-    def restore():
-        if previous is None:
-            sys.modules.pop("entrypoint", None)
-        else:
-            sys.modules["entrypoint"] = previous
-
-    test.addCleanup(restore)
-    return importlib.import_module("entrypoint")
+from tests.fakes import entrypoint_for as _entrypoint
 
 
 def _backup(cfg, name, created, ha="2026.8.3"):

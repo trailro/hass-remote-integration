@@ -38,8 +38,8 @@ def _read(path):
         return fh.read()
 
 
-def _request(body=None):
-    return SimpleNamespace(headers={}, query={}, content_type="application/json",
+def _request(body=None, headers=None):
+    return SimpleNamespace(headers=headers or {}, query={}, content_type="application/json",
                            json=mock.AsyncMock(return_value=body if body is not None else {}))
 
 
@@ -268,7 +268,7 @@ class PatchSaveRaceTest(unittest.TestCase):
     PATCH = "VALUE = {}\ndef apply(ctx):\n    pass\ndef status(ctx):\n    pass\n"
 
     def save(self, value):
-        return self.view.post(_request({"name": "p.py", "text": self.PATCH.format(value)}), domain="demo", op="save")
+        return self.view.post(_request({"name": "p.py", "text": self.PATCH.format(value)}, {"X-Requested-With": "fetch"}), domain="demo", op="save")
 
     def test_each_save_writes_its_own_temporary_file(self):
         seen = []

@@ -1,6 +1,30 @@
-"""Small stand-ins for the installer, the HA updater and the MQTT publisher."""
+"""Small stand-ins for the installer, the HA updater and the MQTT publisher, and entrypoint imported for a test."""
 
+import importlib
+import os
+import sys
 from types import SimpleNamespace
+from unittest import mock
+
+
+def entrypoint_for(test, cfg, **env):
+    """entrypoint imported for ``cfg`` (HRI_CONFIG) and ``env``; the environment and the module other tests imported
+    come back after the test.  entrypoint reads HRI_CONFIG and HRI_PORT at import, and a test that set them and
+    popped them afterwards took the container's own values away from every test after it (auth.COOKIE, computed
+    from the real HRI_PORT, no longer matched what a later test read from the environment)."""
+    patch = mock.patch.dict(os.environ, {"HRI_CONFIG": cfg, **env})
+    patch.start()
+    test.addCleanup(patch.stop)
+    previous = sys.modules.pop("entrypoint", None)
+
+    def restore():
+        if previous is None:
+            sys.modules.pop("entrypoint", None)
+        else:
+            sys.modules["entrypoint"] = previous
+
+    test.addCleanup(restore)
+    return importlib.import_module("entrypoint")
 
 
 class FakeInstaller:

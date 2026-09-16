@@ -18,6 +18,7 @@ import unittest
 from unittest import mock
 
 import logbuffer
+from tests.fakes import entrypoint_for
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 A, B = "2026.8.3", "2026.9.2"
@@ -40,10 +41,7 @@ def make_venv(cfg, version):
 class EntrypointMainBase(unittest.TestCase):
     def setUp(self):
         self.cfg = tempfile.mkdtemp()
-        os.environ["HRI_CONFIG"] = self.cfg
-        sys.modules.pop("entrypoint", None)
-        self.ep = importlib.import_module("entrypoint")
-        self.addCleanup(lambda: (os.environ.pop("HRI_CONFIG", None), sys.modules.pop("entrypoint", None)))
+        self.ep = entrypoint_for(self, self.cfg)
         os.makedirs(self.ep.STATE_DIR, exist_ok=True)
         for v in (A, B):
             make_venv(self.cfg, v)
@@ -157,10 +155,7 @@ class StatusServerTest(unittest.TestCase):
     """HRI-15: the install page's server must release its port, the hold after a failed rollback binds it again."""
 
     def test_second_server_on_the_same_port_after_stop(self):
-        os.environ["HRI_CONFIG"] = tempfile.mkdtemp()
-        sys.modules.pop("entrypoint", None)
-        ep = importlib.import_module("entrypoint")
-        self.addCleanup(lambda: (os.environ.pop("HRI_CONFIG", None), sys.modules.pop("entrypoint", None)))
+        ep = entrypoint_for(self, tempfile.mkdtemp())
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
@@ -209,10 +204,7 @@ class InstallMarkerTest(unittest.TestCase):
     """U2: the .ok marker is durable only after what pip wrote is."""
 
     def test_ok_written_after_a_sync(self):
-        os.environ["HRI_CONFIG"] = tempfile.mkdtemp()
-        sys.modules.pop("entrypoint", None)
-        ep = importlib.import_module("entrypoint")
-        self.addCleanup(lambda: (os.environ.pop("HRI_CONFIG", None), sys.modules.pop("entrypoint", None)))
+        ep = entrypoint_for(self, tempfile.mkdtemp())
         os.makedirs(ep.STATE_DIR, exist_ok=True)
         order = []
 

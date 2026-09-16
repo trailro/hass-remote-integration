@@ -284,6 +284,10 @@ class PatchEditView(ManagerView):
 
     @with_body
     async def post(self, request: web.Request, body: dict[str, Any], domain: str, op: str) -> web.Response:
+        if request.headers.get("X-Requested-With") != "fetch":
+            # check runs the submitted module and save stores code that runs at the next apply: like the
+            # upload, for this UI and not for a request another page can make
+            return self.json_message("X-Requested-With: fetch required", status_code=400)
         name, text = body.get("name"), body.get("text")
         if not _DOMAIN_RE.match(domain) or not isinstance(name, str) or not isinstance(text, str):
             return self.json({"ok": False, "error": "domain, name and text required"})
@@ -468,7 +472,7 @@ class SettingsView(ManagerView):
             url = str(body["parent_ha_url"] or "").strip().rstrip("/")
             if "@" in url:  # user:password@host would be stored and shown in the clear, and sent along with the token
                 return self.json({"ok": False, "error": "parent_ha_url must not contain user@ or user:password@: the token authenticates"})
-            if url and not re.match(r"^https?://[^\s/]+(:\d+)?$", url):
+            if url and not re.fullmatch(r"https?://[^\s/]+", url):  # the host part already takes a :port
                 return self.json({"ok": False, "error": "parent_ha_url must look like http://host:8123 (no path)"})
             new["parent_ha_url"] = url
             if url != str(self.installer.settings.data.get("parent_ha_url") or "") and "parent_ha_token" not in body:

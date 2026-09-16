@@ -4,7 +4,6 @@ stop budget (D1), cancelled boot (D2)."""
 
 import asyncio
 import errno
-import importlib
 import json
 import logging
 import os
@@ -25,6 +24,7 @@ import run
 from custom_components.integration_manager import scheduler as sched_mod
 from custom_components.integration_manager import writer as writer_mod
 from custom_components.integration_manager.installer import Installer
+from tests.fakes import entrypoint_for
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -294,11 +294,7 @@ class BoundedLogQueueTest(unittest.TestCase):
 
 class EntrypointTest(unittest.TestCase):
     def ep(self, cfg):
-        os.environ["HRI_CONFIG"] = cfg
-        sys.modules.pop("entrypoint", None)
-        mod = importlib.import_module("entrypoint")
-        self.addCleanup(lambda: (os.environ.pop("HRI_CONFIG", None), sys.modules.pop("entrypoint", None)))
-        return mod
+        return entrypoint_for(self, cfg)
 
     def test_boot_failure_counted_right_before_exec(self):
         """20: a SIGTERM while old venvs are pruned is not a failed boot."""
