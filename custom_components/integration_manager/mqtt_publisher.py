@@ -1357,7 +1357,7 @@ class MqttPublisher:
             return
         call_prefix = self._call_base() + "/"
         if msg.topic.startswith(call_prefix):
-            if not msg.payload:
+            if not msg.payload.strip():  # whitespace alone is no JSON object either
                 self._reject_empty_call(msg.topic[len(call_prefix):])
                 return
             self._on_call(msg.topic[len(call_prefix):], msg.payload.decode(errors="replace"))
@@ -1667,7 +1667,7 @@ class MqttPublisher:
             self._finish(self._remember("call", f"{domain}.{service}", payload, sent_id), "rejected", denied)
             return
         try:
-            data = _loads_call(payload) if payload.strip() else {}
+            data = _loads_call(payload)
             if not isinstance(data, dict):
                 raise ValueError("payload must be a JSON object")
         except (ValueError, RecursionError) as err:
