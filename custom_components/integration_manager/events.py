@@ -5,14 +5,14 @@ switch/rollback/smoke/restart), the MQTT publisher (connect/disconnect,
 health verdict changes), the cutover and the HA updater.  Read by
 ``GET /api/events`` for the Manager page and by the diagnostics zip.
 
-Thread-safe: paho's callbacks append from their own thread.  An event added on
-the event loop is written by a thread of its own (file I/O must not hold the
-loop up); one added on any other thread is written there, after what the loop
-queued before it.  A read waits for what was added before it."""
+Thread-safe: paho's callbacks append from their own thread.  Every event is
+written by a thread of its own, in the order added, from the event loop or any
+other thread: neither file I/O nor a backlog may hold up the loop or paho's
+network thread.  A read waits for what was added before it; run.py drains the
+queue before the process exits."""
 
 from __future__ import annotations
 
-import asyncio
 import atexit
 import json
 import logging
@@ -41,14 +41,7 @@ class Events:
         if data:
             rec["data"] = data
         line = json.dumps(rec, ensure_ascii=False, default=str) + "\n"
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            drain(READ_DRAIN_S)  # what the loop queued before this event goes first
-            with _APPEND:
-                self._append(line)
-        else:
-            _submit(self, line)
+        _submit(self, line)  # one queue: the order events were added in is the order they are written in
         _LOGGER.info("event %s: %s", kind, message)
         return rec
 

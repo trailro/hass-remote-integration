@@ -4,12 +4,16 @@ flip was lost.  m5: the value of a text entity in password mode was kept in clea
 and the log.  D2: an entity moved into a device whose config is over the broker's maximum rescheduled the discovery pass
 every 5 s for good.  C11: a whitespace-only call payload ran the service with no data.
 C13: a live discovery-prefix change swept every retained entity document, not only the discovery configs.  C14: a call
-payload was parsed up to four times on paho's thread.  Every test fails on the tree
+payload was parsed up to four times on paho's thread.  C15: an event added off the loop (paho's thread) waited up to
+5 s for the timeline's backlog.  Every test fails on the tree
 before its fix."""
 
 import asyncio
 import json
+import os
+import shutil
 import socket
+import tempfile
 import threading
 import time
 import unittest
@@ -20,6 +24,7 @@ import paho.mqtt.client as mqtt
 from paho.mqtt.packettypes import PacketTypes
 from paho.mqtt.reasoncodes import ReasonCode
 
+from custom_components.integration_manager import events
 from custom_components.integration_manager import mqtt_publisher as mp
 from tests import test_camp_publish as camp
 
@@ -586,6 +591,52 @@ class CallParsedOnceTest(unittest.TestCase):
         self.assertEqual(reads, 1)
         self.assertIn("bad payload", pub.history[-1]["error"])
         self.assertNotIn("1234", pub.history[-1]["data"])
+
+
+class EventsOffTheLoopTest(unittest.TestCase):
+    """C15: paho's callbacks emit events; one added behind a slow write held the network thread up to 5 s."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.store = events.Events(os.path.join(self.dir, "events.jsonl"))
+        self.assertTrue(events.drain(5), "an earlier test left events that are never written")
+
+    def test_an_event_off_the_loop_does_not_wait_for_the_backlog(self):
+        gate = threading.Event()
+        self.addCleanup(lambda: (gate.set(), events.drain(10)))
+        real = self.store._append
+
+        def slow(line):
+            gate.wait(10)  # a volume that hangs for a moment
+            real(line)
+
+        async def on_the_loop():
+            self.store.add("mqtt", "first, from the loop")
+
+        with mock.patch.object(self.store, "_append", slow):
+            asyncio.run(on_the_loop())
+            t0 = time.monotonic()
+            done = []
+            paho = threading.Thread(target=lambda: (self.store.add("mqtt", "second, from paho"), done.append(time.monotonic() - t0)))
+            paho.start()
+            paho.join(3)
+            self.assertEqual(len(done), 1, "the paho thread was still inside events.add")
+            self.assertLess(done[0], 0.5)
+            gate.set()
+            self.assertTrue(events.drain(5))
+        self.assertEqual([r["message"] for r in self.store.recent()], ["first, from the loop", "second, from paho"])
+
+    def test_the_order_holds_across_threads(self):
+        async def on_the_loop(i):
+            self.store.add("mqtt", f"m{i}")
+
+        for i in range(20):
+            if i % 2:
+                asyncio.run(on_the_loop(i))
+            else:
+                self.store.add("mqtt", f"m{i}")
+        self.assertEqual([r["message"] for r in self.store.recent()], [f"m{i}" for i in range(20)])
 
 
 if __name__ == "__main__":
