@@ -1111,7 +1111,9 @@ when `.storage` is restored.
 
 - **The page keeps showing the installation progress.** The first start
   downloads Home Assistant; a slow connection can take several minutes. The
-  container log (`docker logs <name>`) shows pip's progress. An install that
+  container log (`docker logs <name>`) shows pip's progress. While it runs the
+  page and every `/api/` path answer `503` (the manager API does not exist
+  yet), so a healthcheck does not call the container healthy. An install that
   has not finished after 30 minutes fails: the container starts the Home
   Assistant version it already had, or, on a first start, exits and Docker
   starts it again.
