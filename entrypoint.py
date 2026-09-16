@@ -9,8 +9,9 @@ recreation.  The manager UI changes the wanted version in
 does the rest, keeps the previous venv for rollback, and falls back to the
 last working venv if an install fails (the UI then shows the error).
 
-While installing (a few minutes on first boot) a tiny status page answers
-on the manager port so the browser is not left with a connection error.
+Until Home Assistant is exec'd (an install takes a few minutes on first boot)
+a tiny status page answers on the manager port so the browser is not left
+with a connection error.
 """
 
 from __future__ import annotations
