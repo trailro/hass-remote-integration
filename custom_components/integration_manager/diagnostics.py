@@ -2,7 +2,8 @@
 manifest, requirement versions, patches, health, MQTT/HA/manager status,
 a memory snapshot, the last log records and the tail of the integration's newest log file.  Secrets are
 scrubbed (values of keys that look like passwords/tokens, the GitHub token,
-the MQTT password); settings.json and mqtt.json are never included."""
+the MQTT password, the text of a log search in a request line); settings.json
+and mqtt.json are never included."""
 
 from __future__ import annotations
 
@@ -87,6 +88,9 @@ def scrub(value: Any) -> Any:
 def _scrub_one_line_rules(value: str) -> str:
     """Every rule whose match stays within one line; the PEM block is the one
     that spans lines and is masked by the caller."""
+    # the log search text and credentials in a URL: process.log no longer receives them (logbuffer masks them
+    # before a record is written), but lines written by an older version still hold them
+    value = logbuffer.mask_query_secrets(value)
     value = _COOKIE_TEXT.sub(lambda m: m.group(1) + (m.group(2)[0] + "***" + m.group(2)[0] if m.group(2)[:1] in ('"', "'") else "***"), value)
     if _SECRET_TEXT_HINT.search(value):
         value = _SECRET_TEXT.sub(lambda m: m.group(1) + (m.group(2)[0] + "***" + m.group(2)[0] if m.group(2)[:1] in ('"', "'") else "***"), value)
