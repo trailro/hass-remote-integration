@@ -13,7 +13,10 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+import asyncio
+
 import run
+from custom_components.integration_manager import build_views, views
 from custom_components.integration_manager import installer as installer_mod
 from custom_components.integration_manager import patches
 from custom_components.integration_manager.installer import Installer
@@ -160,6 +163,66 @@ class DeployLeftoverTest(R12InstallerCase):
                 inst._deploy("demo", "2.0.0")
         self.assertEqual(os.listdir(self.cc), ["demo"])
         self.assertEqual(inst.installed_manifest("demo")["version"], "1.0.0")
+
+
+def _request(body):
+    return SimpleNamespace(headers={}, query={}, content_type="application/json", json=mock.AsyncMock(return_value=body))
+
+
+class ManagerDomainTest(R12InstallerCase):
+    """m10: integration_manager is never a managed integration."""
+
+    def test_registry(self):
+        inst = self.installer()
+        with self.assertRaisesRegex(ValueError, "this manager itself"):
+            inst.add_to_registry("integration_manager", "owner/repo")
+        res = json.loads(asyncio.run(views.RegistryView(inst).post(_request({"domain": "Integration_Manager", "repo": "owner/repo"}))).body)
+        self.assertFalse(res["ok"])
+        self.assertIn("this manager itself", res["error"])
+        self.assertFalse(os.path.exists(inst.user_registry_file))
+        # a hand-edited registry entry is ignored
+        with open(inst.user_registry_file, "w", encoding="utf-8") as fh:
+            json.dump({"integrations": {"integration_manager": {"repo": "owner/repo"}, "demo": {"repo": "owner/demo"}}}, fh)
+        with self.assertLogs(installer_mod._LOGGER, "WARNING"):
+            registry = inst.registry()
+        self.assertIn("demo", registry)
+        self.assertNotIn("integration_manager", registry)
+
+    def test_build_check_refuses_and_registers_nothing(self):
+        inst = self.installer()
+        check = object.__new__(build_views.BuildCheckView)
+        check.hass, check.installer, check.updater, check._checks = None, inst, None, {}
+        with self.assertRaisesRegex(ValueError, "this manager itself"):
+            asyncio.run(check._resolve({"domain": "integration_manager", "repo": "owner/repo", "ref": "main"}))
+        self.assertFalse(os.path.exists(inst.user_registry_file))
+
+    def test_install_start_uninstall_install_local(self):
+        tag = "1.0.0"
+        inst = self.installer({"domain": "integration_manager", "installed": {
+            "integration_manager": {"versions": {tag: {"requirements": []}}, "running_tag": tag}}})
+        self.store(inst, "integration_manager", tag)
+        os.makedirs(os.path.join(self.cc, "integration_manager"))
+        with open(inst.user_registry_file, "w", encoding="utf-8") as fh:
+            json.dump({"integrations": {"integration_manager": {"repo": "owner/repo"}}}, fh)
+        for call in (lambda: inst.install(tag, domain="integration_manager"),
+                     lambda: inst.install_local("integration_manager"),
+                     lambda: inst.start("integration_manager", tag),
+                     lambda: inst.uninstall("integration_manager")):
+            res = asyncio.run(call())
+            self.assertFalse(res["ok"])
+            self.assertIn("this manager itself", res["error"])
+        self.assertFalse(inst.busy)
+        self.assertTrue(os.path.isdir(os.path.join(self.cc, "integration_manager")))
+
+    def test_dev_candidates_leave_the_manager_out(self):
+        inst = self.installer()
+        src = os.path.join(self.dir, "src")
+        for domain in ("integration_manager", "demo"):
+            os.makedirs(os.path.join(src, "custom_components", domain))
+            with open(os.path.join(src, "custom_components", domain, "manifest.json"), "w", encoding="utf-8") as fh:
+                json.dump({"domain": domain, "version": "1.0.0"}, fh)
+        with mock.patch.dict(inst.settings.data, {"dev_source_dir": src}):
+            self.assertEqual([c["domain"] for c in inst.dev_candidates()["candidates"]], ["demo"])
 
 
 class BootSweepTest(unittest.TestCase):

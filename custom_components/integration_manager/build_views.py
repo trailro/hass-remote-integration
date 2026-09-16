@@ -27,7 +27,7 @@ from homeassistant.core import HomeAssistant
 from . import events, preflight
 from .ha_updater import HaUpdater
 from .http_util import ManagerView, with_body
-from .installer import Installer
+from .installer import Installer, manager_domain_error
 from .ui import load_template, render
 
 _DOMAIN_RE = re.compile(r"^[a-z0-9_]{1,64}\Z")
@@ -177,6 +177,8 @@ class BuildCheckView(ManagerView):
         ha = str(body.get("ha", "") or "").strip()
         if not _DOMAIN_RE.match(domain) or not _ok_ref(ref):
             raise ValueError("domain and ref (release tag, branch or commit) are required")
+        if (why := manager_domain_error(domain)):
+            raise ValueError(why)
         if ha and not _HA_RE.match(ha):
             raise ValueError("bad Home Assistant version")
         spec = self.installer.spec(domain)

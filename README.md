@@ -739,7 +739,8 @@ HRI_DEV_SRC=/path/to/your/checkout docker compose \
 list it, or leave it out if you do not have one.)
 
 The directory is mounted read-only at `/dev-src`. The **Install** page lists
-every `manifest.json` it finds there; *Install as local* copies it into the
+every `manifest.json` it finds there (except the manager's own
+`integration_manager`); *Install as local* copies it into the
 version store as version `local`, which you start like any other. *Reinstall +
 restart* refreshes the running copy after you edit the code. Symbolic links in
 the directory are skipped, never followed, and the limits of a release archive
@@ -1200,6 +1201,9 @@ used, with a warning in the log.
 A registry entry in `integration_manager/registry.json` has this shape; only
 `repo` is required. A file of another shape is ignored, with a line in the log
 saying what was expected: a hand edit cannot keep the container from starting.
+The domain `integration_manager` is the manager itself: it is refused in the
+registry (an entry for it is ignored, with a warning), and never installed,
+started or uninstalled.
 A `state.json` that cannot be read is kept as `state.json.corrupt-<stamp>` (the
 newest three), the loss is reported on the timeline and as a notification, and
 the manager adopts what it finds on disk: when exactly one integration has
