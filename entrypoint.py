@@ -984,5 +984,14 @@ def _prepare() -> str:
     return python
 
 
+def _on_sigterm(signum: int, _frame) -> None:
+    """PID 1 without an init ignores SIGTERM unless it handles it: `docker stop` during an install waited the whole
+    grace period.  SystemExit unwinds like Ctrl-C does: _run_pip kills pip's process group, a restore being applied
+    keeps its schedule for the next boot, the status server is stopped.  The exec resets the handler for run.py."""
+    log(f"signal {signum}: stopping before Home Assistant starts")
+    raise SystemExit(128 + signum)
+
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, _on_sigterm)
     main()
