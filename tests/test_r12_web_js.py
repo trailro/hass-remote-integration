@@ -39,6 +39,13 @@ class PagesTest(unittest.TestCase):
     def test_a_recorded_logout_leaves_without_a_word(self):
         self.assertEqual(self.out["logout"]["recorded"], {"alerts": [], "sent": ["/api/logout"], "href": "/login"})
 
+    def test_a_refused_subscription_shows_while_connected(self):
+        refused = self.out["mqconn"]["refused"]
+        self.assertIn("connected", refused["text"])
+        self.assertIn("subscription refused: <b>cmd/#</b> (Not authorized)", refused["text"])
+        self.assertEqual(refused["bold"], 0)
+        self.assertNotIn("refused", self.out["mqconn"]["fine"]["text"])
+
     def test_the_target_domains_are_text(self):
         self.assertEqual(self.out["target_domains"], {
             "images": 0, "label": "target entity_id(s) comma separated · <img src=x onerror=alert(1)>/light, switch"})

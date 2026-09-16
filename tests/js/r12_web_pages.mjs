@@ -34,4 +34,16 @@ const out = {};
   const label = x.querySelectorAll('label')[0];
   out.target_domains = { images: x.querySelectorAll('img').length, label: label ? label.textContent : null };
 }
+{  // m3: a subscription the broker refused shows while connected (state keeps flowing, commands do not)
+  const line = read('mqtt.js').split('\n').find(l => l.trimStart().startsWith("$('#mqconn').innerHTML="));
+  out.mqconn = {};
+  for (const [name, s] of Object.entries({
+    refused: { enabled: true, connected: true, protocol: 'MQTT 5', subscribe_error: 'subscription refused: <b>cmd/#</b> (Not authorized)' },
+    fine: { enabled: true, connected: true, protocol: 'MQTT 5', subscribe_error: '' },
+  })) {
+    const el = new El('div');
+    new Function('$', 'esc', 's', 'skipped', line)(() => el, pageEsc(path.join(STATIC, 'mqtt.js')), s, '');
+    out.mqconn[name] = { text: el.textContent, bold: el.querySelectorAll('b').length };
+  }
+}
 console.log(JSON.stringify(out));
