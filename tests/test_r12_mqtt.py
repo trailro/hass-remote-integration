@@ -1,7 +1,8 @@
 """Twelfth review, MQTT side.  m3: a SUBACK refusing the command topics left the connection "connected" with no error,
 and paho's own log was never enabled.  m4: "online" went out before the SUBSCRIBE, so a command sent at the availability
 flip was lost.  m5: the value of a text entity in password mode was kept in clear in the command history, the status
-and the log.  Every test fails on the tree before its fix."""
+and the log.  D2: an entity moved into a device whose config is over the broker's maximum rescheduled the discovery pass
+every 5 s for good.  Every test fails on the tree before its fix."""
 
 import asyncio
 import json
@@ -427,6 +428,48 @@ class PasswordTextTest(unittest.IsolatedAsyncioTestCase):
         for task in self.tasks:
             task.cancel()
 
+
+class MovedIntoOversizedDeviceTest(unittest.TestCase):
+    """D2: the device that took an entity over is sent again 5 s later.  While the old owner's config cannot be published
+    (over the broker's maximum), the map keeps the entity there, so every pass saw the move again and scheduled the next."""
+
+    def _run(self, discovery_map, groups):
+        pub = camp._publisher(discovery_enabled=True)
+        pub._orphan_sweep_due, pub._boot_components = False, None
+        pub._blocks = {}
+        pub._broker_max_packet = 4096
+        pub._discovery_map = discovery_map
+        scheduled = []
+        pub.hass.loop.call_later = lambda delay, fn, *args: scheduled.append((fn, args))
+        passes = 0
+        with mock.patch.object(mp.MqttPublisher, "_announced_groups", return_value=(groups, {"mirrored": 0, "disabled": 0})), \
+                mock.patch.object(mp.events, "emit"), self.assertLogs(mp._LOGGER, "ERROR"):
+            pub._publish_discovery_all()
+            first = len(scheduled)
+            while scheduled and passes < 5:
+                fn, args = scheduled.pop()
+                fn(*args)
+                passes += 1
+        return pub, first, passes, scheduled
+
+    def test_an_oversized_old_owner_does_not_loop(self):
+        small = {"platform": "sensor", "unique_id": "u", "state_topic": "t"}
+        big = {**small, "json_attributes_template": "x" * 5000}
+        discovery_map = {"dev_b": {"sensor.e3": small}, "dev_a": {"sensor.e1": small, "sensor.e2": small}}
+        groups = {"dev_a": ({"name": "a"}, {"sensor.e2": big}), "dev_b": ({"name": "b"}, {"sensor.e3": small, "sensor.e1": small})}
+        pub, first, passes, scheduled = self._run(discovery_map, groups)
+        self.assertEqual(first, 1)  # the move itself is sent again once
+        self.assertEqual((passes, scheduled), (1, []), "the follow-up pass scheduled yet another one")
+        self.assertIn("homeassistant/device/dev_a/config", pub.stats["last_oversized"])
+
+    def test_an_oversized_new_owner_does_not_loop(self):
+        small = {"platform": "sensor", "unique_id": "u", "state_topic": "t"}
+        big = {**small, "json_attributes_template": "x" * 5000}
+        discovery_map = {"dev_a": {"sensor.e1": small, "sensor.e2": small}}
+        groups = {"dev_a": ({"name": "a"}, {"sensor.e2": small}), "dev_b": ({"name": "b"}, {"sensor.e1": big})}
+        _pub, _first, passes, scheduled = self._run(discovery_map, groups)
+        self.assertLessEqual(passes, 1)
+        self.assertEqual(scheduled, [])
 
 if __name__ == "__main__":
     unittest.main()

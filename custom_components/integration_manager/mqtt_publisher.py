@@ -2074,7 +2074,7 @@ class MqttPublisher:
         # not published (disconnected/moving): the map keeps the old components,
         # so the next full republish computes the removal forms again
 
-    def _publish_discovery_all(self) -> None:
+    def _publish_discovery_all(self, follow_up: bool = True) -> None:
         if not self.config.discovery_enabled:
             return  # e.g. a delayed republish that lands after an undo
         groups, counts = self._announced_groups()
@@ -2099,10 +2099,12 @@ class MqttPublisher:
         for disc_id in sorted(groups, key=lambda d: (d not in with_removals, depth(d))):
             block, comps = groups[disc_id]
             self._publish_device_discovery(disc_id, block, comps)
-        if moved_in and self._connected:
+        if moved_in and self._connected and follow_up:
             for did in moved_in:
                 self._last_hash.pop(self._discovery_topic(did), None)
-            self.hass.loop.call_soon_threadsafe(lambda: self.hass.loop.call_later(5, self._publish_discovery_all))
+            # once: while a config cannot be published (over the broker's maximum) the map keeps the old owner, and the
+            # move shows again in every pass; the next registry refresh or full republish tries again
+            self.hass.loop.call_soon_threadsafe(lambda: self.hass.loop.call_later(5, self._publish_discovery_all, False))
         self.stats["discovery_devices"] = len(groups)
         self.stats["discovery_components"] = sum(len(c) for _, c in groups.values())
         self.stats["discovery_mirrored"] = counts["mirrored"]
