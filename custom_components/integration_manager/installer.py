@@ -1295,7 +1295,20 @@ class Installer:
         try:
             h = self.health_source(grace=False) if self.health_source else self.health()
         except Exception as err:  # noqa: BLE001
-            h = {"state": "error", "reason": f"health check failed: {err}"}
+            # the manager's own check broke, not necessarily the version: never a reason for a rollback
+            pending = self._smoke_pending if isinstance(self._smoke_pending, dict) else {}
+            failures = int(pending.get("health_failures") or 0) + 1
+            h = {"state": "unknown", "reason": f"the health check failed {failures} times: {type(err).__name__}: {err}"}
+            if not hung and failures <= self.SMOKE_HEALTH_RETRIES:
+                _LOGGER.warning("smoke test %s %s: the health check failed (%s: %s); checked again in 60 s", domain, tag, type(err).__name__, err)
+                events.emit("smoke", f"{domain} {tag}: the health check failed ({type(err).__name__}: {err}); cannot judge, checked again in 60 s",
+                            domain=domain, tag=tag, state="unknown")
+                self._smoke_pending = {"auto_rollback": can_rollback and self.settings.bool_("auto_rollback"), **pending,
+                                       "domain": domain, "tag": tag, "health_failures": failures,
+                                       "at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() + 60))}
+                self._smoke_handle = self.hass.loop.call_later(
+                    60, lambda: self.hass.async_create_task(self._smoke_check(domain, tag, can_rollback)))
+                return
         if hung:
             # Home Assistant puts no timeout on an entry's setup: a version that never finishes it is broken
             h = {**h, "state": "error", "reason": f"config entry still setting up after {int(waited)} s"}
@@ -1324,7 +1337,8 @@ class Installer:
         # older version would not bring back; a rollback (restore + restart) is only for a version that does not set up
         degraded = h.get("state") == "degraded"
         unconfigured = h.get("state") == "unconfigured"
-        rollback = not ok and not degraded and not unconfigured and can_rollback and self.settings.bool_("auto_rollback")
+        unknown = h.get("state") == "unknown"  # the health check itself kept failing: nothing is known about the version
+        rollback = not ok and not degraded and not unconfigured and not unknown and can_rollback and self.settings.bool_("auto_rollback")
         if ok:
             await self.async_finish_change_report(domain, tag)
             prev = self.state.last_smoke if isinstance(self.state.last_smoke, dict) else {}
@@ -2259,6 +2273,7 @@ class Installer:
 
     LOCAL_TAG = "local"
     SETUP_WAIT_S = 900  # a config entry still setting up after this long is judged, not waited for any more
+    SMOKE_HEALTH_RETRIES = 3  # a health check that raises is no verdict: tried again this many times, 60 s apart
 
     def dev_candidates(self) -> dict[str, Any]:
         """Blocking: what the dev source directory offers: every

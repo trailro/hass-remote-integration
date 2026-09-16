@@ -19,7 +19,7 @@ import run
 from custom_components.integration_manager import build_views, views
 from custom_components.integration_manager import installer as installer_mod
 from custom_components.integration_manager import patches
-from custom_components.integration_manager.installer import Installer
+from custom_components.integration_manager.installer import Installer, State
 
 TWIN = ["# twin", "def twin():", "    x = 0", "    return 1", "    y = 0", "# end", "pass"]
 INSERTED = [f"added_{i} = {i}" for i in range(60)]
@@ -318,6 +318,70 @@ class YamlSaveRaceTest(R12InstallerCase):
         self.assertEqual(os.listdir(os.path.dirname(inst.yaml_path("demo"))), ["demo.yaml"])
         self.assertEqual(inst.yaml_write("demo", "  \n"), {"keys": 0, "removed": True})
         self.assertEqual(os.listdir(os.path.dirname(inst.yaml_path("demo"))), [])
+
+
+class SmokeHealthExceptionTest(unittest.TestCase):
+    """D1: a health check that raises is no verdict, and never a reason for a rollback."""
+
+    def _installer(self, health):
+        inst = object.__new__(Installer)
+        inst.state = State(domain="demo", installed={"demo": {"versions": {"1.0": {}, "2.0": {}}, "running_tag": "2.0"}},
+                           pending_smoke={"domain": "demo", "tag": "2.0", "can_rollback": True})
+        inst.hass = SimpleNamespace(is_running=True, loop=mock.Mock(), async_create_task=mock.Mock())
+        inst.settings = SimpleNamespace(int_=lambda key, lo, hi: 300, bool_=lambda key: True)
+        inst.busy = False
+        inst._smoke_handle, inst._smoke_waiting, inst._smoke_rechecked = None, {}, set()
+        inst._smoke_pending = {"domain": "demo", "tag": "2.0", "at": "2026-01-01T00:00:00", "auto_rollback": True}
+        entry = SimpleNamespace(state=SimpleNamespace(value="loaded"), disabled_by=None, title="Hub")
+        inst._entries_of = lambda dom: [entry]
+        inst.health_source = health
+        inst._save_state = lambda: None
+        inst.rollback_full = mock.AsyncMock(return_value={"ok": True, "tag": "1.0", "restore": "b.zip"})
+        inst.restart = mock.AsyncMock()
+        inst.announce_smoke = mock.Mock()
+        inst.async_finish_change_report = mock.AsyncMock()
+        inst._dismiss_smoke_notification = mock.Mock()
+        inst._notify_yaml_imported = mock.Mock()
+        return inst
+
+    @staticmethod
+    def broken(grace):
+        raise RuntimeError("entity registry not loaded")
+
+    def test_retried_then_unknown_without_rollback(self):
+        inst = self._installer(self.broken)
+        with mock.patch.object(installer_mod.events, "emit") as emit:
+            for n in range(1, getattr(Installer, "SMOKE_HEALTH_RETRIES", 3) + 1):
+                asyncio.run(inst._smoke_check("demo", "2.0", True))
+                self.assertIsNone(inst.state.last_smoke)
+                self.assertIsNotNone(inst.state.pending_smoke)
+                self.assertEqual(inst._smoke_pending["health_failures"], n)
+                self.assertEqual(inst.hass.loop.call_later.call_args.args[0], 60)
+                self.assertIn("cannot judge", emit.call_args.args[1])
+            asyncio.run(inst._smoke_check("demo", "2.0", True))
+        inst.rollback_full.assert_not_awaited()
+        inst.restart.assert_not_awaited()
+        self.assertEqual((inst.state.last_smoke["state"], inst.state.last_smoke["action"]), ("unknown", "none"))
+        self.assertIn("RuntimeError: entity registry not loaded", inst.state.last_error)
+        self.assertIsNone(inst.state.pending_smoke)
+        self.assertEqual(inst.hass.loop.call_later.call_count, getattr(Installer, "SMOKE_HEALTH_RETRIES", 3))
+
+    def test_a_check_that_recovers_judges_normally(self):
+        calls = []
+
+        def flaky(grace):
+            calls.append(grace)
+            if len(calls) == 1:
+                raise OSError(28, "No space left on device")
+            return {"state": "ok", "reason": ""}
+
+        inst = self._installer(flaky)
+        with mock.patch.object(installer_mod.events, "emit"):
+            asyncio.run(inst._smoke_check("demo", "2.0", True))
+            self.assertIsNone(inst.state.last_smoke)
+            asyncio.run(inst._smoke_check("demo", "2.0", True))
+        self.assertEqual(inst.state.last_smoke["state"], "ok")
+        inst.rollback_full.assert_not_awaited()
 
 
 class BootSweepTest(unittest.TestCase):
