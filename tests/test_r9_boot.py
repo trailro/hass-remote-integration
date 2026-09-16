@@ -176,8 +176,8 @@ class HeldBootStatusTest(unittest.TestCase):
         self.assertNotIn("Collecting homeassistant", body)
 
     def test_the_hold_page_shows_no_install_log_with_a_password_either(self):
-        os.environ["HRI_PASSWORD"] = "pw"
-        _code, body = self.during_hold()["page"]
+        with mock.patch.dict(os.environ, {"HRI_PASSWORD": "pw"}):
+            _code, body = self.during_hold()["page"]
         self.assertNotIn("install log", body)
         self.assertNotIn("Collecting homeassistant", body)
 
@@ -198,8 +198,8 @@ class HeldBootStatusTest(unittest.TestCase):
         status = json.loads(self.get("/api/status")[1])
         self.assertTrue(status["installing"])
         self.assertFalse(status["restore_failed"])
-        os.environ["HRI_PASSWORD"] = "pw"
-        self.assertNotIn("Collecting homeassistant", self.get("/")[1])
+        with mock.patch.dict(os.environ, {"HRI_PASSWORD": "pw"}):
+            self.assertNotIn("Collecting homeassistant", self.get("/")[1])
 
 
 class RestoreDuringCleanStartTest(unittest.TestCase):
