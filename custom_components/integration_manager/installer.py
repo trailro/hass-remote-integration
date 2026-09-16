@@ -69,6 +69,7 @@ _DOMAIN_RE = re.compile(r"^[a-z0-9_]{1,64}\Z")  # \Z: "$" also matches before a 
 _TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+@-]{0,100}\Z")  # as the views check a tag
 SCRATCH_PREFIXES = (".staging-", ".old-", ".preflight-")  # never a tag: tags do not start with a dot
 SCRATCH_MAX_AGE_S = 3600
+PRE_RESTORE_GRACE_S = 7 * 86400  # as backupkit's upload grace: a restore proves itself wrong within days
 
 
 def tag_ok(tag: Any) -> bool:
@@ -176,6 +177,15 @@ def _mtime(path: str) -> int:
         return os.stat(path).st_mtime_ns
     except OSError:
         return -1
+
+
+def _within(stamp: Any, window_s: int) -> bool:
+    """Whether an ha.json timestamp is younger than `window_s`; an unreadable
+    one counts as young, so a missing date never drops a protection."""
+    try:
+        return time.time() - time.mktime(time.strptime(str(stamp)[:19], "%Y-%m-%dT%H:%M:%S")) < window_s
+    except (TypeError, ValueError):
+        return True
 
 
 _DELAYED_STORES: "weakref.WeakSet[Any]" = weakref.WeakSet()
@@ -543,6 +553,12 @@ class Installer:
         last_restore = ha_state.get("last_restore") if isinstance(ha_state, dict) else None
         if isinstance(last_restore, dict) and last_restore.get("backup"):
             out.add(str(last_restore["backup"]))  # just restored: the first start after it must not prune it away  # a failed switch comes back from it, retried at every fallback
+        if isinstance(last_restore, dict) and last_restore.get("pre_restore") and _within(last_restore.get("at"), PRE_RESTORE_GRACE_S):
+            # the copy of what the restore replaced: the only way back from it once restore-pending.json is
+            # gone (deleted as soon as the restore succeeds).  Not pinned for good like the source the user
+            # picked: ha.json keeps last_restore forever, so an automatic copy would hold a keep slot and
+            # refuse deletion for the life of the instance
+            out.add(str(last_restore["pre_restore"]))
         plan = jsonio.read_json(os.path.join(self.state_dir, "rebuild-pending.json"), {}) or {}
         if isinstance(plan, dict):
             for key in ("backup", "boot_backup"):  # boot_backup: taken by the entrypoint right before the clean start
