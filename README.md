@@ -858,7 +858,10 @@ hass_<domain>/manager/result                        outcome of a manager action,
   command, call or result topics.
 - **Commands**: numeric command topics accept only finite numbers. Text
   values, notify messages and select options are used exactly as sent, spaces
-  included. The two bounds of a thermostat range change arrive as two
+  included. The value sent to a `text` entity in password mode, on its command
+  topic or with `text.set_value`, shows as `***` in the command history, the
+  status and the log, also inside a service error that quotes it (the result
+  sent back to the caller keeps it). The two bounds of a thermostat range change arrive as two
   commands and become one service call: the first waits up to 1 s for the
   second. An alarm panel with a code asks for it on the main HA and sends it
   with the action. The state topic of a switch, light, fan, siren or

@@ -1,11 +1,15 @@
 """Twelfth review, MQTT side.  m3: a SUBACK refusing the command topics left the connection "connected" with no error,
 and paho's own log was never enabled.  m4: "online" went out before the SUBSCRIBE, so a command sent at the availability
-flip was lost.  Every test fails on the tree before its fix."""
+flip was lost.  m5: the value of a text entity in password mode was kept in clear in the command history, the status
+and the log.  Every test fails on the tree before its fix."""
 
+import asyncio
+import json
 import socket
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import paho.mqtt.client as mqtt
@@ -342,6 +346,86 @@ class OverdueDoubleTest(unittest.TestCase):
         pub._stopping = True
         pub._on_subscribe(client, None, 7, _suback(1, 1, 1))
         self.assertEqual(client.published, [])
+
+
+class PasswordTextTest(unittest.IsolatedAsyncioTestCase):
+    """m5: discovery announces a text entity in password mode as one; what is typed into it stays out of every record."""
+
+    def setUp(self):
+        self.pub = camp._publisher()
+        modes = {"text.pw": "password", "text.plain": "text"}
+        self.pub.hass.states.get = lambda eid: SimpleNamespace(attributes={"mode": modes[eid]}) if eid in modes else None
+        self.pub._topics = {"text.pw": "t1", "text.plain": "t2", "text.later": "t3"}
+        self.pub.stats.update(commands=0, last_command=None)
+        self.tasks = []
+
+        def create(coro):
+            task = asyncio.ensure_future(coro)
+            self.tasks.append(task)
+            return task
+
+        self.pub.hass.async_create_task = create
+
+    def _command(self, object_id, value):
+        self.pub._handle_message(SimpleNamespace(topic=f"{BASE}/cmd/text/{object_id}/value", payload=value.encode(), retain=False))
+
+    def _visible(self):
+        return json.dumps([list(self.pub.history), self.pub.stats, self.pub.recent_commands()], default=str)
+
+    async def test_a_command_is_recorded_masked(self):
+        self.pub.hass.services.async_call = mock.AsyncMock()
+        self._command("pw", "hunter2")
+        await asyncio.gather(*self.tasks)
+        self.assertNotIn("hunter2", self._visible())
+        self.assertEqual(self.pub.history[-1]["data"], "***")
+        self.assertEqual(self.pub.history[-1]["state"], "ok")
+        self.assertEqual(self.pub.stats["last_command"], f"{BASE}/cmd/text/pw/value = ***")
+        self.pub.hass.services.async_call.assert_awaited_once_with("text", "set_value", {"entity_id": "text.pw", "value": "hunter2"}, blocking=True)
+
+    async def test_the_service_error_quoting_the_value_is_masked(self):
+        self.pub.hass.services.async_call = mock.AsyncMock(side_effect=ValueError("Value hunter2 for text.pw is too short (minimum length 8)"))
+        with self.assertLogs(mp._LOGGER, "ERROR") as logs:
+            self._command("pw", "hunter2")
+            await asyncio.gather(*self.tasks)
+        self.assertNotIn("hunter2", self._visible() + "".join(logs.output))
+        self.assertEqual(self.pub.history[-1]["error"], "ValueError: Value *** for text.pw is too short (minimum length 8)")
+
+    async def test_a_plain_text_entity_is_recorded_as_sent(self):
+        self.pub.hass.services.async_call = mock.AsyncMock()
+        self._command("plain", "hello")
+        await asyncio.gather(*self.tasks)
+        self.assertEqual(self.pub.history[-1]["data"], "hello")
+
+    async def test_an_entity_without_a_state_is_read_from_its_registry_capabilities(self):
+        entry = SimpleNamespace(capabilities={"mode": "password", "min": 0, "max": 100})
+        registry = SimpleNamespace(async_get=lambda eid: entry if eid == "text.later" else None)
+        self.pub.hass.services.async_call = mock.AsyncMock()
+        with mock.patch.object(mp.er, "async_get", return_value=registry):
+            self._command("later", "hunter2")
+            await asyncio.gather(*self.tasks)
+        self.assertNotIn("hunter2", self._visible())
+
+    async def test_a_service_call_setting_it_is_recorded_masked(self):
+        self.pub.hass.services.has_service = lambda d, s: True
+        self.pub.hass.services.supports_response = lambda d, s: mp.SupportsResponse.NONE
+        self.pub.hass.services.async_call = mock.AsyncMock(side_effect=ValueError("Value hunter2 for text.pw is too long"))
+        self.pub.hass.loop.call_soon_threadsafe = lambda f: f()
+        with mock.patch.object(mp.MqttPublisher, "_call_target_problem", return_value=None), \
+                mock.patch.object(mp.MqttPublisher, "_publish_result") as result, self.assertLogs(mp._LOGGER, "WARNING"):
+            self.pub._on_call("text/set_value", json.dumps({"entity_id": "text.pw", "value": "hunter2", "_id": 1}))
+            await asyncio.gather(*self.tasks)
+        self.assertNotIn("hunter2", self._visible())
+        self.assertIn("***", self.pub.history[-1]["data"])
+        self.assertEqual(self.pub.history[-1]["error"], "ValueError: Value *** for text.pw is too long")
+        self.assertIn("hunter2", result.call_args.args[2]["error"])  # the caller, who sent it, gets the service's own words
+
+    async def test_a_call_by_area_masks_when_a_published_text_entity_is_a_password(self):
+        registry = SimpleNamespace(async_get=lambda eid: None)
+        with mock.patch.object(mp.er, "async_get", return_value=registry):
+            self.pub._on_call("text/set_value", json.dumps({"area_id": "hall", "value": "hunter2"}))
+        self.assertNotIn("hunter2", self._visible())
+        for task in self.tasks:
+            task.cancel()
 
 
 if __name__ == "__main__":
