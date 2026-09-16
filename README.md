@@ -660,7 +660,12 @@ Inside JSON every backslash is written twice. For lines like
 ```
 
 The format is checked on save: the pattern must compile and have at least one
-named group. It is stored in `integration_manager/settings.json`, so it
+named group. Counted repeats are limited, because compiling writes each one out
+and has no time limit: with every `{n}` and `{m,n}` written out `n` times, the
+pattern may hold at most 10000 elements (`[0-9]{4}` is a few, `(?:[0-9]{2}:){100}`
+a few hundred, `(?:a{1000}){1000}` a million and is refused). A field of any
+length is `.*` or `[^ ]+`, which costs nothing. The format is stored in
+`integration_manager/settings.json`, so it
 survives image updates and is part of backups. The filter box searches the
 whole line with secrets already masked, hidden groups included. Matching has a time limit: when a
 pattern is too slow for the lines on screen, the remaining lines are shown
