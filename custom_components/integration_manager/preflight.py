@@ -35,6 +35,7 @@ _LOGGER = logging.getLogger(__name__)
 LOCK = asyncio.Lock()  # one pip resolution at a time (UI, builder, MQTT update)
 
 PIP_TIMEOUT_S = 300
+STDERR_TAIL_LINES = 12  # of a failed pip run, what the report carries for the UI to show verbatim
 CACHE_S = 1800  # a preflight report stays good enough to gate a start for 30 min (same stored copy, same Home Assistant)
 MAX_CHECK_BYTES = 5 * 1024 * 1024  # a .py file above this is a blocker, not parsed
 _REPORTS: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
@@ -66,8 +67,11 @@ def _pip_dry_run(python: str, requirements: list[str], constraints: str | None) 
     except subprocess.TimeoutExpired:
         return {"ok": False, "install": [], "stderr": f"pip did not finish within {PIP_TIMEOUT_S}s"}
     if proc.returncode != 0:
-        tail = "\n".join(proc.stderr.strip().splitlines()[-12:])
-        return {"ok": False, "install": [], "stderr": tail}
+        err = proc.stderr.strip()
+        # The line that says why can sit far above pip's closing summary (scipy's meson prints the missing
+        # compiler ~20 lines before "metadata-generation-failed"), so _pip_reason reads the whole output;
+        # "stderr" stays the bounded tail because the UI renders it verbatim.
+        return {"ok": False, "install": [], "stderr": "\n".join(err.splitlines()[-STDERR_TAIL_LINES:]), "stderr_full": err}
     try:
         report = json.loads(proc.stdout or "{}")
     except ValueError:
@@ -368,7 +372,7 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
         installed_now = {_req_name(req): ver for req, ver in (await hass.async_add_executor_job(installer._requirement_versions, all_reqs)).items()}
         pip = await hass.async_add_executor_job(_pip_dry_run, sys.executable, all_reqs, installer.constraints)
         if not pip["ok"]:
-            blockers.append("requirements cannot be resolved: " + _pip_reason(pip["stderr"]))
+            blockers.append("requirements cannot be resolved: " + _pip_reason(pip.get("stderr_full") or pip["stderr"]))
         py = ".".join(str(x) for x in sys.version_info[:3])
         import platform
 
