@@ -435,12 +435,40 @@ def _drop_stale_pending(config_dir: str, keep: str | None = None) -> None:
             pass
 
 
-def cancel_restore(config_dir: str, only_zip: str | None = None) -> bool:
+class BelongsToVersionChange(ValueError):
+    """A restore scheduled with the Home Assistant version change ha.json still records: it goes with that change."""
+
+    def __init__(self, for_version: str) -> None:
+        super().__init__(f"the scheduled restore belongs to the switch to Home Assistant {for_version}")
+        self.for_version = for_version
+
+
+def _scheduled_change_to(config_dir: str) -> str | None:
+    """The version of the change ha.json records (scheduled from System, not yet applied or dropped)."""
+    try:
+        with open(os.path.join(config_dir, STATE_DIR, "ha.json"), encoding="utf-8") as fh:
+            change = json.load(fh).get("change")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return change.get("to") if isinstance(change, dict) else None
+
+
+def cancel_restore(config_dir: str, only_zip: str | None = None, by_hand: bool = False) -> bool:
     """``only_zip``: cancel only while the schedule is still that archive's (checked under the same lock a
-    new schedule takes, so a restore scheduled by someone else in between is never cancelled)."""
+    new schedule takes, so a restore scheduled by someone else in between is never cancelled).
+
+    ``by_hand`` (Cancel restore in the UI): a restore that belongs to the version change ha.json still records
+    raises BelongsToVersionChange and stays.  Cancelled alone, the entrypoint cancels that switch one boot later
+    (its restore "did not happen") while System still shows it scheduled; it goes with the switch.  A leftover
+    for a change ha.json no longer records is cancelled like any other.  Checked under the lock too: the
+    schedule judged is the one cancelled."""
     with _PENDING_LOCK:
-        if only_zip is not None and (_pending_meta(config_dir) or {}).get("zip") != only_zip:
+        meta = _pending_meta(config_dir) or {}
+        if only_zip is not None and meta.get("zip") != only_zip:
             return False
+        for_version = meta.get("for_version")
+        if by_hand and for_version and pending(config_dir) and _scheduled_change_to(config_dir) == for_version:
+            raise BelongsToVersionChange(str(for_version))
         had = pending(config_dir)
         try:
             os.remove(os.path.join(config_dir, PENDING_META))  # first: from here on nothing is scheduled

@@ -11,6 +11,7 @@ import socket
 import signal
 import tarfile
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
@@ -373,6 +374,74 @@ class CachedCatalogTest(unittest.TestCase):
         results, total = catalog.search(rows, "demo", {}, set())
         self.assertEqual((total, results[0]["domain"]), (1, "demo"))
         self.assertEqual(rows, [good])
+
+
+class CancelRestoreByHandTest(unittest.TestCase):
+    """Cancel restore in the UI leaves a version change's own restore alone, judging and cancelling one schedule
+    under the lock a new schedule takes (the view read the schedule through a private helper, then cancelled)."""
+
+    def setUp(self):
+        self.cfg = _volume()
+        self.addCleanup(shutil.rmtree, self.cfg, True)
+        self.backup = backupkit.create(self.cfg, "b", storage_version="2026.8.3")["name"]
+
+    def ha_change(self, to):
+        with open(os.path.join(self.cfg, backupkit.STATE_DIR, "ha.json"), "w", encoding="utf-8") as fh:
+            json.dump({"current": "2026.8.3", **({"change": {"to": to, "mode": "restore"}} if to else {})}, fh)
+
+    def test_a_version_changes_own_restore_is_refused_and_stays(self):
+        self.ha_change("2026.9.2")
+        backupkit.schedule_restore(self.cfg, self.backup, ["storage"], for_version="2026.9.2")
+        with self.assertRaises(backupkit.BelongsToVersionChange) as ctx:
+            backupkit.cancel_restore(self.cfg, by_hand=True)
+        self.assertEqual(ctx.exception.for_version, "2026.9.2")
+        self.assertTrue(backupkit.pending(self.cfg))
+
+    def test_a_leftover_of_a_change_no_longer_recorded_is_cancelled(self):
+        self.ha_change(None)
+        backupkit.schedule_restore(self.cfg, self.backup, ["storage"], for_version="2026.9.2")
+        self.assertTrue(backupkit.cancel_restore(self.cfg, by_hand=True))
+        self.assertFalse(backupkit.pending(self.cfg))
+
+    def test_a_restore_scheduled_by_hand_is_cancelled_and_the_entrypoint_call_is_unchanged(self):
+        self.ha_change("2026.9.2")
+        backupkit.schedule_restore(self.cfg, self.backup, ["storage"])
+        self.assertTrue(backupkit.cancel_restore(self.cfg, by_hand=True))
+        backupkit.schedule_restore(self.cfg, self.backup, ["storage"], for_version="2026.9.2")
+        self.assertTrue(backupkit.cancel_restore(self.cfg))  # not by hand: the entrypoint drops a change's restore itself
+
+    def test_a_schedule_cannot_slip_in_between_the_check_and_the_cancel(self):
+        self.ha_change("2026.9.2")
+        backupkit.schedule_restore(self.cfg, self.backup, ["storage"], for_version="2026.8.3")  # a leftover: cancellable
+        first_zip = backupkit._pending_meta(self.cfg)["zip"]
+        checking, go_on, scheduled = threading.Event(), threading.Event(), threading.Event()
+        real_check = backupkit._scheduled_change_to
+
+        def slow_check(cfg):
+            checking.set()
+            self.assertTrue(go_on.wait(5))
+            return real_check(cfg)
+
+        def schedule_the_changes_restore():
+            backupkit.schedule_restore(self.cfg, self.backup, ["storage"], for_version="2026.9.2")
+            scheduled.set()
+
+        result = {}
+        with mock.patch.object(backupkit, "_scheduled_change_to", slow_check):
+            canceller = threading.Thread(target=lambda: result.setdefault("cancelled", backupkit.cancel_restore(self.cfg, by_hand=True)))
+            canceller.start()
+            self.assertTrue(checking.wait(5))
+            scheduler = threading.Thread(target=schedule_the_changes_restore)
+            scheduler.start()
+            self.assertFalse(scheduled.wait(0.3), "a new schedule went through while the cancel was deciding")
+            go_on.set()
+            canceller.join(5)
+            scheduler.join(5)
+        self.assertTrue(result["cancelled"])  # the leftover it judged
+        meta = backupkit._pending_meta(self.cfg)
+        self.assertNotEqual(meta["zip"], first_zip)
+        self.assertEqual(meta["for_version"], "2026.9.2")  # the change's restore scheduled afterwards is intact
+        self.assertTrue(backupkit.pending(self.cfg))
 
 
 if __name__ == "__main__":
