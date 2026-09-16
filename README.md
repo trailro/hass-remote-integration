@@ -1060,7 +1060,12 @@ edit cannot keep the manager from starting: a value out of range, or not a
 number, falls back to its default (1883, 0, 300, 60) with a warning in the log.
 
 A registry entry in `integration_manager/registry.json` has this shape; only
-`repo` is required:
+`repo` is required. A file of another shape is ignored, with a line in the log
+saying what was expected: a hand edit cannot keep the container from starting.
+A `state.json` that cannot be read is kept as `state.json.corrupt-<stamp>` (the
+newest three), the loss is reported on the timeline and as a notification, and
+the manager adopts what it finds on disk: the running integration keeps running
+and can be managed again.
 
 ```json
 {"integrations": {"my_integration": {
@@ -1123,7 +1128,10 @@ newer ones the banner shows. `POST /api/run/start` takes `force`; without it, a
 start with preflight blockers answers `needs_force` with the report in
 `preflight`, a start whose preflight could not run says why in
 `preflight_note`, and one that passes with warnings answers with
-`preflight_warnings`. `POST /api/backups/<name>/restore` takes `force` too: a
+`preflight_warnings`. `ok: true` from a start means the version was deployed
+and recorded, not that it set up: the scheduled health verdict, in `smoke_test`,
+is what tells you that, and `note` says when no verdict is coming (the version
+was already deployed and running, or the smoke test is off). `POST /api/backups/<name>/restore` takes `force` too: a
 backup that does not record its Home Assistant version answers `needs_force`
 when `.storage` is restored.
 
