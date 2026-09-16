@@ -213,9 +213,9 @@ class BackupActionView(ManagerView):
                 # lock, with busy reserved.  The archive's own lock covers each write only: a change prepared between
                 # this restore's checks and its schedule replaced it, or was replaced by it, and both answered ok.
                 # Refused, never waited for: what holds these is short (a schedule) or long and unrelated (an install).
-                from .views import _HA_CHANGE_LOCK
+                from .views import _HA_CHANGE_LOCK, _ha_change_lock_taken
 
-                if _HA_CHANGE_LOCK.locked() or self.installer.busy:
+                if _ha_change_lock_taken() or self.installer.busy:
                     return self.json({"ok": False, "error": "a Home Assistant version change or an install is running: try again in a moment"})
                 async with _HA_CHANGE_LOCK:
                     self.installer.busy = True
@@ -260,28 +260,47 @@ class BackupActionView(ManagerView):
 class RestoreCancelView(ManagerView):
     url = "/api/backups/restore/cancel"
 
-    def __init__(self, hass: HomeAssistant) -> None:
+    def __init__(self, hass: HomeAssistant, installer) -> None:
         self.hass = hass
+        self.installer = installer
 
     @with_body
     async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
-        cancelled, for_version = await self.hass.async_add_executor_job(_cancel_restore_by_hand, self.hass.config.config_dir)
-        if for_version:
-            return self.json({"ok": False, "for_version": for_version,
-                              "error": f"this restore belongs to the scheduled switch to Home Assistant {for_version}: cancel that switch on System "
-                                       "(choose the running version), which drops its restore too"})
+        # under the version-change lock with busy reserved, like a restore by hand: a version change schedules its
+        # restore before ha.json records the change, and a cancel in between took that restore as one made by hand
+        # (the switch was then dropped at the boot as a restore that did not happen).  Refused, never waited for.
+        from .views import _HA_CHANGE_LOCK, _ha_change_lock_taken
+
+        if _ha_change_lock_taken() or self.installer.busy:
+            return self.json({"ok": False, "error": "a Home Assistant version change, a full rollback or an install is running: try again in a moment"})
+        async with _HA_CHANGE_LOCK:
+            self.installer.busy = True
+            try:
+                cancelled, for_version, name = await self.hass.async_add_executor_job(_cancel_restore_by_hand, self.hass.config.config_dir)
+                if for_version:
+                    return self.json({"ok": False, "for_version": for_version,
+                                      "error": f"this restore belongs to the scheduled switch to Home Assistant {for_version}: cancel that switch on System "
+                                               "(choose the running version), which drops its restore too"})
+                if cancelled and name and name == self.installer.state.rollback_backup:
+                    # the full rollback's restore will not happen: nothing else ends that backup's protection
+                    self.installer.state.rollback_backup = self.installer.state.rollback_at = None
+                    self.installer._save_state()  # noqa: SLF001
+            finally:
+                self.installer.busy = False
         return self.json({"ok": True, "cancelled": cancelled})
 
 
-def _cancel_restore_by_hand(cfg: str) -> tuple[bool, str | None]:
-    """Blocking: (cancelled, the version change the restore belongs to).  A version change's own restore stays:
-    without it that switch is cancelled by the entrypoint one boot later (its restore "did not happen"), while
-    ha.json still shows it scheduled; it goes with the switch (HaUpdater.cancel_config_change).  backupkit
-    checks and cancels under the schedule lock, so a restore scheduled in between is never taken for this one."""
+def _cancel_restore_by_hand(cfg: str) -> tuple[bool, str | None, str | None]:
+    """Blocking: (cancelled, the version change the restore belongs to, the backup that was scheduled).  A version
+    change's own restore stays: without it that switch is cancelled by the entrypoint one boot later (its restore
+    "did not happen"), while ha.json still shows it scheduled; it goes with the switch
+    (HaUpdater.cancel_config_change).  backupkit checks and cancels under the schedule lock, so a restore scheduled
+    in between is never taken for this one, and only the schedule whose backup is named here is cancelled."""
+    meta = backupkit._pending_meta(cfg) or {}  # noqa: SLF001
     try:
-        return backupkit.cancel_restore(cfg, by_hand=True), None
+        return backupkit.cancel_restore(cfg, only_zip=meta.get("zip"), by_hand=True), None, meta.get("name")
     except backupkit.BelongsToVersionChange as err:
-        return False, str(err.for_version)
+        return False, str(err.for_version), meta.get("name")
 
 
 def _last_restore(hass: HomeAssistant) -> dict[str, Any] | None:

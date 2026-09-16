@@ -84,13 +84,22 @@ async def async_disable_foreign_entry(installer: Installer, result: dict) -> str
     from homeassistant.exceptions import HomeAssistantError
 
     try:
-        await installer.async_suspend_entry(entry)
+        unloaded = await installer.async_suspend_entry(entry)
     except HomeAssistantError as err:  # UnknownEntry, OperationNotAllowed
         if entry.disabled_by is not None:
             # disabled and recorded, but Home Assistant refused to unload it: it runs until the process restarts
-            return f"entry created DISABLED, but it did not unload ({err}): restart the process"
+            return _restart_to_unload(installer, f"entry created DISABLED, but it did not unload ({err}): restart the process")
         return f"entry created but could not be disabled ({err}); stop/start will sort it out"
+    if not unloaded or entry.state.value == "failed_unload":
+        # as Installer._disable_entries: disabled, but its unload returned False and it keeps running
+        return _restart_to_unload(installer, f"entry created DISABLED, but it did not unload ({entry.state.value}): restart the process")
     return f"entry created DISABLED: this container runs {installer.running or 'nothing'}; {domain} is not the integration installed here"
+
+
+def _restart_to_unload(installer: Installer, note: str) -> str:
+    installer.state.restart_required = True
+    installer._save_state()  # noqa: SLF001
+    return note
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -195,7 +204,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ReleaseCheckView(installer),
         BackupUploadView(hass),
         BackupActionView(hass, installer, ha_updater),
-        RestoreCancelView(hass),
+        RestoreCancelView(hass, installer),
         DevicesPageView(),
         DevicesApiView(hass, publisher),
         DeviceActionView(hass),

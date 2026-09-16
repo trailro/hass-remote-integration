@@ -213,7 +213,8 @@ class CancelRestoreTest(unittest.TestCase):
         async def executor(fn, *args):
             return fn(*args)
 
-        view = backup_views.RestoreCancelView(SimpleNamespace(config=SimpleNamespace(config_dir=cfg), async_add_executor_job=executor))
+        view = backup_views.RestoreCancelView(SimpleNamespace(config=SimpleNamespace(config_dir=cfg), async_add_executor_job=executor),
+                                              SimpleNamespace(busy=False, state=SimpleNamespace(rollback_backup=None)))
         view.json = lambda d: d
         return asyncio.run(backup_views.RestoreCancelView.post.__wrapped__(view, None, {}))
 
@@ -248,14 +249,26 @@ class RollbackBackupProtectionTest(unittest.TestCase):
         inst = object.__new__(Installer)
         inst.state = State(rollback_backup=backup, rollback_at=at)
         inst._save_state = lambda: None
+        inst.config_dir = tempfile.mkdtemp()
         return inst
 
+    @staticmethod
+    def _schedule_its_restore(inst):
+        _schedule(inst.config_dir, None)
+        with open(os.path.join(inst.config_dir, backupkit.PENDING_META), encoding="utf-8") as fh:
+            meta = json.load(fh)
+        with open(os.path.join(inst.config_dir, backupkit.PENDING_META), "w", encoding="utf-8") as fh:
+            json.dump({**meta, "name": "pre.zip"}, fh)
+
     def test_an_older_restore_does_not_release_it(self):
+        # while the rollback's own restore is still scheduled (one whose schedule is gone did not happen and
+        # releases it: test_r11_state)
         inst = self._installer()
+        self._schedule_its_restore(inst)
         for last in ({"ok": True, "backup": "other.zip", "at": "2026-09-01T08:00:00"},  # a restore of another day
                      {"ok": True, "backup": "other.zip", "at": "2026-09-16T11:00:00"},  # another backup, after
                      {"ok": True, "backup": "pre.zip", "at": "2026-09-10T08:00:00"},  # this backup, before the rollback
-                     {"ok": False, "backup": "pre.zip", "at": "2026-09-16T11:00:00"}):  # its restore failed
+                     {"ok": False, "backup": "pre.zip", "at": "2026-09-16T11:00:00"}):  # its restore failed, kept for a retry
             with self.subTest(last=last):
                 self.assertFalse(inst.release_rollback_backup(last))
                 self.assertEqual(inst.state.rollback_backup, "pre.zip")
@@ -268,6 +281,7 @@ class RollbackBackupProtectionTest(unittest.TestCase):
 
     def test_a_volume_from_before_the_time_goes_by_the_name(self):
         inst = self._installer(at=None)
+        self._schedule_its_restore(inst)
         self.assertFalse(inst.release_rollback_backup({"ok": True, "backup": "other.zip", "at": "2026-09-16T11:00:00"}))
         self.assertTrue(inst.release_rollback_backup({"ok": True, "backup": "pre.zip", "at": "2026-09-01T08:00:00"}))
 

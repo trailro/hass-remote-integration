@@ -53,7 +53,9 @@ class Events:
         return rec
 
     def _append(self, line: str) -> None:
-        data = line.encode("utf-8")  # the cap is in bytes: a line of non-ASCII text is longer than its characters
+        # the cap is in bytes: a line of non-ASCII text is longer than its characters.  "replace": a message may carry a
+        # lone surrogate (an OSError's text with a file name Python decoded with surrogateescape), which utf-8 refuses
+        data = line.encode("utf-8", errors="replace")
         try:
             if self._size is None:
                 try:
@@ -110,13 +112,20 @@ _THREAD: threading.Thread | None = None
 
 
 def _submit(store: Events, line: str) -> None:
-    global _PENDING, _THREAD
+    global _PENDING
     with _COND:
         _PENDING += 1
         _QUEUE.put((store, line))
-        if _THREAD is None:
-            _THREAD = threading.Thread(target=_run, name="hri-events", daemon=True)
-            _THREAD.start()
+        _ensure_writer()
+
+
+def _ensure_writer() -> None:
+    """Under _COND.  A writing thread that ended anyway (whatever _run did not catch) is replaced: every event queued
+    after it would wait for it for good, and every read and the exit for READ_DRAIN_S."""
+    global _THREAD
+    if _THREAD is None or not _THREAD.is_alive():
+        _THREAD = threading.Thread(target=_run, name="hri-events", daemon=True)
+        _THREAD.start()
 
 
 def _run() -> None:
@@ -126,6 +135,8 @@ def _run() -> None:
         try:
             with _APPEND:
                 store._append(line)  # noqa: SLF001
+        except Exception:  # noqa: BLE001 - one event that cannot be written must not take every later one with it
+            _LOGGER.exception("event not recorded")
         finally:
             with _COND:
                 _PENDING -= 1
@@ -143,6 +154,11 @@ def drain(timeout: float) -> bool:
     """Blocking (not on the loop, not from the writing thread): True once every event added so far is in its file.
     Also before the process exits; run.py leaves with os._exit, which skips atexit, and has to call it itself."""
     with _COND:
+        if _PENDING:
+            try:
+                _ensure_writer()
+            except RuntimeError:  # at interpreter shutdown no thread starts: wait for the one there is
+                pass
         return _COND.wait_for(lambda: _PENDING == 0, timeout)
 
 

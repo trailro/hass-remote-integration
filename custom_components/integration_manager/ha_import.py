@@ -148,15 +148,18 @@ ENTRY_ID_RE = re.compile(r"[A-Za-z0-9]+")  # as ImportApplyView: an entry id is 
 
 @contextlib.contextmanager
 def _open_inner(path: str, compressed: bool, password: str | None):
-    """The configuration archive, with extended headers bounded.  securetar passes no tarinfo class on: a plain
-    archive is opened the way it opens one (tarfile, r: or r:gz), so its first header is bounded too; an encrypted
-    one gets the class once open, which leaves only its first header as tarfile reads it."""
+    """The configuration archive, with extended headers bounded from its first header on: tarfile reads that one
+    while it opens the archive, so the class is passed to the open.  SecureTarFile takes no tarinfo class (securetar
+    2026.4.1), so neither archive is opened through it: a plain one the way it opens one (tarfile, r: or r:gz), an
+    encrypted one as it does (the header, then a stream of the decrypted tar, r| or r|gz), through securetar's
+    SecureTarDecryptStream.  Every securetar a Home Assistant release pins with SecureTarFile(password=) has it."""
     if password is None:
         with tarfile.open(path, "r:gz" if compressed else "r:", tarinfo=_BoundedTarInfo) as tar:
             yield tar
         return
-    with securetar.SecureTarFile(path, gzip=compressed, password=password) as tar:
-        tar.tarinfo = _BoundedTarInfo
+    with open(path, "rb") as raw, \
+            securetar.SecureTarDecryptStream(raw, root_key_context=securetar.SecureTarRootKeyContext(password)) as plain, \
+            tarfile.open(fileobj=plain, mode="r|gz" if compressed else "r|", tarinfo=_BoundedTarInfo) as tar:
         yield tar
 
 
