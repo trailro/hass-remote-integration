@@ -393,7 +393,9 @@ restore, so one cut off halfway (`docker stop`, a power loss) finishes at the
 next boot instead of putting the rejected version back on the restored
 configuration. If the restore did not happen at all (cancelled by hand,
 dropped, or failed), the rollback is given up: the integration stays on the
-version it was running, and the reason goes on the timeline.
+version it was running, and the reason goes on the timeline. The backup a full rollback
+restores is kept from pruning and refused for deletion until that restore is
+over: applied, failed, dropped at the boot, or cancelled with *Cancel restore*.
 
 A downgrade of the integration after its config entries were migrated to a
 newer format usually fails (`migration_error`), which the preflight warns
@@ -503,7 +505,8 @@ version change is cancelled together with that change (choose the running
 version under Home Assistant), and cancelling it on its own is refused. A
 restore is refused (try again) while a Home Assistant version change or an
 install is being prepared, and a version change is refused while a restore is
-being scheduled.
+being scheduled. *Cancel restore* is refused the same way (try again) while a Home
+Assistant version change, a full rollback or an install is being prepared.
 Restoring the YAML part also
 removes root `*.yaml` / `*.yml` files that are not in the backup, so a file
 created after it (a `secrets.yaml`, for example) does not survive the restore.
