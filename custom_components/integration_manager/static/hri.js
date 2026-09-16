@@ -56,7 +56,7 @@ document.addEventListener('DOMContentLoaded',()=>{
  // the log-files item is integration-specific: show it only when the running
  // integration writes log files, labelled with the newest one
  const a=document.getElementById('nav-logfiles'); if(!a) return;
- const files=await fetch('/api/log_files').then(r=>r.json());
+ const files=await fetch('/api/log_files',{headers:{'X-Requested-With':'fetch'}}).then(r=>r.json());
  if(!Array.isArray(files)||!files.length) return;
  const f=files[0]; const base=f.name.split('/').pop();
  a.textContent=base+(files.length>1?' +'+(files.length-1):''); a.title=`log files written by the running integration (${files.length})${f.active?', active':''}`; a.hidden=false;
