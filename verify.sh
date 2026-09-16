@@ -91,7 +91,7 @@ unit() {
   # only the code under test: registry.json and patches/ are not copied (the tests do not read them; code that
   # does falls back to the image's /app copies)
   docker exec "$NAME" sh -c "rm -rf $dir && mkdir -p $dir/custom_components" || return 1
-  for f in tests jsonio.py backupkit.py logbuffer.py entrypoint.py run.py docker-compose.yml Dockerfile; do docker cp -q "$f" "$NAME:$dir/" || return 1; done
+  for f in tests jsonio.py backupkit.py logbuffer.py entrypoint.py run.py docker-compose.yml Dockerfile README.md; do docker cp -q "$f" "$NAME:$dir/" || return 1; done
   docker cp -q custom_components/integration_manager "$NAME:$dir/custom_components/" || return 1
   docker exec -w "$dir" -e PYTHONPATH="$dir" -e PYTHONDONTWRITEBYTECODE=1 "$NAME" /config/venv-current/bin/python -m unittest discover -s tests -t .
 }
