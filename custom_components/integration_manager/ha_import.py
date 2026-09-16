@@ -982,7 +982,7 @@ async def async_finish_rebuild(hass: HomeAssistant, aligner: RegistryAligner, in
                 raise ValueError(f"stopped after {REBUILD_ATTEMPTS} attempts (a start that ended during the import counts as one)")
             # counted before the import: a process killed or out of memory during it must not retry forever
             await hass.async_add_executor_job(write_json, os.path.join(cfg, REBUILD_FILE), {**plan, "attempts": attempts})
-            res = await _locked(apply_all(hass, aligner, [domain], True, True, domain, set(installer.state.installed)))
+            res = await _locked(lambda: apply_all(hass, aligner, [domain], True, True, domain, set(installer.state.installed)))
             ok, failed = res["imported"], res["failed"]
             retry = bool(failed) and attempts < REBUILD_ATTEMPTS
             if retry:
