@@ -2,7 +2,8 @@
 and paho's own log was never enabled.  m4: "online" went out before the SUBSCRIBE, so a command sent at the availability
 flip was lost.  m5: the value of a text entity in password mode was kept in clear in the command history, the status
 and the log.  D2: an entity moved into a device whose config is over the broker's maximum rescheduled the discovery pass
-every 5 s for good.  Every test fails on the tree before its fix."""
+every 5 s for good.  C11: a whitespace-only call payload ran the service with no data.  Every test fails on the tree
+before its fix."""
 
 import asyncio
 import json
@@ -470,6 +471,23 @@ class MovedIntoOversizedDeviceTest(unittest.TestCase):
         _pub, _first, passes, scheduled = self._run(discovery_map, groups)
         self.assertLessEqual(passes, 1)
         self.assertEqual(scheduled, [])
+
+class WhitespaceCallTest(unittest.TestCase):
+    """C11: b"" was refused, b"  " ran as {}."""
+
+    def test_a_whitespace_payload_is_refused_like_an_empty_one(self):
+        for payload in (b"", b"  ", b"\n\t "):
+            with self.subTest(payload=payload):
+                pub = camp._publisher()
+                pub.hass.async_create_task = mock.Mock()
+                pub._handle_message(SimpleNamespace(topic=f"{BASE}/call/script/turn_on", payload=payload, retain=False))
+                pub.hass.async_create_task.assert_not_called()
+                self.assertEqual(pub.history[-1]["state"], "rejected")
+                self.assertIn("empty payload", pub.history[-1]["error"])
+                topic, answer, _qos, retain = pub._client.published[-1]
+                self.assertEqual((topic, retain), (f"{BASE}/result/script/turn_on", False))
+                self.assertFalse(json.loads(answer)["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()

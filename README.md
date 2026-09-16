@@ -923,7 +923,7 @@ hass_<domain>/manager/result                        outcome of a manager action,
   it under a different name. A `device_id` that is not a
   Home Assistant device (a hardware address a service takes as data) stays plain
   service data. A call needs a JSON object, `{}` when it has no data: an empty
-  payload is rejected.
+  or whitespace-only payload is rejected.
 - **Manager device**: with discovery on, or with `manager_discovery` alone (for
   example while running in shadow mode), the main Home Assistant gets a
   `hass-remote-integration (hass_<domain>)` device. It shows whether the
