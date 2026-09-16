@@ -172,7 +172,7 @@ The UI has one page per task:
 | **Install** | Install from the registry or any GitHub repo, the environment builder, dev mode |
 | **MQTT** | Broker connection, translator status, discovery, recent commands, health rules |
 | **Cutover** | Compare with your main HA, enable discovery, undo |
-| **Entities / Devices / Services** | Inspect, rename, disable, call services (the form sends lists for multiple-choice fields and for text fields that take several values, one box per item, accepts typed custom values, and checks required fields after the extra JSON is merged) |
+| **Entities / Devices / Services** | Inspect, rename, disable, call services (the form sends lists for multiple-choice fields and for text fields that take several values, one box per item, accepts typed custom values (one box per value, sent as typed: a comma or surrounding spaces stay part of it), and checks required fields after the extra JSON is merged) |
 | **Logs / Log files** | The integration's logs and the log files it writes |
 | **System** | Home Assistant version, backups and restore, import from a HA backup, settings, diagnostics |
 
@@ -219,8 +219,10 @@ Choose whichever fits the integration, on the **Integration** page:
   Selectors render as the control they describe: durations, dates, times,
   colours, read-only constants, and a number as a box, or as a slider when it
   asks for one and gives both ends, either way with its unit next to the
-  label; a text field that takes several values shows one box per item (an item
-  may contain a comma), and a single custom select value is sent whole. One the
+  label; a text field that takes several values, and the typed values of a
+  multi-select that allows them, show one box per item (an item may contain a
+  comma or surrounding spaces and is sent as typed), and a single custom select
+  value is sent whole. One the
   page does not know falls back to a JSON textarea saying so.
   A value the page cannot convert (a fraction in a whole-number field, broken
   JSON) is refused with the reason under that field, and nothing is sent.
@@ -494,7 +496,10 @@ applied at the next restart, can be partial (only `.storage`, only the manager
 state, …), and is rolled back if it fails halfway. *Cancel restore* cancels a
 restore scheduled by hand; a restore that belongs to a scheduled Home Assistant
 version change is cancelled together with that change (choose the running
-version under Home Assistant), and cancelling it on its own is refused.
+version under Home Assistant), and cancelling it on its own is refused. A
+restore is refused (try again) while a Home Assistant version change or an
+install is being prepared, and a version change is refused while a restore is
+being scheduled.
 Restoring the YAML part also
 removes root `*.yaml` / `*.yml` files that are not in the backup, so a file
 created after it (a `secrets.yaml`, for example) does not survive the restore.
@@ -1020,8 +1025,9 @@ What is in place:
   The searches on the Logs and Log files pages run on the masked text, so
   looking for part of a key finds nothing: a row that appeared only while the
   search matched the key would let it be read out one character at a time.
-  For the same reason, how far a search on the Log files page reads and how
-  long it takes do not depend on what the masking hides.
+  For the same reason, what a search answers besides its rows (the Logs page's
+  `cursor` and `truncated`, how far a search on the Log files page reads) and
+  how long it takes do not depend on what the masking hides.
   A key is recognised from its `-----END …-----` marker or from the shape of
   its own lines, so a search result or a tail that starts in the middle of a
   block is masked too; key material with no marker anywhere in the window and
