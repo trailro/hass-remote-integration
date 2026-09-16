@@ -666,6 +666,11 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
     booting (a failed install or a fallback boots another one).  Returns the
     version to boot: if a downgrade's restore or clean start did not happen,
     the version the configuration still belongs to."""
+    def record_dropped(result: dict) -> bool:
+        state["last_restore"] = result
+        return save_state(state)
+
+    backupkit.drop_orphan_schedule(CONFIG_DIR, log, record=record_dropped)  # a schedule whose archive is gone restores nothing
     for_version = backupkit.pending_for_version(CONFIG_DIR)
     if backupkit.pending(CONFIG_DIR) and for_version and for_version != wanted:
         backupkit.cancel_restore(CONFIG_DIR)
