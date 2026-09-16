@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/trailro/hass-remote-integration/actions/workflows/ci.yml/badge.svg)](https://github.com/trailro/hass-remote-integration/actions/workflows/ci.yml)
 [![Image](https://img.shields.io/badge/ghcr.io-hass--remote--integration-2496ED?logo=docker&logoColor=white)](https://github.com/trailro/hass-remote-integration/pkgs/container/hass-remote-integration)
+[![Docker Hub](https://img.shields.io/docker/v/trailro26/hass-remote-integration?sort=semver&label=docker%20hub&logo=docker&logoColor=white)](https://hub.docker.com/r/trailro26/hass-remote-integration)
 <a href="https://www.buymeacoffee.com/trailro"><img src="https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=%E2%98%95&slug=trailro&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff" alt="Buy me a coffee" height="36"></a>
 
 Run **one Home Assistant custom integration in its own small container**,
@@ -1347,7 +1348,8 @@ a release builds the `amd64` and `arm64` image and pushes it to
 `ghcr.io/trailro/hass-remote-integration` and to Docker Hub as
 `trailro26/hass-remote-integration` (`<version>`, `<major>.<minor>` and, for the
 newest stable release, `latest`; the Docker Hub push needs the `DOCKERHUB_TOKEN`
-repository secret).
+repository secret). The newest stable release also updates the Docker Hub
+overview from this README, up to *Everyday operation*.
 
 Inside the container the Home Assistant venv is `/config/venv-current/bin/python`
 (the image's own `python3` does not have Home Assistant).
