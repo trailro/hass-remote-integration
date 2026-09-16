@@ -95,7 +95,7 @@ $('#imupload').onclick=async()=>{const f=$('#imfile').files[0];
     const u=await (await fetch('api/import/upload',{method:'POST',headers:{'X-Requested-With':'fetch'},body:fd})).json(); if(!u.ok){$('#immsg').textContent='ERROR: '+u.error;return;} }
   $('#immsg').textContent='inspecting…'; const r=await post('api/import/inspect',{password:$('#impass').value||null});
   $('#immsg').textContent=r.ok?'inspected':'ERROR: '+r.error; if(r.ok){IMS=r.summary; imRender();}};
-$('#imclear').onclick=async()=>{if(!confirm('Discard the uploaded backup and everything inspected from it?')) return; await post('api/import/clear'); IMS=null; IMSEL=null; imRender(); $('#immsg').textContent='cleared';};
+$('#imclear').onclick=async()=>{if(!confirm('Discard the uploaded backup and everything inspected from it?')) return; const r=await post('api/import/clear'); if(!r.ok){$('#immsg').textContent='ERROR: '+r.error;return;} IMS=null; IMSEL=null; imRender(); $('#immsg').textContent='cleared';};
 $('#imapplyall').onclick=async()=>{ const doms=Object.keys(IMS.domains).filter(d=>INSTALLED[d]&&IMS.domains[d].importable); if(!doms.length) return;
   if(!confirm(`Import the config entries of ${doms.join(', ')} with their data/options exactly as in the backup? Integrations that are not running get their entry stored disabled.`)) return; $('#imallresult').textContent='importing…';
   const r=await post('api/import/apply_all',{domains:doms,align:$('#imallalign').checked,copy_storage:$('#imallstorage').checked});
