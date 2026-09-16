@@ -38,10 +38,14 @@ PIP_TIMEOUT_S = 300
 STDERR_TAIL_LINES = 12  # of a failed pip run, what the report carries for the UI to show verbatim
 CACHE_S = 1800  # a preflight report stays good enough to gate a start for 30 min (same stored copy, same Home Assistant)
 MAX_CHECK_BYTES = 5 * 1024 * 1024  # a .py file above this is a blocker, not parsed
+MAX_REPORTS = 32  # a report is several kB and every gate key carries the copy's installed_at: within CACHE_S,
+# reinstalls add keys faster than staleness retires them, so the sweep alone does not bound the dict
 _REPORTS: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
 GITHUB_API = "https://api.github.com/repos/{repo}"
 
 
+class StoredCopyUnusable(ValueError):
+    """The stored copy start() would deploy is not an integration Home Assistant can load."""
 
 
 def _read_text(path: str) -> str:
@@ -176,6 +180,27 @@ _REMOVED_STDLIB = frozenset({
 })
 
 
+# a package that puts a removed module back is either named like it (telnetlib) or belongs to one of the
+# families that exist for exactly that: standard-imghdr and the rest of PEP 594, legacy-cgi
+_SHIM_PREFIXES = ("standard-", "legacy-")
+
+
+def _canon(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).strip().lower()
+
+
+def _removed_import_module(entry: str) -> str:
+    """The module out of a `_code_checks` row ("__init__.py:2 imports imp")."""
+    return entry.rsplit(" imports ", 1)[-1]
+
+
+def _may_provide(module: str, distributions: set[str]) -> bool:
+    """Whether any of ``distributions`` could ship ``module``, judged by name alone (pip's report
+    does not say which modules a package installs)."""
+    want = _canon(module.split(".")[0])
+    return any(d == want or (d.startswith(_SHIM_PREFIXES) and d.split("-", 1)[1] == want) for d in distributions)
+
+
 def _catches_import_error(handler: Any) -> bool:
     import ast
 
@@ -265,7 +290,12 @@ def _config_flow_version(component_dir: str) -> int | None:
 
 
 def remember(domain: str, ref: str, report: dict[str, Any], target_ha: str | None = None) -> None:
-    _REPORTS[(domain, ref, target_ha or ha_version)] = (time.monotonic(), report)
+    now = time.monotonic()
+    for key in [k for k, (at, _) in _REPORTS.items() if now - at >= CACHE_S]:
+        del _REPORTS[key]
+    _REPORTS[(domain, ref, target_ha or ha_version)] = (now, report)
+    while len(_REPORTS) > MAX_REPORTS:
+        del _REPORTS[min(_REPORTS, key=lambda k: _REPORTS[k][0])]
 
 
 def recent(domain: str, ref: str) -> dict[str, Any] | None:
@@ -277,7 +307,8 @@ async def gate(hass: HomeAssistant, installer, domain: str, tag: str | None) -> 
     """Whether a start of (domain, tag) from the UI or the API should wait for a confirmation:
     {"blocked", "report", "skipped"}.  Starting the version that already runs (or ran last), a dev
     build or a release without a GitHub repository is not gated; a preflight that cannot run
-    (the stored copy is gone, for example) does not block either: the smoke test still guards the start.
+    (GitHub is unreachable, for example) does not block either: the smoke test still guards the start.
+    A stored copy that is no integration at all is the exception, and blocks.
     The check reads the stored copy start() deploys, not what the ref names on GitHub now (a moved tag or
     branch, a commit installed under a name).  No busy flag while it runs (pip can take minutes, and an
     install or a backup must not be refused for that): LOCK queues concurrent gates, start() refuses on its
@@ -303,6 +334,11 @@ async def gate(hass: HomeAssistant, installer, domain: str, tag: str | None) -> 
         try:
             async with LOCK:
                 report = await run(hass, installer, domain, target, source_dir=installer._version_dir(domain, target))
+        except StoredCopyUnusable as err:
+            # not a transient failure: deploying this copy replaces the live integration with a tree Home Assistant
+            # cannot load ("Integration not found"), and only the smoke test undoes it, two restarts later
+            return {"blocked": True, "report": {"domain": domain, "ref": target, "ok": False, "blockers": [str(err)],
+                                                "warnings": []}, "skipped": None}
         except Exception as err:  # noqa: BLE001
             return {"blocked": False, "report": None, "skipped": f"preflight could not run: {err}"}
         if stamp() != before:
@@ -328,7 +364,7 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
     if source_dir:
         manifest = await hass.async_add_executor_job(installer._manifest_at, source_dir)
         if not manifest or manifest.get("domain") != domain:
-            raise ValueError(f"{domain} {ref}: the stored copy has no manifest.json for {domain}")
+            raise StoredCopyUnusable(f"{domain} {ref}: the stored copy has no manifest.json for {domain}")
         scratch, blob, min_ha = source_dir, b"", installer.min_ha_of(domain, ref)
     else:
         fetch = archive_ref or ref
@@ -419,8 +455,17 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
             blockers.append(f"the integration's code does not compile on Python {py}: " + "; ".join(code_errors[:3])
                             + (f" (+{len(code_errors) - 3} more)" if len(code_errors) > 3 else ""))
         if removed_imports:
-            warnings.append(f"the integration imports modules Python {py} no longer has ({'; '.join(removed_imports[:3])}): "
-                            "it fails when loaded, unless one of its requirements provides them")
+            # the escape hatch is only real when something could ship the module: with the manifest's requirements
+            # and pip's resolved set both known here, an import nothing provides fails at load, so it blocks
+            provided = {_canon(_req_name(req)) for req in all_reqs} | {_canon(str(r.get("name") or "")) for r in pip["install"]}
+            orphans = [e for e in removed_imports if not _may_provide(_removed_import_module(e), provided)]
+            shimmed = [e for e in removed_imports if e not in orphans]
+            if orphans:
+                blockers.append(f"the integration imports modules Python {py} no longer has ({'; '.join(orphans[:3])}) "
+                                "and none of its requirements provides them: it fails when loaded")
+            if shimmed:
+                warnings.append(f"the integration imports modules Python {py} no longer has ({'; '.join(shimmed[:3])}): "
+                                "it fails when loaded, unless one of its requirements provides them")
 
         # 6. configuration surface
         yaml_present = os.path.isfile(installer.yaml_path(domain))
