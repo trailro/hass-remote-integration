@@ -1123,7 +1123,10 @@ What is in place:
   in the backup or in its configuration archive, is refused; neither the
   backup nor its configuration archive may hold more than 100000 files. Config entries
   with an invalid id are skipped.
-- Dangerous service domains are not callable, over MQTT or from the UI.
+- Dangerous service domains are not callable, over MQTT or from the UI. Only
+  a call over MQTT is limited to the entities the container publishes: the
+  **Services** page and `POST /api/services/call` belong to the admin UI and can
+  target any entity, `entity_id: all` and excluded entities included.
 - Without `tls` (see *MQTT reference*), the broker connection, the MQTT
   password included, travels unencrypted.
 
@@ -1303,7 +1306,9 @@ itself appears in `GET /api/status` under `smoke_test.last`, and `note` says
 when no verdict is coming (the version
 was already deployed and running, or the smoke test is off). `POST /api/backups/<name>/restore` takes `force` too: a
 backup that does not record its Home Assistant version answers `needs_force`
-when `.storage` is restored. `POST /api/services/call` is bounded like the MQTT
+when `.storage` is restored. `POST /api/services/call` refuses the same service
+domains as the MQTT path but, unlike it, is not limited to published entities
+(any target, `entity_id: all` included). It is bounded like the MQTT
 path: a call that has not answered within `HRI_CALL_TIMEOUT` seconds is answered
 `timeout after <n>s (service still running)` while the service goes on running,
 and at most 50 calls from this endpoint run at once, a timed-out one counting
