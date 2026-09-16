@@ -140,6 +140,7 @@ class State:
     last_smoke: dict[str, Any] | None = None     # last smoke verdict (survives restarts and rollbacks)
     last_release_check: int = 0                  # epoch of the last weekly GitHub release check
     rollback_backup: str | None = None           # the backup a full rollback restores: protected until that restore succeeded
+    rollback_at: str | None = None               # when that rollback was recorded: an older restore of the same backup is not its restore
     release_updates: dict[str, str] = field(default_factory=dict)  # last release check: domain -> newest stable tag not in the store
     pending_change: dict[str, Any] | None = None  # {domain, from_tag, to_tag, at, before}: compared once the new version runs
     ha_error_reported: str | None = None           # the Home Assistant version-change error already announced
@@ -153,7 +154,7 @@ _NONE = type(None)
 _STATE_TYPES: dict[str, tuple[type, ...]] = {
     "domain": (str, _NONE), "restart_required": (bool,), "last_action": (str,), "last_error": (str,),
     "pending_smoke": (dict, _NONE), "pending_start": (dict, _NONE), "last_smoke": (dict, _NONE), "last_release_check": (int,),
-    "rollback_backup": (str, _NONE), "release_updates": (dict,), "pending_change": (dict, _NONE), "ha_error_reported": (str, _NONE),
+    "rollback_backup": (str, _NONE), "rollback_at": (str, _NONE), "release_updates": (dict,), "pending_change": (dict, _NONE), "ha_error_reported": (str, _NONE),
     "suspended_entries": (list, _NONE), "smoke_announced": (str, _NONE), "last_restore_reported": (str, _NONE),
     "pending_rollback": (dict, _NONE),
 }
@@ -831,6 +832,9 @@ class Installer:
         check verified it); ``tag`` stays the name in the store."""
         import backupkit
 
+        if not tag_ok(tag) or (archive_ref is not None and not tag_ok(archive_ref)):
+            # both become a GitHub URL path, the tag also a directory of the version store
+            return {"ok": False, "error": f"invalid tag {str(tag)[:80]!r}"}
         if backupkit.pending(self.config_dir):
             return {"ok": False, "error": "a restore is scheduled for the next restart: restart (or cancel it) first"}
         domain = domain or self.installed_domain
@@ -902,6 +906,8 @@ class Installer:
             pass
 
     async def remove_version(self, domain: str, tag: str) -> dict[str, Any]:
+        if not tag_ok(tag):
+            return {"ok": False, "error": f"invalid tag {str(tag)[:80]!r}"}
         rec = self.state.installed.get(domain)
         if not rec or tag not in rec.get("versions", {}):
             return {"ok": False, "error": "not installed"}
@@ -938,6 +944,8 @@ class Installer:
         and sets the domain up right after (no restart for either).
         ``own_restore``: the archive of a restore the caller scheduled itself as the first
         step of the same operation (a full rollback); any other scheduled restore refuses."""
+        if tag and not tag_ok(tag):  # none: the running or newest stored tag
+            return {"ok": False, "error": f"invalid tag {str(tag)[:80]!r}"}
         rec = self.state.installed.get(domain)
         if not rec or not rec.get("versions"):
             return {"ok": False, "error": f"{domain} is not installed"}
@@ -1443,8 +1451,6 @@ class Installer:
     async def _loadable(self, domain: str) -> bool:
         """Can HA's loader see the deployed component?  Its custom-component
         scan is cached from boot: drop the caches and look again."""
-        from homeassistant import loader
-
         self.hass.data.pop(loader.DATA_CUSTOM_COMPONENTS, None)
         integrations = self.hass.data.get(loader.DATA_INTEGRATIONS)
         if isinstance(integrations, dict):
@@ -1466,11 +1472,11 @@ class Installer:
         for entry in self._entries_of(domain):
             if entry.disabled_by is None:
                 try:
-                    ok = await self.hass.config_entries.async_set_disabled_by(entry.entry_id, ConfigEntryDisabler.USER)
-                    self.mark_suspended(entry.entry_id)  # disabled by the manager: resumed at the next start
+                    ok = await self.async_suspend_entry(entry)  # disabled by the manager: resumed at the next start
                 except HomeAssistantError as err:  # OperationNotAllowed: an entry in migration_error or failed_unload
                     self.state.restart_required = True
-                    raise RuntimeError(f"config entry '{entry.title}' of {domain} could not be disabled ({err}): restart the process") from None
+                    what = "is disabled but did not unload" if entry.disabled_by is not None else "could not be disabled"
+                    raise RuntimeError(f"config entry '{entry.title}' of {domain} {what} ({err}): restart the process") from None
                 if not ok or entry.state.value == "failed_unload":
                     self.state.restart_required = True
                     raise RuntimeError(f"config entry '{entry.title}' of {domain} did not unload ({entry.state.value}): restart the process")
@@ -1494,6 +1500,20 @@ class Installer:
         if entry_id not in suspended:
             suspended.append(entry_id)
             self._save_state()
+
+    async def async_suspend_entry(self, entry: Any) -> bool:
+        """Disable an entry on the manager's behalf and record that it did.  Home Assistant sets disabled_by and
+        schedules the save before it unloads, and the unload raises for an entry in a state it cannot leave
+        (migration_error, failed_unload, setup_in_progress): the entry is disabled on disk all the same, and
+        unrecorded it would count as disabled by the user at every later start (never resumed, "no enabled
+        config entry").  So the record follows what happened to the entry, not whether the call returned; an
+        entry that was already disabled is not the manager's to resume."""
+        was_enabled = entry.disabled_by is None
+        try:
+            return await self.hass.config_entries.async_set_disabled_by(entry.entry_id, ConfigEntryDisabler.USER)
+        finally:
+            if was_enabled and entry.disabled_by is not None:
+                self.mark_suspended(entry.entry_id)
 
     async def _enable_entries(self, domain: str) -> list[str]:
         """Resume what the manager disabled; an entry the user disabled (or imported disabled) stays disabled."""
@@ -1611,8 +1631,8 @@ class Installer:
         # killed between the schedule and the state start() writes at its end, the next boot would restore the
         # old files and .storage while state.json still names the rejected version, and the boot reconcile
         # would deploy that version over the restored configuration.  _apply_pending_rollback finishes it there.
-        self.state.pending_rollback = {"domain": domain, "tag": prev_tag, "backup": backup,
-                                       "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        intent_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        self.state.pending_rollback = {"domain": domain, "tag": prev_tag, "backup": backup, "at": intent_at}
         self._save_state()
         try:
             # scheduled BEFORE the files change: a kill between the two then restores the backup at the next boot
@@ -1649,7 +1669,7 @@ class Installer:
         self.state.pending_smoke = {"domain": domain, "tag": prev_tag, "can_rollback": False}
         self.state.restart_required = True
         self.state.last_action = f"full rollback of {domain} to {prev_tag}: restoring {backup} at restart"
-        self.state.rollback_backup = backup
+        self.state.rollback_backup, self.state.rollback_at = backup, intent_at
         self._save_state()
         events.emit("rollback", f"{domain} back to {prev_tag}; {backup} restored at the next restart", domain=domain, tag=prev_tag)
         return {"ok": True, "tag": prev_tag, "restore": backup, "restart_required": True}
@@ -1889,7 +1909,7 @@ class Installer:
         # (the start that was killed is where a new way back would have been recorded)
         rec["previous_tag"], rec["pre_update_backup"] = None, None
         self.state.domain = domain
-        self.state.rollback_backup = None  # restored: the regular pruning applies to that backup again
+        self.state.rollback_backup = self.state.rollback_at = None  # restored: the regular pruning applies to that backup again
         if isinstance(self.state.pending_change, dict) and self.state.pending_change.get("domain") == domain:
             self.state.pending_change = None
         # a verdict for the version that now runs, never another rollback (as after a completed one)
@@ -1898,6 +1918,19 @@ class Installer:
         self._save_state()
         events.emit("rollback", f"{domain} back to {tag}; {backup} restored (the rollback was interrupted and finished at this boot)",
                     domain=domain, tag=tag)
+
+    def release_rollback_backup(self, last_restore: Any) -> bool:
+        """Boot: the backup a full rollback restores is protected until that restore succeeded.  ha.json keeps the
+        last outcome for good, so "a restore succeeded" alone is any restore of any earlier day: only an outcome of
+        this backup, applied after the rollback was recorded, is it (a volume from before rollback_at: the name)."""
+        backup = self.state.rollback_backup
+        if not backup or not isinstance(last_restore, dict) or not last_restore.get("ok") or last_restore.get("backup") != backup:
+            return False
+        if str(last_restore.get("at") or "") < str(self.state.rollback_at or ""):
+            return False
+        self.state.rollback_backup = self.state.rollback_at = None  # restored: the regular pruning applies to it again
+        self._save_state()
+        return True
 
     def _tag_of_deployed(self, domain: str) -> tuple[str | None, str | None]:
         """(tag, installed_at) from the marker _ensure_deployed writes next to
@@ -1990,7 +2023,7 @@ class Installer:
         missing = [r for r in reqs if not pkg_util.is_installed(r)]
         pip_failed: list[str] = []
         if missing:
-            pip_failed = await self.hass.async_add_executor_job(self._install_requirements, reqs + missing)
+            pip_failed = await self.hass.async_add_executor_job(self._install_requirements, reqs)
             if pip_failed:
                 _LOGGER.error("reconcile %s: pip failed for %s", domain, pip_failed)
             elif domain in self.hass.config.components:

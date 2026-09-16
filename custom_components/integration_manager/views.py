@@ -37,8 +37,8 @@ _SYSTEM_HTML = load_template("system")
 _MQTT_HTML = load_template("mqtt")
 
 
-_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-_TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+@-]{0,100}$")
+_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")  # \Z: "$" also matches before a trailing newline
+_TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+@-]{0,100}\Z")
 
 
 class IndexView(ManagerView):
@@ -240,9 +240,9 @@ async def async_change_ha_version(installer: Installer, updater: HaUpdater, targ
                     rebuild = await hass.async_add_executor_job(ha_import.stage_rebuild, cfg, backup["name"], installer.running, HA_VERSION, target)
             else:
                 await hass.async_add_executor_job(updater.cancel_config_change)  # an older change's preparations
-            state = updater.set_desired(target, change={"to": target, "mode": mode, "backup": backup["name"],
-                                                        "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                                                        **({"parts": restore_parts} if restore is not None else {})})
+            state = await hass.async_add_executor_job(updater.set_desired, target, {"to": target, "mode": mode, "backup": backup["name"],
+                                                                                   "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                                                                   **({"parts": restore_parts} if restore is not None else {})})
             await hass.async_add_executor_job(backupkit.prune, cfg, installer.settings.backup_keep,
                                               installer.protected_backups() | {backup["name"]})
         finally:
@@ -298,15 +298,16 @@ class HaActionView(ManagerView):
                 if target != HA_VERSION:
                     await self.updater.validate(target)
             else:
-                target = self.updater.previous_version()
+                target = await hass.async_add_executor_job(self.updater.previous_version)
             if target == HA_VERSION:
                 desired = (await hass.async_add_executor_job(self.updater._read)).get("desired")
                 if not desired or desired == HA_VERSION:
                     raise ValueError(f"Home Assistant {target} is already running")
                 if self.installer.busy or _HA_CHANGE_LOCK.locked():
                     raise ValueError("an install/start or a version change is running: try again in a moment")
-                dropped = await hass.async_add_executor_job(self.updater.cancel_config_change)
-                self.updater.set_desired(HA_VERSION)
+                async with _HA_CHANGE_LOCK:  # held across both writes: a change scheduled in between would be overwritten
+                    dropped = await hass.async_add_executor_job(self.updater.cancel_config_change)
+                    await hass.async_add_executor_job(self.updater.set_desired, HA_VERSION)
                 events.emit("ha", f"scheduled switch to Home Assistant {desired} cancelled" + (f"; dropped: {', '.join(dropped)}" if dropped else ""),
                             version=HA_VERSION)
                 return self.json({"ok": True, "desired": HA_VERSION, "cancelled": desired, "dropped": dropped})

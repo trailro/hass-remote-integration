@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 
 import jsonio
@@ -73,6 +74,25 @@ def _recent(stamp: str, window_s: int = 900) -> bool:
         return False
 
 
+async def async_disable_foreign_entry(installer: Installer, result: dict) -> str | None:
+    """Exactly one running integration: an entry a flow creates for any other
+    domain is disabled (and enabled when that integration is started)."""
+    domain = result.get("handler")
+    entry = result.get("result")
+    if not domain or entry is None or domain == DOMAIN or domain == installer.running:
+        return None
+    from homeassistant.exceptions import HomeAssistantError
+
+    try:
+        await installer.async_suspend_entry(entry)
+    except HomeAssistantError as err:  # UnknownEntry, OperationNotAllowed
+        if entry.disabled_by is not None:
+            # disabled and recorded, but Home Assistant refused to unload it: it runs until the process restarts
+            return f"entry created DISABLED, but it did not unload ({err}): restart the process"
+        return f"entry created but could not be disabled ({err}); stop/start will sort it out"
+    return f"entry created DISABLED: this container runs {installer.running or 'nothing'}; {domain} is not the integration installed here"
+
+
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     events.EVENTS = events.Events(hass.config.path("integration_manager", "events.jsonl"))
     track_delayed_stores()  # before the integration is set up: backups write its pending saves
@@ -118,24 +138,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     flows = FlowDriver(hass)
 
-    async def _on_entry_created(result):
-        """Exactly one running integration: an entry of any other domain is
-        created disabled (it is enabled when that integration is started)."""
-        domain = result.get("handler")
-        entry = result.get("result")
-        if not domain or entry is None or domain == DOMAIN or domain == installer.running:
-            return None
-        from homeassistant.config_entries import ConfigEntryDisabler
-        from homeassistant.exceptions import HomeAssistantError
-
-        try:
-            await hass.config_entries.async_set_disabled_by(entry.entry_id, ConfigEntryDisabler.USER)
-            installer.mark_suspended(entry.entry_id)  # enabled when that integration is started
-        except HomeAssistantError as err:  # UnknownEntry, OperationNotAllowed
-            return f"entry created but could not be disabled ({err}); stop/start will sort it out"
-        return f"entry created DISABLED: this container runs {installer.running or 'nothing'}; {domain} is not the integration installed here"
-
-    flows.on_entry_created = _on_entry_created
+    flows.on_entry_created = functools.partial(async_disable_foreign_entry, installer)
 
     # Entity -> MQTT translator: publishes every entity (state, attributes,
     # registry metadata, integration tag) as retained JSON; LWT on
@@ -169,9 +172,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ha_pn.async_create(hass, ha_error, title="Home Assistant version", notification_id="hri_ha_version_error")
         installer.state.ha_error_reported = ha_error
         installer._save_state()
-    if isinstance(last_restore, dict) and last_restore.get("ok") and installer.state.rollback_backup:
-        installer.state.rollback_backup = None  # restored: the regular pruning applies to it again
-        installer._save_state()
+    installer.release_rollback_backup(last_restore)
     if isinstance(last_restore, dict) and last_restore.get("at") and _recent(last_restore["at"]) \
             and last_restore["at"] != installer.state.last_restore_reported:
         installer.state.last_restore_reported = last_restore["at"]  # a later boot within the window must not report it again

@@ -11,14 +11,14 @@ from typing import Any
 from aiohttp import web
 from homeassistant.const import __version__ as HA_VERSION
 from homeassistant.core import HomeAssistant
-from jsonio import fsync_dir, ha_vkey
+from jsonio import fsync_dir, ha_vkey, read_json
 
 from . import events, ha_import
 from .http_util import ManagerView, with_body
 
 import backupkit  # /app/backupkit.py (/app is on sys.path)
 
-_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.zip$")
+_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.zip\Z")  # \Z: "$" also matches before a trailing newline
 MAX_UPLOAD = 200 * 1024 * 1024
 
 
@@ -93,11 +93,24 @@ class BackupUploadView(ManagerView):
         if not _name_ok(name):
             return self.json({"ok": False, "error": "bad file name"})
         bdir = os.path.join(self.hass.config.config_dir, backupkit.BACKUP_DIR)
-        os.makedirs(bdir, exist_ok=True)
         size = 0
         ok = False
-        fd, tmp = await self.hass.async_add_executor_job(lambda: tempfile.mkstemp(dir=bdir, prefix=".upload-", suffix=".zip.tmp"))
-        fh = await self.hass.async_add_executor_job(os.fdopen, fd, "wb")
+
+        def _open() -> tuple[Any, str]:
+            os.makedirs(bdir, exist_ok=True)
+            fd, path = tempfile.mkstemp(dir=bdir, prefix=".upload-", suffix=".zip.tmp")
+            return os.fdopen(fd, "wb"), path
+
+        def _discard() -> None:
+            if not fh.closed:  # closed already once the upload was complete
+                fh.close()
+            if not ok:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+
+        fh, tmp = await self.hass.async_add_executor_job(_open)
         try:
             while chunk := await field.read_chunk(1 << 16):
                 size += len(chunk)
@@ -120,12 +133,7 @@ class BackupUploadView(ManagerView):
             await self.hass.async_add_executor_job(fsync_dir, bdir)
             ok = True
         finally:
-            await self.hass.async_add_executor_job(fh.close)
-            if not ok:
-                try:
-                    os.remove(tmp)
-                except OSError:
-                    pass
+            await self.hass.async_add_executor_job(_discard)
         return self.json({"ok": True, "name": name, "bytes": size, "info": info})
 
 
@@ -141,7 +149,7 @@ class BackupActionView(ManagerView):
         if action != "download" or not _name_ok(name):
             return self.json_message("not found", status_code=404)
         path = os.path.join(self.hass.config.config_dir, backupkit.BACKUP_DIR, name)
-        if not os.path.isfile(path):
+        if not await self.hass.async_add_executor_job(os.path.isfile, path):
             return self.json_message("not found", status_code=404)
         return web.FileResponse(path, headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
@@ -151,13 +159,13 @@ class BackupActionView(ManagerView):
             return self.json({"ok": False, "error": "bad name"})
         cfg = self.hass.config.config_dir
         path = os.path.join(cfg, backupkit.BACKUP_DIR, name)
-        if not os.path.isfile(path):
+        if not await self.hass.async_add_executor_job(os.path.isfile, path):
             return self.json({"ok": False, "error": "no such backup"})
         try:
             if action == "delete":
                 if name in self.installer.protected_backups() | await self.hass.async_add_executor_job(backupkit.restore_needs, cfg):
                     return self.json({"ok": False, "error": "a scheduled Home Assistant version change, a full rollback or a restore from the last 7 days needs this backup"})
-                os.remove(path)
+                await self.hass.async_add_executor_job(os.remove, path)
                 return self.json({"ok": True})
             if action == "restore":
                 if self.installer.busy:
@@ -209,7 +217,7 @@ class BackupActionView(ManagerView):
                         try:
                             await self.hass.async_add_executor_job(backupkit.validate, path)
                             await self.hass.async_add_executor_job(self.updater.cancel_config_change)
-                            self.updater.set_desired(HA_VERSION)
+                            await self.hass.async_add_executor_job(self.updater.set_desired, HA_VERSION)
                             await self.hass.async_add_executor_job(backupkit.schedule_restore, cfg, name, parts, None, force)
                             await self.hass.async_add_executor_job(ha_import.drop_rebuild, cfg)
                         finally:
@@ -244,8 +252,28 @@ class RestoreCancelView(ManagerView):
 
     @with_body
     async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
-        cancelled = await self.hass.async_add_executor_job(backupkit.cancel_restore, self.hass.config.config_dir)
+        cancelled, for_version = await self.hass.async_add_executor_job(_cancel_restore_by_hand, self.hass.config.config_dir)
+        if for_version:
+            return self.json({"ok": False, "for_version": for_version,
+                              "error": f"this restore belongs to the scheduled switch to Home Assistant {for_version}: cancel that switch on System "
+                                       "(choose the running version), which drops its restore too"})
         return self.json({"ok": True, "cancelled": cancelled})
+
+
+def _cancel_restore_by_hand(cfg: str) -> tuple[bool, str | None]:
+    """Blocking: (cancelled, the version change the restore belongs to).  A version change's own restore stays:
+    without it that switch is cancelled by the entrypoint one boot later (its restore "did not happen"), while
+    ha.json still shows it scheduled; it goes with the switch (HaUpdater.cancel_config_change).  A leftover
+    for a switch that is no longer in ha.json is cancelled like any other.  The schedule is read once and
+    cancelled only while it is still that archive's: one scheduled in between is never taken for this one."""
+    meta = backupkit._pending_meta(cfg) or {}  # noqa: SLF001 - its archive and its version from one read
+    for_version = meta.get("for_version")
+    if for_version and backupkit.pending(cfg):
+        ha_state = read_json(os.path.join(cfg, backupkit.STATE_DIR, "ha.json"), {})
+        change = ha_state.get("change") if isinstance(ha_state, dict) else None
+        if isinstance(change, dict) and change.get("to") == for_version:
+            return False, str(for_version)
+    return backupkit.cancel_restore(cfg, only_zip=meta.get("zip")), None
 
 
 def _last_restore(hass: HomeAssistant) -> dict[str, Any] | None:
