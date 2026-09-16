@@ -1,4 +1,4 @@
-"""Review round 12 (C6, C7): HRI_PORT, SIGTERM before the exec."""
+"""Review round 12 (C6, C7, C21): HRI_PORT, SIGTERM before the exec, originals an interrupted import set aside."""
 
 import os
 import shutil
@@ -77,6 +77,26 @@ class SigtermTest(unittest.TestCase):
                     os.killpg(pid, signal.SIGKILL)
                 except OSError:
                     pass
+
+
+class ImportAsideTest(unittest.TestCase):
+    """C21: an original an import set aside (.storage/<store>.pre-import) stayed on the volume after a kill."""
+
+    def test_the_original_is_put_back_at_boot(self):
+        cfg = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, cfg, True)
+        ep = entrypoint_for(self, cfg)
+        storage = os.path.join(cfg, ".storage")
+        os.makedirs(storage)
+        os.makedirs(ep.STATE_DIR)
+        for name, text in (("demo", "imported"), ("demo.pre-import", "original"), ("other.pre-import", "only the original")):
+            with open(os.path.join(storage, name), "w", encoding="utf-8") as fh:
+                fh.write(text)
+        ep.clean_import_leftovers()
+        self.assertEqual(sorted(os.listdir(storage)), ["demo", "other"])
+        for name, text in (("demo", "original"), ("other", "only the original")):
+            with open(os.path.join(storage, name), encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), text)
 
 
 if __name__ == "__main__":
