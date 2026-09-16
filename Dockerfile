@@ -14,6 +14,14 @@ ENV PYTHONUNBUFFERED=1 \
     MALLOC_ARENA_MAX=2 \
     TZ=UTC
 
+# libjpeg-turbo's C library (~0.5 MB): PyTurboJPEG is a ctypes binding and
+# finds nothing in the slim base, so HA's camera component - a dependency of
+# many integrations - logs an ERROR with a traceback at every boot and cannot
+# scale a snapshot.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libturbojpeg0 \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY entrypoint.py run.py logbuffer.py backupkit.py jsonio.py registry.json requirements.txt /app/

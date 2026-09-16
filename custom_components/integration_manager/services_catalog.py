@@ -1,8 +1,9 @@
 """Catalog of the services registered in this instance, grouped by domain,
-merged with what HA users see: fields/selectors/target/response from the
-integration's ``services.yaml`` and names/descriptions from its
-``translations/en.json``.  Used by the /services page and published to
-MQTT so the consuming HA can call any of them generically.
+merged with what HA users see: fields/selectors/target from the
+integration's ``services.yaml``, names/descriptions from its
+``translations/en.json`` and the response support from the registration.
+Used by the /services page and published to MQTT so the consuming HA can
+call any of them generically.
 
 The yaml is read directly, NOT through HA's async_get_all_descriptions:
 that validates "supported_features" filters by importing every base
@@ -17,7 +18,7 @@ import os
 from typing import Any
 
 from homeassistant import loader
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util.yaml import load_yaml_dict
 
@@ -77,6 +78,26 @@ def _flat_fields(desc: dict[str, Any], tr_svc: dict[str, Any]) -> dict[str, Any]
     return fields
 
 
+def _response(supports: SupportsResponse, desc: dict[str, Any]) -> str | None:
+    """How the service answers: "optional", "required", or None for no
+    response data at all.
+
+    ``supports_response`` is an argument of ``hass.services.async_register``,
+    not a key of services.yaml: HA injects it into the descriptions it builds
+    (helpers/service.py), and across core only knx writes ``response:`` in its
+    yaml.  Reading the yaml alone published every response-capable service as
+    None, so the registry decides here too, as it does on the call path; an
+    explicit yaml declaration still wins, for an integration that ships one."""
+    yaml_resp = desc.get("response")
+    if isinstance(yaml_resp, dict):
+        return "optional" if yaml_resp.get("optional") else "required"
+    if supports == SupportsResponse.OPTIONAL:
+        return "optional"
+    if supports == SupportsResponse.ONLY:
+        return "required"
+    return None
+
+
 async def service_rows(hass: HomeAssistant) -> list[dict[str, Any]]:
     registered = hass.services.async_services()
     out: list[dict[str, Any]] = []
@@ -95,7 +116,6 @@ async def service_rows(hass: HomeAssistant) -> list[dict[str, Any]]:
             desc = _dict(yaml_desc.get(name))
             tr_svc = _dict(tr_services.get(name))
             fields = _flat_fields(desc, tr_svc)
-            resp = desc.get("response")
             services.append(
                 {
                     "name": name,
@@ -103,7 +123,7 @@ async def service_rows(hass: HomeAssistant) -> list[dict[str, Any]]:
                     "description": tr_svc.get("description") or desc.get("description") or "",
                     "fields": fields,
                     "target": desc.get("target"),
-                    "response": None if not isinstance(resp, dict) else ("optional" if resp.get("optional") else "required"),
+                    "response": _response(hass.services.supports_response(domain, name), desc),
                 }
             )
         out.append({"domain": domain, "custom": custom, "services": services})
