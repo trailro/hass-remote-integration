@@ -844,7 +844,10 @@ hass_<domain>/manager/result                        outcome of a manager action,
   `password`, `passwd`, `secret`, `token`, `apikey`, `passkey` or `bindkey`
   (`access_token`, `api_token`, not `token_type`) are masked in the command
   history, the status and the log; `translation_key`, `sort_key` and
-  `primary_key` stay readable. A call reaches only entities
+  `primary_key` stay readable. The masking reads at most the first 4 KB of a
+  payload's text (every key of a JSON payload is still found), so a longer
+  payload shows cut there in the history, the status and a rejected command's
+  log line, and masking can never hold up the MQTT connection. A call reaches only entities
   the container publishes: an `entity_id` of `all`, or an entity, group (and
   its members), area, floor, label or device that resolves to an excluded or
   unknown entity, is refused, and so is a target that cannot be read (an id
