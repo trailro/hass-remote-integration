@@ -41,6 +41,9 @@ _SECRET_TEXT = re.compile(
     r"|(?:api|access|private|local|encryption|device|client|master|app|shared|signing|session|auth|link|network|aes|ssl)[_-]?key)"
     r"['\"]?\s*[=:]\s*)"
     r"(\"[^\"]*\"|'[^']*'|[^'\",\s}]+)", re.I)
+# every name _SECRET_TEXT knows ends in a letter, then the = or :, so a text without this has nothing it masks; the
+# rule is the costly one (a Logs page search masks every record it passes), and most log lines fail this test
+_SECRET_TEXT_HINT = re.compile(r"[a-z]['\"]?\s*[=:]", re.I)
 # the whole value of an Authorization header, scheme included (Digest, a custom scheme, a bare token)
 _AUTH_TEXT = re.compile(r"(authorization['\"]?\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|(?:[A-Za-z-]+\s+)?[^'\",\s}]+)", re.I)
 # Cookie / Set-Cookie: every cookie of the header, to the end of the line
@@ -85,7 +88,8 @@ def _scrub_one_line_rules(value: str) -> str:
     """Every rule whose match stays within one line; the PEM block is the one
     that spans lines and is masked by the caller."""
     value = _COOKIE_TEXT.sub(lambda m: m.group(1) + (m.group(2)[0] + "***" + m.group(2)[0] if m.group(2)[:1] in ('"', "'") else "***"), value)
-    value = _SECRET_TEXT.sub(lambda m: m.group(1) + (m.group(2)[0] + "***" + m.group(2)[0] if m.group(2)[:1] in ('"', "'") else "***"), value)
+    if _SECRET_TEXT_HINT.search(value):
+        value = _SECRET_TEXT.sub(lambda m: m.group(1) + (m.group(2)[0] + "***" + m.group(2)[0] if m.group(2)[:1] in ('"', "'") else "***"), value)
     value = _AUTH_TEXT.sub(lambda m: m.group(1) + (m.group(2)[0] + "***" + m.group(2)[0] if m.group(2)[:1] in ('"', "'") else "***"), value)
     # a token, not "Basic information": anything but a plain word (base64 without padding is often letters only)
     value = _BEARER.sub(lambda m: m.group(0) if re.fullmatch(r"[A-Z]?[a-z]+", m.group(2)) else f"{m.group(1)} ***", value)

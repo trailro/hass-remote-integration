@@ -46,11 +46,11 @@ def _query_masked(handler, **kwargs: Any) -> tuple[list[dict[str, Any]], bool, i
     scrubber, over all the records at once: a PEM block printed line by line
     becomes one record per line, and no record on its own matches it.
 
-    The search runs on the masked text, so searching for a key returns the
-    lines that still say what the user typed, and nothing that only matched
-    inside the part now masked.  It runs twice.  Inside the handler, on each
-    record masked on its own, before the record takes a place on the page: a
-    page of raw matches that all matched inside a masked value (records
+    The search runs on the masked text only, so searching for a key returns
+    the lines that still say what the user typed, and nothing that only
+    matched inside the part now masked.  It runs twice.  Inside the handler,
+    on each record masked on its own, before the record takes a place on the
+    page: a page of records that match only inside a masked value (records
     holding ``password=needle``) would otherwise come back empty, and a
     follower that advances from the records it is given would ask for that
     same page forever.  Then here, on the page masked as one text, because
@@ -58,19 +58,29 @@ def _query_masked(handler, **kwargs: Any) -> tuple[list[dict[str, Any]], bool, i
     below a short last line of a body): scrub_lines masks a line that is key
     material on its own for exactly the case where they are not on the page.
 
+    The handler gets no text: its search runs on the raw message, and
+    whatever depends on which records the raw search matched - which records
+    are masked (the time an answer takes), how far the page reaches (the
+    cursor, truncated) - answers a guess at a masked value.  With a search,
+    every record that passed the level and logger filters is masked, until
+    the page is full, whether its raw text matches or not.
+
     The third value is the cursor: the newest id this answer has decided on
     (shown, or asked about and not matching), so a follower that continues
     from it never re-reads a page and never skips a record it was not shown.
+    Which records it is asked about does not depend on the search's text,
+    only on which records match once masked.
     """
-    text = str(kwargs.get("text") or "").lower()
+    text = str(kwargs.pop("text", "") or "").lower()
     seen = int(kwargs.get("since_id") or 0)
 
     def keep(rec: dict[str, Any]) -> bool:
         nonlocal seen
         seen = max(seen, int(rec.get("id") or 0))
-        if not text or text in str(rec.get("logger", "")).lower():
+        if not text:
             return True
-        return text in scrub_lines([str(rec.get("message") or "")])[0].lower()
+        masked = scrub_lines([str(rec.get("message") or "")])[0]  # also when the logger name matches: the same work for every record
+        return text in masked.lower() or text in str(rec.get("logger", "")).lower()
 
     recs, truncated = handler.query(**kwargs, keep=keep)
     seen = max([seen, *(int(r.get("id") or 0) for r in recs)])
