@@ -204,7 +204,7 @@ class RequirementOptionsTest(unittest.TestCase):
             self.assertIsNone(inst_mod.bad_requirement(req))
 
     def test_pip_dry_run_refuses_options(self):
-        with mock.patch.object(preflight.subprocess, "run") as run:
+        with mock.patch.object(preflight, "_run_pip") as run:
             res = preflight._pip_dry_run(sys.executable, ["ok==1.0", "--index-url=http://evil.example"], None)
         run.assert_not_called()
         self.assertFalse(res["ok"])

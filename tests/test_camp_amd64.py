@@ -137,7 +137,7 @@ class PipReasonSurvivesLongOutputTest(unittest.TestCase):
 
     def _pip_fails(self):
         proc = SimpleNamespace(returncode=1, stdout="", stderr=SCIPY_STDERR)
-        return mock.patch.object(preflight.subprocess, "run", return_value=proc)
+        return mock.patch.object(preflight, "_run_pip", return_value=proc)
 
     def test_the_report_keeps_the_whole_output_for_the_reason(self):
         with self._pip_fails():
