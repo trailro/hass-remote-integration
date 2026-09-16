@@ -22,6 +22,7 @@ from unittest import mock
 import backupkit
 import run
 from custom_components.integration_manager import preflight
+from tests.fakes import entrypoint_for
 from tests.test_r3_install import _hass, _preflight_installer
 
 # what pip really writes when it resolves scipy without a compiler (35 lines; the compiler is on line 15)
@@ -167,12 +168,8 @@ class StatusPageIsNotHealthyTest(unittest.TestCase):
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
         self.cfg = _tmp(self)
-        os.environ.update(HRI_CONFIG=self.cfg, HRI_PORT=str(port))
-        self.addCleanup(lambda: [os.environ.pop(k, None) for k in ("HRI_CONFIG", "HRI_PORT")])
         os.makedirs(os.path.join(self.cfg, "integration_manager"))
-        self.ep = importlib.import_module("entrypoint")
-        importlib.reload(self.ep)
-        self.addCleanup(importlib.reload, self.ep)
+        self.ep = entrypoint_for(self, self.cfg, HRI_PORT=str(port))
         self.ep._status.update(phase="pip install homeassistant==2026.9.2", version="2026.9.2")
         self.srv = self.ep.start_status_server()
         self.addCleanup(self.ep.stop_status_server, self.srv)

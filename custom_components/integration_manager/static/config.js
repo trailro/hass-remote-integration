@@ -382,10 +382,13 @@ function render(r){
 // a finished flow has no id to act on any more: the chip kept naming it, so the page read as if it were still open
 function done(){ $('#abort').disabled=true; $('#flowid').textContent='finished'; }
 let PROGRESS_T=null;
+// the poll belongs to the flow that asked for it: a flow started meanwhile (Start, Options, Continue) must not get
+// user_input null from a timer of the old one, nor have its step drawn over by the old flow's answer
 function pollProgress(delay=2000){
-  clearTimeout(PROGRESS_T);
-  PROGRESS_T=setTimeout(async()=>{ if(!flow) return;
-    try{ const url=flow.kind==='config'?`api/flow/${flow.id}`:`api/options/${flow.id}`; const r=await post(url,{user_input:null});
+  clearTimeout(PROGRESS_T); const f=flow;
+  PROGRESS_T=setTimeout(async()=>{ if(!f||flow!==f) return;
+    try{ const url=f.kind==='config'?`api/flow/${f.id}`:`api/options/${f.id}`; const r=await post(url,{user_input:null});
+      if(flow!==f) return;
       if(r.message){ $('#baseerr').textContent=r.message; return; }
       if(r.type==='progress'){ $('#steptitle').textContent=progressTitle(r); pollProgress(); } else render(r);
     }catch(e){ $('#baseerr').textContent='progress check failed: '+e.message; }

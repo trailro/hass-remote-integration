@@ -2,11 +2,9 @@
 
 import asyncio
 import errno
-import importlib
 import io
 import json
 import os
-import sys
 import tarfile
 import tempfile
 import time
@@ -17,12 +15,11 @@ from unittest import mock
 
 import backupkit
 import jsonio
+from tests.fakes import entrypoint_for
 
 
-def _entrypoint(cfg):
-    os.environ["HRI_CONFIG"] = cfg
-    sys.modules.pop("entrypoint", None)
-    return importlib.import_module("entrypoint")
+def _entrypoint(test, cfg):
+    return entrypoint_for(test, cfg)
 
 
 def _hass(cfg):
@@ -155,7 +152,7 @@ class CleanStartKillTest(unittest.TestCase):
 
     def setUp(self):
         self.cfg = _volume()
-        self.ep = _entrypoint(self.cfg)
+        self.ep = _entrypoint(self, self.cfg)
         os.makedirs(os.path.join(self.ep.STATE_DIR, "import-extracted"))
         with open(os.path.join(self.ep.STATE_DIR, "import-extracted", "summary.json"), "w", encoding="utf-8") as fh:
             json.dump({"type": "ha-downgrade-rebuild"}, fh)
@@ -163,10 +160,6 @@ class CleanStartKillTest(unittest.TestCase):
             json.dump({"stage": "reset", "to": "2026.8.3", "backup": "b.zip"}, fh)
         self.old = os.path.join(self.cfg, ".storage.pre-rebuild-20200101-000000")
         os.makedirs(self.old)
-
-    def tearDown(self):
-        os.environ.pop("HRI_CONFIG", None)
-        sys.modules.pop("entrypoint", None)
 
     def plan(self):
         with open(self.ep.REBUILD_FILE, encoding="utf-8") as fh:
@@ -328,10 +321,6 @@ class UnknownVersionRestoreTest(unittest.TestCase):
         self.cfg = _volume()
         _zip(self.cfg, "nov.zip", {"created": "20200101-000000"})
 
-    def tearDown(self):
-        os.environ.pop("HRI_CONFIG", None)
-        sys.modules.pop("entrypoint", None)
-
     def test_storage_restore_needs_force(self):
         with self.assertRaises(backupkit.UnknownVersion):
             backupkit.schedule_restore(self.cfg, "nov.zip")
@@ -357,7 +346,7 @@ class UnknownVersionRestoreTest(unittest.TestCase):
         backupkit.schedule_restore(self.cfg, "nov.zip", force=True)
         meta = backupkit._pending_meta(self.cfg)
         jsonio.write_json(os.path.join(self.cfg, backupkit.PENDING_META), {**meta, "force": False})
-        ep = _entrypoint(self.cfg)
+        ep = _entrypoint(self, self.cfg)
         state = {}
         ep.apply_config_changes(state, "2026.8.3", "2026.8.3")
         self.assertFalse(backupkit.pending(self.cfg))
@@ -369,7 +358,7 @@ class UmaskTest(unittest.TestCase):
     """27"""
 
     def test_main_restricts_the_umask_first(self):
-        ep = _entrypoint(tempfile.mkdtemp())
+        ep = _entrypoint(self, tempfile.mkdtemp())
         order = []
 
         class Stop(Exception):
@@ -380,11 +369,9 @@ class UmaskTest(unittest.TestCase):
             with self.assertRaises(Stop):
                 ep.main()
         self.assertEqual(order, ["umask", "makedirs"])
-        os.environ.pop("HRI_CONFIG", None)
-        sys.modules.pop("entrypoint", None)
 
     def test_restrict_umask(self):
-        ep = _entrypoint(tempfile.mkdtemp())
+        ep = _entrypoint(self, tempfile.mkdtemp())
         previous = ep.restrict_umask()
         try:
             self.assertEqual(os.umask(0o077), 0o077)
@@ -394,8 +381,6 @@ class UmaskTest(unittest.TestCase):
             self.assertEqual(os.stat(p).st_mode & 0o777, 0o600)
         finally:
             os.umask(previous)
-            os.environ.pop("HRI_CONFIG", None)
-            sys.modules.pop("entrypoint", None)
 
 
 class DurabilityTest(unittest.TestCase):

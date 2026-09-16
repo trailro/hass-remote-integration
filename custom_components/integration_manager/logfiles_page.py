@@ -38,9 +38,25 @@ NOT_OURS = ("home-assistant.log", "OZW_Log", "ha-install.log")
 DEFAULT_LINES = 50
 MAX_LINES = 5000
 MAX_SCAN_BYTES = 32 * 1024 * 1024  # a filter that matches nothing must not read a 7-day log
-# lines the filter matched only inside a value the mask removes: each costs the one-line rules (~35 us), so a
-# search inside the password of every line stops here (~0.7 s) instead of at the byte budget
+# lines a search runs the one-line rules on (~40 us each): a log with a token on every line stops here (~0.8 s)
+# instead of at the byte budget.  Counted on every line the rules could change, whatever the search is for, so
+# where a search stops says nothing about what the rules hide
 MAX_MASKED_OUT = 20_000
+# what the one-line rules of diagnostics._scrub_one_line_rules need to find before they change a line: a line
+# holding none of these comes out of them unchanged, so the search skips them for it.  A rule added there needs its
+# literal here (the tests compare the two)
+_RULE_LITERALS = ("pass", "token", "secret", "credential", "psk", "hmac", "key", "webhook_id", "cloudhook_url", "pin",
+                  "sig", "code", "otp", "pwd", "_pw", "session", "irk", "ltk", "csrk", "cookie", "authorization",
+                  "bearer", "basic", "://", "gh", "github_pat_")
+# the rules are case-insensitive, and re's IGNORECASE takes four characters beyond ASCII for letters: lower() alone
+# leaves the long s and the dotless i as they are, and turns the dotted I into "i" plus a combining dot
+_FOLD = str.maketrans({"\u017f": "s", "\u0131": "i", "\u0130": "i", "\u212a": "k"})
+
+
+def _rules_may_change(text: str) -> bool:
+    folded = text.translate(_FOLD).lower()
+    return any(k in folded for k in _RULE_LITERALS)
+
 
 FORMAT_KEYS = ("pattern", "hide", "dim", "color_by", "colors")
 FORMAT_COLORS = ("ok", "warn", "bad", "accent", "muted")
@@ -220,25 +236,39 @@ def _tail(path: str, lines: int, needle: str) -> tuple[list[str], int]:
     then decides on the masked text, and finds nothing where a key was.
     Masking the scanned lines and not scrubbing them is what keeps the cost:
     it is a length test and one substring test per line, so a tail of a 99 MB
-    log stays in the milliseconds.  A line the needle matches is masked by the
-    one-line rules as well (a password, a token, a cookie) and has to match
-    again: a search for "hunter" otherwise returned ``password=***`` for as
-    long as the guess was a prefix of the password.  Only matching lines pay
-    for those rules, and the scan stops after MAX_MASKED_OUT lines that
-    matched only inside a masked value."""
+    log stays in the milliseconds.  A search also decides on the text the
+    one-line rules (a password, a token, a cookie) leave: a search for "hunter"
+    otherwise returned ``password=***`` for as long as the guess was a prefix
+    of the password.  The rules run on every scanned line they could change,
+    not only on the lines the search matched: when only matching lines paid
+    for them, a search matching inside a password on many lines hit the budget
+    (and took the time) that a wrong guess did not, and total_lines_scanned
+    answered the question the rows no longer did.  Lines holding none of the
+    rules' literals skip them, and the scan stops after MAX_MASKED_OUT lines
+    that ran them."""
     from .diagnostics import _scrub_one_line_rules, mask_key_material_lines  # diagnostics imports this module
 
     needle = needle.lower()
     found: list[str] = []
-    scanned = masked_out = 0
+    scanned = ruled = 0
     in_block = False  # inside a key block whose END marker a newer block already passed
+
+    def matches(text: str) -> bool:
+        nonlocal ruled
+        if not needle:
+            return True
+        if _rules_may_change(text):
+            ruled += 1
+            text = _scrub_one_line_rules(text)  # before the search, whether or not the raw line holds the needle
+        return needle in text.lower()
+
     with open(path, "rb") as fh:
         fh.seek(0, os.SEEK_END)
         pos = fh.tell()
         buf = b""
         block = 64 * 1024
         scanned_bytes = 0
-        while pos > 0 and len(found) < lines and scanned_bytes < MAX_SCAN_BYTES and masked_out < MAX_MASKED_OUT:
+        while pos > 0 and len(found) < lines and scanned_bytes < MAX_SCAN_BYTES and ruled < MAX_MASKED_OUT:
             step = min(block, pos)
             scanned_bytes += step
             pos -= step
@@ -252,20 +282,16 @@ def _tail(path: str, lines: int, needle: str) -> tuple[list[str], int]:
                 if not text.strip():
                     continue
                 scanned += 1
-                if needle and needle not in text.lower():
-                    continue
-                if needle and needle not in _scrub_one_line_rules(text).lower():
-                    masked_out += 1
-                    if masked_out >= MAX_MASKED_OUT:
+                if matches(text):
+                    found.append(text)
+                    if len(found) >= lines:
                         break
-                    continue
-                found.append(text)
-                if len(found) >= lines:
+                if ruled >= MAX_MASKED_OUT:
                     break
-        if pos == 0 and buf.strip() and len(found) < lines and scanned_bytes < MAX_SCAN_BYTES + block and masked_out < MAX_MASKED_OUT:
+        if pos == 0 and buf.strip() and len(found) < lines and scanned_bytes < MAX_SCAN_BYTES + block and ruled < MAX_MASKED_OUT:
             text = mask_key_material_lines([buf.decode("utf-8", errors="replace")], in_block)[0][0]
             scanned += 1
-            if not needle or (needle in text.lower() and needle in _scrub_one_line_rules(text).lower()):
+            if matches(text):
                 found.append(text)
     found.reverse()
     return found, scanned

@@ -1,6 +1,5 @@
 """entrypoint.apply_config_changes: what a boot does with a scheduled restore and a version change."""
 
-import importlib
 import json
 import os
 import sys
@@ -9,6 +8,7 @@ import unittest
 import zipfile
 
 import backupkit
+from tests.fakes import entrypoint_for
 
 
 def make_backup(cfg, name, ha_version):
@@ -24,9 +24,7 @@ def make_backup(cfg, name, ha_version):
 class ApplyConfigChangesTest(unittest.TestCase):
     def setUp(self):
         self.cfg = tempfile.mkdtemp()
-        os.environ["HRI_CONFIG"] = self.cfg
-        sys.modules.pop("entrypoint", None)
-        self.ep = importlib.import_module("entrypoint")
+        self.ep = entrypoint_for(self, self.cfg)
         os.makedirs(os.path.join(self.cfg, ".storage"))
         os.makedirs(os.path.join(self.cfg, "integration_manager"))
         with open(os.path.join(self.cfg, ".storage", "core.config_entries"), "w", encoding="utf-8") as fh:
@@ -40,10 +38,6 @@ class ApplyConfigChangesTest(unittest.TestCase):
                 os.makedirs(os.path.join(venv, folder))
             for marker in (".ok", "bin/python", os.path.join(ha_pkg, "__init__.py")):  # what venv_ok looks for
                 open(os.path.join(venv, marker), "w").close()
-
-    def tearDown(self):
-        os.environ.pop("HRI_CONFIG", None)
-        sys.modules.pop("entrypoint", None)
 
     def storage(self):
         with open(os.path.join(self.cfg, ".storage", "core.config_entries"), encoding="utf-8") as fh:
@@ -95,9 +89,7 @@ class CleanStartAtomicTest(unittest.TestCase):
         from unittest import mock
 
         cfg = tempfile.mkdtemp()
-        os.environ["HRI_CONFIG"] = cfg
-        sys.modules.pop("entrypoint", None)
-        ep = importlib.import_module("entrypoint")
+        ep = entrypoint_for(self, cfg)
         os.makedirs(os.path.join(cfg, ".storage"))
         os.makedirs(os.path.join(ep.STATE_DIR, "import-extracted"))
         with open(os.path.join(cfg, ".storage", "core.config_entries"), "w", encoding="utf-8") as fh:
@@ -116,9 +108,7 @@ class CleanStartAtomicTest(unittest.TestCase):
         from unittest import mock
 
         cfg = tempfile.mkdtemp()
-        os.environ["HRI_CONFIG"] = cfg
-        sys.modules.pop("entrypoint", None)
-        ep = importlib.import_module("entrypoint")
+        ep = entrypoint_for(self, cfg)
         os.makedirs(os.path.join(cfg, ".storage"))
         os.makedirs(os.path.join(ep.STATE_DIR, "import-extracted"))
         with open(os.path.join(cfg, ".storage", "core.config_entries"), "w", encoding="utf-8") as fh:

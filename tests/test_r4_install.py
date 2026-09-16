@@ -414,7 +414,7 @@ class PatchFilesOffTheLoopTest(unittest.TestCase):
         self.on_loop.clear()  # the fixture itself
         edit = manage_views.PatchEditView(self.hass, SimpleNamespace())
         body = {"name": "fix.patch", "text": "--- a/m.py\n+++ b/m.py\n@@ -1 +1 @@\n-a\n+b\n", "create": True}
-        req = SimpleNamespace(headers={}, query={}, content_type="application/json", json=mock.AsyncMock(return_value=body))
+        req = SimpleNamespace(headers={"X-Requested-With": "fetch"}, query={}, content_type="application/json", json=mock.AsyncMock(return_value=body))
         res = json.loads(asyncio.run(edit.post(req, "demo", "save")).body)
         self.assertFalse(res["ok"])
         self.assertIn("exists already", res["error"])

@@ -7,8 +7,8 @@ custom names.  Everything else gets 403 with an explanation."""
 
 from __future__ import annotations
 
+import functools
 import ipaddress
-import re
 import logging
 import socket
 
@@ -17,20 +17,40 @@ from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
 SAFE_SUFFIXES = (".local", ".lan", ".home", ".internal", ".home.arpa", ".localdomain")
-# every script is a static file (no inline script or handler); inline style attributes remain, hence 'unsafe-inline' for styles
+# every script is a static file (no inline script or handler); style attributes and the login page's <style> element
+# remain, hence 'unsafe-inline' for styles
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
 
 
-def _host_ok(host: str, extra: set[str]) -> bool:
+@functools.cache
+def _own_hostname() -> str:
+    # the container's name does not change while it runs, and gethostname is a system call on every request
+    return socket.gethostname().lower().rstrip(".")
+
+
+def _bare(host: str) -> str:
+    """A Host value without its port and without the one trailing dot of a fully qualified name
+    ("hri.local." is the same host as "hri.local", and browsers send what the user typed)."""
     h = host.strip().lower()
     if h.startswith("["):  # [v6]:port
         h = h[1:].split("]", 1)[0]
     elif h.count(":") == 1:
         h = h.split(":", 1)[0]
+    return h[:-1] if h.endswith(".") else h
+
+
+@functools.lru_cache(maxsize=8)
+def _allowed(raw: str) -> frozenset[str]:
+    # the setting is read on every request but changes only on a save: parsed once per value
+    return frozenset(_bare(x) for x in raw.split(",") if x.strip())
+
+
+def _host_ok(host: str, extra: set[str] | frozenset[str]) -> bool:
+    h = _bare(host)
     if not h:
         return False
-    if h in ("localhost", socket.gethostname().lower()) or h in extra:
+    if h in ("localhost", _own_hostname()) or h in extra:
         return True
     try:
         ipaddress.ip_address(h)
@@ -43,7 +63,7 @@ def _host_ok(host: str, extra: set[str]) -> bool:
 def install_host_guard(hass: HomeAssistant, installer) -> None:
     @web.middleware
     async def host_guard(request: web.Request, handler):
-        extra = {re.sub(r":\d+$", "", x.strip().lower()) for x in str(installer.settings.data.get("allowed_hosts") or "").split(",") if x.strip()}  # the Host header is compared without its port
+        extra = _allowed(str(installer.settings.data.get("allowed_hosts") or ""))  # the Host header is compared without its port
         # the two refusals below answer before the handler, so they carry the policy themselves
         if not _host_ok(request.headers.get("Host", ""), extra):
             return web.Response(status=403, content_type="text/plain", headers={"Content-Security-Policy": CSP},
@@ -65,5 +85,8 @@ def install_host_guard(hass: HomeAssistant, installer) -> None:
 
     try:
         hass.http.app.middlewares.append(host_guard)
-    except Exception as err:  # noqa: BLE001 - frozen app (should not happen at setup time)
-        _LOGGER.error("host guard not installed: %s", err)
+    except Exception as err:  # noqa: BLE001 - a frozen app: refuse to run without the guard, as auth.py does
+        # without it every page is open to DNS rebinding and HA's onboarding API is reachable: the manager's setup
+        # fails, run.py exits and the container's restarts and this line are what the operator sees
+        _LOGGER.error("host guard not installed (%s): the manager does not start without it", err)
+        raise

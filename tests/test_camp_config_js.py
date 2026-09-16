@@ -20,6 +20,7 @@ CONFIG_JS_PATH = os.path.join(os.path.dirname(__file__), os.pardir, "custom_comp
 SERVICES_JS_PATH = os.path.join(os.path.dirname(CONFIG_JS_PATH), "services.js")
 HARNESS = os.path.join(os.path.dirname(__file__), "js", "config_form.mjs")
 SERVICES_HARNESS = os.path.join(os.path.dirname(__file__), "js", "services_form.mjs")
+REQUESTS_HARNESS = os.path.join(os.path.dirname(__file__), "js", "r9_pages.mjs")
 with open(CONFIG_JS_PATH, encoding="utf-8") as _fh:
     CONFIG_JS = _fh.read()
 
@@ -232,6 +233,33 @@ class FlowEndingTest(unittest.TestCase):
     def test_a_flow_to_continue_says_which_entry_it_belongs_to(self):
         self.assertIn("titles[e.entry_id]=e.title", self.entries)
         self.assertIn("f.entry_id?(titles[f.entry_id]||f.entry_id.slice(0,8)", self.entries)
+
+
+@unittest.skipUnless(shutil.which("node") and os.path.isfile(REQUESTS_HARNESS), "node (or the harness) is not available here")
+class RequestHelpersAndProgressPollTest(unittest.TestCase):
+    """static/hri.js post()/del() and config.js pollProgress() run for real (tests/js/r9_pages.mjs): post() sent no
+    X-Requested-With, so the patch editor's check and save could not be gated on it; a plain-text 500 made r.json()
+    throw where callers do not catch; a progress timer of one flow posted user_input null to the flow started after it."""
+
+    @classmethod
+    def setUpClass(cls):
+        out = subprocess.run([shutil.which("node"), REQUESTS_HARNESS, os.path.dirname(CONFIG_JS_PATH)], capture_output=True, text=True, timeout=60)
+        if out.returncode != 0:
+            raise AssertionError(f"the harness failed: {out.stderr.strip()}")
+        cls.out = json.loads(out.stdout)
+
+    def test_post_and_del_send_the_header(self):
+        self.assertEqual(self.out["post_headers"].get("X-Requested-With"), "fetch")
+        self.assertEqual(self.out["del_headers"].get("X-Requested-With"), "fetch")
+
+    def test_a_plain_text_error_comes_back_as_an_error(self):
+        self.assertEqual(self.out["plain_500"], {"ok": False, "error": "HTTP 500: 500 Internal Server Error", "message": "HTTP 500: 500 Internal Server Error"})
+        self.assertEqual(self.out["json_answer"], {"ok": True, "n": 1})
+
+    def test_a_progress_poll_of_an_old_flow_does_not_reach_a_new_one(self):
+        self.assertEqual(self.out["timer_after_new_flow"], {"posts": [], "renders": 0})
+        self.assertEqual(self.out["answer_after_new_flow"], {"posts": ["api/flow/A"], "renders": 0})
+        self.assertEqual(self.out["same_flow"], {"posts": ["api/flow/A"], "renders": 1})
 
 
 if __name__ == "__main__":
