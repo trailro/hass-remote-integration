@@ -2167,7 +2167,7 @@ class Installer:
                 self._save_state()
             return
         _LOGGER.info("reconcile %s %s: deployed=%s missing=%s patch=%s user_patches_pending=%s", domain, tag, deployed, missing, patch_state, pending)
-        failed = pip_failed or (await self.hass.async_add_executor_job(self._install_requirements, reqs) if deployed else [])
+        failed = pip_failed  # installed above when missing: a second pass would only check them again
         outcome = patched_now or await self.hass.async_add_executor_job(self._apply_patches, domain)
         self.state.last_action = f"reconciled {domain} {tag}; patches: {outcome}" + (f"; pip failed: {', '.join(failed)}" if failed else "")
         if failed:
