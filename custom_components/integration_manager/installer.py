@@ -587,7 +587,8 @@ class Installer:
             "loaded_tag": self._loaded_tags.get(domain),
             "code_version": manifest.get("version") if manifest else None,
             "requirements": req_versions,
-            "requirements_ok": (bool(reqs) and all(req_versions.values())) if running else None,
+            # an integration whose manifest has no requirements has nothing missing: all({}) is True
+            "requirements_ok": all(req_versions.values()) if running else None,
             "loaded_as_integration": domain in self.hass.config.components,
             "entries": [{"entry_id": e.entry_id, "title": e.title, "state": e.state.value,
                          "disabled_by": e.disabled_by.value if e.disabled_by else None, "version": e.version} for e in entries],
