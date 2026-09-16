@@ -991,6 +991,15 @@ What is in place:
   and cloudhook URLs, `Authorization` values (`Bearer`, `Basic` and any other
   scheme), `Cookie`/`Set-Cookie` values and credentials in URLs (also a
   password holding `/` or `@`). Masking errs on the side of hiding too much.
+  The searches on the Logs and Log files pages run on the masked text, so
+  looking for part of a key finds nothing: a row that appeared only while the
+  search matched the key would let it be read out one character at a time.
+  A key is recognised from its `-----END …-----` marker or from the shape of
+  its own lines, so a search result or a tail that starts in the middle of a
+  block is masked too; key material with no marker anywhere in the window and
+  no name in front of it (a key cut off mid-write, or bytes pasted into a
+  sentence) can still get through, which is why a log with secrets in it should
+  not be shared casually.
   Backups contain
   them; the login key and the logout record stay out of backups, so a restore
   never revives a logged-out session. The key of an encrypted Home Assistant

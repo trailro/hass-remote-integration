@@ -29,7 +29,10 @@ from plain HTTP traffic. These are:
   of CORS on the manager's routes;
 - secrets (MQTT password, GitHub token, the main Home Assistant's token,
   backup encryption keys) exposed through the API, the logs, the timeline, the
-  diagnostics zip or the UI;
+  diagnostics zip or the UI; the log searches run on the masked text and a
+  search for key material returns nothing by design, but redaction of material
+  that carries no marker and no name in front of it is best effort — a report
+  needs a case where something the scrubber does name comes out unmasked;
 - service calls over MQTT or from the UI that get past the deny list, or MQTT
   commands and service calls that reach entities the container does not
   publish through the target (entity, group, device, area, floor, label) or
