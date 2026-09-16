@@ -16,7 +16,7 @@ from unittest import mock
 import asyncio
 
 import run
-from custom_components.integration_manager import build_views, views
+from custom_components.integration_manager import build_views, manage_views, views
 from custom_components.integration_manager import installer as installer_mod
 from custom_components.integration_manager import patches
 from custom_components.integration_manager.installer import Installer, State
@@ -449,6 +449,42 @@ class GitHubReadsTest(R12InstallerCase):
         with self.assertRaisesRegex(RuntimeError, "private repo or bad token"):
             installer_mod._gh_check(_Resp(404), "owner/demo")
         installer_mod._gh_check(_Resp(200), "owner/demo")
+
+
+class PatchUploadAtomicTest(unittest.TestCase):
+    """C22: an uploaded patch replaces the stored one by rename, never by truncating it in place."""
+
+    def test_upload_replaces(self):
+        cfg = tempfile.mkdtemp(prefix="hri-r12-")
+        self.addCleanup(shutil.rmtree, cfg, ignore_errors=True)
+        d = patches.patch_dir(cfg, "demo")
+        os.makedirs(d)
+        with open(os.path.join(d, "fix.py"), "w", encoding="utf-8") as fh:
+            fh.write("old")
+        before = os.stat(os.path.join(d, "fix.py")).st_ino
+        chunks = [b"def apply(ctx):\n    return 'applied'\n", b"def status(ctx):\n    return 'applied'\n", b""]
+
+        async def read_chunk(_n):
+            return chunks.pop(0)
+
+        field = SimpleNamespace(name="file", filename="fix.py", read_chunk=read_chunk)
+
+        async def multipart():
+            async def nxt():
+                return field
+            return SimpleNamespace(next=nxt)
+
+        async def job(fn, *args):
+            return fn(*args)
+
+        hass = SimpleNamespace(config=SimpleNamespace(config_dir=cfg), async_add_executor_job=job)
+        res = json.loads(asyncio.run(manage_views.PatchUploadView(hass, SimpleNamespace()).post(
+            SimpleNamespace(headers={"X-Requested-With": "fetch"}, multipart=multipart), "demo")).body)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(os.listdir(d), ["fix.py"])
+        with open(os.path.join(d, "fix.py"), encoding="utf-8") as fh:
+            self.assertIn("def status", fh.read())
+        self.assertNotEqual(os.stat(os.path.join(d, "fix.py")).st_ino, before)
 
 
 class BootSweepTest(unittest.TestCase):
