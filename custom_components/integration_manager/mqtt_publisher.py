@@ -72,6 +72,7 @@ from .mqtt_rules import MqttRules
 from .services_catalog import service_rows
 
 TLS_CHECK_INTERVAL_S = 60  # at most one diagnostic handshake per minute while paho keeps failing to connect
+DROP_AFTER_CONNECT_S = 10  # a disconnect within this of a CONNACK: the broker dropped us, the settings are not the problem
 
 _LOGGER = logging.getLogger(__name__)
 ORPHAN_SWEEP_DELAY_S = 300  # after HA started: integrations still adding entities (a device slow to answer) have had time
@@ -119,6 +120,13 @@ MQTT_CALL_DENY_SERVICES = frozenset({("notify", "persistent_notification")})
 # (json.loads would raise RecursionError, and everything that walks the data after it could too).
 CALL_MAX_BYTES = 256 * 1024
 CALL_MAX_DEPTH = 64
+
+# A packet over the broker's maximum makes the broker close the connection, and paho replays the queued
+# QoS 1 message on every automatic reconnect: one oversized document loops the bridge and stops everything
+# else, a new client (Reconnect) being the only way out.  1 MiB is what EMQX and HiveMQ accept by default
+# (mosquitto is far more generous); an MQTT 5 broker's announced maximum wins over it.
+PUBLISH_MAX_BYTES = 1024 * 1024
+PUBLISH_OVERHEAD_BYTES = 32  # fixed header, topic length, packet id and properties, on top of topic + payload
 # Topic segments of our own under the base topic: an integration with one of these names gets its documents under
 # "<name>-integration" ("-" is never part of an integration domain), otherwise an integration called "call" would
 # publish its documents where live subscribers take them as service calls.
@@ -310,11 +318,16 @@ def _dumps(value: Any, **kwargs: Any) -> str:
 
 _SERVICE_NAME = re.compile(r"[a-z0-9_]+")
 
+# how Home Assistant registers an entity service (helpers/service.py): the handler is a partial of one of these
+_ENTITY_SERVICE_CALLS = frozenset({"entity_service_call", "batched_entity_service_call"})
+
 
 class MqttPublisher:
     _stopping = False  # Home Assistant is stopping: no client may be created any more
     _identity_sweep_due = False  # the sweep of an identity that changed while disconnected failed: retried after a connect
     _in_flight = 0  # service calls and commands whose service task has not finished
+    _connected_at = 0.0  # monotonic time of the last CONNACK: a drop right after one is not a TLS problem
+    _broker_max_packet = 0  # maximum packet size the broker announced (MQTT 5 only), 0 = none announced
 
     def __init__(self, hass: HomeAssistant, key_provider=None, health_provider=None, rules_provider=None) -> None:
         self._health_provider = health_provider
@@ -325,6 +338,7 @@ class MqttPublisher:
         self._probed_ok: set[str] = set()  # "host:port/base" namespaces probed clean by this process
         self._tls_checked_at, self._tls_error = 0.0, ""  # the last diagnostic handshake after a failed connect
         self._last_disconnect = ""  # the reason already logged: paho retries forever
+        self._oversized_warned: set[str] = set()  # topics already reported as too big, forgotten on every connect
         self._last_hash: dict[str, str] = {}  # topic -> content hash of the last published document (minus timestamps)
         self._last_full = 0.0
         self._moving = False  # identity move in progress: nothing may be published under the old names
@@ -349,6 +363,8 @@ class MqttPublisher:
             "connect_error": "",
             "published": 0,
             "cleared": 0,
+            "oversized_skipped": 0,
+            "last_oversized": None,
             "last_publish": None,
             "last_full_republish": None,
             "health_state": None,
@@ -689,8 +705,10 @@ class MqttPublisher:
             # meanwhile (a disabled or deleted entity) stays there as a zombie; like Undo on Cutover
             self._set_undiscover_due(True)
         if self._connected and self.wanted_base_topic is None and not moved:
-            # a stop: the retained verdict must not keep saying "ok" for an integration that no longer runs
+            # a stop: the retained verdict must not keep saying "ok" for an integration that no longer runs,
+            # and the retained catalog must not keep advertising services the consumer can no longer call
             self._publish(self._health_topic(), _dumps(self.build_health()), qos=1)
+            self._clear_services_catalog()
         # no retained "offline" on a status topic we just cleared
         await self.hass.async_add_executor_job(self._disconnect, not moved)
         self._moving = False
@@ -899,6 +917,7 @@ class MqttPublisher:
         self._live_base = base
         self._live_prefix = base + "_"
         self._tls_checked_at, self._tls_error, self._last_disconnect = 0.0, "", ""  # new settings: report afresh
+        self._connected_at, self._broker_max_packet = 0.0, 0
         old = self._client
         if old is not None:  # belt and braces next to the lock: never leave a second client running
             self._client = None
@@ -949,6 +968,7 @@ class MqttPublisher:
             except Exception:  # noqa: BLE001
                 pass
         self._connected = False
+        self._connected_at = 0.0
         self.stats["connected"] = False
         self._live_base = self._live_prefix = None
         self.hass.loop.call_soon_threadsafe(self._last_hash.clear)  # a new connection re-asserts every retained document
@@ -963,6 +983,10 @@ class MqttPublisher:
         if self._stopping:
             return  # no "online" and no republish while Home Assistant stops
         self._connected = True
+        self._connected_at = time.monotonic()
+        # MQTT 5 only: the broker states what it accepts, which beats guessing (paho itself refuses a bigger packet)
+        announced = getattr(properties, "MaximumPacketSize", None)
+        self._broker_max_packet = announced if isinstance(announced, int) and announced > 0 else 0
         self.stats["connected"] = True
         self.stats["connect_error"] = ""
         self._tls_checked_at, self._tls_error, self._last_disconnect = 0.0, "", ""
@@ -979,6 +1003,7 @@ class MqttPublisher:
         # on the loop, which is the only place that reads it, right before.
         def _resume() -> None:
             self._last_hash.clear()
+            self._oversized_warned.clear()  # what could not be published is worth reporting again on a new connection
             self._manager_absent_sent = False
             self.hass.async_create_task(self.async_republish_all())
 
@@ -1023,12 +1048,19 @@ class MqttPublisher:
             return ""  # not a TLS problem: the broker is unreachable, which the generic message says
 
     def _on_disconnect(self, client, userdata, flags, reason_code, properties=None) -> None:
+        lived = time.monotonic() - self._connected_at if self._connected_at else None
         self._connected = False
+        self._connected_at = 0.0
         self.stats["connected"] = False
         if reason_code != 0:
             reason = str(reason_code)
-            # a plain connection to a TLS listener ends like this, with no better reason from paho
-            hint = "; if the port is a TLS listener, turn TLS on" if not self.config.tls and reason == "Unspecified error" else ""
+            # A plain connection to a TLS listener never gets a CONNACK, so the TLS hint is only honest while
+            # none arrived.  A drop moments after one is a broker closing an established connection - a packet
+            # over its maximum is the usual cause - and blaming TLS sends the operator the wrong way.
+            hint = (f"; the broker closed the connection {lived:.0f}s after accepting it (a packet over its maximum looks like this)"
+                    if lived is not None and lived < DROP_AFTER_CONNECT_S
+                    else "" if lived is not None
+                    else "; if the port is a TLS listener, turn TLS on" if not self.config.tls and reason == "Unspecified error" else "")
             self.stats["connect_error"] = f"disconnected ({reason}){hint}; reconnecting"
             if reason != self._last_disconnect:  # one warning and one event per reason, not one per retry
                 self._last_disconnect = reason
@@ -1252,7 +1284,23 @@ class MqttPublisher:
         rows = list(self.history)[-limit:]
         return [{**r, "received": iso(r["received"]), "finished": iso(r["finished"]), "result": None} for r in reversed(rows)]
 
-    def _call_target_problem(self, data: dict[str, Any]) -> str | None:
+    def _service_reach(self, domain: str | None, service: str | None) -> set[str] | None:
+        """Entity domains an entity service can act on, None when it is not one (or cannot be recognised as
+        one).  Home Assistant hands an entity service only its own component's entities, so an area, floor or
+        label picking up entities of other domains is not a request to touch them.  Anything unrecognised keeps
+        the strict check: a plain service handler may do what it likes with an area_id."""
+        from homeassistant.helpers.entity_platform import DATA_DOMAIN_PLATFORM_ENTITIES
+
+        if not domain or not service:
+            return None
+        registered = self.hass.services.async_services_for_domain(domain).get(service)
+        handler = getattr(getattr(registered, "job", None), "target", None)
+        if getattr(getattr(handler, "func", handler), "__name__", "") not in _ENTITY_SERVICE_CALLS:
+            return None
+        # a platform entity service (async_register_platform_entity_service) reaches entities of other domains
+        return {domain} | {ed for ed, sd in self.hass.data.get(DATA_DOMAIN_PLATFORM_ENTITIES, {}) if sd == domain}
+
+    def _call_target_problem(self, data: dict[str, Any], domain: str | None = None, service: str | None = None) -> str | None:
         """A call reaches only entities this container publishes, like a cmd/ topic: the target
         (entity ids, and area/floor/label/device ids resolved the way Home Assistant resolves them)
         must not name anything else.  A device_id that is not a registry device (a RAMSES address
@@ -1273,8 +1321,12 @@ class MqttPublisher:
         except Exception as err:  # noqa: BLE001 - what cannot be resolved here cannot be checked: never passed on unchecked
             return f"the target cannot be read ({type(err).__name__}): entity, device, area, floor and label ids must be strings"
         # expansion replaces a group by its members: the group named must be published too
-        wanted = selected.referenced | selected.indirectly_referenced | {e for e in split if valid_entity_id(e)} | _entity_ids_in(data)
-        outside = sorted(e for e in wanted if e not in self._topics)
+        wanted = selected.referenced | {e for e in split if valid_entity_id(e)} | _entity_ids_in(data)
+        indirect = selected.indirectly_referenced
+        if (reach := self._service_reach(domain, service)) is not None:
+            # what the service can never act on is no reason to refuse it; ids the caller named stay strict
+            indirect = {e for e in indirect if e.split(".", 1)[0] in reach}
+        outside = sorted(e for e in wanted | indirect if e not in self._topics)
         if outside:
             return f"not entities this container publishes: {', '.join(outside[:5])}{'…' if len(outside) > 5 else ''}"
         return None
@@ -1291,10 +1343,12 @@ class MqttPublisher:
     def _reject_empty_call(self, rest: str) -> None:
         """A call needs a JSON object ({} without data); an empty payload is what clearing a retained call looks like."""
         parts = rest.split("/")
-        rec = self._remember("call", rest[:80], "")
-        self._finish(rec, "rejected", "empty payload: send {} to call a service without data")
+        error = "empty payload: send {} to call a service without data"
+        self._finish(self._remember("call", rest[:80], ""), "rejected", error)
         if len(parts) == 2 and _SERVICE_NAME.fullmatch(parts[0].lower()) and _SERVICE_NAME.fullmatch(parts[1].lower()) and not self._moving:
-            self._publish_result(parts[0].lower(), parts[1].lower(), {"ok": False, "error": "empty payload: send {} to call a service without data"})
+            domain, service = parts[0].lower(), parts[1].lower()
+            # the shape every other result has: a consumer routes on "service" and correlates on "id"
+            self._publish_result(domain, service, {"id": None, "service": f"{domain}.{service}", "ok": False, "error": error})
 
     def _on_call(self, rest: str, payload: str) -> None:
         """Generic service call: <base>/call/<domain>/<service> with a JSON
@@ -1302,27 +1356,30 @@ class MqttPublisher:
         an optional "_id" is echoed back).  Outcome goes to
         <base>/result/<domain>/<service>, not retained."""
         parts = rest.split("/")
+        # read once, before the payload is parsed for real: the refusals below all answer with it, and the
+        # command history is only useful to the consumer when a refused call carries the id it sent
+        sent_id = _call_id_of(payload)
         if len(parts) != 2:
-            self._finish(self._remember("call", rest[:80], payload), "rejected", "topic must be <base>/call/<domain>/<service>")
+            self._finish(self._remember("call", rest[:80], payload, sent_id), "rejected", "topic must be <base>/call/<domain>/<service>")
             _LOGGER.warning("MQTT call on %r ignored: the topic must be <base>/call/<domain>/<service>", rest[:80])
             return
         domain, service = parts[0].lower(), parts[1].lower()  # HA looks services up in lower case, so the deny list must too
         if not _SERVICE_NAME.fullmatch(domain) or not _SERVICE_NAME.fullmatch(service):
-            self._finish(self._remember("call", rest[:80], payload), "rejected", "domain and service must be names made of a-z, 0-9 and _")
+            self._finish(self._remember("call", rest[:80], payload, sent_id), "rejected", "domain and service must be names made of a-z, 0-9 and _")
             return
         denied = (f"domain {domain} is not callable over MQTT" if domain in MQTT_CALL_DENY_DOMAINS or domain in self.config.exclude_integrations
                   else f"{domain}.{service} is not callable over MQTT" if (domain, service) in MQTT_CALL_DENY_SERVICES else None)
         if denied:
-            self._publish_result(domain, service, {"id": _call_id_of(payload), "service": f"{domain}.{service}", "ok": False, "error": denied})
-            self._finish(self._remember("call", f"{domain}.{service}", payload), "rejected", denied)
+            self._publish_result(domain, service, {"id": sent_id, "service": f"{domain}.{service}", "ok": False, "error": denied})
+            self._finish(self._remember("call", f"{domain}.{service}", payload, sent_id), "rejected", denied)
             return
         try:
             data = _loads_call(payload) if payload.strip() else {}
             if not isinstance(data, dict):
                 raise ValueError("payload must be a JSON object")
         except (ValueError, RecursionError) as err:
-            self._publish_result(domain, service, {"id": _call_id_of(payload), "service": f"{domain}.{service}", "ok": False, "error": f"bad payload: {err}"})
-            self._finish(self._remember("call", f"{domain}.{service}", payload), "rejected", f"bad payload: {err}")
+            self._publish_result(domain, service, {"id": sent_id, "service": f"{domain}.{service}", "ok": False, "error": f"bad payload: {err}"})
+            self._finish(self._remember("call", f"{domain}.{service}", payload, sent_id), "rejected", f"bad payload: {err}")
             return
         call_id = data.pop("_id", None)
         # an _id is unique per service for the consumer (a counter that restarts, one per automation)
@@ -1364,7 +1421,7 @@ class MqttPublisher:
                 done("error", res["error"], res)
                 _LOGGER.warning("MQTT call %s.%s failed: unknown service", domain, service)
                 return
-            if problem := self._call_target_problem(data):
+            if problem := self._call_target_problem(data, domain, service):
                 res = {**base, "ok": False, "error": problem}
                 self._publish_result(domain, service, res)
                 done("rejected", problem, res)
@@ -1424,8 +1481,14 @@ class MqttPublisher:
         c = self._client
         if c is None or not self._connected:
             return
-        info = c.publish(f"{self.base_topic}/result/{domain}/{service}",
-                         _dumps(result), qos=1, retain=False)
+        topic, payload = f"{self.base_topic}/result/{domain}/{service}", _dumps(result)
+        if self._oversized(topic, payload):
+            # the caller is waiting for an answer on this topic: send it without the response data rather than nothing
+            payload = _dumps({"id": result.get("id"), "service": result.get("service"), "ok": False,
+                              "error": f"the result is over the {self._publish_limit()} byte maximum the broker accepts"})
+            if self._oversized(topic, payload):
+                return
+        info = c.publish(topic, payload, qos=1, retain=False)
         _LOGGER.debug("MQTT result %s.%s published rc=%s ok=%s", domain, service, info.rc, result.get("ok"))
 
     def _publish_if_changed(self, topic: str, payload: str, qos: int | None = None) -> bool:
@@ -1443,9 +1506,30 @@ class MqttPublisher:
             return True
         return False
 
+    def _publish_limit(self) -> int:
+        """Bytes a single packet may have: what the broker announced on connect, else our own default."""
+        return self._broker_max_packet or PUBLISH_MAX_BYTES
+
+    def _oversized(self, topic: str, payload: str) -> bool:
+        """A packet the broker refuses costs the connection, and with QoS 1 paho replays it on every
+        reconnect until a new client is built: skipping the document is the cheaper failure."""
+        size = len(payload.encode()) + len(topic.encode()) + PUBLISH_OVERHEAD_BYTES
+        limit = self._publish_limit()
+        if size <= limit:
+            return False
+        self.stats["oversized_skipped"] += 1
+        self.stats["last_oversized"] = f"{topic}: {size} bytes over the {limit} byte maximum"
+        if topic not in self._oversized_warned:  # once per topic per connection, not once per republish
+            self._oversized_warned.add(topic)
+            _LOGGER.error("MQTT: %s not published: %s bytes, over the %s byte maximum the broker accepts", topic, size, limit)
+            events.emit("mqtt", f"{topic} not published: {size} bytes, over the {limit} byte maximum")
+        return True
+
     def _publish(self, topic: str, payload: str | None, retain: bool = True, qos: int | None = None) -> bool:
         c = self._client
         if c is None or not self._connected or self._moving:
+            return False
+        if payload is not None and self._oversized(topic, payload):
             return False
         if payload is None:
             # a cleared retained topic must be published again next time, even
@@ -2141,6 +2225,14 @@ class MqttPublisher:
         self._services_published = current
         self.stats["services_published"] = sum(len(r["services"]) for r in rows)
 
+    def _clear_services_catalog(self) -> None:
+        """Clear every retained catalog document.  Forgetting which domains were published is what makes a
+        later start publish them all again (the content gate would otherwise skip an unchanged domain)."""
+        for domain in self._services_published:
+            self._publish(f"{self.base_topic}/services/{domain}", None, qos=1)
+        self._services_published = set()
+        self.stats["services_published"] = 0
+
     def _remove_component(self, entity_id: str) -> None:
         """HA's documented removal form: republish the device with the
         component reduced to {"platform": <domain>}; the next full republish
@@ -2286,8 +2378,8 @@ class MqttPublisher:
         if self._services_timer is not None:
             self._services_timer.cancel()
         # A burst of registrations means an integration just finished
-        # loading: republish everything (its entities appeared after our
-        # connect-time run), not only the catalog.
+        # loading: republish the catalog once the burst is over.  Its
+        # entities are covered by the registry burst (_async_discovery_refresh).
         self._services_timer = self.hass.loop.call_later(
             5, lambda: self.hass.async_create_task(self._async_services_refresh())
         )

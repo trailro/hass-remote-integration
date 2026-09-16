@@ -282,7 +282,7 @@ def _running_publisher():
     pub.hass.async_create_task = loop.create_task
     pub.hass.services.has_service = lambda d, s: True
     pub.hass.services.supports_response = lambda d, s: SupportsResponse.NONE
-    pub._call_target_problem = lambda data: None
+    pub._call_target_problem = lambda data, *_: None  # the check itself is tested in test_camp_publish.py
     pub.release = asyncio.Event()
 
     async def service(*_a, **_k):
