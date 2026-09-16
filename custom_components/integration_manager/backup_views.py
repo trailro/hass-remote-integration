@@ -206,34 +206,42 @@ class BackupActionView(ManagerView):
                                           "note": f"Home Assistant {made_on} is installed if needed and the backup restored at the next restart"})
                     # made on the running version while a switch to another one is scheduled: that switch goes,
                     # once the backup is known to be restorable and no other change is being prepared
-                    from .views import _HA_CHANGE_LOCK
-
                     if parts is not None and (not parts or any(p not in backupkit.PARTS for p in parts)):
                         return self.json({"ok": False, "error": f"parts must be a non-empty subset of {', '.join(backupkit.PARTS)}"})
-                    if _HA_CHANGE_LOCK.locked() or self.installer.busy:
-                        return self.json({"ok": False, "error": "a Home Assistant version change or an install is running: try again in a moment"})
-                    async with _HA_CHANGE_LOCK:
-                        self.installer.busy = True
-                        try:
+                cancel_switch = choice == "backup" and bool(made_on) and made_on != boot
+                # checked and scheduled as one step, like a version change (views.async_change_ha_version): under its
+                # lock, with busy reserved.  The archive's own lock covers each write only: a change prepared between
+                # this restore's checks and its schedule replaced it, or was replaced by it, and both answered ok.
+                # Refused, never waited for: what holds these is short (a schedule) or long and unrelated (an install).
+                from .views import _HA_CHANGE_LOCK
+
+                if _HA_CHANGE_LOCK.locked() or self.installer.busy:
+                    return self.json({"ok": False, "error": "a Home Assistant version change or an install is running: try again in a moment"})
+                async with _HA_CHANGE_LOCK:
+                    self.installer.busy = True
+                    try:
+                        # the version checked above is still the one that boots next (a change prepared meanwhile)
+                        if (await self.hass.async_add_executor_job(backupkit.boot_version, cfg) or HA_VERSION) != boot:
+                            return self.json({"ok": False, "error": "the Home Assistant version that boots next changed meanwhile: check System and try again"})
+                        if cancel_switch:
                             await self.hass.async_add_executor_job(backupkit.validate, path)
                             await self.hass.async_add_executor_job(self.updater.cancel_config_change)
                             await self.hass.async_add_executor_job(self.updater.set_desired, HA_VERSION)
-                            await self.hass.async_add_executor_job(backupkit.schedule_restore, cfg, name, parts, None, force)
-                            await self.hass.async_add_executor_job(ha_import.drop_rebuild, cfg)
-                        finally:
-                            self.installer.busy = False
+                        elif self.updater is not None:
+                            # a restore by hand would take the place of the restore or clean start a scheduled switch needs
+                            change = (await self.hass.async_add_executor_job(self.updater._read)).get("change")  # noqa: SLF001
+                            if isinstance(change, dict) and change.get("mode") in ("restore", "rebuild") and change.get("to") != HA_VERSION:
+                                return self.json({"ok": False, "error": f"a switch to Home Assistant {change.get('to')} with a {'configuration restore' if change.get('mode') == 'restore' else 'clean start'} "
+                                                                        "is scheduled: cancel it on System (choose the running version) before restoring a backup"})
+                        await self.hass.async_add_executor_job(backupkit.schedule_restore, cfg, name, parts, None, force)
+                        await self.hass.async_add_executor_job(ha_import.drop_rebuild, cfg)  # the restore replaces a scheduled clean start
+                    finally:
+                        self.installer.busy = False
+                if cancel_switch:
                     events.emit("restore", f"{name} scheduled for the next restart ({', '.join(parts) if parts else 'everything'}); "
                                 f"the scheduled switch to Home Assistant {boot} was cancelled", backup=name)
                     return self.json({"ok": True, "parts": parts or list(backupkit.PARTS), "cancelled_switch": boot,
                                       "note": "restore is applied by the entrypoint at the next process restart"})
-                elif self.updater is not None:
-                    # a restore by hand would take the place of the restore or clean start a scheduled switch needs
-                    change = (await self.hass.async_add_executor_job(self.updater._read)).get("change")  # noqa: SLF001
-                    if isinstance(change, dict) and change.get("mode") in ("restore", "rebuild") and change.get("to") != HA_VERSION:
-                        return self.json({"ok": False, "error": f"a switch to Home Assistant {change.get('to')} with a {'configuration restore' if change.get('mode') == 'restore' else 'clean start'} "
-                                                                "is scheduled: cancel it on System (choose the running version) before restoring a backup"})
-                await self.hass.async_add_executor_job(backupkit.schedule_restore, cfg, name, parts, None, force)
-                await self.hass.async_add_executor_job(ha_import.drop_rebuild, cfg)  # the restore replaces a scheduled clean start
                 events.emit("restore", f"{name} scheduled for the next restart ({', '.join(parts) if parts else 'everything'})", backup=name)
                 return self.json({"ok": True, "parts": parts or list(backupkit.PARTS),
                                   "note": "restore is applied by the entrypoint at the next process restart"})
