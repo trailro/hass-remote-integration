@@ -18,6 +18,11 @@ them stayed valid.
 C1: DELETE /api/flow/<id> and /api/options/<flow_id> were the only changes
 without the JSON body or X-Requested-With gate.
 
+C4: the Log files listing named a file relative to the config dir as given and
+checked it against the resolved one: with the config dir reached through a
+symbolic link, every name read ``../<real dir>/...`` and the ``.storage/`` and
+``integration_manager/`` exclusions matched nothing.
+
 Every test fails on the tree before the fix unless its docstring says it pins
 behaviour that already held.
 """
@@ -357,3 +362,38 @@ class FlowAbortGateTest(unittest.TestCase):
                     resp = asyncio.run(view_cls(flows).delete(request, flow_id="F1"))
                     self.assertEqual(resp.status, status)
                     self.assertEqual(aborted, ["F1"] if status == 200 else [])
+
+
+# ----- C4 -----------------------------------------------------------------------------------------
+
+class SymlinkedConfigDirTest(unittest.TestCase):
+
+    def setUp(self):
+        tmp = _tmp(self)
+        self.real = os.path.join(tmp, "real")
+        for d in (".storage", "integration_manager", "logs"):
+            os.makedirs(os.path.join(self.real, d))
+        for name in ("probe.log", ".storage/auth.log", "integration_manager/process.log", "logs/radio.log", "home-assistant.log"):
+            with open(os.path.join(self.real, name), "w", encoding="utf-8") as fh:
+                fh.write(f"2026-09-17 10:00:00 INFO [probe] {name}\n")
+        self.cfg = os.path.join(tmp, "config")
+        os.symlink(self.real, self.cfg)
+        self.installer = FakeInstaller()
+        self.installer.settings = SimpleNamespace(data={})
+        self.hass = SimpleNamespace(config=SimpleNamespace(config_dir=self.cfg), async_add_executor_job=_job)
+        self.entry_paths = [".storage/auth.log", "integration_manager/process.log", "logs/radio.log",
+                            os.path.join(self.cfg, ".storage", "auth.log")]
+
+    def test_the_names_and_the_exclusions_are_the_same_as_without_the_link(self):
+        linked = logfiles_page._log_files(self.cfg, self.installer, self.entry_paths)
+        direct = logfiles_page._log_files(self.real, self.installer, self.entry_paths)
+        self.assertEqual(sorted(f["name"] for f in linked), ["logs/radio.log", "probe.log"])
+        self.assertEqual([(f["name"], f["path"]) for f in linked], [(f["name"], f["path"]) for f in direct])
+
+    def test_a_tail_through_the_link(self):
+        request = make_mocked_request("GET", "/api/log_files/tail?" + urlencode({"file": "logs/radio.log", "lines": 5}),
+                                      headers={"Host": "10.0.0.2:8222", "X-Requested-With": "fetch"})
+        with mock.patch.object(logfiles_page, "_entry_paths", return_value=self.entry_paths):
+            resp = asyncio.run(logfiles_page.LogFileTailView(self.hass, self.installer).get(request))
+        self.assertEqual(resp.status, 200)
+        self.assertEqual([row["raw"] for row in json.loads(resp.body)["lines"]], ["2026-09-17 10:00:00 INFO [probe] logs/radio.log"])
