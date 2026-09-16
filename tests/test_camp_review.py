@@ -1,6 +1,8 @@
-"""Test campaign: the pre-restore copy's protection, the pre-2026.9 device registry shape and a
-unique id lost between change-report snapshots."""
+"""Test campaign: the pre-restore copy's protection, the pre-2026.9 device
+registry shape, a unique id lost between change-report snapshots, and a
+malformed entry id in the source backup."""
 
+import asyncio
 import json
 import os
 import tempfile
@@ -135,6 +137,41 @@ class ChangeReportKeyShapeTest(unittest.TestCase):
                              {"uid:sensor:u1": _entity("sensor.y")})
         self.assertEqual(report["entities_before"], 2)
         self.assertEqual([e["entity_id"] for e in report["entities_removed"]], ["sensor.x"])
+
+
+class ImportBadEntryIdTest(unittest.TestCase):
+    def _apply(self, entries):
+        cfg = tempfile.mkdtemp()
+        src = os.path.join(cfg, ha_import.EXTRACT_DIR, ".storage")
+        os.makedirs(src)
+        os.makedirs(os.path.join(cfg, ".storage"))
+        for name in ("hub.e1", "hub_shared"):
+            with open(os.path.join(src, name), "w", encoding="utf-8") as fh:
+                fh.write("{}")
+        summary = {"domains": {"hub": {"entries": entries, "storage_files": ["hub.e1", "hub_shared"]}}}
+
+        async def executor(fn, *args):
+            return fn(*args)
+
+        config_entries = SimpleNamespace(async_entries=lambda _d=None: [], async_get_entry=lambda _i: None)
+
+        async def async_add(_entry):
+            return None
+
+        config_entries.async_add = async_add
+        hass = SimpleNamespace(config=SimpleNamespace(config_dir=cfg), config_entries=config_entries,
+                               async_add_executor_job=executor)
+        with mock.patch.object(ha_import, "load_summary", return_value=summary):
+            return asyncio.run(ha_import.apply(hass, None, "hub", "e1", None, None, align=False, copy_storage=True,
+                                               running=False, cleanup=False))
+
+    def test_a_malformed_id_in_the_backup_does_not_drop_a_valid_entrys_store(self):
+        res = self._apply([{"entry_id": "e1", "data": {}}, {"entry_id": ".", "data": {}}])
+        self.assertEqual(res["copied_storage"], ["hub.e1", "hub_shared"])
+
+    def test_a_second_valid_entry_still_keeps_its_own_store(self):
+        res = self._apply([{"entry_id": "e1", "data": {}}, {"entry_id": "e2", "data": {}}])
+        self.assertEqual(res["copied_storage"], ["hub.e1", "hub_shared"])
 
 
 if __name__ == "__main__":
