@@ -8,6 +8,7 @@ health document and the diagnostics zip."""
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from aiohttp import web
@@ -16,6 +17,14 @@ from homeassistant.core import HomeAssistant, callback
 
 from . import events
 from .http_util import ManagerView, with_body
+
+# One integration raising a hundred notifications at once filled the whole page /api/events returns (100
+# rows) with `notify` lines and pushed every operational line off it.  Coalescing here rather than at the
+# view keeps the file honest too: the timeline rotates at 512 KB, so a burst also cost the history on disk.
+BURST_WINDOW_S = 2.0  # notifications raised within this of the first one go in as one line
+BURST_MAX = 3         # up to this many still get a line each
+BURST_TITLES = 3      # titles named in the summary line
+BURST_IDS = 20        # notification_ids kept in its data
 
 
 def _rows(hass: HomeAssistant) -> list[dict[str, Any]]:
@@ -34,9 +43,27 @@ def count(hass: HomeAssistant) -> int:
 
 @callback
 def async_watch(hass: HomeAssistant) -> None:
-    """Every notification an integration raises goes to the timeline."""
+    """Every notification an integration raises goes to the timeline, a burst
+    of them as one line that still names how many there were."""
 
     seen: dict[str, tuple[Any, Any]] = {}
+    pending: list[tuple[str, str, str]] = []  # (notification_id, title, line) waiting for the window to close
+    timer: list[asyncio.TimerHandle] = []
+
+    @callback
+    def _flush() -> None:
+        timer.clear()
+        burst, pending[:] = list(pending), []
+        if len(burst) <= BURST_MAX:
+            for nid, _title, line in burst:
+                events.emit("notify", line, notification_id=nid)
+            return
+        titles = list(dict.fromkeys(title for _nid, title, _line in burst))
+        named = ", ".join(titles[:BURST_TITLES])
+        if len(titles) > BURST_TITLES:
+            named += f" and {len(titles) - BURST_TITLES} more"
+        events.emit("notify", f"{len(burst)} notifications: {named}",
+                    count=len(burst), notification_ids=[nid for nid, _, _ in burst][:BURST_IDS])
 
     @callback
     def _changed(update_type: pn.UpdateType, changed: dict[str, pn.Notification]) -> None:
@@ -51,7 +78,11 @@ def async_watch(hass: HomeAssistant) -> None:
                 continue  # re-created unchanged: one timeline line, not one per minute
             seen[nid] = (n.get("title"), n.get("message"))
             title = n.get("title") or nid
-            events.emit("notify", f"{title}: {str(n.get('message') or '')[:160]}", notification_id=nid)
+            pending.append((nid, title, f"{title}: {str(n.get('message') or '')[:160]}"))
+        # the window runs from the first one pending, never restarted: a stream that does not let up
+        # still costs one line per window instead of one per notification
+        if pending and not timer:
+            timer.append(hass.loop.call_later(BURST_WINDOW_S, _flush))
 
     pn.async_register_callback(hass, _changed)
 
