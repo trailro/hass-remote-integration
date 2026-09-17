@@ -406,7 +406,10 @@ restore*: the rollback already selected the previous version, which must not
 start on the configuration the newer one migrated. To undo a full rollback
 before that restart, start the version it left again: that start drops the
 rollback's restore, and the previous version stays the
-Full rollback target as before. Any other start is refused until the restart. After an automatic
+Full rollback target as before. Any other start is refused until the restart, and so
+are *Stop*, *Uninstall*, a second full rollback, an install and removing the
+version it goes back to or the one it left: each answer says to restart to
+finish the rollback, or to start the version it left to undo it. After an automatic
 rollback there is no Full rollback target: the version the smoke test rejected
 is never offered again that way.
 
