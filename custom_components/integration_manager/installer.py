@@ -281,7 +281,7 @@ class Installer:
         self._releases_checked: dict[str, str] = {}
         self._patch_cache: dict[str, str | None] = {}
         self._req_versions_cache: dict[str, str | None] = {}
-        self.settings = Settings(self.state_dir)
+        self.settings = Settings(self.state_dir, hass)
         self.health_source = None  # set by __init__: publisher.build_health(grace=...)
         self.on_domain_removed = None  # set by __init__: async (base_topic) -> clears the old MQTT identity
         self.last_identity_cleared = 0  # retained topics that clearing removed at the last uninstall
@@ -345,10 +345,15 @@ class Installer:
         builtin = self._builtin_registry().get(domain)
         if builtin and builtin.get("repo") != repo:
             raise ValueError(f"{domain} is a built-in registry entry pinned to {builtin['repo']}; use another domain name")
-        data = jsonio.read_json(self.user_registry_file, {"integrations": {}})
+        data = jsonio.read_json(self.user_registry_file, None)
         if not isinstance(data, dict) or not isinstance(data.get("integrations"), dict):
-            # a hand-edited file of the wrong shape is reported at every read and ignored everywhere else;
-            # adding an entry has to start from something usable rather than raise here
+            # a hand-edited file that cannot be read or has the wrong shape is reported at every read and ignored
+            # everywhere else; adding an entry has to start from something usable, but the entries typed into the
+            # damaged file are kept beside it rather than overwritten
+            if os.path.isfile(self.user_registry_file):
+                kept = f"{self.user_registry_file}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
+                shutil.copy2(self.user_registry_file, kept)
+                _LOGGER.warning("registry.json could not be used: kept as %s before adding %s", os.path.basename(kept), domain)
             data = {"integrations": {}}
         entry = {"name": name or domain, "repo": repo}
         if local:

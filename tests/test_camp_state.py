@@ -86,6 +86,16 @@ class RegistryOfTheWrongTypeTest(unittest.TestCase):
         self.assertEqual(spec["repo"], "owner/demo")
         self.assertEqual(json.loads(_read(inst.user_registry_file))["integrations"]["demo"]["repo"], "owner/demo")
 
+    def test_a_damaged_file_is_kept_beside_the_new_one(self):
+        for text in ('{"integrations": {"mine": {"repo": "o/mine"},}}', '{"integrations": [1, 2, 3]}'):
+            with self.subTest(text=text):
+                inst = self.installer(text)
+                with self.assertLogs("custom_components.integration_manager.installer", "WARNING"):
+                    inst.add_to_registry("demo", "owner/demo")
+                kept = [n for n in os.listdir(inst.state_dir) if n.startswith("registry.json.corrupt-")]
+                self.assertEqual(len(kept), 1)
+                self.assertEqual(_read(os.path.join(inst.state_dir, kept[0])), text)
+
     def test_the_boot_reads_quiet_loggers_without_crashing(self):
         """run.py:_quiet_loggers ran before the event loop: its AttributeError killed the process with an
         empty log, and the entrypoint kept retrying the boot for ever."""
