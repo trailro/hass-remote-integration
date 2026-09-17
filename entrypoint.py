@@ -191,13 +191,15 @@ def _count(value) -> int:
 
 TMP_SWEEP_AGE_S = 600
 _JSON_TMP = re.compile(r".+\.json\.[^.]+\.tmp")  # jsonio.write_json's mkstemp names
+_YAML_TMP = re.compile(r"\.[a-z0-9_]+\.yaml\.[A-Za-z0-9_]+\.tmp")  # Installer.yaml_write's, in integration_manager/yaml/
 
 
 def sweep_json_tmp_files() -> None:
-    """A kill between jsonio.write_json's mkstemp and its replace leaves the tmp file behind for good (nothing else
-    ever matches its random name).  Only on the volume's top level and integration_manager/, only old ones."""
+    """A kill between jsonio.write_json's (or Installer.yaml_write's) mkstemp and its replace leaves the tmp file
+    behind for good (nothing else ever matches its random name).  Only on the volume's top level,
+    integration_manager/ and integration_manager/yaml/, only old ones."""
     now = time.time()
-    for d in (CONFIG_DIR, STATE_DIR):
+    for d, pattern in ((CONFIG_DIR, _JSON_TMP), (STATE_DIR, _JSON_TMP), (os.path.join(STATE_DIR, "yaml"), _YAML_TMP)):
         try:
             names = os.listdir(d)
         except OSError:
@@ -205,7 +207,7 @@ def sweep_json_tmp_files() -> None:
         for name in names:
             path = os.path.join(d, name)
             try:
-                if _JSON_TMP.fullmatch(name) and os.path.isfile(path) and not os.path.islink(path) and now - os.path.getmtime(path) > TMP_SWEEP_AGE_S:
+                if pattern.fullmatch(name) and os.path.isfile(path) and not os.path.islink(path) and now - os.path.getmtime(path) > TMP_SWEEP_AGE_S:
                     os.remove(path)
                     log(f"removed leftover {os.path.relpath(path, CONFIG_DIR)}")
             except OSError:
