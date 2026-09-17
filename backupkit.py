@@ -14,9 +14,12 @@ caches, local backups themselves.
 
 from __future__ import annotations
 
+import errno
 import fnmatch
 import json
+import logging
 import re
+import stat
 import threading
 import os
 import posixpath
@@ -79,6 +82,7 @@ EXCLUDE_GLOBS = (
     f"{STATE_DIR}/mqtt_identity.json*", f"{STATE_DIR}/mqtt_cleanup_pending.json*",
 )
 KEEP_DEFAULT = 5
+_LOGGER = logging.getLogger(__name__)
 INFO_MAX = 64 * 1024  # backup-info.json is a few hundred bytes; a huge one is a zip bomb
 # files in a backup, as the Home Assistant backup import (ha_import.MAX_MEMBERS): a volume holds a few thousand, and
 # every member costs memory and time to read even when empty (500000 took 17 s and 286 MB to validate)
@@ -157,26 +161,101 @@ def _excluded(rel: str) -> bool:
     return any(fnmatch.fnmatch(rel, g) for g in EXCLUDE_GLOBS)
 
 
-def iter_files(config_dir: str):
-    """Yield (abs_path, rel_path) of everything a backup should contain."""
+def _inside(path: str, root: str) -> bool:
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def _source(config_dir: str, path: str, rel: str, log) -> str | None:
+    """The file to read for ``rel``: the path itself when it is a regular file.  A symbolic link is read through only
+    when it resolves to a regular file a backup takes anyway (inside the configuration directory, in an included tree
+    and not excluded): a link out of the volume, to the login key or to another backup is skipped.  Named pipes,
+    sockets and devices are skipped: reading one blocks forever or never ends."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if stat.S_ISREG(st.st_mode):
+        return path
+    if stat.S_ISDIR(st.st_mode):
+        return None
+    if not stat.S_ISLNK(st.st_mode):
+        log(f"backup: {rel} skipped: not a regular file (a named pipe, socket or device)")
+        return None
+    root = os.path.realpath(config_dir)
+    target = os.path.realpath(path)
+    target_rel = os.path.relpath(target, root).replace(os.sep, "/") if _inside(target, root) else None
+    if target_rel is None or not _allowed(target_rel) or _excluded(target_rel):
+        log(f"backup: {rel} skipped: a symbolic link to a file outside what a backup holds")
+        return None
+    try:
+        if not stat.S_ISREG(os.stat(target).st_mode):
+            log(f"backup: {rel} skipped: a symbolic link to something that is not a regular file")
+            return None
+    except OSError:
+        log(f"backup: {rel} skipped: a symbolic link to nothing")
+        return None
+    return target
+
+
+def iter_files(config_dir: str, log=None):
+    """Yield (path to read, rel_path) of everything a backup should contain.  A symbolic link to a directory is never
+    followed (skipped with a line in the log), nor is a special file read (see _source)."""
+    log = log or _LOGGER.warning
     for name in sorted(os.listdir(config_dir)):
         path = os.path.join(config_dir, name)
-        if os.path.isfile(path) and any(fnmatch.fnmatch(name, g) for g in INCLUDE_ROOT_GLOBS) and not _excluded(name):
-            yield path, name
+        if any(fnmatch.fnmatch(name, g) for g in INCLUDE_ROOT_GLOBS) and not _excluded(name):
+            src = _source(config_dir, path, name, log)
+            if src is not None:
+                yield src, name
     for top in INCLUDE_DIRS:
         base = os.path.join(config_dir, top)
+        if os.path.islink(base):
+            log(f"backup: {top} skipped: a symbolic link to a directory is not followed")
+            continue
         if not os.path.isdir(base):
             continue
         for root, dirs, files in os.walk(base):
             rel_root = os.path.relpath(root, config_dir)
+            for d in [d for d in dirs if os.path.islink(os.path.join(root, d))]:
+                dirs.remove(d)
+                if not _excluded(os.path.join(rel_root, d)):
+                    log(f"backup: {os.path.join(rel_root, d)} skipped: a symbolic link to a directory is not followed")
             dirs[:] = sorted(d for d in dirs if not _excluded(os.path.join(rel_root, d)))
             for f in sorted(files):
                 rel = os.path.join(rel_root, f)
                 if not _excluded(rel):
-                    yield os.path.join(root, f), rel
+                    src = _source(config_dir, os.path.join(root, f), rel, log)
+                    if src is not None:
+                        yield src, rel
 
 
-def create(config_dir: str, label: str = "", storage_version: str | None = None) -> dict:
+def _write_member(zf: zipfile.ZipFile, path: str, rel: str, log) -> bool:
+    """zf.write, except that what is opened is checked, not what was listed: a file replaced meanwhile by a named pipe
+    or a link is skipped, and opening never blocks.  False: nothing was written."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return False  # vanished while zipping (a deploy in progress)
+    except OSError as err:
+        if err.errno != errno.ELOOP:
+            raise
+        log(f"backup: {rel} skipped: it became a symbolic link while the backup was taken")
+        return False
+    with os.fdopen(fd, "rb") as src:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            log(f"backup: {rel} skipped: not a regular file (a named pipe, socket or device)")
+            return False
+        info = zipfile.ZipInfo(rel, time.localtime(st.st_mtime)[:6])
+        info.external_attr = (st.st_mode & 0xFFFF) << 16
+        info.compress_type = zf.compression
+        info.file_size = st.st_size
+        with zf.open(info, "w") as dst:
+            shutil.copyfileobj(src, dst, 1 << 20)
+    return True
+
+
+def create(config_dir: str, label: str = "", storage_version: str | None = None, log=None) -> dict:
     """Write <config>/backups/<timestamp>[-label].zip and return its record.
     ``storage_version``: the Home Assistant version that wrote .storage, when
     it is not the current one (a crash fallback: the crashed version is still
@@ -195,15 +274,13 @@ def create(config_dir: str, label: str = "", storage_version: str | None = None)
     try:
         with os.fdopen(fd, "wb") as fh:
             with zipfile.ZipFile(fh, "w", zipfile.ZIP_DEFLATED) as zf:
-                for path, rel in iter_files(config_dir):
+                log = log or _LOGGER.warning
+                for path, rel in iter_files(config_dir, log):
                     if count >= MAX_MEMBERS:
                         # not a backup that could be restored (validate refuses it): said now, not at the restore
                         raise ValueError(f"the configuration holds more than {MAX_MEMBERS} files: no backup was made")
-                    try:
-                        zf.write(path, rel)
-                    except FileNotFoundError:
-                        continue  # vanished while zipping (a deploy in progress)
-                    count += 1
+                    if _write_member(zf, path, rel, log):
+                        count += 1
                 info = {"created": stamp, "label": label, "files": count, "tool": "hass-remote-integration", "ha_version": storage_version or ha_version(config_dir)}
                 zf.writestr("backup-info.json", json.dumps(info))
             fh.flush()
@@ -774,7 +851,7 @@ def apply_pending(config_dir: str, log=print, record=None, storage_version: str 
                 pre = None
         validate(src)
         if pre is None:
-            pre = create(config_dir, "pre-restore", storage_version)
+            pre = create(config_dir, "pre-restore", storage_version, log)
             try:
                 write_json(os.path.join(config_dir, PENDING_META), {**meta, "pre_restore": pre["name"]})
             except OSError as err:

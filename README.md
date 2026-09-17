@@ -585,6 +585,13 @@ most 100000 files: taking a larger one fails, and an upload or restore of one
 is refused (counted from the archive's directory before it is read, and not
 listed with its details). Backups, restored files and
 uploads are created readable by the container user only (umask 077).
+A backup takes regular files only: a named pipe, socket or device in the backed-up
+trees is skipped with a line in the log, and so is a symbolic link to a directory
+(`custom_components` itself included). A symbolic link to a file is stored as that
+file only when it points at a file a backup holds anyway (inside `/config`, in the
+backed-up trees, not excluded); a link out of the volume, to the login key or to
+another backup is skipped with a line in the log. What a backup reads is never
+outside `/config`, and a special file never holds it up.
 Automatic pruning keeps the newest backups by the date they were made (never
 later than the file's own date), never removes the backup it runs after, and
 leaves uploaded backups, and the copy taken before the last restore, alone for their
