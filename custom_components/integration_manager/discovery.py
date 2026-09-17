@@ -871,6 +871,10 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
                 if not isinstance(data.get("command"), str) or not data["command"].strip():
                     raise ValueError('a JSON send_command needs a "command" string')
                 params = {k: v for k, v in data.items() if k != "command" and k not in _TARGET_KEYS}
+                if set(params) == {"params"} and isinstance(params["params"], dict):
+                    # the shape 0.17.0 and older took ({"command": ..., "params": {...}}): a script written for it
+                    # keeps working, and the main HA never sends a lone parameter named "params" holding an object
+                    params = params["params"]
                 return "vacuum", "send_command", {**t, "command": data["command"], **({"params": params} if params else {})}
             return "vacuum", "send_command", {**t, "command": p}
     if domain == "lawn_mower" and field == "command":

@@ -14,7 +14,7 @@ async function mqtt(){
   const ht=$('#mqhistt'); ht.querySelectorAll('tr:not(:first-child)').forEach(e=>e.remove());
   for(const c of hist){const tr=document.createElement('tr'); const cls=c.state==='ok'||c.state==='late-ok'?'ok':c.state==='running'?'mut':c.state==='duplicate'?'warn':'bad';
     tr.innerHTML=`<td class="mut" style="white-space:nowrap">${esc((c.received||'').slice(11))}</td><td>${esc(c.kind)}</td><td>${esc(c.what)}${c.id!=null?` <span class="mut">#${esc(String(c.id))}</span>`:''}</td><td class="mut" style="font-size:12px">${esc(c.data||'')}</td><td class="${cls}">${esc(c.state)}${c.error?' · '+esc(c.error):''}</td><td class="mut">${c.duration_ms??''}</td>`; ht.appendChild(tr);}
-  $('#mqcall').textContent=`${s.services_published} services published on ${esc(s.base_topic)}/services/<domain> · calls: ${s.calls} · last: ${esc(s.last_call||'—')} · topic: ${esc(s.call_base)}/<domain>/<service> (JSON)`;
+  $('#mqcall').textContent=`${s.services_published} services published${s.base_topic?` on ${esc(s.base_topic)}/services/<domain>`:''} · calls: ${s.calls} · last: ${esc(s.last_call||'—')}${s.call_base?` · topic: ${esc(s.call_base)}/<domain>/<service> (JSON)`:''}`;
 }
 async function mqttConfigLoad(){
   const c=await (await fetch('api/mqtt/config')).json();

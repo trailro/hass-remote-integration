@@ -259,8 +259,12 @@ class VacuumCommandsTest(_HassCase):
             ("vacuum", "send_command", {"entity_id": "vacuum.bot", "command": "clean_room", "params": {"room": "kitchen", "repeat": 2}})])
         await consumer.entity.async_send_command("beep")
         self.assertEqual(await self.run_here(consumer), [("vacuum", "send_command", {"entity_id": "vacuum.bot", "command": "beep"})])
-        await consumer.entity.async_send_command("go", params={"params": {"a": 1}})  # a parameter named params stays one
-        self.assertEqual((await self.run_here(consumer))[0][2]["params"], {"params": {"a": 1}})
+        # a lone parameter named "params" holding an object arrives exactly like the shape 0.17.0 took from raw MQTT
+        # scripts ({"command": ..., "params": {...}}): that shape wins, so those scripts keep working
+        await consumer.entity.async_send_command("go", params={"params": {"a": 1}})
+        self.assertEqual((await self.run_here(consumer))[0][2]["params"], {"a": 1})
+        await consumer.entity.async_send_command("go", params={"params": {"a": 1}, "b": 2})  # not alone: stays a parameter
+        self.assertEqual((await self.run_here(consumer))[0][2]["params"], {"params": {"a": 1}, "b": 2})
 
     async def test_send_command_params_cannot_retarget(self):
         consumer = self.consumer()

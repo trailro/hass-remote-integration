@@ -944,13 +944,17 @@ hass_<domain>/manager/result                        outcome of a manager action,
   command, call or result topics.
 - **Commands**: numeric command topics accept only finite numbers. Text
   values, notify messages and select options are used exactly as sent, spaces
-  included. The value sent to a `text` entity in password mode, on its command
-  topic or with `text.set_value`, shows as `***` in the command history, the
+  included. The value sent to a `text` entity in password mode, on any of its
+  command topics or with `text.set_value`, shows as `***` in the command history, the
   status and the log, also inside a service error that quotes it (the result
   sent back to the caller keeps it). The two bounds of a thermostat range change arrive as two
   commands and become one service call: the first waits up to 1 s for the
   second. An alarm panel with a code asks for it on the main HA and sends it
-  with the action. The state topic of a switch, light, fan, siren or
+  with the action. A JSON payload on a vacuum's `send_command` topic needs a
+  `command` string; its other keys are the command's parameters (`{"command":
+  "spot_area", "rooms": [1]}`, the shape the main HA sends; a lone `params`
+  object, as 0.17.0 took it, is used as the parameters); any other payload is
+  sent as the command name. The state topic of a switch, light, fan, siren or
   humidifier takes only `ON`/`OFF`, `TRUE`/`FALSE` or `1`/`0` (any case,
   surrounding spaces ignored); any other payload is refused rather than read
   as *off*, with the reason under *recent commands* and in the log. The action
@@ -1063,7 +1067,7 @@ hass_<domain>/manager/result                        outcome of a manager action,
   (an install, a backup, a check for updates) and for an install, start or
   backup started from the UI to finish; if one is still running then, or if the
   restart is refused for another reason, the restart is skipped and the result
-  says so (`restart skipped: <action> is still running (<n> s)`). The result goes out once the restart is really under way, so an `ok`
+  says so (`restart skipped: <action> is still running (<n> s)` for a manager action, `restart skipped: another action is still running` for one started from the UI). The result goes out once the restart is really under way, so an `ok`
   on `manager/result` means the process is going down and not only that the
   command was accepted. A refused command (an unknown action, a wrong payload,
   or `manager_commands` off) gets `ok: false` and the reason on
@@ -1080,7 +1084,8 @@ hass_<domain>/manager/result                        outcome of a manager action,
   *Stop* also clears the retained service catalog, so the main Home Assistant
   is not left with services it cannot call; the next start publishes it again.
   While no integration runs there is no identity: `GET /api/mqtt/status`
-  shows `base_topic` and the other topics as `null`.
+  shows `base_topic` and the other topics as `null`, and so do `base_topic` in
+  its `health` and in the `mqtt` part of a `POST /api/run/{start,stop}` answer.
   *Uninstall* clears everything retained under that identity, so the main Home
   Assistant removes the entities and devices. If the broker cannot be reached
   then (or refuses the cleanup), the integration is still removed here, the
@@ -1379,7 +1384,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
     import.tar                  an uploaded Home Assistant backup, until it is inspected
     import-extracted/           what the inspection unpacked from it, until the import or Clear
   .storage.pre-rebuild-<time>/  .storage set aside by a clean start: removed once the rebuild finished or a restore replaced .storage; kept (and logged) when the clean start was dropped, delete it by hand
-  backups/                      backups (zip); <time>-pre-restore.zip is the copy taken before a restore
+  backups/                      backups (zip); <time>-pre-restore.zip is a copy taken before a restore, kept from pruning and deletion for 7 days
 ```
 
 Settings, the MQTT configuration and the MQTT rules are written in the order
@@ -1388,11 +1393,12 @@ a backup. Edit these files by hand only while the container is stopped:
 `settings.json` and `mqtt_rules.json` are read when the process starts and
 overwritten by the next save from the UI, and a hand edit of `mqtt.json` is
 picked up by *Reconnect* but lost after a second save from the MQTT page.
-`registry.json` is read again whenever it changes. A `settings.json` that is not
-valid JSON or not a JSON object is not used: the manager starts on the default
-settings (without the tokens), says so in the log, on the timeline and as a notification, and
-keeps the damaged file as `settings.json.corrupt-<stamp>` (the newest three,
-mode 600) before the next save replaces it. In `settings.json` a switch
+`registry.json` is read again whenever it changes. A `settings.json` that cannot
+be read, is not valid JSON or is not a JSON object is not used: the manager starts
+on the default settings (without the tokens) and says so in the log, on the
+timeline and as a notification. One that is not valid JSON or not an object is
+kept as `settings.json.corrupt-<stamp>` (the newest three, mode 600) before the
+next save replaces it. In `settings.json` a switch
 written as `"true"`/`"false"`, `"on"`/`"off"`, `"yes"`/`"no"` or `"1"`/`"0"` is
 read as that value; any other text uses the default. A save that cannot be
 written (a full volume) leaves the running configuration as it was and answers
@@ -1480,7 +1486,7 @@ points:
 | Backups | `GET /api/backups`, `POST /api/backups/create`, `POST /api/backups/upload`, `GET /api/backups/<name>/download`, `POST /api/backups/<name>/{restore,delete}`, `POST /api/backups/restore/cancel` (answers `cancelled`; a restore that belongs to a scheduled Home Assistant version change is refused with `for_version`, and a full rollback's restore with `rollback`, the backup it restores) |
 | Import | `POST /api/import/upload`, `GET/POST /api/import/inspect`, `POST /api/import/{apply,apply_all,clear}` |
 | Cutover | `GET /api/parity`, `POST /api/parity/{test,remove_orphans}`, `POST /api/cutover/{status,enable,undo}`; `enable` takes `force`, which skips the checks on the main Home Assistant (MQTT loaded, the integration's config entries, entity ids still registered there) but not the container's own (an integration running, health, MQTT connected), and the answer and the timeline say `forced`; `undo` answers `cleared_discovery_configs` and `manager_device_kept`; a check on the main HA that cannot run (unreachable, its registry unreadable) blocks the enable rather than passing. Removing an orphan while discovery is off is refused, except for the manager device while `manager_discovery` announces it |
-| Logs | `GET /api/logs?level=&prefix=&q=&since_id=&limit=` (`limit` 1 to 2000; the answer carries `cursor`, the next `since_id`), `GET /api/logs/loggers`, `POST /api/logs/level` (`{"logger": …, "level": …}`), `GET /api/log_files` (an `id` per file, which changes at every start), `GET /api/log_files/tail?id=&file=&lines=&q=` (`file` is the masked name, answered `409` when several files share it; a real name is not accepted), `GET/POST /api/settings` (`log_format`) |
+| Logs | `GET /api/logs?level=&prefix=&q=&since_id=&limit=` (`limit` 1 to 2000, `since_id` 0 to 2^63-1, otherwise `400`; the answer carries `cursor`, the next `since_id`), `GET /api/logs/loggers`, `POST /api/logs/level` (`{"logger": …, "level": …}`), `GET /api/log_files` (an `id` per file, which changes at every start), `GET /api/log_files/tail?id=&file=&lines=&q=` (`file` is the masked name, answered `409` when several files share it; a real name is not accepted), `GET/POST /api/settings` (`log_format`) |
 | Diagnostics | `GET /api/diagnostics` (zip, secrets removed), `GET /api/diag/memory[?refs=<type>]` (one probe at a time: a second one meanwhile answers `429`) |
 
 `POST /api/logs/level` accepts any existing logger; a logger that does not
