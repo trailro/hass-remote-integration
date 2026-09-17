@@ -141,6 +141,7 @@ class LogFileSearchPrefilterTest(unittest.TestCase):
             "custom_components.integration_manager.diagnostics._SECRET_TEXT",
             "custom_components.integration_manager.diagnostics._SECRET_TEXT_HINT",
             "custom_components.integration_manager.diagnostics._URL_CRED",
+            "custom_components.integration_manager.diagnostics._mask_value",
             "logbuffer._CREDENTIAL_PARAM",
             "logbuffer._LOG_SEARCH_PATHS",
             "logbuffer._LOG_SEARCH_PLAIN",
@@ -168,7 +169,8 @@ class LogFileSearchPrefilterTest(unittest.TestCase):
         ]
         rng = random.Random(9)
         parts = ["pass", "word", "tok", "en", "key", "_", "-", "=", ":", " ", "'", '"', "Bearer ", "Basic ", "://", "@", "gh",
-                 "p_", "sig", "pin", "code", "otp", "Cookie", "auth", "orization", "session", "id", "x9Y", "ſ", "ı", "K"]
+                 "p_", "sig", "pin", "code", "otp", "Cookie", "auth", "orization", "session", "id", "x9Y", "ſ", "ı", "K",
+                 "\\", '\\"', "\\'"]
         corpus += ["".join(rng.choice(parts) for _ in range(rng.randint(2, 12))) for _ in range(20_000)]
         missed = [line for line in corpus if diagnostics._scrub_one_line_rules(line) != line and not logfiles_page._rules_may_change(line)]
         self.assertEqual(missed, [])

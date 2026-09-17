@@ -1120,6 +1120,10 @@ What is in place:
   and cloudhook URLs, `Authorization` values (`Bearer`, `Basic` and any other
   scheme), `Cookie`/`Set-Cookie` values and credentials in URLs (also a
   password holding `/` or `@`). Masking errs on the side of hiding too much.
+  A quoted value is masked up to its closing quote, past escaped quotes (`\"`,
+  `\'`), also as a JSON string inside another one (`\"password\": \"…\"`);
+  a value whose quote never closes (a line cut short) is masked to the end of
+  the line.
   The searches on the Logs and Log files pages run on the masked text, so
   looking for part of a key finds nothing: a row that appeared only while the
   search matched the key would let it be read out one character at a time.

@@ -36,19 +36,26 @@ _SECRET_KEY = re.compile(
     rf"|^(?!{_PLAIN_KEYS}$).*key$"  # any *key: Z-Wave (lr_)s2_*_key, security_key, api-key, ...
     r"|(^|[_-])(irk|ltk|csrk|pwd|pw|sig|session_?id)$|(^|[_-])otp([_-]|$)"  # BLE bonding keys, one-time codes
     r"|^(pin|auth|pass)$|[_-](pin|pass)$)", re.I)
+# a quoted value, to its closing quote: an escaped quote inside it (\" or \') does not end it, and a value whose quote
+# never closes (a line the logger cut) is masked to the end of the text.  A name and value that are themselves inside a
+# JSON string have their quotes escaped (\"password\": \"x\"): that value ends at the same run of backslashes and the
+# same quote it opened with.  Every repeat is possessive and its branches start on different characters, so the match
+# never backtracks: the rules run on every line a search reads, whatever the line holds
+_QUOTED = (r"\"(?:[^\"\\]++|\\[\s\S])*+\"?|'(?:[^'\\]++|\\[\s\S])*+'?"
+           r"|(?P<esc_run>\\++)(?P<esc_quote>[\"'])(?:[^\\]++|(?!(?P=esc_run)(?P=esc_quote))\\++[\"']?)*+(?:(?P=esc_run)(?P=esc_quote))?")
 _SECRET_TEXT = re.compile(
     r"((?:password|passwd|passphrase|token|secret|credential|psk|hmac|passkey|bindkey|webhook_id|cloudhook_url|pin_code|signature|\bpin|\bcode|\botp"
     rf"|\bpwd|\w_pw\b|\bsession_?id|\b(?:irk|ltk|csrk|sig)\b|\b(?!{_PLAIN_KEYS}\b)\w*key"
     r"|(?:api|access|private|local|encryption|device|client|master|app|shared|signing|session|auth|link|network|aes|ssl)[_-]?key)"
-    r"['\"]?\s*[=:]\s*)"
-    r"(\"[^\"]*\"|'[^']*'|[^'\",\s}]+)", re.I)
+    r"(?:\\*+['\"])?\s*[=:]\s*)"
+    rf"({_QUOTED}|[^'\",\s}}]+)", re.I)
 # every name _SECRET_TEXT knows ends in a letter, then the = or :, so a text without this has nothing it masks; the
 # rule is the costly one (a Logs page search masks every record it passes), and most log lines fail this test
-_SECRET_TEXT_HINT = re.compile(r"[a-z]['\"]?\s*[=:]", re.I)
+_SECRET_TEXT_HINT = re.compile(r"[a-z](?:\\*+['\"])?\s*[=:]", re.I)
 # the whole value of an Authorization header, scheme included (Digest, a custom scheme, a bare token)
-_AUTH_TEXT = re.compile(r"(authorization['\"]?\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|(?:[A-Za-z-]+\s+)?[^'\",\s}]+)", re.I)
+_AUTH_TEXT = re.compile(rf"(authorization(?:\\*+['\"])?\s*[=:]\s*)({_QUOTED}|(?:[A-Za-z-]+\s+)?[^'\",\s}}]+)", re.I)
 # Cookie / Set-Cookie: every cookie of the header, to the end of the line
-_COOKIE_TEXT = re.compile(r"(\b(?:set-)?cookie['\"]?\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\r\n]+)", re.I)
+_COOKIE_TEXT = re.compile(rf"(\b(?:set-)?cookie(?:\\*+['\"])?\s*[=:]\s*)({_QUOTED}|[^\r\n]+)", re.I)
 # a whole PEM block.  A truncated one (a cut log tail): the rest of the BEGIN line, and the lines under it that are
 # nothing but base64; the first line that is not ends it before its first character (a log line under a BEGIN line
 # that never got its END marker is not body, and shows the same whatever else the window holds)
@@ -88,16 +95,27 @@ def scrub(value: Any) -> Any:
     return value
 
 
+def _mask_value(match: re.Match[str]) -> str:
+    """The name, and the value as ``***`` inside the quotes it opened with."""
+    if match.group("esc_run"):
+        quote = match.group("esc_run") + match.group("esc_quote")
+    elif match.group(2)[:1] in ('"', "'"):
+        quote = match.group(2)[0]
+    else:
+        return match.group(1) + "***"
+    return match.group(1) + quote + "***" + quote
+
+
 def _scrub_one_line_rules(value: str) -> str:
     """Every rule whose match stays within one line; the PEM block is the one
     that spans lines and is masked by the caller."""
     # the log search text and credentials in a URL: process.log no longer receives them (logbuffer masks them
     # before a record is written), but lines written by an older version still hold them
     value = logbuffer.mask_query_secrets(value)
-    value = _COOKIE_TEXT.sub(lambda m: m.group(1) + (m.group(2)[0] + "***" + m.group(2)[0] if m.group(2)[:1] in ('"', "'") else "***"), value)
+    value = _COOKIE_TEXT.sub(_mask_value, value)
     if _SECRET_TEXT_HINT.search(value):
-        value = _SECRET_TEXT.sub(lambda m: m.group(1) + (m.group(2)[0] + "***" + m.group(2)[0] if m.group(2)[:1] in ('"', "'") else "***"), value)
-    value = _AUTH_TEXT.sub(lambda m: m.group(1) + (m.group(2)[0] + "***" + m.group(2)[0] if m.group(2)[:1] in ('"', "'") else "***"), value)
+        value = _SECRET_TEXT.sub(_mask_value, value)
+    value = _AUTH_TEXT.sub(_mask_value, value)
     # a token, not "Basic information": anything but a plain word (base64 without padding is often letters only)
     value = _BEARER.sub(lambda m: m.group(0) if re.fullmatch(r"[A-Z]?[a-z]+", m.group(2)) else f"{m.group(1)} ***", value)
     return _GH_TOKEN.sub("***", _URL_CRED.sub(r"\1***@", value))
