@@ -285,6 +285,63 @@ class LongUploadNameTest(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(os.path.join(cfg, backupkit.BACKUP_DIR))), sorted(names))
 
 
+class DamagedSettingsTest(unittest.TestCase):
+    """6: a settings.json that does not parse silently became the defaults (tokens gone), then the next save replaced it."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.path = os.path.join(self.dir, "settings.json")
+
+    def load(self, text, hass=None):
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        with mock.patch.object(settings_mod.events, "emit") as emit, self.assertLogs(settings_mod._LOGGER, logging.WARNING) as logs:
+            st = settings_mod.Settings(self.dir, hass)
+        return st, emit, logs
+
+    def copies(self):
+        return sorted(n for n in os.listdir(self.dir) if n.startswith("settings.json.corrupt-"))
+
+    def test_unparseable_is_reported_and_kept(self):
+        broken = '{not json "github_token": "ghp_x"'
+        hass = object()
+        with mock.patch("homeassistant.components.persistent_notification.create") as notify:
+            st, emit, logs = self.load(broken, hass)
+        self.assertEqual(st.data, settings_mod.DEFAULTS)
+        self.assertIn("not valid JSON", st.load_error)
+        self.assertIn("not valid JSON", "\n".join(logs.output))
+        emit.assert_called_once()
+        notify.assert_called_once()
+        self.assertIs(notify.call_args.args[0], hass)
+        [copy] = self.copies()
+        with open(os.path.join(self.dir, copy), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), broken)
+        self.assertEqual(os.stat(os.path.join(self.dir, copy)).st_mode & 0o777, 0o600)
+        self.assertIn(copy, st.load_error)
+
+    def test_not_an_object_is_reported_and_kept(self):
+        st, emit, _logs = self.load("[1, 2]")
+        self.assertIn("not a JSON object", st.load_error)
+        self.assertEqual(len(self.copies()), 1)
+
+    def test_only_the_newest_copies_are_kept(self):
+        for i in range(5):
+            _write(os.path.join(self.dir, f"settings.json.corrupt-2020010{i}-000000"), "x")
+        self.load("{")
+        self.assertEqual(len(self.copies()), settings_mod.CORRUPT_KEEP)
+
+    def test_a_missing_or_good_file_says_nothing(self):
+        with mock.patch.object(settings_mod.events, "emit") as emit:
+            self.assertIsNone(settings_mod.Settings(self.dir).load_error)
+            _write(self.path, json.dumps({"backup_keep": 9}))
+            st = settings_mod.Settings(self.dir)
+        self.assertIsNone(st.load_error)
+        self.assertEqual(st.backup_keep, 9)
+        emit.assert_not_called()
+        self.assertEqual(self.copies(), [])
+
+
 class KeepAfterManualBackupTest(unittest.TestCase):
     """7: backup_keep N kept N + 1 after a manual backup, and protected backups did not count."""
 

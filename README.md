@@ -1328,7 +1328,11 @@ a backup. Edit these files by hand only while the container is stopped:
 `settings.json` and `mqtt_rules.json` are read when the process starts and
 overwritten by the next save from the UI, and a hand edit of `mqtt.json` is
 picked up by *Reconnect* but lost after a second save from the MQTT page.
-`registry.json` is read again whenever it changes. In `settings.json` a switch
+`registry.json` is read again whenever it changes. A `settings.json` that is not
+valid JSON or not a JSON object is not used: the manager starts on the default
+settings (without the tokens), says so in the log and on the timeline, and
+keeps the damaged file as `settings.json.corrupt-<stamp>` (the newest three,
+mode 600) before the next save replaces it. In `settings.json` a switch
 written as `"true"`/`"false"`, `"on"`/`"off"`, `"yes"`/`"no"` or `"1"`/`"0"` is
 read as that value; any other text uses the default. A save that cannot be
 written (a full volume) leaves the running configuration as it was and answers

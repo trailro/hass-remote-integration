@@ -6,11 +6,17 @@ whether one is set."""
 from __future__ import annotations
 
 import json
+import logging
 import os
+import shutil
+import time
 
 from typing import Any
 
-from . import writer
+from . import events, writer
+
+_LOGGER = logging.getLogger(__name__)
+CORRUPT_KEEP = 3  # settings.json.corrupt-<stamp> copies kept, as state.json's
 
 DEFAULTS: dict[str, Any] = {
     "backup_keep": 5, "github_token": "",
@@ -33,16 +39,51 @@ HEALTH_MODES = ("periodic", "event")  # event: the integration only writes state
 
 
 class Settings:
-    def __init__(self, state_dir: str) -> None:
+    def __init__(self, state_dir: str, hass=None) -> None:
+        """``hass``: raises the notification when the file cannot be used (reading it is thread-safe)."""
         self.path = os.path.join(state_dir, "settings.json")
         self.data = dict(DEFAULTS)
+        self.load_error: str | None = None
         try:
             with open(self.path, encoding="utf-8") as fh:
                 loaded = json.load(fh)
-            if isinstance(loaded, dict):
-                self.data.update({k: loaded[k] for k in DEFAULTS if k in loaded})
-        except (OSError, ValueError):
+        except FileNotFoundError:
+            return
+        except OSError as err:
+            self._report(f"settings.json cannot be read ({type(err).__name__}: {err}): the defaults are used until it can", hass)
+            return
+        except ValueError:  # also a text that is not UTF-8
+            self._report(f"settings.json is not valid JSON: the defaults are used (tokens included) {self._keep_corrupt()}", hass)
+            return
+        if not isinstance(loaded, dict):
+            self._report(f"settings.json is not a JSON object: the defaults are used (tokens included) {self._keep_corrupt()}", hass)
+            return
+        self.data.update({k: loaded[k] for k in DEFAULTS if k in loaded})
+
+    def _keep_corrupt(self) -> str:
+        """A copy of the file the next save replaces (it may hold the tokens): the newest CORRUPT_KEEP are kept."""
+        kept = f"{self.path}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
+        try:
+            shutil.copyfile(self.path, kept)
+            os.chmod(kept, 0o600)
+        except OSError as err:
+            return f"and the damaged file could not be copied ({err}): the next save replaces it"
+        folder, prefix = os.path.dirname(self.path), os.path.basename(self.path) + ".corrupt-"
+        try:
+            for old in sorted(n for n in os.listdir(folder) if n.startswith(prefix))[:-CORRUPT_KEEP]:
+                os.remove(os.path.join(folder, old))
+        except OSError:
             pass
+        return f"and the damaged file is kept as {os.path.basename(kept)}: the next save replaces settings.json"
+
+    def _report(self, message: str, hass) -> None:
+        self.load_error = message
+        _LOGGER.warning("%s", message)
+        events.emit("error", message)
+        if hass is not None:
+            from homeassistant.components import persistent_notification as ha_pn
+
+            ha_pn.create(hass, message, title="Manager settings reset", notification_id="hri_settings_unreadable")
 
     async def async_save(self) -> None:
         """Copied now, on the loop that changes it; written by the ordered writer."""
