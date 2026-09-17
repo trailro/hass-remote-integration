@@ -1084,7 +1084,9 @@ hass_<domain>/manager/result                        outcome of a manager action,
   tried only while the
   MQTT settings name that broker, is never sent to another one, and completes
   once that broker is configured again (`retained_cleanup_other_broker` in
-  the answer while it is not). If that broker is gone for good, stop the
+  the answer while it is not). Its `error` in the MQTT status says what it
+  waits for now: MQTT disabled, the MQTT settings to name its broker again, the
+  next try, or the error of the last one. If that broker is gone for good, stop the
   container and delete `mqtt_cleanup_pending.json` (or remove its entry for
   that broker). An `mqtt_identity.json` written by 0.16.x or older names no
   broker: a cleanup deferred from it belongs to the broker the MQTT settings

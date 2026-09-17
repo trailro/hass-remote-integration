@@ -1151,7 +1151,18 @@ class MqttPublisher:
         here, pending = self._pending_key("", self._broker_identity())[1:], self._cleanup_pending
         keys = sorted((k for k in pending if base is None or k[0] == base), key=lambda k: (k[1:] != here, k))
         return [{"base_topic": k[0], "broker": f"{k[1]}:{k[2]}", "other_broker": k[1:] != here, "deferred": bool(pending[k].get("deferred")),
-                 "error": pending[k].get("error") or "", "since": pending[k].get("since")} for k in keys]
+                 "error": self._pending_reason(k, pending[k], here), "since": pending[k].get("since")} for k in keys]
+
+    def _pending_reason(self, key: tuple, rec: dict[str, Any], here: tuple) -> str:
+        """Why it still waits, as things are now: the reason recorded at the last try ("MQTT is disabled", a broker error)
+        is stale once the settings changed."""
+        if key[1:] != here:
+            return f"waiting for the MQTT settings to name the broker {key[1]}:{key[2]} again"
+        if not self.config.enabled:
+            return "MQTT is disabled"
+        if rec.get("deferred"):
+            return "MQTT is enabled again: the removal runs at the next try (every minute)"
+        return rec.get("error") or ""
 
     def _cancel_pending_cleanup(self, key: tuple) -> None:
         """Blocking: the identity is wanted again on that broker (installed and started before the broker came back): what
