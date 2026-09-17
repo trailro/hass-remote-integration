@@ -1331,8 +1331,9 @@ symbolic link out of the volume) is dropped the same way: the system CAs are
 used, with a warning in the log.
 
 A registry entry in `integration_manager/registry.json` has this shape; only
-`repo` is required. A file of another shape is ignored, with a line in the log
-saying what was expected: a hand edit cannot keep the container from starting.
+`repo` is required. A file of another shape, or one that is not valid JSON (empty,
+a trailing comma), is ignored, with a line in the log saying what was expected: a
+hand edit cannot keep the container from starting.
 The domain `integration_manager` is the manager itself: it is refused in the
 registry (an entry for it is ignored, with a warning), and never installed,
 started or uninstalled.
