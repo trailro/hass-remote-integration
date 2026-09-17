@@ -67,6 +67,16 @@ def _num(value: Any, default: float) -> float:
     return out if math.isfinite(out) else float(default)  # NaN/inf would make the whole device config invalid JSON
 
 
+def _speed_count(step: Any) -> int | None:
+    """Number of speeds of a fan from its percentage_step (Home Assistant: step = 100 / speed_count); None for a
+    fan with one speed or 100 (the MQTT default range already is 1..100)."""
+    try:
+        count = round(100 / float(step))
+    except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+        return None
+    return count if 1 < count < 100 else None
+
+
 def _onoff(expr: str) -> str:
     """ON/OFF for the on/off platforms; 'None' (their "unknown") for unknown and unavailable, never a made-up OFF."""
     return _tpl(f"'None' if {expr} in ['unavailable', 'unknown'] else ('ON' if {expr} == 'on' else 'OFF')")
@@ -362,6 +372,16 @@ def build_component(
                 {"percentage_state_topic": doc_topic, "percentage_value_template": _attr('percentage'),
                  "percentage_command_topic": f"{cmd}/percentage"}
             )
+            if speeds := _speed_count(attrs.get("percentage_step")):
+                # the main HA offers the source's steps only through a speed range: the state goes out as the speed
+                # (1..speeds, 0 for off) and a speed comes back here as the percentage Home Assistant uses for it
+                comp.update(
+                    {"speed_range_min": 1, "speed_range_max": speeds,
+                     "percentage_value_template": _tpl(
+                         "'None' if value_json.attributes.get('percentage') is none"
+                         f" else (value_json.attributes.percentage * {speeds} / 100) | round(0, 'ceil') | int"),
+                     "percentage_command_template": _tpl(f"value * 100 // {speeds}")}
+                )
         if attrs.get("preset_modes"):
             comp.update(
                 {"preset_modes": list(attrs["preset_modes"]), "preset_mode_state_topic": doc_topic,
