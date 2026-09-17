@@ -299,7 +299,7 @@ class DiagnosticsView(ManagerView):
         found = _log_files(cfg, self.installer, entry_paths)
         if not found:
             return "(the running integration writes no log file)"
-        path = found[0]["path"]
+        name, path = found[0]["name"], found[0]["path"]  # the name as the Log files page gives it, relative to the resolved dir
         try:
             with open(path, "rb") as fh:
                 fh.seek(0, os.SEEK_END)
@@ -308,7 +308,7 @@ class DiagnosticsView(ManagerView):
                 lines = fh.read().decode("utf-8", errors="replace").splitlines()
             # the integration's own log can carry passwords and tokens like any other log, and
             # this window (the last 200 kB, then the last LOG_FILE_TAIL lines) can start inside a key
-            return scrub_text(f"# {os.path.relpath(path, cfg)}, last {min(LOG_FILE_TAIL, len(lines))} lines\n"
+            return scrub_text(f"# {name}, last {min(LOG_FILE_TAIL, len(lines))} lines\n"
                               + "\n".join(lines[-LOG_FILE_TAIL:]))
         except OSError as err:
             return f"(log file unreadable: {err})"

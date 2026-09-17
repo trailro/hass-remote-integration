@@ -1,10 +1,15 @@
-"""The Log files format after the fourteenth review.
+"""The Log files format and the diagnostics zip after the fourteenth review.
 
 N4: a pattern with two or more global flags after the start
 (``(?P<x>a)(?p)b(?b)``) compiles, but the weighing parsed it again only once:
 the second flag's exception reached aiohttp, a 500 on saving the format and
 on every Log files tail with it stored.  The package itself parses again until
 no new global flag turns up.
+
+N5: the zip's log_file.txt named the file relative to the config dir as given,
+while the file's path is the resolved one: with the config dir reached through
+a symbolic link it read ``../real/probe.log`` (C4 of the twelfth review fixed
+the Log files page, not the zip).
 
 Every test fails on the tree before the fix unless its docstring says it pins
 behaviour that already held.
@@ -22,7 +27,7 @@ from urllib.parse import urlencode
 
 from aiohttp.test_utils import make_mocked_request
 
-from custom_components.integration_manager import logfiles_page, manage_views
+from custom_components.integration_manager import diagnostics, logfiles_page, manage_views
 from tests.fakes import FakeInstaller
 
 
@@ -127,6 +132,39 @@ class GlobalFlagsLaterTest(unittest.TestCase):
                 fmt, error = logfiles_page.clean_log_format({"pattern": pattern})
                 self.assertEqual(fmt, {})
                 self.assertIn("does not compile", error or "")
+
+
+# ----- N5 -----------------------------------------------------------------------------------------
+
+class DiagnosticsSymlinkedConfigDirTest(unittest.TestCase):
+
+    def setUp(self):
+        tmp = _tmp(self)
+        self.real = os.path.join(tmp, "real-volume-dir")
+        os.makedirs(os.path.join(self.real, "logs"))
+        with open(os.path.join(self.real, "logs", "radio.log"), "w", encoding="utf-8") as fh:
+            fh.write("2026-09-17 10:00:00 INFO [probe] one line\n")
+        self.cfg = os.path.join(tmp, "config")
+        os.symlink(self.real, self.cfg)
+        self.installer = FakeInstaller()
+        self.installer.settings = SimpleNamespace(data={})
+
+    def tail(self, cfg):
+        view = diagnostics.DiagnosticsView.__new__(diagnostics.DiagnosticsView)
+        view.hass = SimpleNamespace(config=SimpleNamespace(config_dir=cfg))
+        view.installer = self.installer
+        return view._log_file_tail(["logs/radio.log"])
+
+    def test_the_zip_names_the_file_as_the_log_files_page_does(self):
+        text = self.tail(self.cfg)
+        self.assertEqual(text.splitlines()[0], "# logs/radio.log, last 1 lines")
+        self.assertNotIn("real-volume-dir", text)
+        self.assertNotIn("..", text.splitlines()[0])
+        self.assertEqual(logfiles_page._log_files(self.cfg, self.installer, ["logs/radio.log"])[0]["name"], "logs/radio.log")
+
+    def test_without_the_link(self):
+        """Pins behaviour that already held."""
+        self.assertEqual(self.tail(self.real).splitlines()[0], "# logs/radio.log, last 1 lines")
 
 
 if __name__ == "__main__":
