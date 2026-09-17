@@ -157,18 +157,20 @@ class HaUpdater:
         }
 
     async def validate(self, version: str) -> None:
-        """Raise ValueError unless ``version`` exists on PyPI, is not older
-        than the image's baseline and supports this Python."""
+        """Raise ValueError unless ``version`` exists on PyPI (or is installed
+        for this Python), is not older than the image's baseline and supports
+        this Python."""
         version = version.strip()
         avail = await self.available()
-        if not self._releases:
+        if version not in self._releases:
             # without the release list neither that the version exists nor the Python it needs is known: the
             # entrypoint would spend minutes in pip, or install a version this image's Python cannot run.  A venv
-            # already installed for this Python needs neither (the entrypoint boots it as it is)
+            # already installed for this Python needs neither (the entrypoint boots it as it is), also when PyPI
+            # no longer lists it or yanked it after it was installed
             if not await self.hass.async_add_executor_job(self._venv_for_this_python, version):
-                raise ValueError(f"cannot check Home Assistant {version} against PyPI ({avail.get('error') or 'no release list'}): try again")
-        elif version not in self._releases:
-            raise ValueError(f"{version} is not a Home Assistant release on PyPI")
+                if not self._releases:
+                    raise ValueError(f"cannot check Home Assistant {version} against PyPI ({avail.get('error') or 'no release list'}): try again")
+                raise ValueError(f"{version} is not a Home Assistant release on PyPI")
         floor = os.environ.get("HA_VERSION_DEFAULT")
         if floor and _key(version) < _key(floor):
             # older releases have no wheels for this image's Python: pip would
