@@ -505,8 +505,16 @@ def clean_import_leftovers() -> None:
     secrets) must not survive a restart that interrupted an import.  Nor an
     original an import set aside as .storage/<store>.pre-import (the import
     runs inside Home Assistant, so none is in progress at boot): put back, as
-    the import undoes a failure."""
+    the import undoes a failure.  One an import completed is renamed to
+    .pre-import.done before its delete: removed, never put back."""
     storage = os.path.join(CONFIG_DIR, ".storage")
+    for done in glob.glob(os.path.join(glob.escape(storage), "*.pre-import.done")):
+        if os.path.isfile(done) and not os.path.islink(done):
+            try:
+                os.remove(done)
+                log(f"removed leftover .storage/{os.path.basename(done)}")
+            except OSError as err:
+                log(f"could not remove .storage/{os.path.basename(done)} ({err})")
     for aside in glob.glob(os.path.join(glob.escape(storage), "*.pre-import")):
         if os.path.islink(aside) or not os.path.isfile(aside):
             continue

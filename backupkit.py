@@ -70,7 +70,7 @@ EXCLUDE_GLOBS = (
     # container) would pin a foreign port here and every boot would stop at run.py's port check
     ".storage/http",
     # a store being written (HA's temporary file: tmp + 8 random characters) and an import's set-aside original
-    ".storage/tmp" + "[a-z0-9_]" * 8, ".storage/*.pre-import",
+    ".storage/tmp" + "[a-z0-9_]" * 8, ".storage/*.pre-import", ".storage/*.pre-import.done",
     # the record of what happened (timeline, resource history, change reports) must survive a restore
     f"{STATE_DIR}/events.jsonl*", f"{STATE_DIR}/resource_history.json*", f"{STATE_DIR}/change_reports.json*",
     f"{STATE_DIR}/latest_versions.json*", f"{STATE_DIR}/mqtt_undiscover.json",  # a restore must not bring back older "latest" versions
