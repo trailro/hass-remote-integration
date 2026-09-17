@@ -447,7 +447,8 @@ def prune(config_dir: str, keep: int = KEEP_DEFAULT, protect: set[str] | None = 
     """Delete the oldest backups beyond `keep` (0 or less = keep all);
     names in `protect` (e.g. the recorded pre-update backup, the backup the
     caller just made) are never removed, nor what a restore needs, nor an
-    upload younger than UPLOAD_GRACE_S."""
+    upload younger than UPLOAD_GRACE_S.  Those still count toward `keep`: the
+    backup just made is one of the `keep` newest, not one more."""
     if keep <= 0:
         return []
     removed = []
@@ -455,10 +456,10 @@ def prune(config_dir: str, keep: int = KEEP_DEFAULT, protect: set[str] | None = 
     kept = 0
     now = time.time()
     for b in list_backups(config_dir):
-        if b["name"] in protect or (b["name"].startswith("upload-") and now - float(b.get("mtime") or 0) < UPLOAD_GRACE_S):
-            continue
         kept += 1
         if kept <= keep:
+            continue
+        if b["name"] in protect or (b["name"].startswith("upload-") and now - float(b.get("mtime") or 0) < UPLOAD_GRACE_S):
             continue
         try:
             os.remove(os.path.join(config_dir, BACKUP_DIR, b["name"]))

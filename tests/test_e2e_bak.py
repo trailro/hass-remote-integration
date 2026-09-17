@@ -187,5 +187,36 @@ class LastRestoreProtectionTest(unittest.TestCase):
         self.assertIn("copy taken before a restore in the last 7 days", refused["error"])
 
 
+class KeepAfterManualBackupTest(unittest.TestCase):
+    """7: backup_keep N kept N + 1 after a manual backup, and protected backups did not count."""
+
+    def test_the_new_backup_counts_toward_keep_and_is_kept(self):
+        cfg = _volume()
+        self.addCleanup(shutil.rmtree, cfg, True)
+        for i, name in enumerate(("a.zip", "b.zip", "c.zip")):
+            path = _zip(cfg, name, {"created": time.strftime("%Y%m%d-%H%M%S", time.localtime(time.time() - 3600 * (3 - i)))})
+            os.utime(path, (time.time() - 3600 * (3 - i),) * 2)
+
+        async def backup(label):
+            return await asyncio.get_running_loop().run_in_executor(None, backupkit.create, cfg, label)
+
+        installer = SimpleNamespace(settings=SimpleNamespace(backup_keep=2), protected_backups=set, async_backup_exclusive=backup)
+        view = backup_views.BackupCreateView(_hass(cfg), installer)
+        view.json = lambda d: d
+        res = asyncio.run(backup_views.BackupCreateView.post.__wrapped__(view, None, {"label": "manual"}))
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(sorted(res["pruned"]), ["a.zip", "b.zip"])
+        self.assertEqual(sorted(os.listdir(os.path.join(cfg, backupkit.BACKUP_DIR))), sorted(["c.zip", res["backup"]["name"]]))
+
+    def test_a_protected_backup_counts_but_is_never_removed(self):
+        cfg = _volume()
+        self.addCleanup(shutil.rmtree, cfg, True)
+        for i, name in enumerate(("a.zip", "b.zip", "c.zip", "d.zip")):
+            path = _zip(cfg, name, {"created": time.strftime("%Y%m%d-%H%M%S", time.localtime(time.time() - 3600 * (4 - i)))})
+            os.utime(path, (time.time() - 3600 * (4 - i),) * 2)
+        # newest first: d (protected), c, b, a
+        self.assertEqual(sorted(backupkit.prune(cfg, 2, {"d.zip", "a.zip"})), ["b.zip"])
+
+
 if __name__ == "__main__":
     unittest.main()
