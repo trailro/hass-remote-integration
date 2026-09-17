@@ -1191,8 +1191,8 @@ class MqttPublisher:
             c.suppress_exceptions = True  # a callback bug must not kill the network thread
             c.reconnect_delay_set(min_delay=2, max_delay=60)
             c.connect_async(self.config.host, self.config.port, keepalive=60, **self._connect_options(c))
+            self._client = c  # before its network thread starts: "online" goes out only for the current client
             c.loop_start()
-            self._client = c
             self.stats["connect_error"] = ""
         except Exception as err:  # noqa: BLE001
             self.stats["connect_error"] = f"{type(err).__name__}: {err}"
@@ -1202,8 +1202,8 @@ class MqttPublisher:
             self._disconnect(publish_offline=False)  # the stop ran between the check above and the client existing
 
     def _disconnect(self, publish_offline: bool = True) -> None:
-        c, self._client = self._client, None
-        with self._subscribing_lock:
+        with self._subscribing_lock:  # an "online" being published goes out before the "offline" below, none after it
+            c, self._client = self._client, None
             self._subscribing = None
         if c is None:
             self._live_base = self._live_prefix = None
@@ -1328,8 +1328,11 @@ class MqttPublisher:
         self._announce_online(client)
 
     def _announce_online(self, client: mqtt.Client) -> None:
-        if not self._stopping:
-            client.publish(self._status_topic(), "online", qos=1, retain=True)
+        """Under the subscribing lock, which _disconnect takes to detach the client before its retained "offline": an
+        "online" racing it goes out first or not at all.  publish() only queues the packet, so paho's thread never waits."""
+        with self._subscribing_lock:
+            if client is self._client and not self._stopping:
+                client.publish(self._status_topic(), "online", qos=1, retain=True)
 
     def _subscribe_failed(self, reason: str) -> None:
         message = (f"{reason}: commands, service calls and manager actions from the main Home Assistant do not reach this "
