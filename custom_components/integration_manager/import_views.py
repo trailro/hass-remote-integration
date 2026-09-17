@@ -22,6 +22,10 @@ MAX_UPLOAD = 2 * 1024 * 1024 * 1024  # HA backups with media can be big; .storag
 _IMPORT_LOCK = asyncio.Lock()
 
 
+class ImportBusy(ValueError):
+    """Refused because another import or a manager action holds what this needs: nothing was done, try again."""
+
+
 async def _locked(make_coro, installer=None):
     """apply / apply_all one at a time: one's cleanup deletes the extracted
     backup the other is still reading, and two applies of one entry race.
@@ -31,12 +35,12 @@ async def _locked(make_coro, installer=None):
     enabled entry (set up by Home Assistant) behind a manager that reports the
     integration as stopped."""
     if _IMPORT_LOCK.locked():
-        raise ValueError("an import is already running: wait for it to finish")
+        raise ImportBusy("an import is already running: wait for it to finish")
     async with _IMPORT_LOCK:
         if installer is None:
             return await make_coro()
         if installer.busy:
-            raise ValueError("another action is running (an install, start, stop, import, restore or full rollback): wait for it to finish")
+            raise ImportBusy("another action is running (an install, start, stop, import, restore or full rollback): wait for it to finish")
         installer.busy = True
         try:
             return await make_coro()
