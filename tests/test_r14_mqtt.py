@@ -157,6 +157,14 @@ class DebugLogMaskingTest(unittest.IsolatedAsyncioTestCase):
         output = await self._logs(lambda: self.pub._handle_message(msg), ValueError("Value hunter2 for text.pw is too long"))
         self.assertNotIn("hunter2", output)
 
+    async def test_a_password_text_payload_on_another_field(self):
+        """End-to-end run: a value published to text/<entity>/set (not /value) was rejected but kept in clear."""
+        msg = SimpleNamespace(topic=f"{BASE}/cmd/text/pw/set", payload=b"hunter2", retain=False)
+        output = await self._logs(lambda: self.pub._handle_message(msg), None)
+        self.assertNotIn("hunter2", output)
+        self.assertNotIn("hunter2", json.dumps(list(self.pub.history), default=str))
+        self.assertNotIn("hunter2", str(self.pub.stats.get("last_command")))
+
 
 class RefusalReportedAgainAfterADisconnectTest(unittest.TestCase):
     """a and b."""

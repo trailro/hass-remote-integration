@@ -594,8 +594,8 @@ another backup is skipped with a line in the log. What a backup reads is never
 outside `/config`, and a special file never holds it up.
 Automatic pruning keeps the newest backups by the date they were made (never
 later than the file's own date), never removes the backup it runs after, and
-leaves uploaded backups, and the copy taken before the last restore, alone for their
-first 7 days; while that week lasts the copy is also refused for deletion, since
+leaves uploaded backups, and every copy taken before a restore (`<time>-pre-restore.zip`), alone for their
+first 7 days; while that week lasts such a copy is also refused for deletion, since
 it is the only way back once the restore has succeeded and its schedule is gone.
 The backups pruning leaves alone still count toward the number kept: with
 *keep 5*, a backup made by hand is one of the 5 newest, not a sixth. The backup a
