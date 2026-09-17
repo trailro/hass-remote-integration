@@ -494,7 +494,9 @@ three have to support that Python:
   need another Python is refused before the restart. While PyPI cannot be
   reached a version is refused too ("try again"), unless its venv is already
   installed for this Python. A release whose files were all yanked on PyPI is
-  never offered, installed or picked for a first start.
+  never offered, installed or picked for a first start; a venv of it (or of a
+  version PyPI no longer lists) already installed for this Python can still be
+  switched to.
 - **The integration's requirements.** The preflight resolves them with pip
   against the running venv. A package whose `requires_python` excludes the
   image's Python, or that conflicts with Home Assistant's pins, is a blocker.
