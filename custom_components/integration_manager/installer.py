@@ -2219,10 +2219,12 @@ class Installer:
         """Blocking: the component directory of a GitHub zipball into ``dest``
         (replaced); returns its manifest.  Shared by the version store and
         the preflight scratch directory."""
+        import backupkit
+
+        if backupkit.zip_has_more_members(io.BytesIO(blob), UNPACK_MAX_MEMBERS):  # before zipfile reads every header
+            raise RuntimeError(f"archive has more than {UNPACK_MAX_MEMBERS} members")
         with zipfile.ZipFile(io.BytesIO(blob)) as zf:
             infos = zf.infolist()
-            if len(infos) > UNPACK_MAX_MEMBERS:
-                raise RuntimeError(f"archive has {len(infos)} members, more than {UNPACK_MAX_MEMBERS}")
             if sum(i.file_size for i in infos) > UNPACK_MAX_BYTES:  # the declared size: zipfile never reads past it
                 raise RuntimeError(f"archive unpacks to more than {UNPACK_MAX_BYTES // 1048576} MB")
             names = zf.namelist()
