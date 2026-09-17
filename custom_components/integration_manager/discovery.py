@@ -78,6 +78,12 @@ def _attr(name: str) -> str:
     return _tpl(f"value_json.attributes.get('{name}', None)")
 
 
+def _attr_or_empty(name: str) -> str:
+    """For handlers with no 'None' payload (light brightness and colour temperature, cover position and tilt):
+    they parse 'None' as a number and log a traceback or a warning, and skip an empty payload silently."""
+    return _tpl(f"value_json.attributes.get('{name}') if value_json.attributes.get('{name}') is not none else ''")
+
+
 # 'unavailable'/'unknown' as a raw state would be an invalid value for
 # numeric sensors and enum-like platforms; 'None' is the documented no-value
 # payload (PAYLOAD_NONE) and per-entity availability marks the entity offline.
@@ -281,13 +287,13 @@ def build_component(
         modes = set(attrs.get("supported_color_modes") or [])
         if modes & {"brightness", "color_temp", "hs", "rgb", "rgbw", "rgbww", "xy", "white"}:
             comp.update(
-                {"brightness_state_topic": doc_topic, "brightness_value_template": _attr('brightness'),
+                {"brightness_state_topic": doc_topic, "brightness_value_template": _attr_or_empty('brightness'),
                  "brightness_command_topic": f"{cmd}/brightness", "brightness_scale": 255}
             )
         if "color_temp" in modes:
             comp.update(
                 {"color_temp_kelvin": True, "color_temp_state_topic": doc_topic,
-                 "color_temp_value_template": _attr('color_temp_kelvin'),
+                 "color_temp_value_template": _attr_or_empty('color_temp_kelvin'),
                  "color_temp_command_topic": f"{cmd}/color_temp"}
             )
             if attrs.get("min_color_temp_kelvin"):
@@ -316,12 +322,12 @@ def build_component(
             comp["device_class"] = dc
         if attrs.get("current_position") is not None:
             comp.update(
-                {"position_topic": doc_topic, "position_template": _attr('current_position'),
+                {"position_topic": doc_topic, "position_template": _attr_or_empty('current_position'),
                  "set_position_topic": f"{cmd}/position"}
             )
         if attrs.get("current_tilt_position") is not None:
             comp.update(
-                {"tilt_status_topic": doc_topic, "tilt_status_template": _attr('current_tilt_position'),
+                {"tilt_status_topic": doc_topic, "tilt_status_template": _attr_or_empty('current_tilt_position'),
                  "tilt_command_topic": f"{cmd}/tilt"}
             )
 
@@ -454,10 +460,11 @@ def build_component(
     elif domain == "update":
         comp.update(
             {
+                # MQTT update validates the rendered JSON as a whole and drops all of it for one null field
+                # (a release_url of None is enough): only the fields that have a value go out
                 "value_template": _tpl(
-                    "{'installed_version': value_json.attributes.get('installed_version'), 'latest_version': value_json.attributes.get('latest_version'),"
-                    " 'title': value_json.attributes.get('title'), 'release_url': value_json.attributes.get('release_url'),"
-                    " 'release_summary': value_json.attributes.get('release_summary'), 'in_progress': value_json.attributes.get('in_progress')} | to_json"
+                    "dict(value_json.attributes.items() | selectattr('0', 'in', ['installed_version', 'latest_version', 'title',"
+                    " 'release_url', 'release_summary', 'in_progress']) | rejectattr('1', 'none') | list) | to_json"
                 ),
                 "command_topic": f"{cmd}/install",
                 "payload_install": "install",
