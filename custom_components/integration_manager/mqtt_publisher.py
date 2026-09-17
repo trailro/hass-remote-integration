@@ -150,11 +150,18 @@ PUBLISH_OVERHEAD_BYTES = 32  # fixed header, topic length, packet id and propert
 # "<name>-integration" ("-" is never part of an integration domain), otherwise an integration called "call" would
 # publish its documents where live subscribers take them as service calls.
 RESERVED_TOPIC_SEGMENTS = frozenset({"call", "cmd", "result", "services", "manager", "health", "status"})
-# A key names a secret when it ends in one of these: code, pin and key as a word of their own (user_code, api_key, not
-# zipcode, spin or hotkey), the rest anywhere (access_token, apitoken, old_password).  Not: translation/sort/primary_key.
+# Names of secrets, shared with the diagnostics masker (the zip, the Logs and Log files pages), so what the command
+# history, the status and the log hide is hidden there too.  These end a longer name as they are (access_token,
+# old_password, wifi_psk, user_credentials) ...
+SECRET_NAME_ENDINGS = ("usercode", "passcode", "pincode", "password", "passwd", "passphrase", "secret", "token", "apikey",
+                       "passkey", "bindkey", "credentials", "credential", "psk")
+# ... and these only as a word of their own (pin, user_pin, otp, basic_auth; not spin, author, oauth or authority)
+SECRET_NAME_WORDS = ("pin", "otp", "auth")
+# A key names a secret when it ends in one of these: code, key and the words above as a word of their own (user_code,
+# api_key, not zipcode or hotkey), the endings anywhere.  Not: translation/sort/primary_key.
 _SECRET_NAME = (r"(?!(?:translation|sort|primary)_key\b)"
-                r"(?:(?:[A-Za-z0-9_-]*[_-])?(?:code|pin|key)"
-                r"|[A-Za-z0-9_-]*(?:usercode|passcode|password|passwd|secret|token|apikey|passkey|bindkey))")
+                r"(?:(?:[A-Za-z0-9_-]*[_-])?(?:code|key|" + "|".join(SECRET_NAME_WORDS) + ")"
+                r"|[A-Za-z0-9_-]*(?:" + "|".join(SECRET_NAME_ENDINGS) + "))")
 # The text rule runs on paho's network thread, over text anyone who may publish under the base topic writes: it must
 # stay linear whatever that text is.  A quoted value ends at its closing quote; an escaped quote inside it (\" or \')
 # does not end it.  A key inside a JSON string (a service value that is itself JSON) has its quotes escaped

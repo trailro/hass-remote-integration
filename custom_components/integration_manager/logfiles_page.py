@@ -50,7 +50,7 @@ MAX_MASKED_OUT = 20_000
 # literal here (the tests list every rule the function runs, and compare the two)
 _RULE_LITERALS = ("pass", "token", "secret", "credential", "psk", "hmac", "key", "webhook_id", "cloudhook_url", "pin",
                   "sig", "code", "otp", "pwd", "_pw", "session", "irk", "ltk", "csrk", "cookie", "authorization",
-                  "bearer", "basic", "://", "gh", "github_pat_",
+                  "bearer", "basic", "auth", "://", "gh", "github_pat_",
                   "api")  # an access line of a log search, in any spelling of its path: its values are masked (logbuffer)
 # the rules are case-insensitive, and re's IGNORECASE takes four characters beyond ASCII for letters: lower() alone
 # leaves the long s and the dotless i as they are, and turns the dotted I into "i" plus a combining dot

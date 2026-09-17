@@ -1001,10 +1001,12 @@ hass_<domain>/manager/result                        outcome of a manager action,
   page can still call them. `NaN`, `Infinity`, numbers too large to be finite
   (`1e999`), payloads larger than 256 KB and JSON nested deeper than 64 levels
   are rejected, with an answer on `result/...`. Values of keys ending in
-  `code`, `pin` or `key` as a word of their own (`code`, `user_code`,
-  `api_key`, not `zipcode` or `code_format`), or in `usercode`, `passcode`,
-  `password`, `passwd`, `secret`, `token`, `apikey`, `passkey` or `bindkey`
-  (`access_token`, `api_token`, not `token_type`) are masked in the command
+  `code`, `key`, `pin`, `otp` or `auth` as a word of their own (`code`, `user_code`,
+  `api_key`, `user_pin`, `basic_auth`, not `zipcode`, `code_format`, `spin`,
+  `author` or `oauth`), or in `usercode`, `passcode`, `pincode`, `password`,
+  `passwd`, `passphrase`, `secret`, `token`, `apikey`, `passkey`, `bindkey`,
+  `credential`, `credentials` or `psk` (`access_token`, `api_token`,
+  `wifi_psk`, not `token_type`) are masked in the command
   history, the status and the log; `translation_key`, `sort_key` and
   `primary_key` stay readable. The masking reads at most the first 4 KB of a
   payload's text (every key of a JSON payload is still found), so a longer
@@ -1233,8 +1235,10 @@ What is in place:
   UI, stored in files readable only by the owner, and never logged or included
   in the diagnostics zip. The diagnostics zip, the log file tails, the records on
   the Logs page (message and traceback) and the inspection of an imported Home
-  Assistant backup mask passwords (also `pwd`, `*_pw`),
-  tokens, session ids, signatures, every value named `…key` (`local_key`,
+  Assistant backup mask passwords (also `pwd`, `*_pw`, passphrases, passcodes
+  and PIN codes), tokens, credentials, session ids, signatures, WiFi and other
+  pre-shared keys (`psk`, `wifi_psk`), `auth` as a word of its own (`auth`,
+  `basic_auth`, not `author` or `oauth`), every value named `…key` (`local_key`,
   `noise_psk`, `encryption_key`, Z-Wave `network_key`, `s0`/`s2_*_key` and
   `lr_s2_*_key`, `security_key`, `bindkey`, `aes_key`, `ssl_key`, `?key=` in
   URLs, …) except `translation_key`, `sort_key` and `primary_key`, Bluetooth

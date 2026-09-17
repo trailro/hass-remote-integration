@@ -29,15 +29,18 @@ from . import events, notifications
 from .installer import Installer
 from .logfiles_page import _entry_paths, _log_files
 from .memdiag import snapshot as memory_snapshot
+from .mqtt_publisher import SECRET_NAME_ENDINGS, SECRET_NAME_WORDS
 
 # names ending in "key" that are known not to be secrets (everything else ending in "key" is masked)
 _PLAIN_KEYS = logbuffer.PLAIN_KEYS
+# the names the MQTT history, status and log mask (mqtt_publisher): anywhere in a name, and as a word of its own
+_ENDINGS, _WORDS = "|".join(SECRET_NAME_ENDINGS), "|".join(SECRET_NAME_WORDS)
 _SECRET_KEY = re.compile(
-    r"(password|passwd|passphrase|token|secret|credential|bearer|cookie|psk|hmac|passkey|bindkey|authorization|webhook_id|cloudhook_url|pin_code|signature"
+    rf"({_ENDINGS}|bearer|cookie|hmac|authorization|webhook_id|cloudhook_url|pin_code|signature"
     r"|(api|access|private|local|encryption|device|client|master|app|user|shared|signing|session|auth|link|network|aes|ssl)[_-]?key"
     rf"|^(?!{_PLAIN_KEYS}$).*key$"  # any *key: Z-Wave (lr_)s2_*_key, security_key, api-key, ...
     r"|(^|[_-])(irk|ltk|csrk|pwd|pw|sig|session_?id)$|(^|[_-])otp([_-]|$)"  # BLE bonding keys, one-time codes
-    r"|^(pin|auth|pass)$|[_-](pin|pass)$)", re.I)
+    rf"|(^|[_-])(pass|{_WORDS})$)", re.I)
 # a quoted value, to its closing quote: an escaped quote inside it (\" or \') does not end it, and a value whose quote
 # never closes (a line the logger cut) is masked to the end of the text.  A name and value that are themselves inside a
 # JSON string have their quotes escaped (\"password\": \"x\"): that value ends at the same run of backslashes and the
@@ -46,7 +49,7 @@ _SECRET_KEY = re.compile(
 _QUOTED = (r"\"(?:[^\"\\]++|\\[\s\S])*+\"?|'(?:[^'\\]++|\\[\s\S])*+'?"
            r"|(?P<esc_run>\\++)(?P<esc_quote>[\"'])(?:[^\\]++|(?!(?P=esc_run)(?P=esc_quote))\\++[\"']?)*+(?:(?P=esc_run)(?P=esc_quote))?")
 _SECRET_TEXT = re.compile(
-    r"((?:password|passwd|passphrase|token|secret|credential|psk|hmac|passkey|bindkey|webhook_id|cloudhook_url|pin_code|signature|\bpin|\bcode|\botp"
+    rf"((?:{_ENDINGS}|hmac|webhook_id|cloudhook_url|pin_code|signature|\bcode|(?<![A-Za-z0-9])(?:{_WORDS})"
     rf"|\bpwd|\w_pw\b|\bsession_?id|\b(?:irk|ltk|csrk|sig)\b|\b(?!{_PLAIN_KEYS}\b)\w*key"
     r"|(?:api|access|private|local|encryption|device|client|master|app|shared|signing|session|auth|link|network|aes|ssl)[_-]?key)"
     r"(?:\\*+['\"])?\s*[=:]\s*)"
