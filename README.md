@@ -132,7 +132,7 @@ Put your settings in a `.env` file next to `docker-compose.yml`:
 ```bash
 TZ=Europe/Berlin          # your time zone
 HRI_PORT=8087             # port of the UI
-# HRI_VERSION=0.16.1      # optional: pin a release (default: latest)
+# HRI_VERSION=0.17.0      # optional: pin a release (default: latest)
 # HRI_REGISTRY=docker.io/trailro26  # optional: pull from Docker Hub (default: ghcr.io/trailro)
 # HRI_PASSWORD=...        # optional: require a password for the UI and API
 ```
@@ -358,7 +358,7 @@ still says 120 s: download it again (or change `stop_grace_period`) when you
 update.
 
 The top bar shows the version that runs and the commit its image was built
-from (`v0.16.1 · 1a2b3c4`), linking to that release. When GitHub has newer
+from (`v0.17.0 · 1a2b3c4`), linking to that release. When GitHub has newer
 releases than the one running (checked with the other update checks), a banner
 under the top bar says so and links the release notes of each newer release,
 newest first. Hiding it applies in that browser only, until a newer release is
@@ -1225,7 +1225,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 |---|---|---|
 | `HRI_PORT` | `8087` | Port of the UI and API; a changed port is picked up at the next boot, and one pinned in `.storage/http` by an older setup or a restored backup is dropped |
 | `HRI_NAME` | `hass-remote-integration` | Container and volume name |
-| `HRI_VERSION` | `latest` | Image tag Compose pulls, for example `0.16.1` |
+| `HRI_VERSION` | `latest` | Image tag Compose pulls, for example `0.17.0` |
 | `HRI_REGISTRY` | `ghcr.io/trailro` | Where Compose pulls the image from: `ghcr.io/trailro` (GitHub Container Registry) or `docker.io/trailro26` (Docker Hub); the same image either way. A `docker-compose.yml` from 0.16.0 or older ignores it and pulls from GitHub Container Registry: download the file again to use it |
 | `TZ` | `UTC` | Time zone; an unknown zone falls back to UTC, with an error in the log |
 | `HA_VERSION_LATEST` | `1` | `0` installs the image's baseline HA on a fresh volume instead of the newest |
