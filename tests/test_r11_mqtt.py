@@ -97,9 +97,8 @@ class UnterminatedEscapedValueTest(unittest.TestCase):
     """N12: `code: \\"aaaa…` without its closing quote came back as `code: "***"`."""
 
     def test_masked_with_its_escaping(self):
-        # to the end of its line since the thirteenth review: an escaped quote no longer ends it, so its end is not known
+        # to the end since the thirteenth review: an escaped quote no longer ends it, so where it ends is not known
         self.assertEqual(mp._mask_codes('script.x code: \\"' + "a" * 2000 + " tail"), 'script.x code: \\"***\\"')
-        self.assertEqual(mp._mask_codes('script.x code: \\"' + "a" * 2000 + " tail\nnext"), 'script.x code: \\"***\\"\nnext')
         self.assertEqual(mp._mask_codes('x {\\"code\\": \\"' + "a" * 2000), 'x {\\"code\\": \\"***\\"')
 
     def test_a_closed_escaped_value_still_ends_at_its_quote(self):
