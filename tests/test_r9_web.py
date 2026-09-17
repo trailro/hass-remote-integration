@@ -166,6 +166,7 @@ class LogFileSearchPrefilterTest(unittest.TestCase):
             "sig=x1", "network_key=x1", "wifikey=x1", "Cookie: a=b", "set-cookie: a=b", "Authorization: Digest x",
             "Bearer abcdefgh123", "Basic dXNlcjpwYXNz", "mqtt://user:pw@broker.local", "ghp_" + "a" * 30,
             "github_pat_" + "a" * 30, "PAſſWORD=x1", "Key=x1", "SıG=x1", "ToKeN = 'x1'", '"password": "x1"',
+            "pincode=x1", "credentials=x1", "auth=x1", "basic_auth: x1", "x-AUTH=x1", "wifi_psk=x1", "user_pin=1", "usercode=1",
         ]
         rng = random.Random(9)
         parts = ["pass", "word", "tok", "en", "key", "_", "-", "=", ":", " ", "'", '"', "Bearer ", "Basic ", "://", "@", "gh",
