@@ -904,7 +904,9 @@ hass_<domain>/manager/result                        outcome of a manager action,
   data (the catalog marks those `"response": "optional"` or `"required"`, from
   what the integration registered). A result over the broker's maximum packet
   size is answered without its response data, with `ok: false` and the reason,
-  so the caller still gets an answer. A repeated `_id` within five minutes is answered from memory
+  so the caller still gets an answer. So is a call that fails inside the
+  container: `ok: false` with `internal error (<exception type>)`, and the log
+  names where (never the message, which may quote the data). A repeated `_id` within five minutes is answered from memory
   and never executed twice (the latest 1000 `_id`s are kept); the comparison
   keeps the type, so `1` and `"1"` are two different calls. At most 50 service
   calls and commands run at once, a timed-out call counting until its service

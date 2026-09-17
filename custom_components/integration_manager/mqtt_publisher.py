@@ -41,6 +41,7 @@ import logging
 import os
 import threading
 import time
+import traceback
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import Any
@@ -1443,7 +1444,11 @@ class MqttPublisher:
             if not msg.payload.strip():  # whitespace alone is no JSON object either
                 self._reject_empty_call(msg.topic[len(call_prefix):])
                 return
-            self._on_call(msg.topic[len(call_prefix):], msg.payload.decode(errors="replace"))
+            rest, payload = msg.topic[len(call_prefix):], msg.payload.decode(errors="replace")
+            try:
+                self._on_call(rest, payload)
+            except Exception as err:  # noqa: BLE001 - the caller waits on result/: an answer, never silence
+                self._call_crashed(rest, payload, err)
             return
         prefix = self._cmd_base() + "/"
         if not msg.topic.startswith(prefix):
@@ -1589,7 +1594,8 @@ class MqttPublisher:
         named = [ids] if isinstance(ids, str) else ids if isinstance(ids, list) else []
         candidates = {p.strip().lower() for x in named if isinstance(x, str) for p in x.split(",")}
         if any(k in data for k in ("area_id", "device_id", "floor_id", "label_id")):
-            candidates |= {e for e in self._topics if e.startswith("text.")}
+            # paho's thread: a snapshot, the loop adds and removes entities meanwhile
+            candidates |= {e for e in list(self._topics) if e.startswith("text.")}
         return value if any(self._password_text(e) for e in candidates if e.startswith("text.")) else None
 
     def _on_manager_command(self, action: str, payload: str) -> None:
@@ -1737,6 +1743,28 @@ class MqttPublisher:
             # the shape every other result has: a consumer routes on "service" and correlates on "id"
             self._publish_result(domain, service, {"id": None, "service": f"{domain}.{service}", "ok": False, "error": error})
 
+    @staticmethod
+    def _internal_error(what: str, err: Exception) -> str:
+        """Logged with where it happened but without its message, which may quote the data of the call (a password)."""
+        frame = traceback.extract_tb(err.__traceback__)[-1] if err.__traceback__ else None
+        where = f" in {frame.name} line {frame.lineno}" if frame else ""
+        _LOGGER.error("MQTT call %s could not be handled: %s%s", what, type(err).__name__, where)
+        return f"internal error ({type(err).__name__}): see the log of the container"
+
+    def _call_crashed(self, rest: str, payload: str, err: Exception) -> None:
+        """Paho thread: _on_call raised."""
+        error = self._internal_error(repr(rest[:80]), err)
+        try:
+            parsed = _loads_call(payload)
+        except Exception:  # noqa: BLE001
+            parsed = None
+        call_id = parsed.get("_id") if isinstance(parsed, dict) else None
+        parts = [p.lower() for p in rest.split("/")]
+        valid = len(parts) == 2 and all(_SERVICE_NAME.fullmatch(p) for p in parts)
+        self._finish(self._remember("call", ".".join(parts) if valid else rest[:80], "", call_id), "error", error)
+        if valid and not self._moving:
+            self._publish_result(parts[0], parts[1], {"id": call_id, "service": ".".join(parts), "ok": False, "error": error})
+
     def _on_call(self, rest: str, payload: str) -> None:
         """Generic service call: <base>/call/<domain>/<service> with a JSON
         object as payload (service data incl. entity_id/device_id/area_id;
@@ -1818,6 +1846,14 @@ class MqttPublisher:
                 seen["state"], seen["result"] = state, res
 
         async def _call() -> None:
+            try:
+                await _run()
+            except Exception as err:  # noqa: BLE001 - the caller waits on result/: an answer, never silence
+                res = {"id": call_id, "service": f"{domain}.{service}", "ok": False, "error": self._internal_error(f"{domain}.{service}", err)}
+                done("error", res["error"], res)
+                self._publish_result(domain, service, res)
+
+        async def _run() -> None:
             base: dict[str, Any] = {"id": call_id, "service": f"{domain}.{service}"}
             if not self.hass.services.has_service(domain, service):
                 res = {**base, "ok": False, "error": f"unknown service {domain}.{service}"}
