@@ -42,7 +42,7 @@ import os
 import threading
 import time
 import traceback
-from dataclasses import asdict, dataclass, field
+from dataclasses import MISSING, asdict, dataclass, field
 from datetime import timedelta
 from typing import Any
 
@@ -513,18 +513,48 @@ class MqttPublisher:
     # ----- config ----------------------------------------------------------
 
     def _load(self) -> MqttConfig:
+        """Blocking.  No file is a fresh volume: the defaults, silently.  A file that cannot be read or is not a JSON
+        object (a hand edit, a damaged volume) gives the defaults too, with a warning in the log and on the timeline:
+        the manager must come up to let the settings be saved again."""
         try:
             with open(self.path, encoding="utf-8") as fh:
                 data = json.load(fh)
-            known = {k: v for k, v in data.items() if k in MqttConfig.__dataclass_fields__}
-            return MqttConfig(**self._sane(known))
-        except (OSError, ValueError, TypeError):
+        except FileNotFoundError:
             return MqttConfig()
+        except (OSError, ValueError) as err:
+            return self._unusable_config(f"cannot be read ({type(err).__name__}: {err})")
+        if not isinstance(data, dict):
+            return self._unusable_config(f"is not a JSON object ({type(data).__name__})")
+        known = {k: v for k, v in data.items() if k in MqttConfig.__dataclass_fields__}
+        return MqttConfig(**self._sane(known))
+
+    def _unusable_config(self, why: str) -> MqttConfig:
+        message = f"{CONFIG_FILE} {why}: MQTT uses the default settings (disabled) until they are saved again"
+        _LOGGER.warning("MQTT: %s", message)
+        events.emit("mqtt", message)
+        return MqttConfig()
 
     def _sane(self, data: dict[str, Any]) -> dict[str, Any]:
         """A numeric setting on disk that is out of range (or not a number at all) falls back to its
-        default, warned: it was written by an older version or by hand, and the boot must not die on it."""
+        default, warned: it was written by an older version or by hand, and the boot must not die on it.
+        So does a switch that is not true/false, a text that is not a string and an exclusion list that is
+        not a list of domains."""
         out = dict(data)
+        for name, spec in MqttConfig.__dataclass_fields__.items():
+            if name not in out or name in INT_BOUNDS:
+                continue
+            value = out[name]
+            if spec.type in ("bool", bool):
+                usable = isinstance(value, bool)
+            elif name == "exclude_integrations":
+                usable = isinstance(value, list) and all(isinstance(x, str) for x in value)
+            else:
+                usable = isinstance(value, str)
+            if not usable:
+                default = spec.default_factory() if spec.default_factory is not MISSING else spec.default
+                # the type only: the value may be the password
+                _LOGGER.warning("MQTT: %s in %s is not usable (%s): using the default", name, self.path, type(value).__name__)
+                out[name] = default
         for name in INT_BOUNDS:
             if name not in out:
                 continue

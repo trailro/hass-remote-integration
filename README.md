@@ -1364,7 +1364,11 @@ min. The MQTT page refuses a port or a qos outside them and clamps the two
 intervals. The same ranges are applied when `mqtt.json` is read, so a hand
 edit cannot keep the manager from starting: a value out of range, or not a
 number, falls back to its default (1883, 0, 300, 60) with a warning in the log.
-A `ca_certs` that resolves outside `/config` (a hand edit, a restored file, a
+So does a switch that is not `true`/`false`, a text setting that is not a
+string, and an `exclude_integrations` that is not a list of domains. An
+`mqtt.json` that cannot be parsed, or that is JSON but not an object (`[]`),
+gives the default settings, MQTT disabled, with a warning in the log and on the
+timeline, until the MQTT page saves them again. A `ca_certs` that resolves outside `/config` (a hand edit, a restored file, a
 symbolic link out of the volume) is dropped the same way: the system CAs are
 used, with a warning in the log.
 
