@@ -153,14 +153,16 @@ _SECRET_NAME = (r"(?!(?:translation|sort|primary)_key\b)"
 # The text rule runs on paho's network thread, over text anyone who may publish under the base topic writes: it must
 # stay linear whatever that text is.  A key inside a JSON string (a service value that is itself JSON) has its quotes
 # escaped (\"code\": \"1234\"): the match starts at the name, after however many backslashes, runs are taken whole
-# (possessive), and an escaped value ends at the first backslash-quote; one without any is masked up to the end of
-# its token, like an unquoted value.  Masking a cut text (cut=True), a string the cut left open is masked to the end.
+# (possessive), and an escaped value ends at the backslash-quote as long as its opening one.  A longer one is a quote
+# escaped inside the value (\\\"); a shorter one, or a plain quote, ends the string around the value; one never closed
+# is masked to the end of its line.  The scan never fails and is never repeated: each run is read once (the lookaheads
+# read at most the run).  Masking a cut text (cut=True), a string the cut left open is masked to the end.
 def _code_value_rule(cut: bool) -> re.Pattern[str]:
     end = r"|\Z" if cut else ""
     return re.compile(
         r"""((?<![A-Za-z0-9_-])""" + _SECRET_NAME + r"""(?:\\*+["'])?\s*+[:=]\s*+)"""
-        r"""(?:(\\++)"(?:(?:[^\\\n]++|\\++(?!"))*+(?:\\++\"""" + end + r""")|[^,}\s]*+)"""
-        r"""|"(?:[^"\\]|\\.)*+(?:\"""" + end + r""")|'[^']*+(?:'""" + end + r""")|[^,}\s]++)""",
+        r"""(?:(\\++)"(?:[^\\\n"]++|\\++(?!")|(?!\2")(?=\2)\\++")*+(?:\2")?"""
+        r"""|"(?:[^"\\]|\\[\s\S])*+(?:\"""" + end + r""")|'(?:[^'\\]|\\[\s\S])*+(?:'""" + end + r""")|[^,}\s]++)""",
         re.IGNORECASE)
 
 
