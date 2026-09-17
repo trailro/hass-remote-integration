@@ -201,5 +201,101 @@ class RefusalReportedAgainAfterADisconnectTest(unittest.TestCase):
         self.assertIn("reconnecting", pub.stats["connect_error"])
 
 
+class _PahoLikeClient(SubscribeDoubleTest.Client):
+    """Threaded paho, as far as the order on the wire goes: what another thread publishes is acknowledged only once the
+    network thread's running callback returned (wait_for_publish), and nothing is sent after disconnect()."""
+
+    def __init__(self, on_offline, callback_done):
+        super().__init__()
+        self.wire: list[tuple[str, str]] = []
+        self.on_offline, self.callback_done = on_offline, callback_done
+
+    def publish(self, topic, payload=None, qos=0, retain=False):
+        info = super().publish(topic, payload, qos, retain)
+        if self.wire is not None:
+            self.wire.append((topic, payload))
+        if payload == "offline":
+            self.on_offline()
+            info.wait_for_publish = lambda timeout=None: self.callback_done.wait(WAIT_S)
+        return info
+
+    def disconnect(self):
+        self.wire = self.wire + [("DISCONNECT", None)]
+        self.sent, self.wire = self.wire, None
+
+    def retained_status(self):
+        return [p for t, p in self.sent if t == f"{BASE}/status"][-1]
+
+
+class _ReleaseGate:
+    """The subscribing lock; the thread named `name` is held right after its first release until `resume` is set."""
+
+    def __init__(self, name):
+        self._lock, self.name = threading.Lock(), name
+        self.released, self.resume = threading.Event(), threading.Event()
+
+    def __enter__(self):
+        self._lock.acquire()
+
+    def __exit__(self, *exc):
+        self._lock.release()
+        if threading.current_thread().name == self.name and not self.released.is_set():
+            self.released.set()
+            self.resume.wait(WAIT_S)
+
+
+class NoOnlineAfterACleanOfflineTest(unittest.TestCase):
+    def _connected(self, gate_resume):
+        pub = camp._publisher()
+        callback_done = threading.Event()
+        client = _PahoLikeClient(gate_resume.set, callback_done)
+        pub._client = client
+        with mock.patch.object(mp.events, "emit"):
+            pub._on_connect(client, None, None, 0, None)
+        return pub, client, callback_done
+
+    def test_a_suback_racing_the_disconnect(self):
+        gate = _ReleaseGate("paho-double")
+        pub, client, callback_done = self._connected(gate.resume)
+        pub._subscribing_lock = gate
+
+        def suback():
+            pub._on_subscribe(client, None, 7, _suback(1, 1, 1))
+            callback_done.set()
+
+        paho = threading.Thread(target=suback, name="paho-double")
+        paho.start()
+        self.assertTrue(gate.released.wait(WAIT_S))
+        pub._disconnect()  # an executor thread: settings saved
+        paho.join(WAIT_S)
+        self.assertEqual(client.retained_status(), "offline", client.sent)
+
+    def test_the_overdue_timer_racing_the_disconnect(self):
+        resume = threading.Event()
+        pub, client, callback_done = self._connected(resume)
+        reported = threading.Event()
+
+        def emit(*_args):  # _subscribe_failed, between the checks and "online"
+            reported.set()
+            resume.wait(WAIT_S)
+
+        def overdue():
+            pub._suback_overdue(client, 7)
+            callback_done.set()
+
+        loop = threading.Thread(target=overdue, name="loop-double")
+        with mock.patch.object(mp.events, "emit", side_effect=emit), mock.patch.object(mp._LOGGER, "error"):
+            loop.start()
+            self.assertTrue(reported.wait(WAIT_S))
+            pub._disconnect()
+            loop.join(WAIT_S)
+        self.assertEqual(client.retained_status(), "offline", client.sent)
+
+    def test_online_still_follows_the_suback_of_the_live_client(self):
+        pub, client, _ = self._connected(threading.Event())
+        pub._on_subscribe(client, None, 7, _suback(1, 1, 1))
+        self.assertEqual(client.wire, [(f"{BASE}/status", "online")])
+
+
 if __name__ == "__main__":
     unittest.main()
