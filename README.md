@@ -834,7 +834,10 @@ hass_<domain>/manager/result                        outcome of a manager action,
   no command, service call or manager action reaches the container: the
   refused topics and the broker's reason are logged once, put on the timeline,
   and shown in `subscribe_error` and `connect_error` of `GET /api/mqtt/status`
-  and next to *connected* on the MQTT page while the connection stays up. Only a refusal the broker states can be seen:
+  and next to *connected* on the MQTT page while the connection stays up. Once
+  means once per connection the container opens (saving the MQTT settings, an
+  identity change, a restart), not once per reconnect of the client library;
+  ending a connection itself clears both errors. Only a refusal the broker states can be seen:
   mosquitto's `acl_file` grants every subscription and silently drops what the
   client may not read (its dynamic security plugin refuses it). `status` turns
   `online` only once the broker

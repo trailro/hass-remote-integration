@@ -1207,6 +1207,7 @@ class MqttPublisher:
             self._subscribing = None
         if c is None:
             self._live_base = self._live_prefix = None
+            self._forget_errors()
             return
         try:
             if publish_offline and self._connected:
@@ -1221,7 +1222,14 @@ class MqttPublisher:
         self._connected_at = 0.0
         self.stats["connected"] = False
         self._live_base = self._live_prefix = None
+        self._forget_errors()  # after _stop_client: its network thread is gone and reports nothing more
         self.hass.loop.call_soon_threadsafe(self._last_hash.clear)  # a new connection re-asserts every retained document
+
+    def _forget_errors(self) -> None:
+        """A deliberate end (settings saved, identity changed, stop): what went wrong belonged to a connection that no longer
+        exists, and a refusal by the next one (another broker, perhaps) is news.  paho's own reconnects do not come here."""
+        self.stats["connect_error"] = self.stats["subscribe_error"] = ""
+        self._last_subscribe_error = ""
 
     def _on_connect(self, client, userdata, flags, reason_code, properties=None) -> None:
         if reason_code != 0:
