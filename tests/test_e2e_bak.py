@@ -187,6 +187,104 @@ class LastRestoreProtectionTest(unittest.TestCase):
         self.assertIn("copy taken before a restore in the last 7 days", refused["error"])
 
 
+class _FullFile:
+    """A file on a volume with no space left: every write fails, and so does the close that flushes the buffer."""
+
+    def __init__(self, real):
+        self.real = real
+
+    def write(self, data):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def flush(self):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def fileno(self):
+        return self.real.fileno()
+
+    @property
+    def closed(self):
+        return self.real.closed
+
+    def close(self):
+        if not self.real.closed:
+            self.real.close()
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+
+def _upload_request(data, filename):
+    chunks = [data, b""]
+
+    async def read_chunk(_n):
+        return chunks.pop(0) if chunks else b""
+
+    field = SimpleNamespace(name="file", filename=filename, read_chunk=read_chunk)
+
+    async def multipart():
+        async def nxt():
+            return field
+        return SimpleNamespace(next=nxt)
+
+    return SimpleNamespace(headers={"X-Requested-With": "fetch"}, multipart=multipart)
+
+
+def _backup_bytes():
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as zf:
+        zf.writestr(backupkit.MARKER, "{}")
+        zf.writestr(".storage/core.config_entries", "{}")
+    return payload.getvalue()
+
+
+class UploadOnAFullVolumeTest(unittest.TestCase):
+    """5: HTTP 500 and a .upload-*.zip.tmp left behind."""
+
+    def test_a_backup_upload_answers_the_reason_and_leaves_nothing(self):
+        cfg = _volume()
+        self.addCleanup(shutil.rmtree, cfg, True)
+        view = backup_views.BackupUploadView(_hass(cfg))
+        view.json = lambda d: d
+        real_fdopen = os.fdopen
+        with mock.patch.object(backup_views.os, "fdopen", side_effect=lambda fd, mode: _FullFile(real_fdopen(fd, mode))):
+            res = asyncio.run(view.post(_upload_request(_backup_bytes(), "b.zip")))
+        self.assertFalse(res["ok"])
+        self.assertIn("No space left", res["error"])
+        self.assertEqual(os.listdir(os.path.join(cfg, backupkit.BACKUP_DIR)), [])
+
+    def test_a_home_assistant_backup_upload_answers_the_reason_and_leaves_nothing(self):
+        cfg = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, cfg, True)
+        hass = _hass(cfg)
+        hass.config.path = lambda *p: os.path.join(cfg, *p)
+        view = import_views.ImportUploadView(hass)
+        view.json = lambda d: d
+        with mock.patch.object(import_views, "open", create=True, side_effect=lambda path, mode: _FullFile(open(path, mode))):
+            res = asyncio.run(view.post(_upload_request(b"x" * 1000, "backup.tar")))
+        self.assertFalse(res["ok"])
+        self.assertIn("No space left", res["error"])
+        self.assertEqual(os.listdir(os.path.dirname(os.path.join(cfg, ha_import.IMPORT_TAR))), [])
+
+
+class LongUploadNameTest(unittest.TestCase):
+    """11: a name at the length limit was taken once; the second upload read the whole file, then refused the name."""
+
+    def test_the_same_long_name_uploaded_twice_gets_a_suffix_that_fits(self):
+        cfg = _volume()
+        self.addCleanup(shutil.rmtree, cfg, True)
+        filename = "a" * (backup_views._NAME_MAX - len("upload-.zip")) + ".zip"
+        view = backup_views.BackupUploadView(_hass(cfg))
+        view.json = lambda d: d
+        names = []
+        for _ in range(3):
+            res = asyncio.run(view.post(_upload_request(_backup_bytes(), filename)))
+            self.assertTrue(res["ok"], res)
+            names.append(res["name"])
+        self.assertEqual(len(set(names)), 3)
+        self.assertTrue(all(len(n) <= backup_views._NAME_MAX and backup_views._name_ok(n) for n in names), names)
+        self.assertEqual(names[1][-len("-2.zip"):], "-2.zip")
+        self.assertEqual(sorted(os.listdir(os.path.join(cfg, backupkit.BACKUP_DIR))), sorted(names))
+
+
 class KeepAfterManualBackupTest(unittest.TestCase):
     """7: backup_keep N kept N + 1 after a manual backup, and protected backups did not count."""
 
