@@ -1,8 +1,8 @@
 """Thirteenth review, MQTT side: an escaped value in the text rule ended at the first backslash-quote of any length, so
 a secret written with an escaped quote inside a value that is itself escaped (`code=\\"a\\\\\\"SECRET\\"`, the form a
 JSON string value takes in the dumped call data) kept everything after that quote in the history, the status and the
-log; a single-quoted value ended at `\\'`, a double-quoted one at a backslash before a line break.  The rule must stay
-linear (it runs on paho's network thread).  Every test fails on the tree before the fix."""
+log; a single-quoted value ended at `\\'`, a double-quoted one at a backslash before a line break, and a value never
+closed was masked to its first space only.  The rule must stay linear (it runs on paho's network thread).  Every test fails on the tree before the fix."""
 
 import json
 import unittest
@@ -40,7 +40,18 @@ class EscapedQuoteMaskingTest(unittest.TestCase):
 
     def test_single_quotes_and_line_breaks(self):
         self.assertMasked("lock.unlock {'code': 'a\\'SECRET MORE'}")
+        self.assertMasked("{'code': '12\\'SECRET'}")
         self.assertMasked('{"code": "a\\\nSECRET MORE"}')
+        self.assertMasked("x {\\'code\\': \\'1\\\\\\'SECRET MORE\\'}")
+        self.assertMasked('x code=\\"a\nSECRET MORE')
+
+    def test_the_reported_forms(self):
+        self.assertEqual(mp._mask_text("{'code': '12\\'SYNTHQ'}"), "{'code': \"***\"}")
+        self.assertEqual(mp._mask_text('{\\"code\\": \\"12\\\\\\"SYNTHD\\"}'), '{\\"code\\": \\"***\\"}')
+
+    def test_a_value_never_closed_is_masked_to_the_end(self):
+        self.assertMasked('lock.unlock code="12 SECRET MORE')
+        self.assertMasked("lock.unlock code='12 SECRET MORE")
 
     def test_the_history_row_of_a_call(self):
         pub = camp._publisher()
@@ -62,7 +73,7 @@ class EscapedQuoteMaskingTimeTest(unittest.TestCase):
 
     def test_runs_and_quotes(self):
         n = "mp.CALL_MAX_BYTES // 8"
-        for body in ('"code=\\\\\\"" + "\\\\\\\\\\"a" * N', '"code=\\"" + "\\\\\\"a code=" * N', "\"code='\" + \"\\\\'a code=\" * N",
+        for body in ("\"code=\\\\'\" + \"\\\\\\\\\\\\'a\\\"b\" * N", '"code=\\\\\\"" + "\\\\\\\\\\"a" * N', '"code=\\"" + "\\\\\\"a code=" * N', "\"code='\" + \"\\\\'a code=\" * N",
                      '"code=\\\\\\\\\\\\\\"" + "\\\\\\"code=\\\\\\"" * N', 'json.dumps({"code": "\\\\" + "\\"" * (2 * N)})'):
             with self.subTest(body=body):
                 self.assertLess(_seconds(f"N = {n}\nmp._mask_codes({body})"), FAST_S)

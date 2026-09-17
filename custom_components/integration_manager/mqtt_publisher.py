@@ -151,23 +151,19 @@ _SECRET_NAME = (r"(?!(?:translation|sort|primary)_key\b)"
                 r"(?:(?:[A-Za-z0-9_-]*[_-])?(?:code|pin|key)"
                 r"|[A-Za-z0-9_-]*(?:usercode|passcode|password|passwd|secret|token|apikey|passkey|bindkey))")
 # The text rule runs on paho's network thread, over text anyone who may publish under the base topic writes: it must
-# stay linear whatever that text is.  A key inside a JSON string (a service value that is itself JSON) has its quotes
-# escaped (\"code\": \"1234\"): the match starts at the name, after however many backslashes, runs are taken whole
-# (possessive), and an escaped value ends at the backslash-quote as long as its opening one.  A longer one is a quote
-# escaped inside the value (\\\"); a shorter one, or a plain quote, ends the string around the value; one never closed
-# is masked to the end of its line.  The scan never fails and is never repeated: each run is read once (the lookaheads
-# read at most the run).  Masking a cut text (cut=True), a string the cut left open is masked to the end.
-def _code_value_rule(cut: bool) -> re.Pattern[str]:
-    end = r"|\Z" if cut else ""
-    return re.compile(
-        r"""((?<![A-Za-z0-9_-])""" + _SECRET_NAME + r"""(?:\\*+["'])?\s*+[:=]\s*+)"""
-        r"""(?:(\\++)"(?:[^\\\n"]++|\\++(?!")|(?!\2")(?=\2)\\++")*+(?:\2")?"""
-        r"""|"(?:[^"\\]|\\[\s\S])*+(?:\"""" + end + r""")|'(?:[^'\\]|\\[\s\S])*+(?:'""" + end + r""")|[^,}\s]++)""",
-        re.IGNORECASE)
-
-
-_CODE_VALUE = _code_value_rule(cut=False)
-_CODE_VALUE_CUT = _code_value_rule(cut=True)
+# stay linear whatever that text is.  A quoted value ends at its closing quote; an escaped quote inside it (\" or \')
+# does not end it.  A key inside a JSON string (a service value that is itself JSON) has its quotes escaped
+# (\"code\": \"1234\"): the match starts at the name, after however many backslashes, and that value ends at the same run
+# of backslashes and quote it opened with.  A longer run is a quote escaped inside it (\\\"); a shorter one, or that
+# quote alone, ends the string around it.  A value never closed (a text the history cut) is masked to the end.  Every repeat
+# is possessive and its branches start on different characters, so the match never fails and nothing is read twice
+# (the lookaheads read at most the run they stand at).
+_CODE_VALUE = re.compile(
+    r"""((?<![A-Za-z0-9_-])""" + _SECRET_NAME + r"""(?:\\*+["'])?\s*+[:=]\s*+)"""
+    r"""(?:(\\++)(["'])(?:[^\\"']++|(?!\3)["']|\\++(?!\3)|(?!\2\3)(?=\2)\\++\3)*+(?:\2\3)?"""
+    r"""|"(?:[^"\\]++|\\[\s\S])*+"?|'(?:[^'\\]++|\\[\s\S])*+'?|[^,}\s]++)""",
+    re.IGNORECASE)
+_CODE_VALUE_CUT = _CODE_VALUE  # the rule for a text cut to MASK_SCAN_CHARS: a value the cut left open is one never closed
 # what the text rule reads of a history row, a status line or a log line (shown cut to a few hundred characters)
 MASK_SCAN_CHARS = 4096
 _SECRET_KEY = re.compile(_SECRET_NAME, re.IGNORECASE)
@@ -198,7 +194,7 @@ def _mask_text(text: str, limit: int | None = None) -> str:
     rule = _CODE_VALUE
     if limit is not None and len(text) > limit:
         text, rule = text[:limit], _CODE_VALUE_CUT
-    return rule.sub(lambda m: m.group(1) + (f'{m.group(2)}"***{m.group(2)}"' if m.group(2) else '"***"'), text)
+    return rule.sub(lambda m: m.group(1) + (f'{m.group(2)}{m.group(3)}***{m.group(2)}{m.group(3)}' if m.group(2) else '"***"'), text)
 
 
 def _masked(value: Any, limit: int | None = None) -> tuple[Any, bool]:
