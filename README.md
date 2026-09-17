@@ -1253,7 +1253,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
     auth_revoked                time of the last logout: sessions from before it are invalid
     mqtt.json                   broker configuration (mode 600)
     mqtt_rules.json             per-entity MQTT rules
-    mqtt_identity.json          base topic and discovery prefix retained data was last published under
+    mqtt_identity.json          base topic, discovery prefix and broker (host, port, TLS, user; no password) retained data was last published under
     mqtt_undiscover.json        whether a discovery cleanup still waits for the broker's confirmation
     mqtt_cleanup_pending.json   retained MQTT data of uninstalled integrations not cleared yet, per broker (unreachable, or MQTT disabled): retried every minute while that broker is configured
     ha.json                     Home Assistant version, version changes, boot failures, last restore
