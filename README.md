@@ -854,7 +854,10 @@ hass_<domain>/manager/result                        outcome of a manager action,
 
 - **Entity document**: state, attributes, `last_changed`, `last_updated`,
   `last_reported`, and the registry metadata (unique id, name, device class,
-  unit, icon, category, device). Every entity of the container's Home Assistant gets a
+  unit, icon, category, device). Access tokens are left out of the
+  attributes: `access_token`, and any attribute whose URL carries a `token=`
+  (the `entity_picture` of a camera, image or media player), which would open
+  this container's proxy. Every entity of the container's Home Assistant gets a
   document, except the entities of the integrations listed in
   `exclude_integrations` (default `["integration_manager"]`; set with `POST
   /api/mqtt/config`, as a list or comma-separated text; their services are also

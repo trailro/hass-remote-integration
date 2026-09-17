@@ -1,7 +1,10 @@
 """End-to-end campaign on 0.17.0, publisher side: what is published.
 
 - zone.home of the container's own Home Assistant reached the main HA (sensor.zone_home on a device "zone (no
-  device)"), and entities_total counted it and every excluded entity."""
+  device)"), and entities_total counted it and every excluded entity.
+- The access token of a camera or image (access_token, and inside entity_picture) was published retained and mirrored
+  into the attributes on the main HA, where it opens this container's camera proxy; it also rewrote the retained
+  document every five minutes."""
 
 import os
 import tempfile
@@ -95,3 +98,41 @@ class ZoneOfTheContainerTest(_Case):
     def test_the_setting_still_excludes_other_integrations(self):
         self.pub.config.exclude_integrations = ["integration_manager", "demo"]
         self.assertIsNone(self.pub.build_document(self.states["sensor.power"]))
+
+
+class AccessTokenTest(_Case):
+    def test_camera_token_is_not_published(self):
+        _topic, doc = self.pub.build_document(self.states["camera.front"])
+        self.assertNotIn("access_token", doc["attributes"])
+        self.assertNotIn("entity_picture", doc["attributes"])
+        self.assertEqual(doc["attributes"]["brand"], "Imou")
+        self.assertNotIn("a" * 64, mp._dumps(doc))
+
+    def test_a_new_token_does_not_change_the_document(self):
+        first = self.pub.build_document(self.states["camera.front"])[1]
+        rotated = State("camera.front", "idle", {**self.states["camera.front"].attributes, "access_token": "b" * 64,
+                                                  "entity_picture": "/api/camera_proxy/camera.front?token=" + "b" * 64},
+                        last_changed=self.states["camera.front"].last_changed, last_updated=self.states["camera.front"].last_updated,
+                        last_reported=self.states["camera.front"].last_reported)
+        second = self.pub.build_document(rotated)[1]
+        for doc in (first, second):
+            doc.pop("published_at")
+        self.assertEqual(first, second)
+
+    def test_image_and_media_player_urls(self):
+        for eid, attrs in (
+            ("image.map", {"access_token": "c" * 64, "entity_picture": "/api/image_proxy/image.map?token=" + "c" * 64}),
+            ("media_player.tv", {"entity_picture": "/api/media_player_proxy/media_player.tv?token=" + "d" * 64 + "&cache=12",
+                                 "entity_picture_local": "/api/media_player_proxy/media_player.tv?cache=12&token=" + "d" * 64,
+                                 "media_title": "News"}),
+        ):
+            with self.subTest(eid=eid):
+                doc = self.pub.build_document(State(eid, "on", attrs))[1]
+                self.assertNotIn("token=", mp._dumps(doc))
+                if eid == "media_player.tv":
+                    self.assertEqual(doc["attributes"], {"media_title": "News"})
+
+    def test_a_picture_without_a_token_stays(self):
+        state = State("sensor.power", "5", {"entity_picture": "/local/meter.png", "tokens_used": 3, "token_type": "bearer"})
+        doc = self.pub.build_document(state)[1]
+        self.assertEqual(doc["attributes"], {"entity_picture": "/local/meter.png", "tokens_used": 3, "token_type": "bearer"})
