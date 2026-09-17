@@ -286,15 +286,17 @@ class RestoreCancelView(ManagerView):
         async with _HA_CHANGE_LOCK:
             self.installer.busy = True
             try:
-                # a full rollback already selected the older version: cancelled alone, its restore would leave that
-                # code to boot on the config entries the newer version migrated (migration_error)
+                # a full rollback already selected the version it goes back to: cancelled alone, its restore would leave
+                # that code to boot on the config entries the version it left migrated (migration_error)
                 rollback = self.installer.state.rollback_backup
                 meta = await self.hass.async_add_executor_job(backupkit._pending_meta, self.hass.config.config_dir) or {}  # noqa: SLF001
                 if rollback and meta.get("name") == rollback:
                     undo = getattr(self.installer, "_rollback_undo", None)
                     undo = undo if undo and undo[2] == meta.get("zip") else None
+                    target = " ".join(x for x in (getattr(self.installer.state, "domain", None), getattr(self.installer, "running_tag", None)) if x)
                     return self.json({"ok": False, "rollback": rollback,
-                                      "error": f"this restore belongs to a full rollback, which already selected the older version: restart to finish it"
+                                      "error": f"this restore belongs to a full rollback, which already selected {target or 'the version it goes back to'}"
+                                               f"{', the version it goes back to' if target else ''}: restart to finish it"
                                                + (f", or start {undo[0]} {undo[1]} again on Integration to undo the rollback (that drops this restore)" if undo else "")})
                 cancelled, for_version, _name = await self.hass.async_add_executor_job(_cancel_restore_by_hand, self.hass.config.config_dir)
                 if for_version:
