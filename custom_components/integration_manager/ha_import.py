@@ -841,10 +841,19 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
 
     def _commit() -> None:
         for f in moved:
+            aside = os.path.join(cfg, ".storage", f) + ".pre-import"
+            # marked done first: a .pre-import left on the volume is put back over the imported store at the next boot
+            done = aside + ".done"
             try:
-                os.remove(os.path.join(cfg, ".storage", f) + ".pre-import")
-            except OSError:
-                pass
+                os.replace(aside, done)
+            except OSError as err:
+                _LOGGER.error("import of %s: the original .storage/%s could not be marked done (%s); unless it is removed "
+                              "now, the next boot puts it back over the imported store", domain, f, err)
+                done = aside
+            try:
+                os.remove(done)
+            except OSError as err:
+                _LOGGER.error("import of %s: .storage/%s could not be removed (%s)", domain, os.path.basename(done), err)
 
     try:
         if copy_storage:
