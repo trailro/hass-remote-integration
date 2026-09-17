@@ -401,18 +401,24 @@ runs) is refused. A full rollback is also refused while a Home Assistant version
 install or a restore is being prepared, and while a switch with a configuration
 restore or a clean start is scheduled; the smoke test's automatic rollback waits
 for those three instead. Once a full rollback has scheduled its restore, a
-restore by hand is refused until the restart finishes it. After an automatic
+restore by hand is refused until the restart finishes it, and so is *Cancel
+restore*: the rollback already selected the previous version, which must not
+start on the configuration the newer one migrated. To undo a full rollback
+before that restart, start the version it left again: that start drops the
+rollback's restore, and the previous version stays the
+Full rollback target as before. Any other start is refused until the restart. After an automatic
 rollback there is no Full rollback target: the version the smoke test rejected
 is never offered again that way.
 
 A full rollback records the version it goes back to before it schedules the
 restore, so one cut off halfway (`docker stop`, a power loss) finishes at the
 next boot instead of putting the rejected version back on the restored
-configuration. If the restore did not happen at all (cancelled by hand,
-dropped, or failed), the rollback is given up: the integration stays on the
+configuration. If the restore did not happen at all (dropped, or failed),
+the rollback is given up: the integration stays on the
 version it was running, and the reason goes on the timeline. The backup a full rollback
 restores is kept from pruning and refused for deletion until that restore is
-over: applied, failed, dropped at the boot, or cancelled with *Cancel restore*.
+over: applied, failed, dropped at the boot, or undone by starting the version
+the rollback left.
 
 A downgrade of the integration after its config entries were migrated to a
 newer format usually fails (`migration_error`), which the preflight warns
@@ -522,7 +528,9 @@ applied at the next restart, can be partial (only `.storage`, only the manager
 state, …), and is rolled back if it fails halfway. *Cancel restore* cancels a
 restore scheduled by hand; a restore that belongs to a scheduled Home Assistant
 version change is cancelled together with that change (choose the running
-version under Home Assistant), and cancelling it on its own is refused. A
+version under Home Assistant), and cancelling it on its own is refused; a full
+rollback's restore is refused too (restart to finish the rollback, or start the
+version it left to undo it). A
 restore and *Cancel restore* are refused (try again) while a Home Assistant
 version change, a full rollback, an install, a start or stop, or an import is
 being prepared or running, and a version change is refused while a restore or a

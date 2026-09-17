@@ -158,13 +158,17 @@ class CancelRestoreVersusVersionChangeTest(unittest.TestCase):
         self.assertFalse(self.views._HA_CHANGE_LOCK.locked())
         self.assertEqual(self.installer.saves, 0)
 
-    def test_cancelling_a_full_rollbacks_restore_ends_its_backups_protection(self):
-        # N5: nothing else would ever release it, the restore that did is gone
+    def test_a_full_rollbacks_restore_is_not_cancelled_and_stays_protected(self):
+        # round 13 F1: cancelled alone, the older version the rollback selected boots on the migrated configuration
         self.installer_state("running.zip")
         backupkit.schedule_restore(self.cfg, "running.zip", ["storage", "custom_components"], None, True)  # what _rollback_full schedules
-        self.assertEqual(asyncio.run(self.cancel()), {"ok": True, "cancelled": True})
-        self.assertEqual((self.installer.state.rollback_backup, self.installer.state.rollback_at), (None, None))
-        self.assertEqual(self.installer.saves, 1)
+        r = asyncio.run(self.cancel())
+        self.assertFalse(r["ok"], r)
+        self.assertEqual(r["rollback"], "running.zip")
+        self.assertTrue(backupkit.pending(self.cfg))
+        self.assertEqual(self.installer.state.rollback_backup, "running.zip")
+        self.assertEqual(self.installer.saves, 0)
+        self.assertFalse(self.installer.busy)
 
     def test_cancelling_another_restore_keeps_a_rollback_backups_protection(self):
         self.installer_state("running.zip")
