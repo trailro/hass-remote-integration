@@ -249,3 +249,50 @@ class UnknownEntryAnswersTest(unittest.TestCase):
             with self.subTest(action=action):
                 res = asyncio.run(view.post(request, "nope", action))
                 self.assertEqual((res.status, res.message), (404, "unknown config entry nope"))
+
+
+class HaErrorAnnouncedOnceTest(unittest.TestCase):
+    def setUp(self):
+        self.cfg = tempfile.mkdtemp(prefix="hri-haerr-")
+        self.addCleanup(shutil.rmtree, self.cfg, ignore_errors=True)
+        self.path = os.path.join(self.cfg, "integration_manager", "ha.json")
+        for patch in (mock.patch.object(manager.events, "emit"),):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+        async def executor(fn, *args):
+            return fn(*args)
+
+        self.hass = SimpleNamespace(async_add_executor_job=executor,
+                                    config=SimpleNamespace(path=lambda *parts: os.path.join(self.cfg, *parts)))
+
+    def boot(self):
+        from homeassistant.components import persistent_notification as pn
+
+        with mock.patch.object(pn, "async_create") as create:
+            asyncio.run(manager.async_announce_ha_error(self.hass, jsonio.read_json(self.path, {})))
+        return create.call_count
+
+    def test_announced_once_across_restores(self):
+        jsonio.write_json(self.path, {"current": "2026.9.2", "last_error": "ha.json was corrupt and has been rebuilt"})
+        self.assertEqual(self.boot(), 1)
+        # a restore brings back an older state.json and leaves ha.json alone: the marker is in ha.json
+        self.assertEqual(self.boot(), 0)
+        self.assertEqual(self.boot(), 0)
+
+    def test_a_rebuilt_ha_json_is_announced_again(self):
+        jsonio.write_json(self.path, {"last_error": "ha.json was corrupt and has been rebuilt"})
+        self.assertEqual(self.boot(), 1)
+        jsonio.write_json(self.path, {"last_error": "ha.json was corrupt and has been rebuilt"})  # corrupt again, rebuilt
+        self.assertEqual(self.boot(), 1)
+
+    def test_another_error_is_announced(self):
+        jsonio.write_json(self.path, {"last_error": "one"})
+        self.assertEqual(self.boot(), 1)
+        jsonio.update_json(self.path, lambda s: {**s, "last_error": "two"})
+        self.assertEqual(self.boot(), 1)
+
+    def test_the_marker_is_not_written_over_a_changed_error(self):
+        jsonio.write_json(self.path, {"last_error": "two"})
+        manager._mark_ha_error_reported(self.path, "one")
+        self.assertNotIn(manager.HA_ERROR_REPORTED, jsonio.read_json(self.path))

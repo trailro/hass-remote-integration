@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import logging
+from typing import Any
 
 import jsonio
 
@@ -72,6 +73,36 @@ def _recent(stamp: str, window_s: int = 900) -> bool:
         return time.time() - time.mktime(time.strptime(stamp[:19], "%Y-%m-%dT%H:%M:%S")) < window_s
     except (TypeError, ValueError):
         return False
+
+
+# Next to last_error in ha.json, not in state.json: a restore brings state.json back and leaves ha.json alone, so
+# a marker there announced the same error again after every restore.  An ha.json the entrypoint rebuilds (the
+# corrupt case) has no marker, so that error is announced again when it happens again.
+HA_ERROR_REPORTED = "last_error_reported"
+
+
+def _mark_ha_error_reported(path: str, error: str) -> None:
+    """Blocking: under ha.json's update lock (run.py and the version-change views write it too); only while the
+    file still holds that error, and never over a file that does not read as an object."""
+    jsonio.update_json(path, lambda state: {**state, HA_ERROR_REPORTED: error}
+                       if isinstance(state, dict) and state.get("last_error") == error else None)
+
+
+async def async_announce_ha_error(hass: HomeAssistant, ha_state: Any) -> None:
+    """Boot: the error the entrypoint left in ha.json (a failed version change, a rebuilt ha.json), once."""
+    from homeassistant.const import __version__ as ha_version
+
+    ha_error = ha_state.get("last_error") if isinstance(ha_state, dict) else None
+    if not ha_error or ha_error == ha_state.get(HA_ERROR_REPORTED):
+        return
+    from homeassistant.components import persistent_notification as ha_pn
+
+    events.emit("ha", ha_error, version=ha_version)
+    ha_pn.async_create(hass, ha_error, title="Home Assistant version", notification_id="hri_ha_version_error")
+    try:
+        await hass.async_add_executor_job(_mark_ha_error_reported, hass.config.path("integration_manager", "ha.json"), ha_error)
+    except OSError as err:
+        _LOGGER.warning("ha.json: the announced error is not recorded (%s): it is announced again at the next boot", err)
 
 
 async def async_disable_foreign_entry(installer: Installer, result: dict) -> str | None:
@@ -173,14 +204,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     events.emit("boot", f"Home Assistant {ha_version}; running {installer.state.domain or 'nothing'} {installer.running_tag or ''}".strip()
                 + (f"; restart required" if installer.state.restart_required else ""), ha=ha_version)
     installer.announce_smoke()  # a failed verdict whose automatic rollback restarted before it could be shown
-    ha_error = ha_state.get("last_error") if isinstance(ha_state, dict) else None
-    if ha_error and ha_error != installer.state.ha_error_reported:
-        from homeassistant.components import persistent_notification as ha_pn
-
-        events.emit("ha", ha_error, version=ha_version)
-        ha_pn.async_create(hass, ha_error, title="Home Assistant version", notification_id="hri_ha_version_error")
-        installer.state.ha_error_reported = ha_error
-        installer._save_state()
+    await async_announce_ha_error(hass, ha_state)
     installer.release_rollback_backup(last_restore)
     if isinstance(last_restore, dict) and last_restore.get("at") and _recent(last_restore["at"]) \
             and last_restore["at"] != installer.state.last_restore_reported:

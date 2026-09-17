@@ -167,7 +167,6 @@ class State:
     rollback_at: str | None = None               # when that rollback was recorded: an older restore of the same backup is not its restore
     release_updates: dict[str, str] = field(default_factory=dict)  # last release check: domain -> newest stable tag not in the store
     pending_change: dict[str, Any] | None = None  # {domain, from_tag, to_tag, at, before}: compared once the new version runs
-    ha_error_reported: str | None = None           # the Home Assistant version-change error already announced
     suspended_entries: list[str] | None = None     # entry ids the manager disabled (stop, switch, flow or import for another integration); None = not recorded yet
     smoke_announced: str | None = None             # "at" of the failed smoke verdict already raised as a notification
     last_restore_reported: str | None = None      # "at" of the restore outcome already put on the timeline
@@ -178,7 +177,7 @@ _NONE = type(None)
 _STATE_TYPES: dict[str, tuple[type, ...]] = {
     "domain": (str, _NONE), "restart_required": (bool,), "last_action": (str,), "last_error": (str,),
     "pending_smoke": (dict, _NONE), "pending_start": (dict, _NONE), "last_smoke": (dict, _NONE), "last_release_check": (int,),
-    "rollback_backup": (str, _NONE), "rollback_at": (str, _NONE), "release_updates": (dict,), "pending_change": (dict, _NONE), "ha_error_reported": (str, _NONE),
+    "rollback_backup": (str, _NONE), "rollback_at": (str, _NONE), "release_updates": (dict,), "pending_change": (dict, _NONE),
     "suspended_entries": (list, _NONE), "smoke_announced": (str, _NONE), "last_restore_reported": (str, _NONE),
     "pending_rollback": (dict, _NONE),
 }
