@@ -117,7 +117,10 @@ class InstalledActionView(ManagerView):
                 if pending := self.publisher.retained_cleanup_pending(key):
                     # removed here; the main Home Assistant keeps the entities until the broker takes the retried cleanup
                     # (the settings' broker first; one pending on another broker waits until that broker is configured again)
-                    res["retained_cleanup_failed"], res["retained_cleanup_error"] = True, pending[0]["error"]
+                    if pending[0]["deferred"]:
+                        res["retained_cleanup_deferred"] = True  # MQTT is disabled: nothing was tried, it runs once MQTT is enabled
+                    else:
+                        res["retained_cleanup_failed"], res["retained_cleanup_error"] = True, pending[0]["error"]
                     res["retained_cleanup_broker"] = pending[0]["broker"]
                     if pending[0]["other_broker"]:
                         res["retained_cleanup_other_broker"] = True
