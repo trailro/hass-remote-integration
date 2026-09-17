@@ -76,6 +76,7 @@ SCRATCH_PREFIXES = (".staging-", ".old-", ".preflight-")  # never a tag: tags do
 SCRATCH_MAX_AGE_S = 3600
 STORE_STAMP = ".hri-stored"  # in a stored version: the install that put that copy there, matched against its record ("stored")
 PRE_RESTORE_GRACE_S = 7 * 86400  # as backupkit's upload grace: a restore proves itself wrong within days
+_PRE_RESTORE_NAME = re.compile(r"(\d{8}-\d{6})-pre-restore(?:-\d+)?\.zip")  # backupkit.create(label="pre-restore")
 CORRUPT_STATE_KEEP = 3  # state.json.corrupt-<stamp> copies kept; the older ones are the same damage, twice removed
 
 
@@ -666,6 +667,18 @@ class Installer:
             # picked: ha.json keeps last_restore forever, so an automatic copy would hold a keep slot and
             # refuse deletion for the life of the instance
             out.add(str(last_restore["pre_restore"]))
+        # every pre-restore copy of the last 7 days, not only the last restore's: a later restore that was dropped or
+        # failed before taking its own copy replaces last_restore, and the copy of the restore before it (the only
+        # way back from what that one brought) lost its protection with it.  Dated by the name backupkit gives it.
+        bdir = os.path.join(os.path.dirname(self.state_dir), "backups")
+        try:
+            names = os.listdir(bdir)
+        except OSError:
+            names = []
+        for name in names:
+            m = _PRE_RESTORE_NAME.fullmatch(name)
+            if m and _within(time.strftime("%Y-%m-%dT%H:%M:%S", time.strptime(m.group(1), "%Y%m%d-%H%M%S")), PRE_RESTORE_GRACE_S):
+                out.add(name)
         plan = jsonio.read_json(os.path.join(self.state_dir, "rebuild-pending.json"), {}) or {}
         if isinstance(plan, dict):
             for key in ("backup", "boot_backup"):  # boot_backup: taken by the entrypoint right before the clean start

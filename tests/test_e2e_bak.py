@@ -171,6 +171,19 @@ class LastRestoreProtectionTest(unittest.TestCase):
         self.assertEqual({"pre.zip"}, self.installer(applied).protected_backups())
         self.assertEqual(set(), self.installer({**applied, "at": _ago(8 * 86400)}).protected_backups())
 
+    def test_an_earlier_pre_restore_copy_stays_protected_after_a_dropped_restore(self):
+        dropped = {"at": _ago(60), "ok": False, "backup": "b.zip", "parts": ["storage"], "for_version": None,
+                   "error": "the scheduled restore of b.zip was dropped: its copy of the archive is gone from the volume; nothing was restored"}
+        inst = self.installer(dropped)
+        bdir = os.path.join(os.path.dirname(inst.state_dir), "backups")
+        os.makedirs(bdir, exist_ok=True)
+        self.addCleanup(shutil.rmtree, bdir, True)
+        recent = time.strftime("%Y%m%d-%H%M%S", time.localtime(time.time() - 600)) + "-pre-restore.zip"
+        old = time.strftime("%Y%m%d-%H%M%S", time.localtime(time.time() - 8 * 86400)) + "-pre-restore.zip"
+        for name in (recent, old, "20260101-000000-manual.zip"):
+            open(os.path.join(bdir, name), "wb").close()
+        self.assertEqual({recent}, inst.protected_backups())
+
     def test_the_source_of_the_last_restore_can_be_deleted(self):
         cfg = _volume()
         self.addCleanup(shutil.rmtree, cfg, True)

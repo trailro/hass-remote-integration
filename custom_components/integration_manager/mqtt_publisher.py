@@ -1628,9 +1628,9 @@ class MqttPublisher:
             # clears retained cmd topics itself when its identity moves): only text/notify take "" as a value
             self._finish(self._remember("cmd", f"{domain}.{object_id}/{field}", ""), "ignored", "empty payload")
             return
-        # the value of a text entity in password mode (announced as one by discovery) never shows in the history,
-        # the status or the log
-        secret = payload if domain == "text" and field == "value" and payload and self._password_text(f"text.{object_id}") else None
+        # what is sent to a text entity in password mode (announced as one by discovery) never shows in the history,
+        # the status or the log: on any of its topics, since a payload published to a wrong field is the value too
+        secret = payload if domain == "text" and payload and self._password_text(f"text.{object_id}") else None
         shown = "***" if secret else payload
         rec = self._remember("cmd", f"{domain}.{object_id}/{field}", shown)
         if problem := _payload_problem(payload):
