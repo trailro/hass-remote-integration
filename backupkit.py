@@ -259,7 +259,7 @@ def _allowed(rel: str) -> bool:
     return "/" not in rel and any(fnmatch.fnmatch(rel, g) for g in INCLUDE_ROOT_GLOBS)
 
 
-_DESCRIBED: dict[str, tuple[tuple[int, int], dict]] = {}  # path -> ((mtime_ns, size), record)
+_DESCRIBED: dict[str, tuple[tuple[int, ...], dict]] = {}  # path -> ((mtime_ns, size, ino, dev), record)
 _DESCRIBED_LOCK = threading.Lock()
 _DESCRIBED_MAX = 512
 
@@ -269,7 +269,7 @@ def describe(config_dir: str, name: str) -> dict:
     reads its whole central directory."""
     path = os.path.join(config_dir, BACKUP_DIR, name)
     st = os.stat(path)
-    key = (st.st_mtime_ns, st.st_size)
+    key = (st.st_mtime_ns, st.st_size, st.st_ino, st.st_dev)  # a same-size copy moved over it within one mtime tick is another inode
     with _DESCRIBED_LOCK:
         hit = _DESCRIBED.get(path)
     if hit is not None and hit[0] == key:
