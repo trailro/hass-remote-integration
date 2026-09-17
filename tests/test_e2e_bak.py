@@ -448,5 +448,24 @@ class MalformedBackupJsonTest(unittest.TestCase):
         self.assertIn("homeassistant.tar.gz is not a regular file", str(ctx.exception))
 
 
+class FullRollbackCancelWordingTest(unittest.TestCase):
+    """The cancel answer said the rollback 'already selected the older version', also for a rollback to a newer tag."""
+
+    def test_it_names_the_version_the_rollback_goes_back_to(self):
+        cfg = _volume()
+        self.addCleanup(shutil.rmtree, cfg, True)
+        _zip(cfg, "pre.zip", {"ha_version": "2026.8.3"})
+        zip_name = os.path.basename(backupkit.schedule_restore(cfg, "pre.zip", ["storage", "custom_components"], None, True))
+        state = SimpleNamespace(domain="demo", rollback_backup="pre.zip", installed={"demo": {"running_tag": "v7.3.0"}})
+        installer = SimpleNamespace(state=state, busy=False, running_tag="v7.3.0", _rollback_undo=("demo", "v7.2.0", zip_name))
+        view = object.__new__(backup_views.RestoreCancelView)
+        view.hass, view.installer, view.json = _hass(cfg), installer, lambda d: d
+        res = asyncio.run(backup_views.RestoreCancelView.post.__wrapped__(view, None, {}))
+        self.assertFalse(res["ok"])
+        self.assertIn("already selected demo v7.3.0, the version it goes back to: restart to finish it", res["error"])
+        self.assertIn("start demo v7.2.0 again", res["error"])
+        self.assertNotIn("older", res["error"])
+
+
 if __name__ == "__main__":
     unittest.main()
