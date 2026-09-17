@@ -30,7 +30,7 @@ class ProtectedPreRestoreTest(unittest.TestCase):
 
     def test_the_copy_taken_before_the_restore_is_protected(self):
         inst = self._installer({"ok": True, "at": self._ago(60), "backup": "src.zip", "pre_restore": "pre.zip"})
-        self.assertEqual({"src.zip", "pre.zip"}, inst.protected_backups())
+        self.assertEqual({"pre.zip"}, inst.protected_backups())  # the source needs nothing once restored (test_e2e_bak)
 
     def test_an_undated_copy_stays_protected(self):
         inst = self._installer({"ok": True, "backup": "src.zip", "pre_restore": "pre.zip"})

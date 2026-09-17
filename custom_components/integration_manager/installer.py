@@ -651,9 +651,10 @@ class Installer:
         recovery = ha_state.get("recovery") if isinstance(ha_state, dict) else None
         if isinstance(recovery, dict) and recovery.get("backup"):
             out.add(str(recovery["backup"]))
+        # the backup the last restore came from needs nothing once that restore is over (applied, failed and put
+        # back, or dropped at the boot): what it brought back is on the volume, and a restore still scheduled or
+        # retried is covered by backupkit.restore_needs.  Pinned by name here, ha.json kept it for good.
         last_restore = ha_state.get("last_restore") if isinstance(ha_state, dict) else None
-        if isinstance(last_restore, dict) and last_restore.get("backup"):
-            out.add(str(last_restore["backup"]))  # just restored: the first start after it must not prune it away  # a failed switch comes back from it, retried at every fallback
         if isinstance(last_restore, dict) and last_restore.get("pre_restore") and _within(last_restore.get("at"), PRE_RESTORE_GRACE_S):
             # the copy of what the restore replaced: the only way back from it once restore-pending.json is
             # gone (deleted as soon as the restore succeeds).  Not pinned for good like the source the user
