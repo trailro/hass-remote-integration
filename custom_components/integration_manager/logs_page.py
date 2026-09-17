@@ -39,6 +39,7 @@ MAX_LOGGER_NAME = 200
 MAX_NEW_LOGGERS = 50
 _NEW_LOGGERS: set[str] = set()
 ROOT_LOGGER = "root"
+MAX_SINCE_ID = 2**63 - 1  # record ids are counted up from 1: none comes near
 
 
 def _query_masked(handler, **kwargs: Any) -> tuple[list[dict[str, Any]], bool, int]:
@@ -191,6 +192,8 @@ class LogsApiView(ManagerView):
             limit = max(1, min(int(q.get("limit", 500) or 500), MAX_LIMIT))
         except ValueError:
             return self.json_message("since_id/limit must be integers", status_code=400)
+        if not 0 <= since_id <= MAX_SINCE_ID:  # the cursor echoes it back, and the JSON encoder takes 64-bit integers only
+            return self.json_message(f"since_id must be between 0 and {MAX_SINCE_ID}", status_code=400)
         recs, truncated, cursor = await self.hass.async_add_executor_job(
             functools.partial(
                 _query_masked,

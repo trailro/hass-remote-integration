@@ -373,5 +373,21 @@ class KeepAfterManualBackupTest(unittest.TestCase):
         self.assertEqual(sorted(backupkit.prune(cfg, 2, {"d.zip", "a.zip"})), ["b.zip"])
 
 
+class LogCursorRangeTest(unittest.TestCase):
+    """8: since_id >= 2**64 answered 500 (the cursor could not be serialized)."""
+
+    def test_out_of_range_since_id_is_refused(self):
+        async def job(fn, *args):
+            return fn(*args)
+
+        handler = SimpleNamespace(capacity=0, path="p", query=lambda **kw: ([], False))
+        view = logs_page.LogsApiView(SimpleNamespace(async_add_executor_job=job))
+        with mock.patch.object(logs_page.logbuffer, "find", return_value=handler):
+            for value, status in ((2**64, 400), (2**63, 400), (-1, 400), (2**63 - 1, 200), (0, 200)):
+                with self.subTest(since_id=value):
+                    req = make_mocked_request("GET", f"/api/logs?since_id={value}", headers={"X-Requested-With": "fetch"})
+                    self.assertEqual(asyncio.run(view.get(req)).status, status)
+
+
 if __name__ == "__main__":
     unittest.main()
