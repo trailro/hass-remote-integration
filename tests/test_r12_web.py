@@ -92,6 +92,11 @@ def _limit_memory():
     resource.setrlimit(resource.RLIMIT_AS, (768 * 1024 * 1024, 768 * 1024 * 1024))
 
 
+# macOS refuses to lower RLIMIT_AS (ValueError in the child, raised as SubprocessError): there the child runs uncapped
+# and only the timeout and the time taken are checked; on Linux (the container, CI) the cap stays
+_MEMORY_CAP = _limit_memory if sys.platform != "darwin" else None
+
+
 @unittest.skipIf(logfiles_page._regex is None, "the regex package is not installed here")
 class PatternCompileTest(unittest.TestCase):
 
@@ -107,8 +112,8 @@ class PatternCompileTest(unittest.TestCase):
         self.assertLess(took, 0.2)
 
     def test_the_reviewers_pattern_is_refused_at_once(self):
-        """In a child process with its memory capped: on the tree before the fix the compile runs out of it
-        (or out of the timeout) instead of taking the container's."""
+        """In a child process with its memory capped (not on macOS, which cannot cap it): on the tree before the
+        fix the compile runs out of it (or out of the timeout) instead of taking the container's."""
         code = ("import json, time\n"
                 "from custom_components.integration_manager import logfiles_page\n"
                 "t = time.monotonic()\n"
@@ -116,7 +121,7 @@ class PatternCompileTest(unittest.TestCase):
                 "print(json.dumps([fmt, error, time.monotonic() - t]))\n")
         try:
             out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30, cwd=ROOT,
-                                 env={**os.environ, "PYTHONPATH": ROOT}, preexec_fn=_limit_memory)
+                                 env={**os.environ, "PYTHONPATH": ROOT}, preexec_fn=_MEMORY_CAP)
         except subprocess.TimeoutExpired:
             self.fail("the pattern was not refused within 30 s")
         self.assertEqual(out.returncode, 0, out.stderr[-2000:])
