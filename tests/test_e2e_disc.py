@@ -301,3 +301,52 @@ class CommandTokenTest(unittest.TestCase):
                 disc.command_to_service(domain, "x", field, "DISARM CODE=1234 X")
             self.assertIn(f"expected one of: {accepted}", str(caught.exception))
             self.assertNotIn("1234", str(caught.exception))
+
+
+class CoverFeaturesTest(_HassCase):
+    SERVICES = ("cover",)
+
+    async def test_tilt_only_cover(self):
+        tilt = State("cover.slats", "closed", {"current_tilt_position": 0, "supported_features": 240})
+        consumer = Consumer(self.hass, tilt)
+        self.assertEqual(int(consumer.entity.supported_features), 240)  # was 251: open, close and stop failed here
+        self.assertNotIn("command_topic", consumer.component)
+        self.assertQuiet(consumer, tilt)
+        for action in ("async_stop_cover_tilt", "async_open_cover_tilt", "async_close_cover_tilt"):
+            await getattr(consumer.entity, action)()
+        await consumer.entity.async_set_cover_tilt_position(tilt_position=40)
+        self.assertEqual(await self.run_here(consumer), [
+            ("cover", "stop_cover_tilt", {"entity_id": "cover.slats"}),
+            ("cover", "set_cover_tilt_position", {"entity_id": "cover.slats", "tilt_position": 100}),
+            ("cover", "set_cover_tilt_position", {"entity_id": "cover.slats", "tilt_position": 0}),
+            ("cover", "set_cover_tilt_position", {"entity_id": "cover.slats", "tilt_position": 40})])
+
+    async def test_stop_tilt_of_a_full_cover(self):
+        full = State("cover.c", "open", {"current_position": 50, "current_tilt_position": 10, "supported_features": 255})
+        consumer = Consumer(self.hass, full)
+        self.assertEqual(int(consumer.entity.supported_features), 255)
+        await consumer.entity.async_stop_cover_tilt()
+        await consumer.entity.async_stop_cover()
+        await consumer.entity.async_set_cover_position(position=30)
+        self.assertEqual([svc for _, svc, _ in await self.run_here(consumer)], ["stop_cover_tilt", "stop_cover", "set_cover_position"])
+
+    async def test_features_follow_the_source(self):
+        for features, attrs in ((1 | 2, {}), (1 | 2 | 8, {}), (1 | 2 | 4, {"current_position": 0}),
+                                (1 | 2 | 8 | 4, {"current_position": 0, "current_tilt_position": 0}), (0, {})):
+            with self.subTest(features=features):
+                consumer = Consumer(self.hass, State("cover.c", "closed", {**attrs, "supported_features": features}))
+                self.assertEqual(int(consumer.entity.supported_features), features)
+        legacy = Consumer(self.hass, State("cover.c", "closed", {"current_position": 0, "current_tilt_position": 0}))
+        self.assertEqual(int(legacy.entity.supported_features), 255)  # features unknown: everything, as before
+
+    async def test_registry_entry_features(self):
+        from types import SimpleNamespace
+
+        entry = SimpleNamespace(entity_id="cover.c", capabilities=None, unit_of_measurement=None, disabled=True,
+                                supported_features=1 | 2, name=None, original_name="C", icon=None, original_icon=None,
+                                entity_category=None, device_class=None, original_device_class=None)
+        registry = mock.Mock()
+        registry.async_get.return_value = entry
+        with mock.patch.object(disc.er, "async_get", return_value=registry):
+            comp = disc.build_component_from_entry(self.hass, entry, f"{BASE}/demo/cover/c", f"{BASE}/cmd", f"{BASE}_")
+        self.assertEqual((comp["payload_open"], comp["payload_close"], comp["payload_stop"]), ("OPEN", "CLOSE", None))
