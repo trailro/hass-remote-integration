@@ -74,6 +74,7 @@ _TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+@-]{0,100}\Z")  # a release tag
 _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")  # GitHub owner/name
 SCRATCH_PREFIXES = (".staging-", ".old-", ".preflight-")  # never a tag: tags do not start with a dot
 SCRATCH_MAX_AGE_S = 3600
+STORE_STAMP = ".hri-stored"  # in a stored version: the install that put that copy there, matched against its record ("stored")
 PRE_RESTORE_GRACE_S = 7 * 86400  # as backupkit's upload grace: a restore proves itself wrong within days
 CORRUPT_STATE_KEEP = 3  # state.json.corrupt-<stamp> copies kept; the older ones are the same damage, twice removed
 
@@ -294,8 +295,8 @@ class Installer:
         self._backup_lock = asyncio.Lock()  # backups on their own queue up instead of refusing each other
         self.state_load_error: str | None = None  # a damaged state.json, reported by the boot reconcile
         os.makedirs(self.versions_dir, exist_ok=True)
-        self._sweep_scratch()
         self.state = self._load_state()
+        self._sweep_scratch()  # after the state: a set-aside copy goes back when the record still describes it
         self.updates = dict(self.state.release_updates or {})  # the badge and the update entity survive a restart
         self._migrate_version_dirs()
 
@@ -495,7 +496,8 @@ class Installer:
 
     def _sweep_scratch(self) -> None:
         """Blocking, at setup (nothing installs yet): staging, set-aside and preflight directories a crash left
-        in the version store.  A set-aside copy whose version directory is missing (killed mid-swap) goes back."""
+        in the version store.  A set-aside copy goes back when its version directory is missing (killed mid-swap),
+        or holds a copy its record does not describe (killed after the swap, before the new record was saved)."""
         cutoff = time.time() - SCRATCH_MAX_AGE_S
         try:
             domains = [os.path.join(self.versions_dir, d) for d in os.listdir(self.versions_dir)]
@@ -511,9 +513,12 @@ class Installer:
                 if not name.startswith(SCRATCH_PREFIXES):
                     continue
                 try:
-                    if name.startswith(".old-") and not os.path.lexists(os.path.join(base, name[len(".old-"):])):
-                        os.replace(path, os.path.join(base, name[len(".old-"):]))
-                        _LOGGER.warning("version store: %s put back (an install stopped between its two renames)", path)
+                    final = os.path.join(base, name[len(".old-"):])
+                    if name.startswith(".old-") and (not os.path.lexists(final) or self._unrecorded_copy(os.path.basename(base), final)):
+                        if os.path.lexists(final):
+                            _rmtree_under(final, self.versions_dir)
+                        os.replace(path, final)
+                        _LOGGER.warning("version store: %s put back (an install stopped before it recorded the copy that replaced it)", path)
                         continue
                     if os.path.getmtime(path) >= cutoff:
                         continue
@@ -521,6 +526,17 @@ class Installer:
                     continue
                 _LOGGER.info("version store: removing the leftover %s", path)
                 _rmtree_under(path, self.versions_dir)
+
+    def _unrecorded_copy(self, domain: str, final: str) -> bool:
+        """Blocking: the stored copy at ``final`` was put there by an install whose record was never saved."""
+        tag = os.path.basename(final).replace("%2F", "/").replace("%25", "%")
+        rec = ((self.state.installed.get(domain) or {}).get("versions") or {}).get(tag)
+        try:
+            with open(os.path.join(final, STORE_STAMP), encoding="utf-8") as fh:
+                stamp = fh.read().strip()
+        except OSError:
+            return False  # a copy stored before stamps: nothing tells, it stays as before
+        return isinstance(rec, dict) and rec.get("stored") != stamp
 
     def _version_dir(self, domain: str, tag: str) -> str:
         # reversible: feature/x and feature_x are different git refs and must not share a directory
@@ -893,14 +909,15 @@ class Installer:
             async with session.get(GITHUB_API.format(repo=spec["repo"]) + f"/zipball/{archive_ref or tag}", headers=self.settings.github_headers()) as resp:
                 _gh_check(resp, f"{spec['repo']}@{archive_ref or tag}")
                 blob = await read_capped(resp, f"{spec['repo']}@{archive_ref or tag}")
-            manifest = await self.hass.async_add_executor_job(self._store_version, blob, domain, tag)  # validated before it replaces anything
+            stamp = os.urandom(8).hex()
+            manifest = await self.hass.async_add_executor_job(self._store_version, blob, domain, tag, stamp)  # validated before it replaces anything
             stored = True
             # only now, with the new release verified and in the store, does the
             # current integration go (a bad tag or a GitHub error leaves it untouched)
             replaced = await self._replace_current(domain)
             self._dom(domain)["versions"][tag] = {"installed_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "version": manifest.get("version"),
                                                  "requirements": manifest.get("requirements", []),
-                                                 "min_ha": manifest.get("_hri_min_ha")}
+                                                 "min_ha": manifest.get("_hri_min_ha"), "stored": stamp}
             recorded = True
             self.state.last_action = f"installed {domain} {tag} into the version store"
             self._save_state()
@@ -2263,7 +2280,7 @@ class Installer:
         rec = ((self.state.installed.get(domain or "") or {}).get("versions") or {}).get(tag or "") or {}
         return rec.get("min_ha")
 
-    def _store_version(self, blob: bytes, domain: str, tag: str) -> dict[str, Any]:
+    def _store_version(self, blob: bytes, domain: str, tag: str, stamp: str | None = None) -> dict[str, Any]:
         """Blocking: the release into versions/<domain>/<tag>, validated in staging first.  A copy already
         there is set aside (.old-<tag>), not deleted: install() drops it once the new copy is recorded, or
         puts it back (_restore_aside) when the install fails before that."""
@@ -2274,12 +2291,24 @@ class Installer:
             shutil.rmtree(staging, ignore_errors=True)
             raise RuntimeError(f"{domain} {tag}: {why}")
         manifest = {**manifest, "_hri_min_ha": self._hacs_min_ha(blob)}  # not written anywhere: the version record keeps it
+        if stamp:
+            self._write_stamp(staging, stamp)
         aside = self._aside_dir(domain, tag)
         shutil.rmtree(aside, ignore_errors=True)
         if os.path.isdir(final):
             os.replace(final, aside)
         os.replace(staging, final)
         return manifest
+
+    @staticmethod
+    def _write_stamp(staging: str, stamp: str) -> None:
+        """Blocking: which install this copy is, written before the swap (the record saved after it names the same)."""
+        try:
+            with open(os.path.join(staging, STORE_STAMP), "w", encoding="utf-8") as fh:
+                fh.write(stamp)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
 
     def _aside_dir(self, domain: str, tag: str) -> str:
         final = self._version_dir(domain, tag)
@@ -2361,11 +2390,12 @@ class Installer:
             if domain not in self.registry():
                 self.add_to_registry(domain, "", cand.get("name"), local=True)
                 registered = True
-            manifest = await self.hass.async_add_executor_job(self._store_local, cand["path"], domain, tag)
+            stamp = os.urandom(8).hex()
+            manifest = await self.hass.async_add_executor_job(self._store_local, cand["path"], domain, tag, stamp)
             stored = True
             replaced = await self._replace_current(domain)  # after the copy succeeded
             self._dom(domain)["versions"][tag] = {"installed_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "version": manifest.get("version"),
-                                                 "requirements": manifest.get("requirements", []), "source": cand["path"]}
+                                                 "requirements": manifest.get("requirements", []), "source": cand["path"], "stored": stamp}
             recorded = True
             self.state.last_action = f"installed {domain} from {cand['path']} as {tag}"
             self._save_state()
@@ -2400,7 +2430,7 @@ class Installer:
         finally:
             self.busy = False
 
-    def _store_local(self, src: str, domain: str, tag: str) -> dict[str, Any]:
+    def _store_local(self, src: str, domain: str, tag: str, stamp: str | None = None) -> dict[str, Any]:
         """Blocking: a dev directory into versions/<domain>/<tag>, as _store_version does for a release (staging,
         the copy already there set aside).  Links are skipped, never followed: one to /config/secrets.yaml would
         copy the secret into the store and every backup, one to .. would recurse.  The release limits apply."""
@@ -2443,6 +2473,8 @@ class Installer:
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise
+        if stamp:
+            self._write_stamp(staging, stamp)
         aside = self._aside_dir(domain, tag)
         shutil.rmtree(aside, ignore_errors=True)
         if os.path.isdir(final):
@@ -2458,7 +2490,7 @@ class Installer:
         shutil.rmtree(tmp, ignore_errors=True)
         shutil.rmtree(aside, ignore_errors=True)
         try:
-            shutil.copytree(src, tmp)
+            shutil.copytree(src, tmp, ignore=lambda d, names: [STORE_STAMP] if d == src and STORE_STAMP in names else [])  # store bookkeeping, not code
         except BaseException:
             shutil.rmtree(tmp, ignore_errors=True)  # a half copy holds the domain's manifest: the loader could pick it
             raise

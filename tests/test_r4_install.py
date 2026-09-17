@@ -204,7 +204,7 @@ class DevInstallTest(unittest.TestCase):
             res = self.install(inst)
         self.assertTrue(res["ok"], res)
         dest = inst._version_dir("demo", "local")
-        self.assertEqual(sorted(os.listdir(dest)), ["__init__.py", "manifest.json", "sub"])
+        self.assertEqual(sorted(set(os.listdir(dest)) - {inst_mod.STORE_STAMP}), ["__init__.py", "manifest.json", "sub"])  # the stamp is the store's own
         self.assertIn("secrets.yaml", "\n".join(logs.output))
 
     def test_caps(self):
