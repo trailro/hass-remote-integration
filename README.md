@@ -1358,7 +1358,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
     mqtt_identity.json          base topic, discovery prefix and broker (host, port, TLS, user; no password) retained data was last published under
     mqtt_undiscover.json        whether a discovery cleanup still waits for the broker's confirmation
     mqtt_cleanup_pending.json   retained MQTT data of uninstalled integrations not cleared yet, per broker (unreachable, or MQTT disabled): retried every minute while MQTT is enabled with that broker
-    ha.json                     Home Assistant version, version changes, boot failures, last restore
+    ha.json                     Home Assistant version, version changes, boot failures, last restore, the last error already announced
     restore-pending.json        a restore scheduled for the next restart (with its zip)
     restore-applied.json        outcome of a restore that could not be recorded (a full volume), recorded at the next boot
     restore-failed.json         the same for a failed restore: recorded at the next boot, never applied again
@@ -1390,7 +1390,7 @@ overwritten by the next save from the UI, and a hand edit of `mqtt.json` is
 picked up by *Reconnect* but lost after a second save from the MQTT page.
 `registry.json` is read again whenever it changes. A `settings.json` that is not
 valid JSON or not a JSON object is not used: the manager starts on the default
-settings (without the tokens), says so in the log and on the timeline, and
+settings (without the tokens), says so in the log, on the timeline and as a notification, and
 keeps the damaged file as `settings.json.corrupt-<stamp>` (the newest three,
 mode 600) before the next save replaces it. In `settings.json` a switch
 written as `"true"`/`"false"`, `"on"`/`"off"`, `"yes"`/`"no"` or `"1"`/`"0"` is
@@ -1415,7 +1415,8 @@ used, with a warning in the log.
 A registry entry in `integration_manager/registry.json` has this shape; only
 `repo` is required. A file of another shape, or one that is not valid JSON (empty,
 a trailing comma), is ignored, with a line in the log saying what was expected: a
-hand edit cannot keep the container from starting.
+hand edit cannot keep the container from starting. Adding an entry from the UI
+over such a file keeps it as `registry.json.corrupt-<stamp>` first.
 The domain `integration_manager` is the manager itself: it is refused in the
 registry (an entry for it is ignored, with a warning), and never installed,
 started or uninstalled.
