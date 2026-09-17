@@ -265,6 +265,9 @@ def build_component(
                 "temperature_unit": "C",
             }
         )
+        features = attrs.get("supported_features")
+        if isinstance(features, int) and features & 8:  # WaterHeaterEntityFeature.ON_OFF; away mode has no MQTT option
+            comp["power_command_topic"] = f"{cmd}/power"
 
     elif domain == "switch":
         comp.update(
@@ -770,6 +773,7 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
         return _pick(field, {
             "temperature": lambda: ("water_heater", "set_temperature", {**t, "temperature": _finite(p)}),
             "mode": lambda: ("water_heater", "set_operation_mode", {**t, "operation_mode": p}),
+            "power": lambda: ("water_heater", "turn_on" if _on_off(p) else "turn_off", t),
         })
     if domain == "switch" and field == "state":
         return "switch", "turn_on" if _on_off(p) else "turn_off", t

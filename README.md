@@ -931,7 +931,9 @@ hass_<domain>/manager/result                        outcome of a manager action,
   with the action. The state topic of a switch, light, fan, siren or
   humidifier takes only `ON`/`OFF`, `TRUE`/`FALSE` or `1`/`0` (any case,
   surrounding spaces ignored); any other payload is refused rather than read
-  as *off*, with the reason under *recent commands* and in the log. A command
+  as *off*, with the reason under *recent commands* and in the log. The action
+  tokens of a cover, valve, lock, alarm panel, vacuum or lawn mower match in any
+  case; an unknown one is refused with the tokens that are accepted. A command
   larger than 256 KB, or nested deeper than 64 levels, is refused unread, with
   the reason in the same two places. A command, service call or manager action
   published with `retain` is never carried out, because a physical effect must
@@ -942,6 +944,20 @@ hass_<domain>/manager/result                        outcome of a manager action,
   container subscribes (at every connection); one published while the container
   is already connected reaches it without the retain flag, runs once, and its
   retained copy is cleared at the next connection.
+- **What the main HA cannot show**: its MQTT platforms have no place for some
+  of what an entity has here. A water heater's away mode (on/off is mirrored),
+  installing an update with a backup, the title of a notify message (the
+  message arrives), who changed an alarm panel (`changed_by`), and the
+  `device_class`, `supported_features` and `entity_picture` attributes of an
+  entity mirrored as a sensor (a media player's `tv`) stay in the container.
+  A text value shows on the main HA without its leading and trailing spaces
+  (Home Assistant strips what a template renders; a value sent from there
+  keeps them). A vacuum command sent from the main HA carries its parameters
+  only as a mapping (the main HA drops a list). Tilting a cover open or closed
+  there arrives as tilt position 100 or 0. A category set with an MQTT rule
+  reaches an entity the main HA already has only after the main HA restarts,
+  like `enabled_by_default`. Covers, vacuums and water heaters show the
+  features the entity supports here, and a fan offers the same speed steps.
 - **Service calls**: publish a JSON object to `call/<domain>/<service>` (service
   data plus optional `entity_id`, and an optional `_id`); the result comes back
   on `result/...`, with a `response` key for a service that returns response
