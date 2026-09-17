@@ -383,7 +383,8 @@ start is refused: start it again. Blockers stop the switch and
 are listed with a choice to start anyway; warnings do not stop it. An update
 started from your main HA over MQTT refuses on blockers, since nobody is there
 to confirm, and says why in its result. Through the API, `POST /api/run/start`
-answers `needs_force` with the report, and `force: true` starts anyway.
+answers `needs_force` with the report, and `force: true` starts anyway; a
+version that is not in the store is refused plainly, with nothing to force.
 Starting the version that is already deployed, a dev build, an integration
 without a GitHub repository, a rollback and a restore skip the preflight. A
 preflight that cannot run (GitHub is unreachable, for example) does not stop the
@@ -1401,8 +1402,9 @@ exist yet (a library imported later) needs a dotted Python name, and at most
 50 of those can be created.
 
 `GET /api/summary` includes `manager_update`: the running release and the
-newer ones the banner shows. `POST /api/run/start` takes `force`; without it, a
-start with preflight blockers answers `needs_force` with the report in
+newer ones the banner shows. `POST /api/run/start` takes `force`; a tag that is
+not in the version store is refused without a preflight or `needs_force`. Without
+`force`, a start with preflight blockers answers `needs_force` with the report in
 `preflight`, a start whose preflight could not run says why in
 `preflight_note`, and one that passes with warnings answers with
 `preflight_warnings`. `ok: true` from a start means the version was deployed
