@@ -51,6 +51,32 @@ class MemberNameTest(unittest.TestCase):
         backupkit.validate(os.path.join(cfg, backupkit.BACKUP_DIR, rec["name"]))
 
 
+class BrokerRecordsTest(unittest.TestCase):
+    """What the broker holds is outside the volume: a restore keeps the live ledger and cleanup list."""
+
+    FILES = ("mqtt_identity.json", "mqtt_cleanup_pending.json")
+
+    def _write(self, cfg, text):
+        for f in self.FILES:
+            with open(os.path.join(cfg, backupkit.STATE_DIR, f), "w", encoding="utf-8") as fh:
+                fh.write(text)
+
+    def test_not_backed_up_and_kept_by_a_restore(self):
+        cfg = _volume()
+        self._write(cfg, '{"old": true}')
+        rec = backupkit.create(cfg, "broker")
+        with zipfile.ZipFile(os.path.join(cfg, backupkit.BACKUP_DIR, rec["name"])) as zf:
+            names = zf.namelist()
+        for f in self.FILES:
+            self.assertNotIn(f"{backupkit.STATE_DIR}/{f}", names)
+        self._write(cfg, '{"live": true}')
+        backupkit.schedule_restore(cfg, rec["name"], parts=["manager"], force=True)
+        backupkit.apply_pending(cfg, log=lambda *_: None)
+        for f in self.FILES:
+            with open(os.path.join(cfg, backupkit.STATE_DIR, f), encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), '{"live": true}')
+
+
 class StoreTempFilesTest(unittest.TestCase):
     """U6"""
 

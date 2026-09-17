@@ -287,7 +287,7 @@ notification says it is degraded. An integration with no config entry and no
 YAML stored here is not judged: the verdict is `unconfigured`, with no rollback
 and no notification. A health check that itself fails (an exception in the
 manager, not a verdict) is tried again every minute, three times, and then
-recorded as `unknown`, never rolled back. A failed or degraded smoke test raises a
+recorded as `unknown`, never rolled back. A failed, degraded or unknown smoke test raises a
 notification and stays in the last error until another version runs healthy,
 also across the rollback's restart.
 
@@ -474,8 +474,10 @@ therefore asks what the older version starts with:
   and the last known states are not carried over. Changes made after the
   switch was scheduled are not rebuilt; the configuration from right before
   the clean start is kept in a backup of its own, which the notification names.
-  The rebuild holds the manager like an import: a start, stop or uninstall is
-  refused while it runs (try again). It waits for one that is already running
+  The rebuild holds the manager like an import: an install, start, stop,
+  uninstall, full rollback, restore, Home Assistant version change or process
+  restart is refused while it runs (try again). It waits for an action that is
+  already running
   and then rebuilds only if the integration still runs.
 - **Keep the current configuration.** This works when the older version can
   read the newer storage formats; otherwise the boot fails and the container
@@ -582,7 +584,9 @@ port when the backup comes from a container on another `HRI_PORT`; a restored
 one from an older archive is dropped at the next boot), a store file Home
 Assistant is writing at that moment (`.storage/tmp…`) or an original an import
 set aside (`.storage/*.pre-import`, and `*.pre-import.done` once the import
-completed). A backup whose file
+completed). Nor are the records of what the broker holds (`mqtt_identity.json`,
+`mqtt_cleanup_pending.json`): the broker is outside the volume, so an older copy
+would forget retained data still there or clear data published since. A backup whose file
 names are not in their plain form (`./`, `//`, `..`) is refused.
 
 Every backup records the Home Assistant version it was made on (the *HA* column),
@@ -679,7 +683,9 @@ named group. Counted repeats are limited, because compiling writes each one out
 and has no time limit: with every `{n}` and `{m,n}` written out `n` times, the
 pattern may hold at most 10000 elements (`[0-9]{4}` is a few, `(?:[0-9]{2}:){100}`
 a few hundred, `(?:a{1000}){1000}` a million and is refused). A field of any
-length is `.*` or `[^ ]+`, which costs nothing. The format is stored in
+length is `.*` or `[^ ]+`, which costs nothing. A stored format that this check
+refuses (saved by an earlier version) is ignored: the Log files page shows whole
+lines and says why. The format is stored in
 `integration_manager/settings.json`, so it
 survives image updates and is part of backups. The filter box searches the
 whole line with secrets already masked, hidden groups included. Matching has a time limit: when a
@@ -690,7 +696,9 @@ whole and the page says so.
 
 Installing a different integration in a container **replaces** the current
 one: after a backup, its config entries, versions, patches, YAML and retained
-MQTT documents are removed. The UI asks before doing it. To run two
+MQTT documents are removed (a cleanup the broker does not take is kept and
+retried as for an uninstall, see *MQTT reference*; the install's answer does
+not report it). The UI asks before doing it. To run two
 integrations, run two containers:
 
 ```bash
@@ -749,7 +757,8 @@ headers retire a patch on its own:
 The Integration page has an editor: *New .py patch* and *New .patch diff* start
 from a template, *Edit* opens an existing patch (a bundled one is saved as your
 copy under the same name). *Check* changes nothing: for a diff it shows where
-each hunk lands, or, when its context is gone, the closest lines in the file
+each hunk lands, `ambiguous` for a hunk that matches more than one place about
+as near, or, when its context is gone, the closest lines in the file
 next to what the hunk expects; a module runs its `status(ctx)`.
 
 When a patch stops fitting the code it targets (upstream changed it, a file is
@@ -991,24 +1000,27 @@ hass_<domain>/manager/result                        outcome of a manager action,
   is not left with services it cannot call; the next start publishes it again.
   *Uninstall* clears everything retained under that identity, so the main Home
   Assistant removes the entities and devices. If the broker cannot be reached
-  then, the integration is still removed here, the answer says so
-  (`retained_cleanup_failed` with `retained_cleanup_error`) and the timeline
-  records it; the cleanup of that identity (its documents and its discovery
-  configs, nothing else) is kept on disk and retried every minute, also with no
-  integration installed, until the broker takes it. If MQTT is disabled at the
+  then (or refuses the cleanup), the integration is still removed here, the
+  answer says so (`retained_cleanup_failed` with `retained_cleanup_error`) and
+  the timeline records it; the cleanup of that identity (its documents and its
+  discovery configs, nothing else) is kept on disk and retried every minute
+  while MQTT is enabled, also with no integration installed, until the broker
+  takes it. If MQTT is disabled at the
   uninstall, nothing is sent: an identity the container published before
   (the one it recorded last) gets the same kept cleanup, the answer says
   `retained_cleanup_deferred`, and it runs once MQTT is enabled again. A kept
-  cleanup belongs to the broker it is for (host, port, TLS and username, as
+  cleanup belongs to the broker it is for (host, port, TLS and username;
   `retained_cleanup_broker` in the answer and `broker` in
-  `retained_cleanup_pending` of the MQTT status): it is tried only while the
+  `retained_cleanup_pending` of the MQTT status show its `host:port`): it is
+  tried only while the
   MQTT settings name that broker, is never sent to another one, and completes
   once that broker is configured again (`retained_cleanup_other_broker` in
   the answer while it is not). If that broker is gone for good, stop the
   container and delete `mqtt_cleanup_pending.json` (or remove its entry for
-  that broker). A cleanup kept by an earlier version, which did not record
-  the broker, belongs to the broker configured when the container first reads
-  it. Starting the same integration again on that broker before then cancels
+  that broker). An `mqtt_identity.json` written by 0.16.x or older names no
+  broker: a cleanup deferred from it belongs to the broker the MQTT settings
+  name at the uninstall. Neither file is part of backups, so a restore never
+  forgets a cleanup the broker still needs or brings back an old one. Starting the same integration again on that broker before then cancels
   it: its documents are live again.
   Entities that a restore, an
   import or a rebuild took away before a restart are removed there five
@@ -1088,11 +1100,12 @@ name (a reverse proxy with its own name, see below).
 
 Over plain HTTP the password and the session travel unencrypted, so on a
 network you do not trust put the UI behind a reverse proxy with TLS. The status
-page served before Home Assistant runs (while a Home Assistant version
-installs, or while a failed restore waits for a retry) is not protected. It
-shows the phase and, for a failed restore, the name of the backup to restore
-from; while Home Assistant installs and no password is set, it also shows the
-tail of the install log, which the System page shows to anyone without a
+page served on every boot until Home Assistant runs (the PyPI lookup, a version
+install, the requirements, a scheduled restore, removing unused venvs, or while
+a failed restore waits for a retry) is not protected. It shows the phase and,
+for a failed restore, the name of the backup to restore from; until Home
+Assistant starts and while no password is set, it also shows the tail of the
+last install log, which the System page shows to anyone without a
 password anyway. While a failed restore holds the boot, `/api/` paths answer
 `503` with `installing: false` and `restore_failed: true`.
 
@@ -1223,7 +1236,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `HRI_PORT` | `8087` | Port of the UI and API; a changed port is picked up at the next boot, and one pinned in `.storage/http` by an older setup or a restored backup is dropped |
+| `HRI_PORT` | `8087` | Port of the UI and API; a changed port is picked up at the next boot, and one pinned in `.storage/http` by an older setup or a restored backup is dropped; a value that is not a port number (1-65535) stops the container at boot with a line in the log |
 | `HRI_NAME` | `hass-remote-integration` | Container and volume name |
 | `HRI_VERSION` | `latest` | Image tag Compose pulls, for example `0.17.0` |
 | `HRI_REGISTRY` | `ghcr.io/trailro` | Where Compose pulls the image from: `ghcr.io/trailro` (GitHub Container Registry) or `docker.io/trailro26` (Docker Hub); the same image either way. A `docker-compose.yml` from 0.16.0 or older ignores it and pulls from GitHub Container Registry: download the file again to use it |
@@ -1255,7 +1268,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
     mqtt_rules.json             per-entity MQTT rules
     mqtt_identity.json          base topic, discovery prefix and broker (host, port, TLS, user; no password) retained data was last published under
     mqtt_undiscover.json        whether a discovery cleanup still waits for the broker's confirmation
-    mqtt_cleanup_pending.json   retained MQTT data of uninstalled integrations not cleared yet, per broker (unreachable, or MQTT disabled): retried every minute while that broker is configured
+    mqtt_cleanup_pending.json   retained MQTT data of uninstalled integrations not cleared yet, per broker (unreachable, or MQTT disabled): retried every minute while MQTT is enabled with that broker
     ha.json                     Home Assistant version, version changes, boot failures, last restore
     restore-pending.json        a restore scheduled for the next restart (with its zip)
     restore-applied.json        outcome of a restore that could not be recorded (a full volume), recorded at the next boot
@@ -1356,9 +1369,9 @@ points:
 
 | Area | Endpoints |
 |---|---|
-| Status | `GET /api/status`, `GET /api/summary`, `GET /api/manager`, `GET /api/manager/history?hours=`, `GET /api/mqtt/status`, `GET /api/events`, `GET /api/notifications`, `POST /api/notifications/dismiss_all`, `POST /api/notifications/<id>/dismiss` |
-| Login | `POST /api/login` (`{"password": …}`, sets the session cookie; `503` with the reason while `HRI_PASSWORD_FILE` is empty or unreadable), `POST /api/logout` (ends every session; `500` with `ok: false` when the volume could not record it, which ends them until a restart; at the restart the sessions issued since end instead) |
-| Integration | `POST /api/install`, `GET /api/change_reports`, `POST /api/run/{start,stop,cancel_pending_start}`, `GET /api/releases`, `GET /api/releases/preview?domain=&tag=`, `POST /api/releases/preflight`, `POST /api/updates/check`, `POST /api/installed/<domain>/{uninstall,rollback_full,remove_version}`, `GET/POST /api/registry` |
+| Status | `GET /api/status`, `GET /api/summary`, `GET /api/manager`, `GET /api/manager/history?hours=`, `GET /api/mqtt/status` (`subscribe_error`; `retained_cleanup_pending`: a list of `{base_topic, broker, other_broker, deferred, error, since}`, the configured broker's first), `GET /api/events`, `GET /api/notifications`, `POST /api/notifications/dismiss_all`, `POST /api/notifications/<id>/dismiss` |
+| Login | `POST /api/login` (`{"password": …}`, sets the session cookie; `503` with the reason while `HRI_PASSWORD_FILE` is empty or unreadable), `POST /api/logout` (ends every session; `500` with `ok: false` and the reason when the volume could not record it: every session still ends, but at the next restart the sessions from before that logout are valid again and those issued after it end) |
+| Integration | `POST /api/install`, `GET /api/change_reports`, `POST /api/run/{start,stop,cancel_pending_start}`, `GET /api/releases`, `GET /api/releases/preview?domain=&tag=`, `POST /api/releases/preflight`, `POST /api/updates/check`, `POST /api/installed/<domain>/{uninstall,rollback_full,remove_version}` (uninstall answers `retained_cleared`, and while its MQTT cleanup waits: `retained_cleanup_failed` with `retained_cleanup_error`, or `retained_cleanup_deferred` when MQTT is disabled, plus `retained_cleanup_broker` (`host:port`) and `retained_cleanup_other_broker` when the settings name another broker) (uninstall answers `retained_cleared`, and while its MQTT cleanup waits: `retained_cleanup_failed` with `retained_cleanup_error`, or `retained_cleanup_deferred` when MQTT is disabled, plus `retained_cleanup_broker` (`host:port`) and `retained_cleanup_other_broker` when the settings name another broker), `GET/POST /api/registry` |
 | Builder / dev | `GET /api/catalog?q=`, `GET /api/build/options`, `POST /api/build/{check,prepare}`, `GET /api/dev`, `POST /api/dev/install` |
 | Configuration | `POST /api/flow/start`, `GET /api/flow/progress`, `POST/DELETE /api/flow/<id>`, `POST/DELETE /api/options/<flow_id>`, `GET/POST /api/yaml/<domain>`, `GET /api/entries`, `POST /api/entries/<entry_id>/{options,reload,delete}` |
 | Patches | `GET /api/patches/<domain>`, `POST /api/patches/<domain>/upload`, `POST /api/patches/<domain>/<name>/{apply,delete}`, `GET /api/patch_editor/<domain>?name=`, `POST /api/patch_editor/<domain>/{check,save}` |
@@ -1408,8 +1421,8 @@ progress (50): try again later`.
   container until Home Assistant is started (the PyPI lookup, the install, the
   manager's requirements, a scheduled restore, removing unused venvs) the
   page and every `/api/` path answer `503` with a `Retry-After: 5`, and under
-  `/api/` with a JSON body naming the phase and how long the install has been
-  going, so a healthcheck does not call the container healthy while there is no
+  `/api/` with a JSON body naming the phase (`phase`) and the seconds since the
+  container started (`elapsed`), so a healthcheck does not call the container healthy while there is no
   manager API yet. `docker stop` during these steps stops pip and exits at
   once. A version in `integration_manager/ha.json` that is not a Home
   Assistant version number (edited by hand) is ignored and logged. A slow install
@@ -1427,7 +1440,8 @@ progress (50): try again later`.
   Overview; some changes (a new version of a loaded integration, YAML) only take
   effect at a restart.
 - **Restart process does nothing.** A restart is refused while the manager is
-  busy: an install, start, stop or uninstall, an import, a full rollback, a
+  busy: an install, start, stop or uninstall, an import, a clean-start rebuild
+  after a Home Assistant downgrade, a full rollback, a
   restore being scheduled or cancelled, a backup, a patch being applied, a Home
   Assistant version change, the self-check right after boot, or a restart
   already under way. The page shows the error. Wait for it to finish
