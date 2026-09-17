@@ -1013,11 +1013,11 @@ class MqttPublisher:
         return self.hass.config.path("integration_manager", "mqtt_identity.json")
 
     def _remember_identity(self, base: str | None, prefix: str) -> None:
-        """Blocking: the names retained data was last published under."""
+        """Blocking: the names retained data was last published under, and the broker it went to."""
         if not base:
             return
         try:
-            write_json(self._identity_file(), {"base": base, "prefix": prefix}, fsync=False)
+            write_json(self._identity_file(), {"base": base, "prefix": prefix, "broker": self._broker_identity()}, fsync=False)
         except OSError:
             pass
 
@@ -1141,8 +1141,10 @@ class MqttPublisher:
                 continue
             if base == self._live_base or not self.config.enabled:
                 continue  # still connected under it (the uninstall's reconnect comes next), or MQTT is off
-            n, _why = self._clear_retained_checked(base, rec.get("prefix") or self.config.discovery_prefix, warn=False)
+            n, why = self._clear_retained_checked(base, rec.get("prefix") or self.config.discovery_prefix, warn=False)
             if n is None:
+                if rec.get("deferred"):  # the first try since MQTT is on: the reason is the broker now
+                    self._set_cleanup_pending(key, {**rec, "deferred": False, "error": why})
                 return  # the broker is still unreachable: the next tick tries again
             self._set_cleanup_pending(key, None)
             _LOGGER.info("MQTT: the broker is reachable again: cleared %s retained topics of the uninstalled %s", n, base)
@@ -2364,7 +2366,9 @@ class MqttPublisher:
         integration): documents, services, health, status and its discovery
         configs, so the consumer removes the entities."""
         if not self.config.enabled:
-            return 0  # MQTT is off: this process published nothing, and the broker may not even take our credentials
+            # MQTT is off: nothing goes out now (the broker may not even take our credentials), what was published before waits
+            await self.hass.async_add_executor_job(self._defer_cleanup, base_topic)
+            return 0
         prefix, broker = self.config.discovery_prefix, self._broker_identity()
         n, why = await self.hass.async_add_executor_job(self._clear_retained_checked, base_topic, prefix, True, False)  # logged below
         if n is None and base_topic:
@@ -2384,6 +2388,26 @@ class MqttPublisher:
             self._discovery_map.clear()
             self._blocks.clear()
         return n or 0
+
+    def _defer_cleanup(self, base: str) -> None:
+        """Blocking, MQTT off: the removal of an identity published before MQTT was turned off (the names recorded last) is
+        kept as pending on the broker it went to, and runs once MQTT is on with that broker.  An identity never published
+        (not the names recorded last) records nothing."""
+        last = read_json(self._identity_file(), {}) or {}
+        if not base or not isinstance(last, dict) or last.get("base") != base:
+            return
+        broker = last.get("broker")
+        try:
+            key = self._pending_key(base, broker)
+        except (KeyError, TypeError, ValueError):  # recorded by a version that did not name the broker: the configured one
+            broker = self._broker_identity()
+            key = self._pending_key(base, broker)
+        if key in self._cleanup_pending:
+            return  # already waiting (the uninstall tries twice): one line
+        self._set_cleanup_pending(key, {"base": base, "prefix": last.get("prefix") or self.config.discovery_prefix, "broker": broker,
+                                        "error": "MQTT is disabled", "deferred": True, "since": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+        _LOGGER.warning("MQTT: the retained data of the uninstalled %s stays on %s:%s until MQTT is enabled", base, key[1], key[2])
+        events.emit("mqtt", f"retained data of the uninstalled {base} not cleared (MQTT is disabled): removed once MQTT is enabled")
 
     async def async_clear_discovery(self) -> int:
         n = await self.hass.async_add_executor_job(self._clear_discovery_retained)
