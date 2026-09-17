@@ -854,7 +854,9 @@ hass_<domain>/manager/result                        outcome of a manager action,
 
 - **Entity document**: state, attributes, `last_changed`, `last_updated`,
   `last_reported`, and the registry metadata (unique id, name, device class,
-  unit, icon, category, device).
+  unit, icon, category, device). A vacuum's document also has `fan_speed` at
+  the top level (a copy of the attribute), because the main HA's MQTT vacuum
+  reads it only there.
 - **Protocol and document size**: the container connects with MQTT 5, so a
   broker can announce the largest packet it accepts. A document over that
   maximum, or over 1 MiB when none is announced, is skipped rather than sent: a
