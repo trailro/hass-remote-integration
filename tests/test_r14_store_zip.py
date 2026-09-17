@@ -4,6 +4,7 @@ import io
 import os
 import shutil
 import struct
+import tempfile
 import time
 import unittest
 import zipfile
@@ -161,6 +162,28 @@ class DescribeMemoInodeTest(unittest.TestCase):
         st2 = os.stat(path)
         self.assertEqual((st2.st_size, st2.st_mtime_ns), (st.st_size, st.st_mtime_ns))
         self.assertEqual(backupkit.describe(self.cfg, "a.zip")["label"], "bbbb")
+
+
+class ZipballMemberCapTest(unittest.TestCase):
+    """The integration zipball's member cap was checked after zipfile had read every header too."""
+
+    def test_refused_before_zipfile(self):
+        from custom_components.integration_manager import installer as inst_mod
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("o-r-abc/custom_components/demo/manifest.json", '{"domain": "demo"}')
+            for i in range(30):
+                zf.writestr(f"o-r-abc/custom_components/demo/m{i}.py", "")
+        blob = bytearray(buf.getvalue())
+        struct.pack_into("<2H", blob, len(blob) - 14, 1, 1)  # the end record claims one member
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        dest = os.path.join(tmp, "out")
+        with mock.patch.object(inst_mod, "UNPACK_MAX_MEMBERS", 20), _NoZipFile(self) as nz, self.assertRaisesRegex(RuntimeError, "more than 20 members"):
+            object.__new__(inst_mod.Installer)._unpack(bytes(blob), "demo", dest)
+        self.assertEqual(nz.opened, [])
+        self.assertFalse(os.path.exists(dest))
 
 
 if __name__ == "__main__":
