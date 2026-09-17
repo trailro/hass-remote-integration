@@ -565,7 +565,8 @@ of the backup is gone from the volume (`integration_manager/restore-pending-*.zi
 deleted by hand) is dropped at the next boot and recorded as failed, so it
 neither protects its backup nor holds up a version change. A backup holds at
 most 100000 files: taking a larger one fails, and an upload or restore of one
-is refused. Backups, restored files and
+is refused (counted from the archive's directory before it is read, and not
+listed with its details). Backups, restored files and
 uploads are created readable by the container user only (umask 077).
 Automatic pruning keeps the newest backups by the date they were made (never
 later than the file's own date), never removes the backup it runs after, and
@@ -580,7 +581,8 @@ port Home Assistant was set up with (`.storage/http`, which would pin a foreign
 port when the backup comes from a container on another `HRI_PORT`; a restored
 one from an older archive is dropped at the next boot), a store file Home
 Assistant is writing at that moment (`.storage/tmp…`) or an original an import
-set aside (`.storage/*.pre-import`). A backup whose file
+set aside (`.storage/*.pre-import`, and `*.pre-import.done` once the import
+completed). A backup whose file
 names are not in their plain form (`./`, `//`, `..`) is refused.
 
 Every backup records the Home Assistant version it was made on (the *HA* column),
