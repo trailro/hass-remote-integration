@@ -1067,6 +1067,8 @@ hass_<domain>/manager/result                        outcome of a manager action,
   entities with their customisations until the integration starts again.
   *Stop* also clears the retained service catalog, so the main Home Assistant
   is not left with services it cannot call; the next start publishes it again.
+  While no integration runs there is no identity: `GET /api/mqtt/status`
+  shows `base_topic` and the other topics as `null`.
   *Uninstall* clears everything retained under that identity, so the main Home
   Assistant removes the entities and devices. If the broker cannot be reached
   then (or refuses the cleanup), the integration is still removed here, the

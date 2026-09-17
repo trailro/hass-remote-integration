@@ -1245,7 +1245,7 @@ class MqttPublisher:
         base = self.wanted_base_topic
         if not base:
             # nothing running -> no identity -> nothing to publish under
-            self.stats["connect_error"] = "no integration is running: MQTT has no identity (hass_<domain>) yet"
+            self.stats["connect_error"] = "no integration is running: MQTT has no identity (hass_<domain>) until one starts"
             _LOGGER.info("MQTT: %s", self.stats["connect_error"])
             return
         if (key := self._pending_key(base, self._broker_identity())) in self._cleanup_pending:
@@ -3120,17 +3120,18 @@ class MqttPublisher:
         return n
 
     def status(self) -> dict[str, Any]:
+        named = bool(self._live_base or self.wanted_base_topic)  # no identity: no topic is used, "hass_none" is no name
         return {
             **self.stats,
             "enabled": self.config.enabled,
             "host": self.config.host,
             "port": self.config.port,
-            "base_topic": self.base_topic,
+            "base_topic": self.base_topic if named else None,
             "wanted_base_topic": self.wanted_base_topic,
             "identity_moved": self._connected and self.wanted_base_topic != self._live_base,
             "has_identity": bool(self.wanted_base_topic),
             "retained_cleanup_pending": self.retained_cleanup_pending(),  # uninstalled identities a broker did not take yet
-            "prefix": self.prefix,
+            "prefix": self.prefix if named else None,
             "force_base_topic": self.config.force_base_topic,
             "tls": self.config.tls,
             # what a full republish publishes a document for: excluded entities (by integration or by a rule) not counted
@@ -3146,10 +3147,10 @@ class MqttPublisher:
             "discovery_prefix": self.config.discovery_prefix,
             "manager_discovery": self.config.manager_discovery,
             "manager_commands": self.config.manager_commands,
-            "manager_topic": self._manager_topic(),
-            "cmd_base": self._cmd_base(),
-            "call_base": self._call_base(),
-            "health_topic": self._health_topic(),
+            "manager_topic": self._manager_topic() if named else None,
+            "cmd_base": self._cmd_base() if named else None,
+            "call_base": self._call_base() if named else None,
+            "health_topic": self._health_topic() if named else None,
             "rules": len(self.rules.rules),
             "health": self._health_last or self.build_health(),
             "recent_commands": self.recent_commands(30),
