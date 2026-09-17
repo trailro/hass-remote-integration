@@ -2145,6 +2145,39 @@ class Installer:
         self._save_state()
         return domain
 
+    def _adopt_enabled_entries(self) -> str | None:
+        """Boot, with nothing recorded as running: an installed integration whose config entries are enabled and
+        whose copy is deployed is set up by this very boot (run.py sets up every domain with an entry), so it
+        runs whatever state.json says.  A restore can do that: the configuration it brings back has the entries
+        enabled while state.json, which it leaves alone, records a stop made after that backup.  As after a
+        damaged state.json (_adopt_from_disk), running is what the config entries say: it is recorded as
+        running, so Stop, the health verdict, the MQTT identity and the version list describe it
+        again.  Exactly one such integration, or none is adopted."""
+        domains = sorted(d for d in self.state.installed
+                         if any(e.disabled_by is None for e in self._entries_of(d)) and self._manifest_at(self._component_dir(d)))
+        if len(domains) != 1:
+            if domains:
+                _LOGGER.error("not adopting %s at boot: their config entries are enabled while nothing is recorded as running, "
+                              "and exactly one integration runs in a container: stop the ones that should not run", domains)
+            return None
+        domain = domains[0]
+        rec = self.state.installed[domain]
+        marker, _ = self._tag_of_deployed(domain)
+        if marker in (rec.get("versions") or {}):
+            rec["running_tag"] = marker  # the deployed copy (a restore may have brought back other files)
+        self.state.domain = domain
+        enabled = {e.entry_id for e in self._entries_of(domain) if e.disabled_by is None}
+        if self.state.suspended_entries:
+            # enabled again by what came back: no longer the manager's to resume
+            self.state.suspended_entries = [i for i in self.state.suspended_entries if i not in enabled]
+        self.state.last_action = f"adopted {domain} {rec.get('running_tag') or '(version unknown)'} at boot: its config entries are enabled"
+        self._save_state()
+        _LOGGER.warning("boot: %s has enabled config entries and a deployed copy while nothing was recorded as running "
+                        "(a restore brought them back?): recorded as running %s", domain, rec.get("running_tag") or "(version unknown)")
+        events.emit("start", f"{domain} {rec.get('running_tag') or ''}: adopted at boot, its config entries are enabled "
+                    "while nothing was recorded as running".replace("  ", " "), domain=domain, tag=rec.get("running_tag"))
+        return domain
+
     def _report_state_loss(self) -> None:
         """One damaged state.json used to be one log line and a UI that showed
         nothing running while the integration was loaded and publishing."""
@@ -2166,6 +2199,8 @@ class Installer:
         if self.state_load_error:
             self._report_state_loss()  # before the rollback/deploy below: they act on the state it repairs
         self._apply_pending_rollback()  # before anything is deployed: it decides which tag this boot runs
+        if not self.state.domain and self.state.installed:
+            self._adopt_enabled_entries()  # before the entries are set up (run.py waits for this reconcile)
         domain = self.state.domain
         rec = self.state.installed.get(domain or "", {})
         tag = rec.get("running_tag")

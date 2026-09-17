@@ -86,3 +86,72 @@ class ActionsDuringAFullRollbackTest(_RollbackScheduled):
     def test_a_restore_by_hand_is_not_a_rollback(self):
         self.inst.state.rollback_backup = None
         self.assertIsNone(self.inst.rollback_restore_refusal())
+
+
+class BootAdoptsEnabledEntriesTest(unittest.TestCase):
+    """What F1 left behind (and a restore by hand after a stop still can): the restored .storage has the entry
+    enabled, state.json records nothing running.  run.py sets that entry up at this boot anyway."""
+
+    def setUp(self):
+        self.cfg = tempfile.mkdtemp(prefix="hri-adopt-")
+        self.addCleanup(shutil.rmtree, self.cfg, ignore_errors=True)
+        patch = mock.patch.object(inst_mod.events, "emit")
+        self.emit = patch.start()
+        self.addCleanup(patch.stop)
+
+    def boot(self, entries, installed=("hub",), marker="v1", suspended=None):
+        state = {"domain": None, "installed": {d: {"versions": {"v1": {}, "v2": {}}, "running_tag": "v2"} for d in installed},
+                 "suspended_entries": suspended}
+        jsonio.write_json(os.path.join(self.cfg, "integration_manager", "state.json"), state)
+        for d in installed:
+            r13._write(os.path.join(self.cfg, "custom_components", d, "manifest.json"), json.dumps({"domain": d, "version": "1"}))
+            r13._write(os.path.join(self.cfg, "custom_components", d, ".hri-tag"), f"{marker}\n2026-09-01T00:00:00\n")
+
+        async def executor(fn, *args):
+            return fn(*args)
+
+        hass = SimpleNamespace(config=SimpleNamespace(config_dir=self.cfg, components=set()), async_add_executor_job=executor,
+                               config_entries=SimpleNamespace(async_entries=lambda domain=None: [e for e in entries if domain in (None, e.domain)]))
+        inst = Installer(hass)
+        deployed = []
+
+        async def nothing(*args, **kwargs):
+            return []
+
+        inst._ensure_deployed = lambda domain, tag, force=False: deployed.append((domain, tag)) or False
+        inst._requirements_for = nothing
+        inst._enable_entries = nothing
+        inst._patch_rows = lambda domain: []
+        inst._notify_patches = lambda domain, rows: None
+        inst._apply_patches = lambda domain: "none"
+        inst._tree_hash = lambda domain: None
+        inst._schedule_smoke = mock.Mock()
+        asyncio.run(inst.async_reconcile())
+        return inst, deployed
+
+    @staticmethod
+    def entry(domain="hub", disabled_by=None, entry_id="e1"):
+        return SimpleNamespace(domain=domain, disabled_by=disabled_by, entry_id=entry_id)
+
+    def test_enabled_entries_are_adopted_as_running(self):
+        inst, deployed = self.boot([self.entry()], suspended=["e1", "other"])
+        self.assertEqual((inst.state.domain, inst.running_tag), ("hub", "v1"), "the deployed copy's marker names the tag")
+        self.assertEqual(deployed, [("hub", "v1")])
+        self.assertEqual(inst.state.suspended_entries, ["other"], "an entry enabled again is not the manager's to resume")
+        with open(inst.state_file, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["domain"], "hub")
+        self.assertIn("adopted at boot", self.emit.call_args_list[0].args[1])
+
+    def test_an_unknown_marker_keeps_the_recorded_tag(self):
+        inst, _ = self.boot([self.entry()], marker="v9")
+        self.assertEqual((inst.state.domain, inst.running_tag), ("hub", "v2"))
+
+    def test_disabled_entries_stay_stopped(self):
+        inst, deployed = self.boot([self.entry(disabled_by="user")])
+        self.assertIsNone(inst.state.domain)
+        self.assertEqual(deployed, [])
+
+    def test_two_candidates_adopt_nothing(self):
+        with self.assertLogs(inst_mod._LOGGER, "ERROR"):
+            inst, _ = self.boot([self.entry(), self.entry("other", entry_id="e2")], installed=("hub", "other"))
+        self.assertIsNone(inst.state.domain)

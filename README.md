@@ -423,6 +423,15 @@ restores is kept from pruning and refused for deletion until that restore is
 over: applied, failed, dropped at the boot, or undone by starting the version
 the rollback left.
 
+A boot that finds an installed integration's config entries enabled and its
+copy deployed while nothing is recorded as running (a restore that brought back
+the entries of a backup taken while it ran, after a stop) records it as running,
+as after a damaged `state.json`: that boot sets its entries up anyway, and
+*Stop*, the health verdict and the MQTT identity then describe what runs. The
+deployed version comes from the marker next to the code; the timeline and the
+log say it was adopted. When more than one installed integration is in that
+state, none is adopted and the log says so.
+
 A downgrade of the integration after its config entries were migrated to a
 newer format usually fails (`migration_error`), which the preflight warns
 about. Full rollback right after the upgrade brings the entries back as they
