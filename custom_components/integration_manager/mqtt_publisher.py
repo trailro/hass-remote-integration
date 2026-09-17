@@ -1771,7 +1771,7 @@ class MqttPublisher:
         expected = disc.MANAGER_ACTIONS.get(action)
         if expected is None or payload.strip() != expected:
             # an empty payload clearing a retained command reaches live subscribers too: never an action, and no answer
-            error = f"unknown action {action!r}" if expected is None else f"payload must be {expected!r}"
+            error = f"unknown action {action[:40]!r}" if expected is None else f"payload must be {expected!r}"
             self._finish(rec, "rejected", error)
             if payload.strip():
                 self._answer_rejected(action, error)

@@ -1059,16 +1059,18 @@ hass_<domain>/manager/result                        outcome of a manager action,
   configuration and restarts. The limits of *Back up now* and *Check for
   updates* survive a restart (if they cannot be saved, the action still runs
   and the limit holds until the restart). A restart asked for over MQTT, on its own or
-  after an install, waits up to five minutes for a running install, start,
-  backup or other action to finish; if it is still running then, or if the
+  after an install, waits up to five minutes in all for a running manager action
+  (an install, a backup, a check for updates) and for an install, start or
+  backup started from the UI to finish; if one is still running then, or if the
   restart is refused for another reason, the restart is skipped and the result
-  says so. The result goes out once the restart is really under way, so an `ok`
+  says so (`restart skipped: <action> is still running (<n> s)`). The result goes out once the restart is really under way, so an `ok`
   on `manager/result` means the process is going down and not only that the
   command was accepted. A refused command (an unknown action, a wrong payload,
   or `manager_commands` off) gets `ok: false` and the reason on
-  `manager/result`, and nothing else is published. While an action runs, a second one is answered
-  `<action> is still running (<n> s)`; one that never returns stops holding the
-  others after 30 minutes. Anyone who can publish under the base topic can use
+  `manager/result`, and nothing else is published; an unknown action's name is
+  cut to 40 characters in the answer, its error and the history. While an action runs, any other
+  action than a restart is answered `<action> is still running (<n> s)`; one
+  that never returns stops holding the others after 30 minutes. Anyone who can publish under the base topic can use
   them, so turn this on only on a broker with credentials.
   hass-remote-integration itself is updated by pulling a new image.
 - **Stop, uninstall, restore**: the identity (`hass_<domain>`) belongs to the
