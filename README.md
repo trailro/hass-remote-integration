@@ -990,7 +990,11 @@ hass_<domain>/manager/result                        outcome of a manager action,
   container: `ok: false` with `internal error (<exception type>)`, and the log
   names where (never the message, which may quote the data). A repeated `_id` within five minutes is answered from memory
   and never executed twice (the latest 1000 `_id`s are kept); the comparison
-  keeps the type, so `1` and `"1"` are two different calls. At most 50 service
+  keeps the type, so `1` and `"1"` are two different calls. While the service
+  still runs, also after the call was answered with a timeout, a repeat is
+  answered `ok: null` with `state: running` and `duplicate: true`; once it
+  ends, a repeat gets its final result (flagged `late` when it ended after the
+  timeout). At most 50 service
   calls and commands run at once, a timed-out call counting until its service
   returns: beyond that a call is answered `too many calls in progress` (a
   retry with the same `_id` runs once there is room) and a command is
