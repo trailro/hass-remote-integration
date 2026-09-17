@@ -389,5 +389,64 @@ class LogCursorRangeTest(unittest.TestCase):
                     self.assertEqual(asyncio.run(view.get(req)).status, status)
 
 
+class MalformedBackupJsonTest(unittest.TestCase):
+    """10: raw Python errors for a backup.json that is a directory, a link or not JSON."""
+
+    def inspect(self, add_meta):
+        cfg = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, cfg, True)
+        path = os.path.join(cfg, ha_import.IMPORT_TAR)
+        os.makedirs(os.path.dirname(path))
+        with tarfile.open(path, "w") as tf:
+            add_meta(tf)
+            ti = tarfile.TarInfo("homeassistant.tar.gz")
+            ti.size = 3
+            tf.addfile(ti, io.BytesIO(b"abc"))
+        with self.assertRaises(ValueError) as ctx:
+            ha_import.inspect_backup(cfg, None, set())
+        self.assertIs(type(ctx.exception), ValueError)
+        return str(ctx.exception)
+
+    def test_a_directory(self):
+        def add(tf):
+            ti = tarfile.TarInfo("backup.json")
+            ti.type = tarfile.DIRTYPE
+            tf.addfile(ti)
+
+        self.assertEqual(self.inspect(add), "not a Home Assistant backup (backup.json is not a regular file)")
+
+    def test_a_symbolic_link(self):
+        def add(tf):
+            ti = tarfile.TarInfo("backup.json")
+            ti.type, ti.linkname = tarfile.SYMTYPE, "elsewhere.json"
+            tf.addfile(ti)
+
+        self.assertEqual(self.inspect(add), "not a Home Assistant backup (backup.json is not a regular file)")
+
+    def test_not_json(self):
+        def add(tf):
+            ti = tarfile.TarInfo("backup.json")
+            ti.size = 9
+            tf.addfile(ti, io.BytesIO(b"{not json"))
+
+        self.assertIn("not a Home Assistant backup (backup.json is not valid JSON: ", self.inspect(add))
+
+    def test_the_inner_archive_as_a_directory(self):
+        cfg = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, cfg, True)
+        path = os.path.join(cfg, ha_import.IMPORT_TAR)
+        os.makedirs(os.path.dirname(path))
+        with tarfile.open(path, "w") as tf:
+            ti = tarfile.TarInfo("backup.json")
+            ti.size = 2
+            tf.addfile(ti, io.BytesIO(b"{}"))
+            ti = tarfile.TarInfo("homeassistant.tar.gz")
+            ti.type = tarfile.DIRTYPE
+            tf.addfile(ti)
+        with self.assertRaises(ValueError) as ctx:
+            ha_import.inspect_backup(cfg, None, set())
+        self.assertIn("homeassistant.tar.gz is not a regular file", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
