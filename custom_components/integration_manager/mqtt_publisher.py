@@ -489,6 +489,9 @@ class MqttPublisher:
         # publishes: a new process knows only the entities it has, and its first config would silently drop
         # the others from the retained config, leaving the orphan sweep nothing to send removal forms for
         self._boot_components: dict[str, dict[str, dict[str, Any]]] | None = None
+        # (discovery_id, component key) this process sent the removal form for (a rename, a delete, an exclusion) while
+        # the sweep is due: never carried again, or the next config of that device brings the entity back on the consumer
+        self._boot_removed: set[tuple[str, str]] = set()
         self._health_soon_handle: asyncio.TimerHandle | None = None
         self._health_announced: str | None = None  # the verdict last published (and put in the timeline)
 
@@ -2280,12 +2283,17 @@ class MqttPublisher:
             # announced before this start and not (yet) here: kept until the orphan sweep decides
             # (an entity still setting up comes back; one a restore took away gets its removal form)
             for key, comp in self._boot_components.get(discovery_id, {}).items():
-                payload["components"].setdefault(key, comp)
+                if (discovery_id, key) not in self._boot_removed:
+                    payload["components"].setdefault(key, comp)
         # Entities that were in this device last time and are gone now must
         # be sent once in HA's removal form, otherwise the consumer keeps them.
-        for gone in set(self._discovery_map.get(discovery_id, {})) - set(comps):
+        gone_ids = set(self._discovery_map.get(discovery_id, {})) - set(comps)
+        for gone in gone_ids:
             # the platform we PUBLISHED (a mirrored media_player is a "sensor"), or HA rejects the whole device
             payload["components"][_comp_key(gone)] = {"platform": self._discovery_map[discovery_id][gone].get("platform", gone.split(".", 1)[0])}
+        if self._orphan_sweep_due:
+            self._boot_removed -= {(discovery_id, _comp_key(eid)) for eid in comps}  # back (e.g. renamed back): announced again
+        self._note_boot_removed(discovery_id, gone_ids)
         for key, platform in (removed or {}).items():  # retained by an earlier process, gone before this one started
             payload["components"].setdefault(key, {"platform": platform})
         topic = self._discovery_topic(discovery_id)
@@ -2294,6 +2302,12 @@ class MqttPublisher:
             self._blocks[discovery_id] = block
         # not published (disconnected/moving): the map keeps the old components,
         # so the next full republish computes the removal forms again
+
+    def _note_boot_removed(self, discovery_id: str, entity_ids) -> None:
+        """Removed from the consumer by this process (removal forms, or the device config cleared): until the orphan
+        sweep, what an earlier process announced for them is not carried in that device's configs any more."""
+        if self._orphan_sweep_due:
+            self._boot_removed |= {(discovery_id, _comp_key(eid)) for eid in entity_ids}
 
     def _publish_discovery_all(self, follow_up: bool = True) -> None:
         if not self.config.discovery_enabled:
@@ -2316,7 +2330,7 @@ class MqttPublisher:
         with_removals = {did for did in groups if set(self._discovery_map.get(did, {})) - set(groups[did][1])}
         for gone in set(self._discovery_map) - set(groups):
             if self._publish(self._discovery_topic(gone), None, qos=1):
-                del self._discovery_map[gone]
+                self._note_boot_removed(gone, self._discovery_map.pop(gone))
         for disc_id in sorted(groups, key=lambda d: (d not in with_removals, depth(d))):
             block, comps = groups[disc_id]
             self._publish_device_discovery(disc_id, block, comps)
@@ -2534,6 +2548,7 @@ class MqttPublisher:
                 if isinstance(eid, str) and (self._entity_gone(eid) or self._excluded_now(eid)):
                     docs.append(topic)
         self._boot_components = {}  # decided: from here on configs carry only what exists
+        self._boot_removed = set()
         if docs:
             if removed_components or cleared_devices:
                 await asyncio.sleep(2)  # the removal forms reach the consumer before the documents empty (no "Erroneous JSON")
@@ -2836,7 +2851,7 @@ class MqttPublisher:
                     # leaves an empty device on the consumer until the next full
                     # republish, an hour away by default.
                     if self._publish(self._discovery_topic(disc_id), None, qos=1):
-                        self._discovery_map.pop(disc_id, None)
+                        self._note_boot_removed(disc_id, self._discovery_map.pop(disc_id, None) or {})
                         self._blocks.pop(disc_id, None)
                     return
             # _publish_device_discovery adds the removal form for entity_id itself

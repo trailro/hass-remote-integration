@@ -908,7 +908,10 @@ hass_<domain>/manager/result                        outcome of a manager action,
   unknown on the main HA. An entity disabled in the container stays on the
   main HA with its customisations and shows unavailable there; it is still
   announced, with `enabled_by_default: false`, which the main HA applies only
-  when it creates an entity. Deleting the entity removes it there; when it was
+  when it creates an entity. Deleting the entity removes it there, and so do
+  renaming its entity id (the new id replaces it) and excluding it, also in the
+  first five minutes after a start, while entities announced before the start
+  are still kept for the orphan sweep (see *Stop, uninstall, restore*); when it was
   the last entity of a device that is gone from the container too, the device's
   discovery config is cleared as well, so no empty device is left on the main HA
   until the next full republish. Renaming a device, or changing its model or its
