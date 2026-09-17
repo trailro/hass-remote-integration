@@ -254,6 +254,54 @@ def _loads_call(payload: str) -> Any:
     return json.loads(payload, parse_constant=_no_constant, parse_float=_finite_float)
 
 
+_ID_TOKEN = re.compile(r'"(?:[^"\\]++|\\[\s\S])*+"?|[{}\[\]:]')
+_ID_SCALAR = re.compile(r'\s*+(?:("(?:[^"\\]++|\\[\s\S])*+")|(-?\d++(?:\.\d++)?(?:[eE][+-]?\d++)?)|(true|false|null))')
+
+
+def _refused_call_id(payload: str) -> Any:
+    """The _id of a call payload that is refused without being parsed, or that does not parse (too large, too deep,
+    NaN, a number too large, broken JSON), so the answer still carries it: the value of the last "_id" key of the outer
+    object when that is a string, a finite number, true, false or null, else None.  Read, never parsed: one pass over at
+    most CALL_MAX_BYTES characters with possessive repeats, linear whatever the payload holds (paho's thread)."""
+    text = payload[:CALL_MAX_BYTES]
+    if not text.lstrip().startswith("{") or ("_id" not in text and "\\u" not in text):
+        return None
+    depth, prev, found = 0, None, None
+    for m in _ID_TOKEN.finditer(text):
+        tok = m.group()
+        if tok in ("{", "["):
+            depth += 1
+        elif tok in ("}", "]"):
+            depth -= 1
+            if depth <= 0:
+                break  # the outer object ended
+        elif tok == ":":
+            if depth == 1 and prev is not None and (prev == '"_id"' or prev[0] == '"' and "\\" in prev and _json_string(prev) == "_id"):
+                if v := _ID_SCALAR.match(text, m.end()):
+                    found = _scalar_id(v)
+        prev = tok
+    return found
+
+
+def _json_string(token: str) -> str | None:
+    try:
+        return json.loads(token)
+    except ValueError:
+        return None
+
+
+def _scalar_id(match: re.Match[str]) -> Any:
+    string, number, word = match.groups()
+    try:
+        if string is not None:
+            return json.loads(string)
+        if number is not None:
+            return _finite_float(number) if any(c in number for c in ".eE") else int(number)
+    except ValueError:  # an invalid escape, 1e999, more digits than int() reads
+        return None
+    return {"true": True, "false": False}.get(word)
+
+
 def _entity_ids_in(value: Any) -> set[str]:
     """Entity ids named in service data outside the target: values of keys ending in entity_id/entity_ids, and of
     group_members, snapshot_entities, entities, add_entities and remove_entities (a list, a comma-separated string, or a mapping keyed by entity id),
@@ -1881,7 +1929,7 @@ class MqttPublisher:
             parsed = _loads_call(payload)
         except Exception:  # noqa: BLE001
             parsed = None
-        call_id = parsed.get("_id") if isinstance(parsed, dict) else None
+        call_id = parsed.get("_id") if isinstance(parsed, dict) else _refused_call_id(payload) if parsed is None else None
         parts = [p.lower() for p in rest.split("/")]
         valid = len(parts) == 2 and all(_SERVICE_NAME.fullmatch(p) for p in parts)
         self._finish(self._remember("call", ".".join(parts) if valid else rest[:80], "", call_id), "error", error)
@@ -1902,7 +1950,7 @@ class MqttPublisher:
             bad = None if isinstance(parsed, dict) else "payload must be a JSON object"
         except (ValueError, RecursionError) as err:
             parsed, bad = None, str(err)
-        sent_id = parsed.get("_id") if isinstance(parsed, dict) else None
+        sent_id = parsed.get("_id") if isinstance(parsed, dict) else _refused_call_id(payload) if parsed is None else None
 
         def remember(what: str) -> dict[str, Any]:
             if isinstance(parsed, (dict, list)):
