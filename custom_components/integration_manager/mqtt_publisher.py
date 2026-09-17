@@ -1147,8 +1147,9 @@ class MqttPublisher:
                     self._set_cleanup_pending(key, {**rec, "deferred": False, "error": why})
                 return  # the broker is still unreachable: the next tick tries again
             self._set_cleanup_pending(key, None)
-            _LOGGER.info("MQTT: the broker is reachable again: cleared %s retained topics of the uninstalled %s", n, base)
-            events.emit("mqtt", f"cleared {n} retained topics of the uninstalled {base} (the broker was unreachable at the uninstall)")
+            why = "MQTT was disabled at the uninstall" if rec.get("deferred") else "the broker was unreachable at the uninstall"
+            _LOGGER.info("MQTT: cleared %s retained topics of the uninstalled %s (%s)", n, base, why)
+            events.emit("mqtt", f"cleared {n} retained topics of the uninstalled {base} ({why})")
 
     async def _on_stop(self, _: Event) -> None:
         # first: a connect still probing or sweeping (it holds _conn_lock, which a stop does not wait for) must not

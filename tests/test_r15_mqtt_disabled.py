@@ -42,6 +42,8 @@ class DisabledBeforeUninstallTest(_Case):
             await pub._on_cleanup_timer(None)
             await pub._on_cleanup_timer(None)
         self.assertEqual(broker.scans, SCAN)  # once, that identity only
+        self.assertIn("cleared 4 retained topics of the uninstalled hass_demo (MQTT was disabled at the uninstall)",
+                      [c.args[1] for c in self.emit.call_args_list])
         self.assertEqual(broker.retained, KEPT)
         self.assertEqual(self.on_disk(), {})
 
