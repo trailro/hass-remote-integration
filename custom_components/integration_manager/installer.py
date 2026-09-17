@@ -887,7 +887,7 @@ class Installer:
             # both become a GitHub URL path, the tag also a directory of the version store
             return {"ok": False, "error": f"invalid tag {str(tag)[:80]!r}"}
         if backupkit.pending(self.config_dir):
-            return {"ok": False, "error": "a restore is scheduled for the next restart: restart (or cancel it) first"}
+            return {"ok": False, "error": self.rollback_restore_refusal() or "a restore is scheduled for the next restart: restart (or cancel it) first"}
         domain = domain or self.installed_domain
         if (why := manager_domain_error(domain)):
             return {"ok": False, "error": why}
@@ -963,6 +963,10 @@ class Installer:
         rec = self.state.installed.get(domain)
         if not rec or tag not in rec.get("versions", {}):
             return {"ok": False, "error": "not installed"}
+        undo = self._rollback_undo
+        if domain == self.state.domain and tag in (rec.get("running_tag"), rec.get("previous_tag"), undo[1] if undo and undo[0] == domain else None) \
+                and (why := self.rollback_restore_refusal()):
+            return {"ok": False, "error": why}  # the version the rollback goes back to, or the one starting again undoes it
         if domain == self.state.domain and rec.get("running_tag") == tag:
             return {"ok": False, "error": "this version is running; stop it or start another version first"}
         if self.busy:
@@ -1015,9 +1019,7 @@ class Installer:
         # the version a full rollback left, started again: the rollback is undone and its restore dropped with it
         undo = rollback if own_restore is None and rollback == (domain, tag, os.path.basename(scheduled or "")) else None
         if scheduled is not None and undo is None and (own_restore is None or os.path.basename(scheduled) != own_restore):
-            if rollback:
-                return {"ok": False, "error": f"a full rollback restores its backup at the next restart: restart to finish it, or start {rollback[0]} {rollback[1]} again to undo it"}
-            return {"ok": False, "error": "a restore is scheduled for the next restart: restart (or cancel it in the Backup card) first"}
+            return {"ok": False, "error": self.rollback_restore_refusal() or "a restore is scheduled for the next restart: restart (or cancel it in the Backup card) first"}
         min_ha = self.min_ha_of(domain, tag)
         if min_ha and not boot and ha_vkey(str(min_ha)) > ha_vkey(homeassistant.const.__version__):
             return {"ok": False, "error": f"{domain} {tag} needs Home Assistant {min_ha} or newer (hacs.json); this is {homeassistant.const.__version__}: "
@@ -1507,6 +1509,8 @@ class Installer:
             return {"ok": False, "error": "nothing is running"}
         if self.busy:
             return {"ok": False, "error": "another action is running"}
+        if (why := self.rollback_restore_refusal()):
+            return {"ok": False, "error": why}
         self.dismiss_patch_notification(domain)
         if isinstance(self.state.pending_change, dict) and self.state.pending_change.get("domain") == domain:
             self.state.pending_change = None  # nothing runs to compare with
@@ -1628,6 +1632,9 @@ class Installer:
             return {"ok": False, "error": f"{domain} is not installed"}
         if self.busy:
             return {"ok": False, "error": "another action is running"}
+        if (why := self.rollback_restore_refusal()):
+            # the restore brings back .storage (this integration's entries among them) and custom_components
+            return {"ok": False, "error": why}
         self.busy = True
         try:
             try:
@@ -1706,6 +1713,25 @@ class Installer:
             self._rollback_running = False
             self.busy = False
 
+    def rollback_restore_refusal(self) -> str | None:
+        """While a full rollback's restore waits for the restart: the refusal for whatever would contradict it
+        (a stop, an uninstall, another start or rollback, removing a version it involves).  The rollback already
+        recorded the version it goes back to, and the restore brings back the configuration that version ran on,
+        entries enabled: a stop recorded now is undone by that restore, and the integration would run with the
+        manager recording nothing.  Cancel restore is refused for it too (backup_views), so the only ways out are
+        the restart, or starting the version the rollback left (which drops its restore)."""
+        import backupkit
+
+        backup = self.state.rollback_backup
+        if not backup:
+            return None
+        meta = backupkit._pending_meta(self.config_dir) or {}  # noqa: SLF001
+        if meta.get("name") != backup or backupkit.pending_archive(self.config_dir) is None:
+            return None
+        undo = self._rollback_undo if self._rollback_undo and self._rollback_undo[2] == meta.get("zip") else None
+        return "a full rollback restores its backup at the next restart: restart to finish it" \
+            + (f", or start {undo[0]} {undo[1]} again to undo it" if undo else "")
+
     def _cancel_own_restore(self, zip_name: str) -> None:
         """Blocking: cancel the scheduled restore only while it is still this operation's archive."""
         import backupkit
@@ -1736,7 +1762,7 @@ class Installer:
             except ValueError as err:
                 return {"ok": False, "error": f"the pre-update backup is unusable ({err}); only a plain start of {prev_tag} is possible"}
             if backupkit.pending(self.config_dir):
-                return {"ok": False, "error": "a restore is scheduled for the next restart: restart (or cancel it in the Backup card) first"}
+                return {"ok": False, "error": self.rollback_restore_refusal() or "a restore is scheduled for the next restart: restart (or cancel it in the Backup card) first"}
             # a clean start schedules no archive: this restore would take its place at the boot, and the switch is cancelled there
             ha_state = await self.hass.async_add_executor_job(jsonio.read_json, os.path.join(self.config_dir, backupkit.STATE_DIR, "ha.json"), {})
             change = ha_state.get("change") if isinstance(ha_state, dict) else None
@@ -2373,7 +2399,7 @@ class Installer:
         if (why := manager_domain_error(domain)):
             return {"ok": False, "error": why}
         if backupkit.pending(self.config_dir):
-            return {"ok": False, "error": "a restore is scheduled for the next restart: restart (or cancel it) first"}
+            return {"ok": False, "error": self.rollback_restore_refusal() or "a restore is scheduled for the next restart: restart (or cancel it) first"}
         if (why := self._replace_guard(domain, replace)):
             return {"ok": False, "error": why, "replace_required": True, "current": self.installed_domain}
         if self.busy:
