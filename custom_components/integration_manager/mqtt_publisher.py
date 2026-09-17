@@ -85,6 +85,7 @@ _PAHO_LOGGER = logging.getLogger(__name__ + ".paho")
 _PAHO_LOGGER.setLevel(logging.INFO)
 ORPHAN_SWEEP_DELAY_S = 300  # after HA started: integrations still adding entities (a device slow to answer) have had time
 HEALTH_INTERVAL_S = disc.HEALTH_INTERVAL_S  # the health entities on the main HA expire after three missed publications
+CLEANUP_RETRY_S = 60  # how often the removal an uninstall could not finish (the broker unreachable) is tried again
 REPUBLISH_BATCH = 200          # documents per batch before yielding to the event loop
 REPUBLISH_BATCH_PAUSE_S = 0.02
 HEALTH_GRACE_S = 900  # after a (re)start, at most this long before unavailable / silent entities count
@@ -383,6 +384,11 @@ _ENTITY_SERVICE_CALLS = frozenset({"entity_service_call", "batched_entity_servic
 class MqttPublisher:
     _stopping = False  # Home Assistant is stopping: no client may be created any more
     _identity_sweep_due = False  # the sweep of an identity that changed while disconnected failed: retried after a connect
+    # base topic -> {prefix, error, since}: uninstalled identities whose retained data the broker did not take, retried by
+    # a timer (no identity is needed).  Replaced as a whole, never changed in place, under the lock
+    _cleanup_pending: dict[str, dict[str, Any]] = {}
+    _cleanup_pending_lock = threading.Lock()
+    _cleanup_retrying = False
     _in_flight = 0  # service calls and commands whose service task has not finished
     _connected_at = 0.0  # monotonic time of the last CONNACK: a drop right after one is not a TLS problem
     _broker_max_packet = 0  # maximum packet size the broker announced (MQTT 5 only), 0 = none announced
@@ -696,6 +702,7 @@ class MqttPublisher:
 
     async def async_start(self) -> None:
         self._undiscover_due = await self.hass.async_add_executor_job(self._read_undiscover_due)
+        self._cleanup_pending = await self.hass.async_add_executor_job(self._read_cleanup_pending)
         # listeners for the life of the process: the publisher is never set up twice
         self.hass.bus.async_listen(EVENT_STATE_CHANGED, self._on_state)
         self.hass.bus.async_listen(er.EVENT_ENTITY_REGISTRY_UPDATED, self._on_registry)
@@ -705,6 +712,7 @@ class MqttPublisher:
         self.hass.bus.async_listen(dr.EVENT_DEVICE_REGISTRY_UPDATED, self._on_device_registry)
         self._arm_republish_timer()
         async_track_time_interval(self.hass, self._on_health_timer, timedelta(seconds=HEALTH_INTERVAL_S))
+        async_track_time_interval(self.hass, self._on_cleanup_timer, timedelta(seconds=CLEANUP_RETRY_S))
         # the verdict follows the integration at once (its entry loading at boot, a
         # failed setup, a reload), not only at the next timer tick a minute later
         async_dispatcher_connect(self.hass, SIGNAL_CONFIG_ENTRY_CHANGED, self._on_entry_changed)
@@ -1015,18 +1023,92 @@ class MqttPublisher:
         """Blocking: every retained topic of ours under <base>/# (unless
         ``docs`` is False) plus the discovery configs carrying our origin
         under <prefix>/device/+/config get an empty retained payload."""
+        return self._clear_retained_checked(base_topic, discovery_prefix, docs)[0]
+
+    def _clear_retained_checked(self, base_topic: str, discovery_prefix: str, docs: bool = True, warn: bool = True) -> tuple[int | None, str]:
+        """Blocking: _clear_retained_under, with the reason when it was not done."""
         try:
             topics = [(f"{discovery_prefix}/device/+/config", 1)] + ([(f"{base_topic}/#", 1)] if docs else [])
             found = self._retained_scan("cleanup", topics)
             ours = [t for t, p in found.items() if self._is_ours(t, p, base_topic)]
             self._clear_topics("cleanup", ours)
         except Exception as err:  # noqa: BLE001
-            _LOGGER.warning("retained cleanup under %s failed: %s", base_topic, err)
-            return None  # not done: the identity must not be recorded as moved
+            (_LOGGER.warning if warn else _LOGGER.debug)("retained cleanup under %s failed: %s", base_topic, err)
+            return None, f"{type(err).__name__}: {err}"  # not done: the identity must not be recorded as moved
         skipped = len(found) - len(ours)
         if skipped:
             _LOGGER.info("MQTT: left %s retained topics under %s alone (not ours)", skipped, base_topic)
-        return len(ours)
+        if docs and (self._cleanup_pending.get(base_topic) or {}).get("prefix") == discovery_prefix:
+            self._set_cleanup_pending(base_topic, None)  # whoever swept it (an identity sweep too): nothing left to retry
+        return len(ours), ""
+
+    def _cleanup_pending_file(self) -> str:
+        return self.hass.config.path("integration_manager", "mqtt_cleanup_pending.json")
+
+    def _read_cleanup_pending(self) -> dict[str, dict[str, Any]]:
+        """Blocking."""
+        data = read_json(self._cleanup_pending_file(), None)
+        pending = data.get("pending") if isinstance(data, dict) else None
+        if not isinstance(pending, dict):
+            return {}
+        return {base: rec for base, rec in pending.items() if isinstance(base, str) and base.startswith("hass_") and isinstance(rec, dict)}
+
+    def _set_cleanup_pending(self, base: str, record: dict[str, Any] | None) -> bool:
+        """Blocking: records the removal of one identity as pending (record None: drops it).  Kept on disk: a restart
+        before the broker is back must not forget it.  True when something changed."""
+        with self._cleanup_pending_lock:
+            if record is None and base not in self._cleanup_pending:
+                return False
+            pending = {b: r for b, r in self._cleanup_pending.items() if b != base}
+            if record is not None:
+                pending[base] = record
+            self._cleanup_pending = pending
+            try:
+                write_json(self._cleanup_pending_file(), {"pending": pending}, fsync=False)
+            except OSError as err:
+                _LOGGER.warning("MQTT: the pending retained cleanup could not be saved: %s", err)
+        return True
+
+    def cleanup_pending(self, base: str) -> dict[str, Any] | None:
+        """The removal of this identity's retained data that failed and waits for the broker: {prefix, error, since}."""
+        return self._cleanup_pending.get(base)
+
+    def _cancel_pending_cleanup(self, base: str) -> None:
+        """Blocking: the identity is wanted again (installed and started before the broker came back): what it publishes
+        is live and stays.  What the uninstalled copy announced that this one does not have goes with the orphan sweep
+        of a later full republish, which reads the retained configs again first."""
+        if self._set_cleanup_pending(base, None):
+            self._orphan_sweep_due, self._boot_components = True, None
+            _LOGGER.info("MQTT: %s runs again: the pending removal of its retained data is cancelled", base)
+            events.emit("mqtt", f"pending removal of the retained data of {base} cancelled: {base} runs again")
+
+    async def _on_cleanup_timer(self, _now) -> None:
+        if not self._cleanup_pending or self._cleanup_retrying or self._stopping:
+            return
+        self._cleanup_retrying = True
+        try:
+            async with self._conn_lock:  # no start or reconnect in between: nothing may be published under a name being cleared
+                await self.hass.async_add_executor_job(self._retry_pending_cleanups)
+        finally:
+            self._cleanup_retrying = False
+
+    def _retry_pending_cleanups(self) -> None:
+        """Blocking, under the connection lock: the removals an uninstall could not finish, from throwaway clients (no
+        identity needed), each under its own base topic and discovery prefix only."""
+        for base, rec in list(self._cleanup_pending.items()):
+            if self._stopping:
+                return
+            if base == self.wanted_base_topic:
+                self._cancel_pending_cleanup(base)
+                continue
+            if base == self._live_base or not self.config.enabled:
+                continue  # still connected under it (the uninstall's reconnect comes next), or MQTT is off
+            n, _why = self._clear_retained_checked(base, rec.get("prefix") or self.config.discovery_prefix, warn=False)
+            if n is None:
+                return  # the broker is still unreachable: the next tick tries again
+            self._set_cleanup_pending(base, None)
+            _LOGGER.info("MQTT: the broker is reachable again: cleared %s retained topics of the uninstalled %s", n, base)
+            events.emit("mqtt", f"cleared {n} retained topics of the uninstalled {base} (the broker was unreachable at the uninstall)")
 
     async def _on_stop(self, _: Event) -> None:
         # first: a connect still probing or sweeping (it holds _conn_lock, which a stop does not wait for) must not
@@ -1066,6 +1148,8 @@ class MqttPublisher:
             self.stats["connect_error"] = "no integration is running: MQTT has no identity (hass_<domain>) yet"
             _LOGGER.info("MQTT: %s", self.stats["connect_error"])
             return
+        if base in self._cleanup_pending:
+            self._cancel_pending_cleanup(base)
         # a different broker is a different namespace; other TLS settings may not reach the same one
         probe_key = f"{self.config.host}:{self.config.port}/{base}/{self.config.tls}/{self.config.ca_certs}/{self.config.tls_insecure}"
         if not self.config.force_base_topic and probe_key not in self._probed_ok:
@@ -2197,7 +2281,17 @@ class MqttPublisher:
         configs, so the consumer removes the entities."""
         if not self.config.enabled:
             return 0  # MQTT is off: this process published nothing, and the broker may not even take our credentials
-        n = await self.hass.async_add_executor_job(self._clear_retained_under, base_topic, self.config.discovery_prefix)
+        prefix = self.config.discovery_prefix
+        n, why = await self.hass.async_add_executor_job(self._clear_retained_checked, base_topic, prefix, True, False)  # logged below
+        if n is None and base_topic:
+            # the broker is unreachable: the uninstall stands, the removal waits for it (a timer, even with nothing installed)
+            known = self._cleanup_pending.get(base_topic)
+            since = (known or {}).get("since") or time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            await self.hass.async_add_executor_job(self._set_cleanup_pending, base_topic, {"prefix": prefix, "error": why, "since": since})
+            if known is None:  # the uninstall tries twice: one line
+                _LOGGER.warning("MQTT: the retained data of the uninstalled %s stays on the broker for now (%s): retried every %s s",
+                                base_topic, why, CLEANUP_RETRY_S)
+                events.emit("mqtt", f"retained data of the uninstalled {base_topic} not cleared ({why}): retried until the broker takes it")
         if base_topic == self.base_topic:
             self._topics.clear()
             self._last_hash.clear()
@@ -2822,6 +2916,7 @@ class MqttPublisher:
             "wanted_base_topic": self.wanted_base_topic,
             "identity_moved": self._connected and self.wanted_base_topic != self._live_base,
             "has_identity": bool(self.wanted_base_topic),
+            "retained_cleanup_pending": sorted(self._cleanup_pending),  # uninstalled identities the broker did not take yet
             "prefix": self.prefix,
             "force_base_topic": self.config.force_base_topic,
             "tls": self.config.tls,
