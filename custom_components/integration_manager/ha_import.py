@@ -182,13 +182,20 @@ def _inspect(config_dir: str, tar_path: str, out_dir: str, password: str | None,
             raise ValueError("not a Home Assistant backup (no backup.json)")
         if meta_member.size > MAX_META_BYTES:
             raise ValueError("not a Home Assistant backup (backup.json is implausibly large)")
-        meta = json.load(outer.extractfile(meta_member))
+        if not meta_member.isfile():  # a directory has no content, a link would be read from another member
+            raise ValueError("not a Home Assistant backup (backup.json is not a regular file)")
+        try:
+            meta = json.load(outer.extractfile(meta_member))
+        except ValueError as err:  # also a text that is not UTF-8
+            raise ValueError(f"not a Home Assistant backup (backup.json is not valid JSON: {err})") from None
         if not isinstance(meta, dict):
             raise ValueError("not a Home Assistant backup (backup.json is not a JSON object)")
         compressed = bool(meta.get("compressed", True))
         inner_member = found.get(f"homeassistant.tar{'.gz' if compressed else ''}")
         if inner_member is None:
             raise ValueError("backup has no homeassistant.tar.gz (add-on only / partial without HA config?)")
+        if not inner_member.isfile():
+            raise ValueError(f"not a Home Assistant backup (homeassistant.tar{'.gz' if compressed else ''} is not a regular file)")
         if meta.get("protected") and not password:
             raise ValueError("this backup is encrypted: enter the backup encryption key (emergency kit)")
         if inner_member.size > MAX_INNER_BYTES:

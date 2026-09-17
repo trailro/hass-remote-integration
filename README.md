@@ -1243,7 +1243,9 @@ What is in place:
   configuration archive may decompress at most 20 times the archive's size (at
   least 2 GB), skipped members included, and an extended tar header over 1 MB,
   in the backup or in its configuration archive, is refused; neither the
-  backup nor its configuration archive may hold more than 100000 files. Config entries
+  backup nor its configuration archive may hold more than 100000 files. A `backup.json`
+  that is not a regular file or not valid JSON, or a configuration archive that is not a
+  regular file, is refused with that reason. Config entries
   with an invalid id are skipped.
 - Dangerous service domains are not callable, over MQTT or from the UI. Only
   a call over MQTT is limited to the entities the container publishes: the
