@@ -914,8 +914,8 @@ hass_<domain>/manager/result                        outcome of a manager action,
   for an entity the rule matches, or when that entity's unit does not fit it
   (`W` with `temperature`): the main HA would refuse the whole device config.
   An entity a glob rule matches later that the class does not fit is announced
-  without it, with a warning in the log, and the rest of the rule applies. An entity excluded while the
-  container was down is removed from the main HA at the next connection. When
+  without it, with a warning in the log, and the rest of the rule applies.
+  An entity excluded while the container was down is removed from the main HA at the next connection. When
   two entities of one device would get the same component key
   (`image_processing.x` and `image.processing_x`), the second is skipped with a
   warning in the log; `discovery_collisions` in `GET /api/mqtt/status` counts
@@ -930,8 +930,8 @@ hass_<domain>/manager/result                        outcome of a manager action,
   when it creates an entity. Deleting the entity removes it there, and so do
   renaming its entity id (the new id replaces it) and excluding it, also in the
   first five minutes after a start, while entities announced before the start
-  are still kept for the orphan sweep (see *Stop, uninstall, restore*); when it was
-  the last entity of a device that is gone from the container too, the device's
+  are still kept for the orphan sweep (see *Stop, uninstall, restore*); when
+  it was the last entity of a device that is gone from the container too, the device's
   discovery config is cleared as well, so no empty device is left on the main HA
   until the next full republish. Renaming a device, or changing its model or its
   parent, reaches the main HA within a few seconds instead of waiting for that
@@ -1088,8 +1088,8 @@ hass_<domain>/manager/result                        outcome of a manager action,
   once that broker is configured again (`retained_cleanup_other_broker` in
   the answer while it is not). Its `error` in the MQTT status says what it
   waits for now: MQTT disabled, the MQTT settings to name its broker again, the
-  next try, or the error of the last one. If that broker is gone for good, stop the
-  container and delete `mqtt_cleanup_pending.json` (or remove its entry for
+  next try, or the error of the last one. If that broker is gone for good,
+  stop the container and delete `mqtt_cleanup_pending.json` (or remove its entry for
   that broker). An `mqtt_identity.json` written by 0.16.x or older names no
   broker: a cleanup deferred from it belongs to the broker the MQTT settings
   name at the uninstall. Neither file is part of backups, so a restore never
@@ -1394,8 +1394,8 @@ So does a switch that is not `true`/`false`, a text setting that is not a
 string, and an `exclude_integrations` that is not a list of domains. An
 `mqtt.json` that cannot be parsed, or that is JSON but not an object (`[]`),
 gives the default settings, MQTT disabled, with a warning in the log and on the
-timeline, until the MQTT page saves them again. A `ca_certs` that resolves outside `/config` (a hand edit, a restored file, a
-symbolic link out of the volume) is dropped the same way: the system CAs are
+timeline, until the MQTT page saves them again. A `ca_certs` that resolves
+outside `/config` (a hand edit, a restored file, a symbolic link out of the volume) is dropped the same way: the system CAs are
 used, with a warning in the log.
 
 A registry entry in `integration_manager/registry.json` has this shape; only
