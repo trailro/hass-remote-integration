@@ -1389,8 +1389,12 @@ class Installer:
                     self.state.last_error = ""  # this version is healthy: an older version's failure no longer describes what runs
                 self._dismiss_smoke_notification(domain)
             self._notify_yaml_imported(domain)
+        elif degraded:
+            # set up and kept, so what it changed matters as much as for a healthy one: its entities are registered
+            # and unavailable ones keep their state; one with no state at all counts as removed
+            await self.async_finish_change_report(domain, tag)
         elif isinstance(self.state.pending_change, dict) and self.state.pending_change.get("domain") == domain:
-            self.state.pending_change = None  # an unhealthy version would report its missing entities as "removed"
+            self.state.pending_change = None  # a version that did not set up would report its missing entities as "removed"
         rec = {"domain": domain, "tag": tag, "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "state": h.get("state"), "reason": h.get("reason", ""),
                "action": "none"}
         events.emit("smoke", f"{domain} {tag}: {h.get('state')}" + (f" ({h.get('reason')})" if h.get("reason") else "")

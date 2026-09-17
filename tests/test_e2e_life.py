@@ -188,3 +188,27 @@ class NotInTheStoreTest(unittest.TestCase):
         with mock.patch.object(preflight, "run", mock.AsyncMock(side_effect=AssertionError("no preflight"))):
             res = asyncio.run(manage_views.RunView.post.__wrapped__(view, None, {"domain": "probe", "tag": "v5.0.0"}, "start"))
         self.assertEqual(res, {"ok": False, "error": "probe v5.0.0 is not in the version store"})
+
+
+class DegradedChangeReportTest(unittest.TestCase):
+    def test_a_kept_degraded_version_gets_its_report(self):
+        from tests.test_r12_install import SmokeHealthExceptionTest
+
+        inst = SmokeHealthExceptionTest._installer(self, lambda grace: {"state": "degraded", "reason": "41 of 41 entities unavailable"})
+        inst.state.pending_change = {"domain": "demo", "from_tag": "1.0", "to_tag": "2.0", "at": "x", "before": {"entities": {"a": {}}}}
+        with mock.patch.object(inst_mod.events, "emit"):
+            asyncio.run(inst._smoke_check("demo", "2.0", True))
+        inst.async_finish_change_report.assert_awaited_once_with("demo", "2.0")
+        inst.rollback_full.assert_not_awaited()
+        self.assertEqual(inst.state.last_smoke["state"], "degraded")
+
+    def test_an_error_still_drops_it(self):
+        from tests.test_r12_install import SmokeHealthExceptionTest
+
+        inst = SmokeHealthExceptionTest._installer(self, lambda grace: {"state": "error", "reason": "setup_error"})
+        inst.settings = SimpleNamespace(int_=lambda key, lo, hi: 300, bool_=lambda key: False)
+        inst.state.pending_change = {"domain": "demo", "from_tag": "1.0", "to_tag": "2.0", "at": "x", "before": {}}
+        with mock.patch.object(inst_mod.events, "emit"):
+            asyncio.run(inst._smoke_check("demo", "2.0", True))
+        inst.async_finish_change_report.assert_not_awaited()
+        self.assertIsNone(inst.state.pending_change)

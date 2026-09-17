@@ -440,7 +440,9 @@ were.
 
 Once the new version has run (after the smoke test), *What changed between
 versions* on the Integration page compares its entities and services with those
-of the version before: entities added, removed or renamed, entities whose unit,
+of the version before. A degraded version is kept, so it gets that report too
+(an entity with no state at all counts as removed there); a version that did not
+set up gets none. The report lists entities added, removed or renamed, entities whose unit,
 device class, state class or category changed, and services or service fields
 added or removed. State attributes are not compared. An entity that only gains
 or only loses its unique id in the new version, under the same entity id, counts
