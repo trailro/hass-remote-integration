@@ -1597,8 +1597,10 @@ class MqttPublisher:
         try:
             mapped = disc.command_to_service(domain, object_id, field, payload)
         except (ValueError, KeyError, OverflowError, RecursionError) as err:
-            _LOGGER.warning("MQTT command %s=%r rejected: %s", msg.topic, _mask_codes(shown, MASK_SCAN_CHARS), err)
-            self._finish(rec, "rejected", str(err))
+            # the message quotes the payload (float() does, and a KeyError is the payload alone): masked like the payload
+            error = _mask_text(f"unknown {field} {err}" if isinstance(err, KeyError) else str(err), MASK_SCAN_CHARS)
+            _LOGGER.warning("MQTT command %s=%r rejected: %s", msg.topic, _mask_codes(shown, MASK_SCAN_CHARS), error)
+            self._finish(rec, "rejected", error)
             return
         if mapped is None:
             _LOGGER.warning("MQTT command not supported: %s", msg.topic)

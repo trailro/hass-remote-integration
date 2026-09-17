@@ -182,5 +182,33 @@ class NewNamesSearchTest(unittest.TestCase):
                 self.assertEqual(a, b)
 
 
+# ----- m3 -----------------------------------------------------------------------------------------
+
+class RejectedCommandReasonTest(unittest.TestCase):
+
+    def _command(self, topic, payload):
+        pub = _publisher()
+        pub._topics = {"alarm_control_panel.house": "t", "number.level": "t"}
+        pub.stats.update(commands=0, last_command=None)
+        with self.assertLogs(mp._LOGGER, "WARNING") as logs:
+            pub._on_message(None, None, _message(f"{BASE}/cmd/{topic}", payload))
+        return pub, "\n".join(logs.output)
+
+    def test_an_unknown_alarm_action_with_a_code(self):
+        pub, log = self._command("alarm_control_panel/house/command", f"DISARM CODE={SECRET}")
+        row = pub.history[-1]
+        self.assertEqual(row["state"], "rejected")
+        self.assertNotIn(SECRET, row["error"])
+        self.assertNotIn(SECRET, json.dumps(pub.recent_commands()))
+        self.assertNotIn(SECRET, log)
+        self.assertIn("unknown command", row["error"])
+
+    def test_a_number_that_does_not_convert(self):
+        pub, log = self._command("number/level/value", f'{{"pin": "{SECRET}"}}')
+        self.assertNotIn(SECRET, pub.history[-1]["error"])
+        self.assertNotIn(SECRET, log)
+        self.assertIn("could not convert", pub.history[-1]["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

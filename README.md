@@ -1007,7 +1007,8 @@ hass_<domain>/manager/result                        outcome of a manager action,
   `passwd`, `passphrase`, `secret`, `token`, `apikey`, `passkey`, `bindkey`,
   `credential`, `credentials` or `psk` (`access_token`, `api_token`,
   `wifi_psk`, not `token_type`) are masked in the command
-  history, the status and the log; `translation_key`, `sort_key` and
+  history, the status and the log, and so is a rejected command's reason
+  where it quotes the payload; `translation_key`, `sort_key` and
   `primary_key` stay readable. The masking reads at most the first 4 KB of a
   payload's text (every key of a JSON payload is still found), so a longer
   payload shows cut there in the history, the status and a rejected command's
