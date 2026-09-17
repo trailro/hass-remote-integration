@@ -2800,7 +2800,7 @@ class MqttPublisher:
             "manager_uptime_s": int(now - self._started_at),
             "mqtt_published": self.stats.get("published", 0),
             "notifications": _notification_count(self.hass),
-            "base_topic": self.base_topic,
+            "base_topic": self.base_topic if (self._live_base or self.wanted_base_topic) else None,  # never "hass_none"
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         })
         return base
