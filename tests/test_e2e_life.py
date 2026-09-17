@@ -296,3 +296,28 @@ class HaErrorAnnouncedOnceTest(unittest.TestCase):
         jsonio.write_json(self.path, {"last_error": "two"})
         manager._mark_ha_error_reported(self.path, "one")
         self.assertNotIn(manager.HA_ERROR_REPORTED, jsonio.read_json(self.path))
+
+
+class UnparseableRegistryTest(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="hri-reg-")
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.path = os.path.join(self.d, "registry.json")
+
+    def test_empty_or_broken_is_logged(self):
+        for text in ("", '{"integrations": {"x": {"repo": "o/x"},}}'):
+            with self.subTest(text=text):
+                with open(self.path, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                with self.assertLogs(inst_mod._LOGGER, "ERROR") as logs:
+                    self.assertEqual(inst_mod._registry_integrations(self.path), {})
+                self.assertIn("cannot be read as JSON", logs.output[0])
+
+    def test_missing_is_silent(self):
+        with mock.patch.object(inst_mod._LOGGER, "error") as error:
+            self.assertEqual(inst_mod._registry_integrations(self.path), {})
+        error.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

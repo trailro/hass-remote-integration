@@ -205,14 +205,21 @@ def _req_name(req: str) -> str:
         return re.split(r"[\s<>=!~;@\[]", req, 1)[0].strip()
 
 
+_UNREADABLE = object()
+
+
 def _registry_integrations(path: str) -> dict[str, Any]:
     """The ``integrations`` map of a registry file, {} for anything else.
     The user registry is documented as hand-editable ("add your own in
     /config/integration_manager/registry.json"), so a list, a string or a
     number where the map belongs is a user error to log, not a crash: the
-    manager comes up and says what it ignored."""
-    data = jsonio.read_json(path)
-    if data is None:
+    manager comes up and says what it ignored.  A file that is not JSON at all (empty, a trailing comma) is
+    logged the same way; otherwise every integration it adds would leave the Install page without a word."""
+    data = jsonio.read_json(path, _UNREADABLE)
+    if data is _UNREADABLE:
+        if os.path.lexists(path):  # a missing user registry is the normal case
+            _LOGGER.error("%s is ignored: it cannot be read as JSON (empty, or a syntax error such as a trailing comma); "
+                          "it must be {\"integrations\": {\"<domain>\": {\"repo\": \"owner/name\"}}}", path)
         return {}
     integrations = data.get("integrations") if isinstance(data, dict) else None
     if isinstance(integrations, dict):
