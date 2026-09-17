@@ -348,6 +348,17 @@ def platform_of(hass: HomeAssistant, entity_id: str) -> str | None:
     return None
 
 
+# A camera, image or media player carries the access token of this container's proxy (/api/camera_proxy/...?token=)
+# in access_token and in its picture URLs: a credential for this container, and on a camera a new value every five
+# minutes, which would rewrite the retained document each time.  Neither is published.
+_TOKEN_URL = re.compile(r"[?&](?:access_)?token=", re.IGNORECASE)
+
+
+def _published_attributes(attributes: Any) -> dict[str, Any]:
+    return {k: v for k, v in attributes.items()
+            if k != "access_token" and not (isinstance(v, str) and _TOKEN_URL.search(v))}
+
+
 def _comp_key(entity_id: str) -> str:
     return entity_id.replace(".", "_", 1)
 
@@ -2099,7 +2110,7 @@ class MqttPublisher:
             "object_id": object_id,
             "integration": integration,
             "state": state.state,
-            "attributes": dict(state.attributes),
+            "attributes": _published_attributes(state.attributes),
             "last_changed": state.last_changed.isoformat(),
             "last_updated": state.last_updated.isoformat(),
             # moves on every write by the integration, value changed or not; picked
