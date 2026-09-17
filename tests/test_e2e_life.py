@@ -155,3 +155,36 @@ class BootAdoptsEnabledEntriesTest(unittest.TestCase):
         with self.assertLogs(inst_mod._LOGGER, "ERROR"):
             inst, _ = self.boot([self.entry(), self.entry("other", entry_id="e2")], installed=("hub", "other"))
         self.assertIsNone(inst.state.domain)
+
+
+class NotInTheStoreTest(unittest.TestCase):
+    def test_the_gate_does_not_offer_force(self):
+        from tests.test_preflight_gate import FakeInstaller, _gate
+
+        res, run = _gate(FakeInstaller(), "v5.0.0", {"ok": False, "blockers": ["x"]})
+        self.assertEqual(res, {"blocked": False, "report": None, "skipped": None})
+        run.assert_not_awaited()
+
+    def test_a_recorded_version_whose_directory_is_gone(self):
+        from tests.test_camp_preflight import _hass, _installer
+
+        inst = _installer(self, {"__init__.py": "x = 1\n"}, {"domain": "demo", "version": "2.0"})
+        shutil.rmtree(inst._version_dir("demo", "2.0"))
+        preflight._REPORTS.clear()
+        res = asyncio.run(preflight.gate(_hass(), inst, "demo", "2.0"))
+        self.assertFalse(res["blocked"], res)
+        self.assertIsNone(res["skipped"])
+
+    def test_run_start_answers_plainly(self):
+        from custom_components.integration_manager import manage_views
+        from tests.test_preflight_gate import FakeInstaller
+
+        inst = FakeInstaller()
+        inst.hass = None
+        inst.start = mock.AsyncMock(return_value={"ok": False, "error": "probe v5.0.0 is not in the version store"})
+        view = manage_views.RunView(inst, mock.Mock())
+        view.json = lambda d: d
+        preflight._REPORTS.clear()
+        with mock.patch.object(preflight, "run", mock.AsyncMock(side_effect=AssertionError("no preflight"))):
+            res = asyncio.run(manage_views.RunView.post.__wrapped__(view, None, {"domain": "probe", "tag": "v5.0.0"}, "start"))
+        self.assertEqual(res, {"ok": False, "error": "probe v5.0.0 is not in the version store"})

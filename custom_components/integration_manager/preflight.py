@@ -336,7 +336,8 @@ async def gate(hass: HomeAssistant, installer, domain: str, tag: str | None) -> 
     {"blocked", "report", "skipped"}.  Starting the version that already runs (or ran last), a dev
     build or a release without a GitHub repository is not gated; a preflight that cannot run
     (GitHub is unreachable, for example) does not block either: the smoke test still guards the start.
-    A stored copy that is no integration at all is the exception, and blocks.
+    A stored copy that is no integration at all is the exception, and blocks; a version that is not in the
+    store (or whose directory is gone) is not gated at all: start() refuses it plainly, forced or not.
     The check reads the stored copy start() deploys, not what the ref names on GitHub now (a moved tag or
     branch, a commit installed under a name).  No busy flag while it runs (pip can take minutes, and an
     install or a backup must not be refused for that): LOCK queues concurrent gates, start() refuses on its
@@ -346,6 +347,9 @@ async def gate(hass: HomeAssistant, installer, domain: str, tag: str | None) -> 
     target = tag or rec.get("running_tag") or (max(versions, key=tag_key) if versions else None)
     if not target or target == rec.get("running_tag"):
         return {"blocked": False, "report": None, "skipped": "same version as the one deployed"}
+    if target not in versions:
+        # nothing to check and nothing to confirm: start() refuses a version that is not in the store, forced or not
+        return {"blocked": False, "report": None, "skipped": None}
     if target == getattr(installer, "LOCAL_TAG", "local"):
         return {"blocked": False, "report": None, "skipped": "dev build"}
     spec = installer.spec(domain) or {}
@@ -363,6 +367,8 @@ async def gate(hass: HomeAssistant, installer, domain: str, tag: str | None) -> 
             async with LOCK:
                 report = await run(hass, installer, domain, target, source_dir=installer._version_dir(domain, target))
         except StoredCopyUnusable as err:
+            if not await hass.async_add_executor_job(os.path.isdir, installer._version_dir(domain, target)):
+                return {"blocked": False, "report": None, "skipped": None}  # recorded, but its directory is gone: start() refuses it
             # not a transient failure: deploying this copy replaces the live integration with a tree Home Assistant
             # cannot load ("Integration not found"), and only the smoke test undoes it, two restarts later
             return {"blocked": True, "report": {"domain": domain, "ref": target, "ok": False, "blockers": [str(err)],
