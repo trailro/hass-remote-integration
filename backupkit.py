@@ -298,16 +298,18 @@ def create(config_dir: str, label: str = "", storage_version: str | None = None,
             "files": count, "ha_version": info["ha_version"]}
 
 
-def reserve_name(bdir: str, stem: str) -> str:
+def reserve_name(bdir: str, stem: str, max_len: int | None = None) -> str:
     """<stem>.zip, else <stem>-2.zip, -3 ...: the name is reserved atomically (an empty file), so two backups
-    or uploads with one name never share it and an existing backup is never overwritten."""
+    or uploads with one name never share it and an existing backup is never overwritten.  ``max_len``: the
+    stem is shortened so that a name with its suffix is no longer than that."""
     name, n = f"{stem}.zip", 2
     while True:
         try:
             os.close(os.open(os.path.join(bdir, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
             return name
         except FileExistsError:
-            name = f"{stem}-{n}.zip"
+            suffix = f"-{n}.zip"
+            name = f"{stem[:max_len - len(suffix)] if max_len else stem}{suffix}"
             n += 1
 
 

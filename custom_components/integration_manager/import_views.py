@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 
 from typing import Any
 
@@ -78,24 +79,36 @@ class ImportUploadView(ManagerView):
         if field is None or field.name != "file":
             return self.json({"ok": False, "error": "form field 'file' expected"})
         dest = self.hass.config.path(ha_import.IMPORT_TAR)
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
         size = 0
         done = False
-        fh = await self.hass.async_add_executor_job(open, dest + ".tmp", "wb")
+        fh = None
+
+        def _discard() -> None:
+            if fh is not None and not fh.closed:
+                try:
+                    fh.close()  # flushes what a full volume did not take: fails again
+                except OSError:
+                    pass
+            if not done:  # too large, empty, not written, or the client went away mid-upload
+                try:
+                    os.remove(dest + ".tmp")
+                except OSError:
+                    pass
+
         try:
+            await self.hass.async_add_executor_job(functools.partial(os.makedirs, os.path.dirname(dest), exist_ok=True))
+            fh = await self.hass.async_add_executor_job(open, dest + ".tmp", "wb")
             while chunk := await field.read_chunk(1 << 16):
                 size += len(chunk)
                 if size > MAX_UPLOAD:
                     return self.json({"ok": False, "error": "file too large"})
                 await self.hass.async_add_executor_job(fh.write, chunk)
+            await self.hass.async_add_executor_job(fh.close)  # the last buffered write: a full volume fails here
             done = size > 0
+        except OSError as err:  # a full volume: answered with the reason, and nothing half written is left
+            return self.json({"ok": False, "error": f"the upload could not be stored: {type(err).__name__}: {err}"})
         finally:
-            await self.hass.async_add_executor_job(fh.close)
-            if not done:  # too large, empty, or the client went away mid-upload
-                try:
-                    os.remove(dest + ".tmp")
-                except OSError:
-                    pass
+            await self.hass.async_add_executor_job(_discard)
         if size == 0:
             return self.json({"ok": False, "error": "empty upload"})
         if _rebuild_staged(self.hass.config.config_dir):  # staged while this streamed: clearing the import area would drop it

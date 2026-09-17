@@ -601,7 +601,10 @@ The backups pruning leaves alone still count toward the number kept: with
 *keep 5*, a backup made by hand is one of the 5 newest, not a sixth. The backup a
 restore came from is pruned and can be deleted like any other once that restore
 is over (applied, failed and put back, or dropped at the boot). An upload never replaces
-an existing backup: a name already taken gets a `-2`, `-3`, … suffix.
+an existing backup: a name already taken gets a `-2`, `-3`, … suffix (a long name is
+shortened to make room for it). An upload that cannot be written (a full volume)
+answers with the reason and leaves no partial file behind; so does the upload of a
+Home Assistant backup for an import.
 A restore never rolls back the record of what happened: the timeline, the
 resource history, the change reports and the last known release versions are
 not part of backups, and neither are the login key and the logout record, the

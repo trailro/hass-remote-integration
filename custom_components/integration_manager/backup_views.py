@@ -19,6 +19,7 @@ from .http_util import ManagerView, with_body
 import backupkit  # /app/backupkit.py (/app is on sys.path)
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.zip\Z")  # \Z: "$" also matches before a trailing newline
+_NAME_MAX = 125  # the longest name _NAME_RE takes
 MAX_UPLOAD = 200 * 1024 * 1024
 
 
@@ -95,6 +96,7 @@ class BackupUploadView(ManagerView):
         bdir = os.path.join(self.hass.config.config_dir, backupkit.BACKUP_DIR)
         size = 0
         ok = False
+        fh = tmp = reserved = None
 
         def _open() -> tuple[Any, str]:
             os.makedirs(bdir, exist_ok=True)
@@ -102,16 +104,21 @@ class BackupUploadView(ManagerView):
             return os.fdopen(fd, "wb"), path
 
         def _discard() -> None:
-            if not fh.closed:  # closed already once the upload was complete
-                fh.close()
-            if not ok:
+            if fh is not None and not fh.closed:  # closed already once the upload was complete
                 try:
-                    os.remove(tmp)
+                    fh.close()  # flushes what a full volume did not take: fails again
                 except OSError:
                     pass
+            if not ok:
+                for leftover in (tmp, reserved):
+                    try:
+                        if leftover:
+                            os.remove(leftover)
+                    except OSError:
+                        pass
 
-        fh, tmp = await self.hass.async_add_executor_job(_open)
         try:
+            fh, tmp = await self.hass.async_add_executor_job(_open)
             while chunk := await field.read_chunk(1 << 16):
                 size += len(chunk)
                 if size > MAX_UPLOAD:
@@ -125,13 +132,15 @@ class BackupUploadView(ManagerView):
             except ValueError as err:
                 return self.json({"ok": False, "error": str(err)})
             # a free name (upload-x-2.zip ...): an existing backup, a protected one included, is never replaced
-            name = await self.hass.async_add_executor_job(backupkit.reserve_name, bdir, name[:-len(".zip")])
+            name = await self.hass.async_add_executor_job(backupkit.reserve_name, bdir, name[:-len(".zip")], _NAME_MAX)
+            reserved = os.path.join(bdir, name)
             if not _name_ok(name):
-                await self.hass.async_add_executor_job(os.remove, os.path.join(bdir, name))
                 return self.json({"ok": False, "error": "bad file name"})
-            await self.hass.async_add_executor_job(os.replace, tmp, os.path.join(bdir, name))
+            await self.hass.async_add_executor_job(os.replace, tmp, reserved)
             await self.hass.async_add_executor_job(fsync_dir, bdir)
             ok = True
+        except OSError as err:  # a full volume: answered with the reason, as a backup that cannot be written
+            return self.json({"ok": False, "error": f"the upload could not be stored: {type(err).__name__}: {err}"})
         finally:
             await self.hass.async_add_executor_job(_discard)
         return self.json({"ok": True, "name": name, "bytes": size, "info": info})
