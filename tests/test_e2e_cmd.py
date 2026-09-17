@@ -376,6 +376,48 @@ class RestartWaitsForAnActionTest(unittest.IsolatedAsyncioTestCase):
         await first
 
 
+# ----- c3 -----------------------------------------------------------------------------------------
+
+def _post(body):
+    async def payload():
+        return body
+
+    return SimpleNamespace(content_type="application/json", json=payload)
+
+
+class ServicesPageCaseTest(unittest.IsolatedAsyncioTestCase):
+
+    def _view(self, calls):
+        hass = SimpleNamespace()
+
+        async def call(domain, service, *a, **k):
+            calls.append((domain, service))
+
+        hass.services = SimpleNamespace(has_service=lambda d, s: (d, s) == ("light", "turn_on"),
+                                        supports_response=lambda d, s: services_page.SupportsResponse.NONE, async_call=call)
+        hass.async_create_task = lambda coro, *a, **k: asyncio.get_running_loop().create_task(coro)
+        view = services_page.ServiceCallView(hass)
+        self.addCleanup(setattr, type(view), "_in_flight", 0)
+        return view
+
+    async def test_a_deny_listed_domain_in_mixed_case(self):
+        calls = []
+        view = self._view(calls)
+        for domain in ("HomeAssistant", "Shell_Command", "PYTHON_SCRIPT"):
+            with self.subTest(domain=domain):
+                body = json.loads((await view.post(_post({"domain": domain, "service": "Restart"}))).body)
+                self.assertFalse(body["ok"])
+                self.assertIn("is not callable from here", body["error"])
+                self.assertIn(domain.lower() + ".*", body["error"])
+        self.assertEqual(calls, [])
+
+    async def test_mixed_case_names_are_the_service_home_assistant_calls(self):
+        calls = []
+        body = json.loads((await self._view(calls).post(_post({"domain": "Light", "service": "Turn_On"}))).body)
+        self.assertTrue(body["ok"], body)
+        self.assertEqual(calls, [("light", "turn_on")])
+
+
 # ----- c4 -----------------------------------------------------------------------------------------
 
 class UnknownManagerActionTest(unittest.TestCase):

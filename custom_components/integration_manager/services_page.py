@@ -63,7 +63,8 @@ class ServiceCallView(ManagerView):
             body = await _json_object(request)
         except BadRequest as err:
             return _bad(self, err)
-        domain, service = str(body.get("domain", "")), str(body.get("service", ""))
+        # Home Assistant looks services up in lower case, so the name checks and the deny list do too (as over MQTT)
+        domain, service = str(body.get("domain", "")).lower(), str(body.get("service", "")).lower()
         data, target = body.get("data") or {}, body.get("target")
         if not re.fullmatch(r"[a-z0-9_]+", domain) or not re.fullmatch(r"[a-z0-9_]+", service):
             return self.json({"ok": False, "error": "domain and service required"})
