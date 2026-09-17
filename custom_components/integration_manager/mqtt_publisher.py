@@ -1877,7 +1877,7 @@ class MqttPublisher:
                 _LOGGER.warning("MQTT call %s.%s refused: %s calls in progress", domain, service, self._in_flight)
                 return
             wants = self.hass.services.supports_response(domain, service) != SupportsResponse.NONE
-            _LOGGER.debug("MQTT call %s.%s start (response=%s) data=%s", domain, service, wants, _mask_codes(json.dumps(data, default=str)))
+            _LOGGER.debug("MQTT call %s.%s start (response=%s) data=%s", domain, service, wants, _mask_codes(json.dumps(shown, default=str)))
             # Not wait_for(): cancelling a service handler that shields or
             # swallows CancelledError would hang the timeout itself.  The
             # call keeps running; the caller gets a timeout now and the real
@@ -1909,7 +1909,7 @@ class MqttPublisher:
                 _LOGGER.warning("MQTT call %s.%s was cancelled by the handler", domain, service)
             except Exception as err:  # noqa: BLE001 - reported to the caller
                 result = {**base, "ok": False, "error": f"{type(err).__name__}: {err}"}
-                _LOGGER.warning("MQTT call %s.%s failed: %s", domain, service, err)
+                _LOGGER.warning("MQTT call %s.%s failed: %s", domain, service, str(err).replace(secret, "***") if secret else err)
             if late:
                 result["late"] = True
             self._publish_result(domain, service, result)

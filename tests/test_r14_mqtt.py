@@ -114,5 +114,49 @@ class AnyExceptionIsAnsweredTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("RuntimeError", _results(self.pub)[-1]["error"])
 
 
+class DebugLogMaskingTest(unittest.IsolatedAsyncioTestCase):
+    """N3: DEBUG on, a password-mode text value and a code field."""
+
+    def setUp(self):
+        self.pub = _password_publisher()
+        self.pub.stats.update(commands=0, last_command=None)
+        self.pub._topics["lock.door"] = "t3"
+        self.tasks = []
+
+        def create(coro):
+            task = asyncio.ensure_future(coro)
+            self.tasks.append(task)
+            return task
+
+        self.pub.hass.async_create_task = create
+        self.pub.hass.services.has_service = lambda d, s: True
+        self.pub.hass.services.supports_response = lambda d, s: mp.SupportsResponse.NONE
+
+    async def _logs(self, send, error):
+        self.pub.hass.services.async_call = mock.AsyncMock(side_effect=error)
+        with mock.patch.object(mp.MqttPublisher, "_call_target_problem", return_value=None), \
+                self.assertLogs(mp._LOGGER, "DEBUG") as logs:
+            send()
+            await asyncio.gather(*self.tasks)
+        return "\n".join(logs.output)
+
+    async def test_a_password_text_call(self):
+        output = await self._logs(lambda: self.pub._on_call("text/set_value", json.dumps({"entity_id": "text.pw", "value": "hunter2"})),
+                                  ValueError("Value hunter2 for text.pw is too long"))
+        self.assertIn("start (response=False) data=", output)
+        self.assertIn("failed", output)
+        self.assertNotIn("hunter2", output)
+
+    async def test_a_code_field(self):
+        output = await self._logs(lambda: self.pub._on_call("lock/unlock", json.dumps({"entity_id": "lock.door", "code": "4711"})), None)
+        self.assertIn("start (response=False) data=", output)
+        self.assertNotIn("4711", output)
+
+    async def test_a_password_text_command(self):
+        msg = SimpleNamespace(topic=f"{BASE}/cmd/text/pw/value", payload=b"hunter2", retain=False)
+        output = await self._logs(lambda: self.pub._handle_message(msg), ValueError("Value hunter2 for text.pw is too long"))
+        self.assertNotIn("hunter2", output)
+
+
 if __name__ == "__main__":
     unittest.main()
