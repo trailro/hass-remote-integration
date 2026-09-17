@@ -140,5 +140,52 @@ def _members_of(cfg, name):
         return {n: zf.read(n) for n in zf.namelist()}
 
 
+def _ago(seconds):
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - seconds))
+
+
+class LastRestoreProtectionTest(unittest.TestCase):
+    """3, 4: the backup a restore came from stayed protected for good, also when the restore was dropped or failed."""
+
+    def installer(self, last_restore):
+        inst = object.__new__(Installer)
+        inst.state_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, inst.state_dir, True)
+        inst.state = SimpleNamespace(installed={}, rollback_backup=None)
+        with open(os.path.join(inst.state_dir, "ha.json"), "w", encoding="utf-8") as fh:
+            json.dump({"last_restore": last_restore}, fh)
+        return inst
+
+    def test_a_restore_dropped_at_the_boot_protects_nothing(self):
+        dropped = {"at": _ago(60), "ok": False, "backup": "src.zip", "parts": ["storage"], "for_version": None,
+                   "error": "the scheduled restore of src.zip was dropped: its copy of the archive is gone from the volume; nothing was restored"}
+        self.assertEqual(set(), self.installer(dropped).protected_backups())
+
+    def test_a_failed_restore_protects_only_its_pre_restore_copy_for_7_days(self):
+        failed = {"at": _ago(60), "ok": False, "backup": "src.zip", "pre_restore": "pre.zip", "rolled_back_to": "pre.zip"}
+        self.assertEqual({"pre.zip"}, self.installer(failed).protected_backups())
+        self.assertEqual(set(), self.installer({**failed, "at": _ago(8 * 86400)}).protected_backups())
+
+    def test_an_applied_restore_protects_its_pre_restore_copy_for_7_days_and_never_its_source(self):
+        applied = {"at": _ago(60), "ok": True, "backup": "src.zip", "pre_restore": "pre.zip"}
+        self.assertEqual({"pre.zip"}, self.installer(applied).protected_backups())
+        self.assertEqual(set(), self.installer({**applied, "at": _ago(8 * 86400)}).protected_backups())
+
+    def test_the_source_of_the_last_restore_can_be_deleted(self):
+        cfg = _volume()
+        self.addCleanup(shutil.rmtree, cfg, True)
+        _zip(cfg, "src.zip", {"ha_version": "2026.8.3"})
+        _zip(cfg, "pre.zip", {"ha_version": "2026.8.3"})
+        inst = self.installer({"at": _ago(60), "ok": True, "backup": "src.zip", "pre_restore": "pre.zip"})
+        view = backup_views.BackupActionView(_hass(cfg), inst)
+        view.json = lambda d: d
+        post = backup_views.BackupActionView.post.__wrapped__
+        self.assertEqual(asyncio.run(post(view, None, {}, "src.zip", "delete")), {"ok": True})
+        refused = asyncio.run(post(view, None, {}, "pre.zip", "delete"))
+        self.assertFalse(refused["ok"])
+        self.assertIn("still needed", refused["error"])
+        self.assertIn("copy taken before a restore in the last 7 days", refused["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

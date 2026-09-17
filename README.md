@@ -596,7 +596,9 @@ Automatic pruning keeps the newest backups by the date they were made (never
 later than the file's own date), never removes the backup it runs after, and
 leaves uploaded backups, and the copy taken before the last restore, alone for their
 first 7 days; while that week lasts the copy is also refused for deletion, since
-it is the only way back once the restore has succeeded and its schedule is gone. An upload never replaces
+it is the only way back once the restore has succeeded and its schedule is gone.
+The backup a restore came from is pruned and can be deleted like any other once
+that restore is over (applied, failed and put back, or dropped at the boot). An upload never replaces
 an existing backup: a name already taken gets a `-2`, `-3`, … suffix.
 A restore never rolls back the record of what happened: the timeline, the
 resource history, the change reports and the last known release versions are
