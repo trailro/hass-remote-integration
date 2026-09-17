@@ -2,8 +2,10 @@
 manifest, requirement versions, patches, health, MQTT/HA/manager status,
 a memory snapshot, the last log records and the tail of the integration's newest log file.  Secrets are
 scrubbed (values of keys that look like passwords/tokens, the GitHub token,
-the MQTT password, the text of a log search in a request line); settings.json
-and mqtt.json are never included."""
+the MQTT password, the text of a log search in a request line).
+The raw credential-bearing files (settings.json, mqtt.json on the volume) are
+excluded; sanitized public views of them are included (settings.json,
+mqtt-config.json)."""
 
 from __future__ import annotations
 
@@ -277,7 +279,8 @@ class DiagnosticsView(ManagerView):
             files["log.txt"] = log_records_text(records)
         files["log_file.txt"] = await self.hass.async_add_executor_job(self._log_file_tail, _entry_paths(self.hass, self.installer.running))
         files["README.txt"] = ("hass-remote-integration diagnostics, generated " + time.strftime("%Y-%m-%dT%H:%M:%S%z")
-                               + "\nSecrets scrubbed; settings.json/mqtt.json contents not included.\n")
+                               + "\nSecrets scrubbed. The raw credential-bearing files (settings.json, mqtt.json on the volume) are excluded;"
+                               " sanitized public views of them are included (settings.json, mqtt-config.json).\n")
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for name, text in files.items():

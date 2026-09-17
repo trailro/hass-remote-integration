@@ -11,6 +11,9 @@ the Logs page and the Log files page, and both searches decided on it.
 Every answer a search gives is compared whole between a right and a wrong
 guess.  Every test fails on the tree before the fix unless its docstring says
 it pins behaviour that already held.
+
+C2: the module docstring and the zip's README.txt said settings.json was never
+included, while the zip carries its sanitized public view.
 """
 
 import asyncio
@@ -164,6 +167,16 @@ class DiagnosticsZipTest(unittest.TestCase):
         for _, masked in CASES:
             self.assertIn(masked, files["log.txt"])
             self.assertIn(masked, files["log_file.txt"])
+
+    def test_c2_the_readme_says_what_is_left_out_and_what_is_in(self):
+        files = self._zip()
+        self.assertIn("settings.json", files)
+        for text in (files["README.txt"], diagnostics.__doc__):
+            with self.subTest(text=text):
+                self.assertIn("raw credential-bearing files", text)
+                self.assertIn("sanitized public views", text)
+                self.assertNotIn("never included", text)
+                self.assertNotIn("not included", text)
 
 
 class LogsSearchTest(unittest.TestCase):
