@@ -1909,11 +1909,12 @@ class MqttPublisher:
 
     def _reject_empty_call(self, rest: str) -> None:
         """A call needs a JSON object ({} without data); an empty payload is what clearing a retained call looks like."""
-        parts = rest.split("/")
+        parts = [p.lower() for p in rest.split("/")]
+        valid = len(parts) == 2 and all(_SERVICE_NAME.fullmatch(p) for p in parts)
         error = "empty payload: send {} to call a service without data"
-        self._finish(self._remember("call", rest[:80], ""), "rejected", error)
-        if len(parts) == 2 and _SERVICE_NAME.fullmatch(parts[0].lower()) and _SERVICE_NAME.fullmatch(parts[1].lower()) and not self._moving:
-            domain, service = parts[0].lower(), parts[1].lower()
+        self._finish(self._remember("call", ".".join(parts) if valid else rest[:80], ""), "rejected", error)
+        if valid and not self._moving:
+            domain, service = parts
             # the shape every other result has: a consumer routes on "service" and correlates on "id"
             self._publish_result(domain, service, {"id": None, "service": f"{domain}.{service}", "ok": False, "error": error})
 
@@ -2016,7 +2017,8 @@ class MqttPublisher:
                 self._finish(rec, state, error, {**res, "error": error})
             else:
                 self._finish(rec, state, error, res)
-            if seen is not None:
+            if seen is not None and state != "timeout":
+                # timed out, the service still runs: a repeat of the _id is answered "running" until it ends
                 seen["state"], seen["result"] = state, res
 
         async def _call() -> None:

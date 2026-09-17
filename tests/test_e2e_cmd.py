@@ -303,5 +303,36 @@ class UnreadableEntityIdTest(unittest.TestCase):
         self.assertEqual(pub.results[-1][2]["id"], "c5")
 
 
+# ----- c6 -----------------------------------------------------------------------------------------
+
+class RepeatAfterTimeoutTest(unittest.IsolatedAsyncioTestCase):
+
+    async def test_a_repeat_while_the_service_still_runs(self):
+        pub = _running_publisher()
+        with mock.patch.object(mp, "CALL_TIMEOUT_S", 0), self.assertLogs(mp._LOGGER, "WARNING"):
+            pub._on_call("hri_probe/tick", json.dumps({"_id": "t1"}))
+            await _settle()
+            self.assertIn("timeout after 0s", pub.results[-1][2]["error"])
+            pub._on_call("hri_probe/tick", json.dumps({"_id": "t1"}))
+            self.assertEqual(pub.results[-1][2], {"id": "t1", "service": "hri_probe.tick", "ok": None, "state": "running", "duplicate": True})
+            pub.release.set()
+            await _settle()
+            self.assertEqual(pub.results[-1][2], {"id": "t1", "service": "hri_probe.tick", "ok": True, "late": True})
+            pub._on_call("hri_probe/tick", json.dumps({"_id": "t1"}))
+            self.assertEqual(pub.results[-1][2], {"id": "t1", "service": "hri_probe.tick", "ok": True, "late": True, "duplicate": True})
+        self.assertEqual(pub._in_flight, 0)
+
+
+class EmptyCallRowTest(unittest.TestCase):
+
+    def test_the_row_names_the_service(self):
+        pub = _publisher()
+        pub._on_message(None, None, _message(f"{BASE}/call/Hri_Probe/tick", " "))
+        self.assertEqual(pub.history[-1]["what"], "hri_probe.tick")
+        self.assertEqual(pub.results[-1][2]["service"], "hri_probe.tick")
+        pub._on_message(None, None, _message(f"{BASE}/call/hri_probe/tick/extra", ""))
+        self.assertEqual(pub.history[-1]["what"], "hri_probe/tick/extra")
+
+
 if __name__ == "__main__":
     unittest.main()
