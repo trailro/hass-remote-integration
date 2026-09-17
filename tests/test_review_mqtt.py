@@ -25,12 +25,13 @@ class CommandParsingTest(unittest.TestCase):
     def test_send_command_payload_cannot_add_targets(self):
         payload = json.dumps({"command": "go", "params": {"a": 1}, "area_id": "kitchen", "device_id": "d1", "entity_id": "vacuum.other"})
         _, _, data = disc.command_to_service("vacuum", "robo", "send_command", payload)
-        self.assertEqual(data, {"command": "go", "params": {"a": 1}, "entity_id": "vacuum.robo"})
+        # every key but the command and the targets is a parameter: MQTT vacuum flattens params into the payload
+        self.assertEqual(data, {"command": "go", "params": {"params": {"a": 1}}, "entity_id": "vacuum.robo"})
 
     def test_deep_nesting_is_text_not_a_crash(self):
         deep = "[" * 200000 + "]" * 200000
         self.assertEqual(disc._json_or_text(deep), deep)
-        with self.assertRaises(KeyError):  # an unknown action: the publisher rejects it (KeyError is in its tuple)
+        with self.assertRaises(ValueError):  # an unknown action: the publisher rejects it (ValueError is in its tuple)
             disc.command_to_service("alarm_control_panel", "a", "command", "{" + '"a":' * 100000 + "1" + "}" * 100000)
 
 
