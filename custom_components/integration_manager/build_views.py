@@ -1,7 +1,8 @@
 """Preflight, dev mode and the environment builder.
 
-* ``GET /api/releases/preflight?domain&tag[&ha]``: the full report of
-  :mod:`preflight` (nothing installed, nothing changed).
+* ``POST /api/releases/preflight`` (JSON body ``domain``, ``tag``, optional
+  ``ha``): the full report of :mod:`preflight` (nothing installed, nothing
+  changed).
 * ``GET /api/dev`` / ``POST /api/dev/install``: what the bind-mounted dev
   source directory offers and installing one of its integrations as the
   ``local`` version (dev mode; ``HRI_DEBUGPY`` state included).
