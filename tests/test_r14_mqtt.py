@@ -158,5 +158,48 @@ class DebugLogMaskingTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("hunter2", output)
 
 
+class RefusalReportedAgainAfterADisconnectTest(unittest.TestCase):
+    """a and b."""
+
+    def _refused(self, pub, client):
+        pub._client = client
+        pub._on_connect(client, None, None, 0, None)
+        pub._on_subscribe(client, None, 7, _suback(NOT_AUTHORIZED, 1, 1))
+
+    def test_another_broker_reports_the_same_refusal(self):
+        pub = camp._publisher()
+        with mock.patch.object(mp.events, "emit") as emit, self.assertLogs(mp._LOGGER, "ERROR") as logs:
+            self._refused(pub, SubscribeDoubleTest.Client())
+            pub._disconnect()
+            pub._live_base = BASE
+            pub.config = mp.MqttConfig(host="other-broker")
+            self._refused(pub, SubscribeDoubleTest.Client())
+        self.assertEqual(len(logs.output), 2)
+        self.assertEqual(len([c for c in emit.call_args_list if "refused the subscription" in c.args[1]]), 2)
+
+    def test_a_clean_disconnect_clears_the_errors(self):
+        pub = camp._publisher()
+        with mock.patch.object(mp.events, "emit"), self.assertLogs(mp._LOGGER, "ERROR"):
+            self._refused(pub, SubscribeDoubleTest.Client())
+        self.assertTrue(pub.stats["subscribe_error"] and pub.stats["connect_error"])
+        pub._disconnect()
+        self.assertEqual((pub.stats["subscribe_error"], pub.stats["connect_error"]), ("", ""))
+
+    def test_a_disconnect_that_was_never_connected_clears_them_too(self):
+        pub = camp._publisher()
+        pub._client = None
+        pub.stats["connect_error"] = "base topic hass_x already carries 3 retained topics that are not ours"
+        pub._disconnect()
+        self.assertEqual(pub.stats["connect_error"], "")
+
+    def test_an_error_disconnect_keeps_its_error(self):
+        pub = camp._publisher()
+        client = SubscribeDoubleTest.Client()
+        pub._client = client
+        with mock.patch.object(mp.events, "emit"), mock.patch.object(mp._LOGGER, "warning"):
+            pub._on_disconnect(client, None, SimpleNamespace(is_disconnect_packet_from_server=False), 7, None)
+        self.assertIn("reconnecting", pub.stats["connect_error"])
+
+
 if __name__ == "__main__":
     unittest.main()
