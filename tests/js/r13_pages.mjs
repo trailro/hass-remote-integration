@@ -58,4 +58,27 @@ const pick = (root, input) => { for (const r of radios(root)) if (r !== input &&
     out.memsnap[name] = { sent, alerts, saved, disabled_after: els['#memsnap'].disabled };
   }
 }
+{  // N3 (follow-up): a Check answer that arrives after the selection changed, or after a newer Check, enables nothing
+  const src = read('install.js');
+  const code = [between(src, 'function domain()', 'async function options('), between(src, 'let CHECK=null', 'function invalidate('),
+                between(src, 'function body(extra)', 'async function prepare(')].join('\n');
+  const run = async (script) => {
+    const els = {}, sel = { '#bdomain': '', '#bdom': 'demo', '#bref': '', '#brel': 'v1', '#bhafree': '', '#bha': '2026.8.3', '#brepo': '', '#bname': '' };
+    const $ = q => els[q] || (els[q] = Object.assign(new El('div'), { value: sel[q] ?? '', disabled: false }));
+    const pending = [];
+    const post = (url, b) => new Promise(res => pending.push({ b, res }));
+    const api = new Function('$', 'post', 'esc', 'renderPreflight', 'confirm',
+      code.replace('$(\'#bcheck\').onclick=', 'const check=') + '\nreturn {check, state: () => ({CHECK, REPORT: typeof REPORT === "undefined" ? null : REPORT})};')(
+      $, post, s => String(s), () => 'report', () => true);
+    await script({ $, api, pending });
+    return { check: api.state().CHECK, prepare_enabled: !$('#bprepare').disabled, msg: $('#bmsg').innerHTML || $('#bmsg').textContent, sent: pending.map(p => p.b.ref) };
+  };
+  const ok = id => ({ ok: true, check_id: id, report: { ok: true } });
+  const flush = () => new Promise(r => setTimeout(r, 0));
+  out.stale_check = {
+    changed: await run(async ({ $, api, pending }) => { const p = api.check(); $('#brel').value = 'v2'; pending[0].res(ok('CHECK_V1')); await p; }),
+    overtaken: await run(async ({ $, api, pending }) => { const p1 = api.check(); await flush(); const p2 = api.check(); pending[1].res(ok('CHECK_2')); await p2; pending[0].res(ok('CHECK_1')); await p1; }),
+    current: await run(async ({ api, pending }) => { const p = api.check(); pending[0].res(ok('CHECK_V1')); await p; }),
+  };
+}
 console.log(JSON.stringify(out));

@@ -8,6 +8,10 @@ cleared the other, and collect() left the cleared field out.
 F6: System -> Memory snapshot was a plain link, and /api/diag/memory answers
 400 to a request without X-Requested-With: fetch, so the button never worked.
 
+N3 (follow-up): a builder Check answer recorded the selection made after the
+request, so an answer for v1 arriving once v2 was picked enabled Prepare for v2,
+and an older Check answering last replaced a newer one.
+
 Needs node, which the container the unit tests run in does not have: it skips there and runs wherever node is
 installed (a developer machine, CI).  Every test fails on the tree before the fix."""
 
@@ -33,6 +37,18 @@ class PagesTest(unittest.TestCase):
         if out.returncode != 0:
             raise AssertionError(f"the harness failed: {out.stderr.strip()}")
         cls.out = json.loads(out.stdout)
+
+    def test_a_stale_check_answer_enables_nothing(self):
+        changed = self.out["stale_check"]["changed"]
+        self.assertIsNone(changed["check"])
+        self.assertFalse(changed["prepare_enabled"])
+        self.assertIn("selection changed", changed["msg"])
+        overtaken = self.out["stale_check"]["overtaken"]
+        self.assertEqual(overtaken["check"]["id"], "CHECK_2")  # the newer answer stands, the older one arriving later is ignored
+        current = self.out["stale_check"]["current"]
+        self.assertEqual(current["check"]["id"], "CHECK_V1")
+        self.assertEqual(current["check"]["combo"], '["demo","v1","2026.8.3"]')
+        self.assertTrue(current["prepare_enabled"])
 
     def test_each_field_is_a_radio_group_of_its_own(self):
         groups = self.out["sections"]["groups"]
