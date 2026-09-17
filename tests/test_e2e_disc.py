@@ -391,3 +391,20 @@ class FanStepTest(_HassCase):
         for step in (100.0, 0, None, "x", float("nan")):
             with self.subTest(step=step):
                 self.assertIsNone(disc._speed_count(step))
+
+
+class WaterHeaterPowerTest(_HassCase):
+    SERVICES = ("water_heater",)
+
+    async def test_on_off_from_the_main_ha(self):
+        attrs = {"operation_list": ["off", "eco"], "current_temperature": 50, "temperature": 55, "supported_features": 1 | 2 | 8}
+        consumer = Consumer(self.hass, State("water_heater.tank", "eco", attrs))
+        self.assertEqual(int(consumer.entity.supported_features), 1 | 2 | 8)  # was 3: no on/off on the main HA
+        await consumer.entity.async_turn_off()
+        await consumer.entity.async_turn_on()
+        self.assertEqual(await self.run_here(consumer), [("water_heater", "turn_off", {"entity_id": "water_heater.tank"}),
+                                                         ("water_heater", "turn_on", {"entity_id": "water_heater.tank"})])
+        without = Consumer(self.hass, State("water_heater.tank", "eco", {**attrs, "supported_features": 1 | 2 | 4}))
+        self.assertEqual(int(without.entity.supported_features), 1 | 2)  # away mode (4) has no MQTT counterpart
+        with self.assertRaises(ValueError):
+            disc.command_to_service("water_heater", "tank", "power", "TOGGLE")
