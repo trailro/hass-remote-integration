@@ -906,8 +906,15 @@ hass_<domain>/manager/result                        outcome of a manager action,
   every domain that has an MQTT platform become native entities with working
   commands; the rest (cameras, media players, weather, …) are mirrored as
   read-only sensors with all attributes. Per-entity rules on the Entities page
-  or as JSON can exclude an entity or change its name, icon, category or
-  default enablement on the MQTT side only. An entity excluded while the
+  or as JSON (`GET/POST /api/mqtt/rules`, `{"rules": {"<entity id or glob>":
+  {...}}}`) change only what is published: `exclude` (true/false), `name`,
+  `enabled_by_default` (true/false), `entity_category` (`config` or
+  `diagnostic`), `device_class` and `icon` (`mdi:<name>`). A `device_class` is
+  refused, with the reason, when it is not one the main Home Assistant takes
+  for an entity the rule matches, or when that entity's unit does not fit it
+  (`W` with `temperature`): the main HA would refuse the whole device config.
+  An entity a glob rule matches later that the class does not fit is announced
+  without it, with a warning in the log, and the rest of the rule applies. An entity excluded while the
   container was down is removed from the main HA at the next connection. When
   two entities of one device would get the same component key
   (`image_processing.x` and `image.processing_x`), the second is skipped with a
