@@ -978,7 +978,14 @@ hass_<domain>/manager/result                        outcome of a manager action,
   *Stop* also clears the retained service catalog, so the main Home Assistant
   is not left with services it cannot call; the next start publishes it again.
   *Uninstall* clears everything retained under that identity, so the main Home
-  Assistant removes the entities and devices. Entities that a restore, an
+  Assistant removes the entities and devices. If the broker cannot be reached
+  then, the integration is still removed here, the answer says so
+  (`retained_cleanup_failed` with `retained_cleanup_error`) and the timeline
+  records it; the cleanup of that identity (its documents and its discovery
+  configs, nothing else) is kept on disk and retried every minute, also with no
+  integration installed, until the broker takes it. Starting the same
+  integration again before then cancels it: its documents are live again.
+  Entities that a restore, an
   import or a rebuild took away before a restart are removed there five
   minutes after Home Assistant in the container has started (only entities
   that exist neither as a state nor in its entity registry by then). The timeline, the resource history and
