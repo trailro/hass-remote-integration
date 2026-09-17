@@ -12,14 +12,17 @@ $('#allowedsave').onclick=async()=>{const r=await post('api/settings',{allowed_h
 $('#ghsave').onclick=async()=>{const t=$('#ghtoken').value.trim(); if(!t){$('#ghmsg').textContent='paste a token first';return;} $('#ghmsg').textContent='checking…'; const r=await post('api/settings',{github_token:t}); $('#ghmsg').textContent=r.ok?r.note:'ERROR: '+r.error; if(r.ok){$('#ghtoken').value='';} ghState();};
 $('#ghclear').onclick=async()=>{if(!confirm('Clear the stored GitHub token?')) return; const r=await post('api/settings',{github_token:''}); $('#ghmsg').textContent=r.ok?'token cleared':'ERROR: '+r.error; ghState();};
 ghState().catch(()=>{});
-// a fetch with the header the endpoint requires, saved under the server's file name (a plain link cannot send it)
-$('#diagzip').onclick=async()=>{const b=$('#diagzip'); b.disabled=true; try{
-  const r=await fetch('api/diagnostics',{headers:{'X-Requested-With':'fetch'}});
-  if(!r.ok){const j=await r.json().catch(()=>({})); alert('Diagnostics zip: '+(j.message||('HTTP '+r.status))); return;}
-  const name=((r.headers.get('Content-Disposition')||'').match(/filename="?([^";]+)"?/)||[])[1]||'hri-diagnostics.zip';
+// a fetch with the header the endpoint requires, saved under the server's file name or `fallback` (a plain link
+// cannot send it); a refusal (a probe already running: 429) is shown, not saved
+async function fetchDownload(b,path,label,fallback){b.disabled=true; try{
+  const r=await fetch(path,{headers:{'X-Requested-With':'fetch'}});
+  if(!r.ok){const j=await r.json().catch(()=>({})); alert(label+': '+(j.message||('HTTP '+r.status))); return;}
+  const name=((r.headers.get('Content-Disposition')||'').match(/filename="?([^";]+)"?/)||[])[1]||fallback;
   const url=URL.createObjectURL(await r.blob()); const a=document.createElement('a'); a.href=url; a.download=name;
   document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url),30000);
- }catch(err){alert('Diagnostics zip: '+err);}finally{b.disabled=false;}};
+ }catch(err){alert(label+': '+err);}finally{b.disabled=false;}}
+$('#diagzip').onclick=()=>fetchDownload($('#diagzip'),'api/diagnostics','Diagnostics zip','hri-diagnostics.zip');
+$('#memsnap').onclick=()=>fetchDownload($('#memsnap'),'api/diag/memory','Memory snapshot',`hri-memory-${new Date().toISOString().slice(0,19).replace(/[-:]/g,'')}.json`);
 async function ha(force){
   const h=await (await fetch('api/ha'+(force?'?refresh=1':''),{headers:{'X-Requested-With':'fetch'}})).json(); HA=h;
   $('#hacur').innerHTML=`<span class="ok">${esc(h.current)}</span> <span class="mut">python ${esc(h.python)}${h.in_venv?'':' · <span class="warn">not running from a venv (old image)</span>'}</span>`;
