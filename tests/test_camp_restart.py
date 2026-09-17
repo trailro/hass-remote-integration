@@ -210,7 +210,7 @@ class ManagerActionLockTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertEqual(dev._running, "backup")
 
-        refused = await dev.async_action("restart")
+        refused = await dev.async_action("check_updates")  # a restart would wait for it first
         self.assertIn("backup is still running", refused["error"])
 
         dev._running_since = time.monotonic() - 7200  # the same lock, held far past any real action

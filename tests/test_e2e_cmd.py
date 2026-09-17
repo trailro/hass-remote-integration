@@ -268,6 +268,130 @@ class RefusedCallIdTest(unittest.TestCase):
                 self.assertLess(_seconds(f"mp._refused_call_id({text})"), FAST_S)
 
 
+# ----- m7 -----------------------------------------------------------------------------------------
+
+def _device():
+    inst = FakeInstaller()
+    return md.ManagerDevice(SimpleNamespace(), inst, FakeUpdater(), FakePublisher(log=inst.log))
+
+
+class RestartWaitsForAnActionTest(unittest.IsolatedAsyncioTestCase):
+
+    async def test_a_restart_right_after_check_updates(self):
+        dev = _device()
+        release = asyncio.Event()
+
+        async def check():
+            await release.wait()
+            return {"ok": True, "note": "integration up to date"}
+
+        dev._do_check_updates = check
+        first = asyncio.create_task(dev.async_action("check_updates"))
+        await asyncio.sleep(0)
+        self.assertEqual(dev._running, "check_updates")
+        waited = []
+        real_sleep = asyncio.sleep
+
+        async def sleep(seconds):
+            waited.append(seconds)
+            if len(waited) == 4:
+                release.set()
+            await real_sleep(0)
+
+        with mock.patch.object(md.asyncio, "sleep", sleep):
+            restart = await asyncio.wait_for(dev.async_action("restart"), 10)
+        release.set()  # the tree before the fix refused at once, without waiting
+        self.assertTrue((await first)["ok"])
+        self.assertTrue(restart["ok"], restart)
+        self.assertIn(("restart",), dev.installer.log)
+        self.assertGreaterEqual(len(waited), 4)
+
+    async def test_the_wait_is_five_minutes_in_all(self):
+        dev = _device()
+        never = asyncio.Event()
+
+        async def hung():
+            await never.wait()
+            return {"ok": True}
+
+        dev._do_backup = hung
+        first = asyncio.create_task(dev.async_action("backup"))
+        self.addCleanup(first.cancel)
+        await asyncio.sleep(0)
+        waited = []
+
+        async def sleep(seconds):
+            waited.append(seconds)
+
+        with mock.patch.object(md.asyncio, "sleep", sleep):
+            res = await dev.async_action("restart")
+        self.assertFalse(res["ok"])
+        self.assertTrue(res["error"].startswith("restart skipped: backup is still running"), res["error"])
+        self.assertEqual(sum(waited), 300)
+        self.assertNotIn(("restart",), dev.installer.log)
+
+    async def test_the_action_wait_and_the_installer_wait_share_the_five_minutes(self):
+        dev = _device()
+        release = asyncio.Event()
+
+        async def check():
+            await release.wait()
+            dev.installer.busy = True  # an install from the UI, still running when the action ends
+            return {"ok": True}
+
+        dev._do_check_updates = check
+        first = asyncio.create_task(dev.async_action("check_updates"))
+        await asyncio.sleep(0)
+        waited = []
+        real_sleep = asyncio.sleep
+
+        async def sleep(seconds):
+            waited.append(seconds)
+            if len(waited) == 100:
+                release.set()
+            await real_sleep(0)
+
+        with mock.patch.object(md.asyncio, "sleep", sleep):
+            res = await asyncio.wait_for(dev.async_action("restart"), 10)
+        release.set()
+        await first
+        self.assertEqual(res["error"], "restart skipped: another action is still running")
+        self.assertEqual(sum(waited), 300)
+
+    async def test_any_other_second_action_is_still_refused(self):
+        """Pins behaviour that already held."""
+        dev = _device()
+        release = asyncio.Event()
+
+        async def check():
+            await release.wait()
+            return {"ok": True}
+
+        dev._do_check_updates = check
+        first = asyncio.create_task(dev.async_action("check_updates"))
+        await asyncio.sleep(0)
+        res = await dev.async_action("backup")
+        self.assertTrue(res["error"].startswith("check_updates is still running"), res["error"])
+        release.set()
+        await first
+
+
+# ----- c4 -----------------------------------------------------------------------------------------
+
+class UnknownManagerActionTest(unittest.TestCase):
+
+    def test_a_long_name_is_cut_the_same_everywhere(self):
+        pub = _publisher()
+        pub._client, pub._connected = mock.Mock(), True
+        name = "a" * 300
+        pub._on_manager_command(name, "PRESS")
+        answer = json.loads(pub._client.publish.call_args.args[1])
+        self.assertEqual(answer["action"], "a" * 40)
+        self.assertEqual(answer["error"], f"unknown action {'a' * 40!r}")
+        self.assertEqual(pub.history[-1]["error"], answer["error"])
+        self.assertEqual(pub.history[-1]["what"], "a" * 40)
+
+
 # ----- c5 -----------------------------------------------------------------------------------------
 
 class UnreadableEntityIdTest(unittest.TestCase):

@@ -83,6 +83,9 @@ MIN_INTERVAL_S = {"backup": 600, "check_updates": 300}  # a flood of presses mus
 # for good, and every later command was refused with "X is still running".  Longer than any real action:
 # an install with its smoke test is bounded by smoke_test_s, an HA upgrade by its download and pip run.
 ACTION_MAX_S = 1800
+# A restart waits for a running manager action, then for installer work (an install, start or backup from the UI),
+# checking every half second: this many checks in all, five minutes
+RESTART_WAIT_CHECKS = 600
 RUNS_FILE = "manager_actions.json"  # when each action last ran: a restart must not reset the limits
 LAG_TICK_S = 1.0
 HISTORY_FILE = "resource_history.json"
@@ -480,11 +483,24 @@ class ManagerDevice:
             return 0.0
         return min(interval, interval - (now - last))
 
+    def _action_held(self) -> float | None:
+        """Seconds the running action has held the lock, None when none holds it (or one hung past ACTION_MAX_S)."""
+        if not self._action_lock.locked():
+            return None
+        held = time.monotonic() - self._running_since
+        return held if held < ACTION_MAX_S else None
+
     async def async_action(self, action: str, rec: dict[str, Any] | None = None) -> dict[str, Any]:
+        checks = 0
+        if action == "restart":
+            # like the restart after an install: a running action finishes first (a second action of any other kind is refused)
+            while checks < RESTART_WAIT_CHECKS and self._action_held() is not None:
+                await asyncio.sleep(0.5)
+                checks += 1
         if action not in MANAGER_ACTIONS:
-            res: dict[str, Any] = {"ok": False, "error": f"unknown action {action!r}"}
-        elif self._action_lock.locked() and (held := time.monotonic() - self._running_since) < ACTION_MAX_S:
-            res = {"ok": False, "error": f"{self._running} is still running ({int(held)} s)"}
+            res: dict[str, Any] = {"ok": False, "error": f"unknown action {action[:40]!r}"}
+        elif (held := self._action_held()) is not None:
+            res = {"ok": False, "error": ("restart skipped: " if action == "restart" else "") + f"{self._running} is still running ({int(held)} s)"}
         elif (wait := self._limit_wait(action)) > 0:
             res = {"ok": False, "error": f"{action} ran moments ago: try again in {int(wait) + 1} s"}
         else:
@@ -520,7 +536,7 @@ class ManagerDevice:
             # The restart goes first, and the result says what really happened.  Announcing it first told the
             # consuming HA "ok" and then waited for the broker in the executor: with the pool exhausted that
             # wait never returned, installer.restart() was never reached and nothing ever stopped.
-            for _ in range(600):  # an install or start clicked meanwhile finishes first (at most 5 min)
+            for _ in range(RESTART_WAIT_CHECKS - checks):  # an install or start clicked meanwhile finishes first (5 min in all)
                 if not self.installer.busy:
                     break
                 await asyncio.sleep(0.5)
