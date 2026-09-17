@@ -18,6 +18,7 @@ creates its entities, optionally the store files are copied first.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -945,6 +946,7 @@ async def apply_all(hass: HomeAssistant, aligner: RegistryAligner, domains: list
 
 
 REBUILD_ATTEMPTS = 3  # a device offline at every start must not keep the plan forever
+REBUILD_RETRY_S = 5  # an action holding the manager (a start, a stop, the boot reconcile): the rebuild waits for it
 
 
 def stage_rebuild(config_dir: str, backup_name: str, domain: str | None, ha_version: str, target: str) -> dict[str, Any]:
@@ -1030,7 +1032,7 @@ async def async_finish_rebuild(hass: HomeAssistant, aligner: RegistryAligner, in
         started = hass.loop.create_future()
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, lambda _e: started.done() or started.set_result(None))
         await started
-    from .import_views import _locked
+    from .import_views import ImportBusy, _locked
 
     domain, backup, to = plan.get("domain"), plan.get("backup"), plan.get("to")
     head = f"Home Assistant {to} started with a clean configuration"
@@ -1039,34 +1041,55 @@ async def async_finish_rebuild(hass: HomeAssistant, aligner: RegistryAligner, in
                 f" in it. The configuration from right before this start is in backup {plan['boot_backup']}.")
     else:
         tail = f" The previous configuration is in backup {backup}."
-    retry = False
+
+    async def rebuild() -> tuple[int, dict[str, Any]] | str:
+        # under the busy flag a start, a stop and an uninstall take (as a manual import): what runs is read here, and
+        # none of them can change it before the entry is added enabled
+        if await hass.async_add_executor_job(_read_plan, cfg) != plan:
+            return "replaced"  # dropped or replaced while this waited: that choice is not this rebuild's to undo
+        if domain != installer.running:
+            return "not running"
+        attempts = int(plan.get("attempts") or 0) + 1
+        if attempts > REBUILD_ATTEMPTS:
+            raise ValueError(f"stopped after {REBUILD_ATTEMPTS} attempts (a start that ended during the import counts as one)")
+        # counted before the import: a process killed or out of memory during it must not retry forever
+        await hass.async_add_executor_job(write_json, os.path.join(cfg, REBUILD_FILE), {**plan, "attempts": attempts})
+        return attempts, await apply_all(hass, aligner, [domain], True, True, domain, set(installer.state.installed))
+
+    keep = False
     try:
         if not domain:
             msg = f"{head}; no integration was running, so there was nothing to rebuild.{tail}"
-        elif domain != installer.running:
-            msg = f"{head}; {domain} is not running now, so it was not rebuilt.{tail}"
         else:
-            attempts = int(plan.get("attempts") or 0) + 1
-            if attempts > REBUILD_ATTEMPTS:
-                raise ValueError(f"stopped after {REBUILD_ATTEMPTS} attempts (a start that ended during the import counts as one)")
-            # counted before the import: a process killed or out of memory during it must not retry forever
-            await hass.async_add_executor_job(write_json, os.path.join(cfg, REBUILD_FILE), {**plan, "attempts": attempts})
-            res = await _locked(lambda: apply_all(hass, aligner, [domain], True, True, domain, set(installer.state.installed)))
-            ok, failed = res["imported"], res["failed"]
-            retry = bool(failed) and attempts < REBUILD_ATTEMPTS
-            if retry:
-                tail = f" It is tried again at the next start ({attempts} of {REBUILD_ATTEMPTS}).{tail}"
-            if not ok and not failed:
-                msg = f"{head}; {domain} had no config entry to rebuild.{tail}"
+            while True:
+                try:
+                    outcome = await _locked(rebuild, installer)
+                    break
+                except ImportBusy:
+                    await asyncio.sleep(REBUILD_RETRY_S)  # not dropped: the plan stays until the manager is free
+            if outcome == "replaced":
+                keep = True
+                _LOGGER.info("the rebuild of %s was not run: its plan was dropped or replaced meanwhile", domain)
+                return
+            if outcome == "not running":
+                msg = f"{head}; {domain} is not running now, so it was not rebuilt.{tail}"
             else:
-                msg = (f"{head}; {domain}: {len(ok)} config entr{'y' if len(ok) == 1 else 'ies'} rebuilt"
-                       + (f", {len(failed)} failed ({'; '.join(f['error'] for f in failed)})" if failed else "") + f".{tail}")
-            if res.get("warnings"):
-                msg += f" {'; '.join(res['warnings'])}."
+                attempts, res = outcome
+                ok, failed = res["imported"], res["failed"]
+                keep = bool(failed) and attempts < REBUILD_ATTEMPTS
+                if keep:
+                    tail = f" It is tried again at the next start ({attempts} of {REBUILD_ATTEMPTS}).{tail}"
+                if not ok and not failed:
+                    msg = f"{head}; {domain} had no config entry to rebuild.{tail}"
+                else:
+                    msg = (f"{head}; {domain}: {len(ok)} config entr{'y' if len(ok) == 1 else 'ies'} rebuilt"
+                           + (f", {len(failed)} failed ({'; '.join(f['error'] for f in failed)})" if failed else "") + f".{tail}")
+                if res.get("warnings"):
+                    msg += f" {'; '.join(res['warnings'])}."
     except Exception as err:  # noqa: BLE001 - reported, the plan must not run again
         msg = f"{head}; rebuilding {domain} failed: {type(err).__name__}: {err}.{tail}"
     finally:
-        if not retry:
+        if not keep:
             await hass.async_add_executor_job(drop_rebuild, cfg)
     _LOGGER.info(msg)
     events.emit("rebuild", msg, backup=backup, version=to)

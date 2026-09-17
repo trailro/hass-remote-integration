@@ -474,6 +474,9 @@ therefore asks what the older version starts with:
   and the last known states are not carried over. Changes made after the
   switch was scheduled are not rebuilt; the configuration from right before
   the clean start is kept in a backup of its own, which the notification names.
+  The rebuild takes the manager like an import: a start, stop or uninstall
+  waits for it (refused, try again), and it waits for one that is running,
+  then rebuilds only if the integration still runs.
 - **Keep the current configuration.** This works when the older version can
   read the newer storage formats; otherwise the boot fails and the container
   falls back to the version you came from.
