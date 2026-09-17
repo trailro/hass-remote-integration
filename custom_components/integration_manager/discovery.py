@@ -700,6 +700,19 @@ def _on_off(p: str) -> bool:
     raise ValueError(f"{p!r} is neither an on nor an off payload")
 
 
+def _service_for(p: str, table: dict[str, str]) -> str:
+    """The service a command token stands for, in any case and with surrounding spaces ignored, like the on/off
+    payloads.  The error names the accepted tokens but not the payload: it may carry a code (the log line quotes
+    the payload, masked)."""
+    token = p.strip().upper()
+    if token not in table:
+        raise ValueError(f"unknown command, expected one of: {', '.join(t.lower() for t in table)}")
+    return table[token]
+
+
+_TARGET_KEYS = ("entity_id", "device_id", "area_id", "floor_id", "label_id")
+
+
 def _pick(field: str, table: dict[str, Any]) -> tuple[str, str, dict[str, Any]] | None:
     """Only the chosen field's conversion runs: a literal table would call
     float("heat") while building the entry for "temperature"."""
@@ -745,17 +758,17 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
         })
     if domain == "cover":
         if field == "command":
-            return "cover", {"OPEN": "open_cover", "CLOSE": "close_cover", "STOP": "stop_cover"}[p.upper()], t
+            return "cover", _service_for(p, {"OPEN": "open_cover", "CLOSE": "close_cover", "STOP": "stop_cover"}), t
         if field == "position":
             return "cover", "set_cover_position", {**t, "position": int(_finite(p))}
         if field == "tilt":
             return "cover", "set_cover_tilt_position", {**t, "tilt_position": int(_finite(p))}
     if domain == "valve":
         if field == "command":
-            return "valve", {"OPEN": "open_valve", "CLOSE": "close_valve", "STOP": "stop_valve"}[p.upper()], t
+            return "valve", _service_for(p, {"OPEN": "open_valve", "CLOSE": "close_valve", "STOP": "stop_valve"}), t
         if field == "position":
             if p.upper() in ("OPEN", "CLOSE", "STOP"):  # a position valve sends its stop payload to the same topic
-                return "valve", {"OPEN": "open_valve", "CLOSE": "close_valve", "STOP": "stop_valve"}[p.upper()], t
+                return "valve", _service_for(p, {"OPEN": "open_valve", "CLOSE": "close_valve", "STOP": "stop_valve"}), t
             return "valve", "set_valve_position", {**t, "position": int(_finite(p))}
     if domain == "fan":
         if field == "state":
@@ -767,7 +780,7 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
             "direction": lambda: ("fan", "set_direction", {**t, "direction": p}),
         })
     if domain == "lock" and field == "command":
-        return "lock", {"LOCK": "lock", "UNLOCK": "unlock", "OPEN": "open"}[p.upper()], t
+        return "lock", _service_for(p, {"LOCK": "lock", "UNLOCK": "unlock", "OPEN": "open"}), t
     if domain == "button" and field == "press":
         return "button", "press", t
     if domain == "scene" and field == "activate":
@@ -800,27 +813,30 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
                 body = {}
             if isinstance(body, dict):
                 action, code = str(body.get("action") or ""), body.get("code")
-        svc = {
+        svc = _service_for(action, {
             "ARM_HOME": "alarm_arm_home", "ARM_AWAY": "alarm_arm_away", "ARM_NIGHT": "alarm_arm_night",
             "ARM_VACATION": "alarm_arm_vacation", "ARM_CUSTOM_BYPASS": "alarm_arm_custom_bypass",
             "DISARM": "alarm_disarm", "TRIGGER": "alarm_trigger",
-        }[action.strip().upper()]
+        })
         return "alarm_control_panel", svc, ({**t, "code": str(code)} if code not in (None, "") else t)
     if domain == "update" and field == "install":
         return "update", "install", t
     if domain == "vacuum":
         if field == "command":
-            return "vacuum", {"start": "start", "pause": "pause", "stop": "stop", "return_to_base": "return_to_base",
-                              "clean_spot": "clean_spot", "locate": "locate"}[p], t
+            return "vacuum", _service_for(p, {"START": "start", "PAUSE": "pause", "STOP": "stop", "RETURN_TO_BASE": "return_to_base",
+                                              "CLEAN_SPOT": "clean_spot", "LOCATE": "locate"}), t
         if field == "fan_speed":
             return "vacuum", "set_fan_speed", {**t, "fan_speed": p}
         if field == "send_command":
             data = _json_or_text(p)
             if isinstance(data, dict):
-                # the payload cannot retarget the command: Home Assistant would add every target key to the entity
-                extra = {k: v for k, v in data.items() if k not in ("entity_id", "device_id", "area_id", "floor_id", "label_id")}
-                return "vacuum", "send_command", {**extra, **t}
+                # MQTT vacuum sends {"command": ..., <params flattened>}: every other key is a parameter, except a
+                # target key, which cannot retarget the command (Home Assistant would add it to the entity)
+                if not isinstance(data.get("command"), str) or not data["command"].strip():
+                    raise ValueError('a JSON send_command needs a "command" string')
+                params = {k: v for k, v in data.items() if k != "command" and k not in _TARGET_KEYS}
+                return "vacuum", "send_command", {**t, "command": data["command"], **({"params": params} if params else {})}
             return "vacuum", "send_command", {**t, "command": p}
     if domain == "lawn_mower" and field == "command":
-        return "lawn_mower", {"start_mowing": "start_mowing", "pause": "pause", "dock": "dock"}[p], t
+        return "lawn_mower", _service_for(p, {"START_MOWING": "start_mowing", "PAUSE": "pause", "DOCK": "dock"}), t
     return None

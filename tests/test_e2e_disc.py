@@ -5,6 +5,7 @@ The consuming side is the MQTT platform code of the Home Assistant in this venv,
 component goes through the platform's DISCOVERY_SCHEMA, becomes an instance of the platform's entity class, and gets
 the entity document on the topics it subscribes to; commands are what that entity publishes."""
 
+import asyncio
 import importlib
 import json
 import logging
@@ -129,9 +130,34 @@ class Consumer:
 
 
 class _HassCase(unittest.IsolatedAsyncioTestCase):
+    SERVICES: tuple[str, ...] = ()  # entity components set up in the container's HA, for their service schemas
+
     async def asyncSetUp(self):
         self.hass = core.HomeAssistant(tempfile.mkdtemp())
         loader.async_setup(self.hass)
+        if self.SERVICES:
+            asyncio.get_running_loop().slow_callback_duration = 10  # loading the components is slow, not a blocked loop
+            from homeassistant import bootstrap, config_entries
+            from homeassistant.setup import async_setup_component
+
+            self.hass.config_entries = config_entries.ConfigEntries(self.hass, {})
+            quiet = logging.getLogger("homeassistant.loader")  # "custom integration integration_manager": this checkout
+            level, quiet.level = quiet.level, logging.ERROR
+            try:
+                await bootstrap.async_load_base_functionality(self.hass)
+                for domain in self.SERVICES:
+                    self.assertTrue(await async_setup_component(self.hass, domain, {}))
+            finally:
+                quiet.setLevel(level)
+
+    async def run_here(self, consumer) -> list[tuple[str, str, dict]]:
+        """Every command the main HA published, mapped here and validated against the service's own schema."""
+        out = consumer.commands()
+        services = self.hass.services.async_services_internal()
+        for domain, service, data in out:
+            services[domain][service].schema(data)
+        consumer.published.clear()
+        return out
 
     async def asyncTearDown(self):
         await self.hass.async_stop(force=True)
@@ -218,3 +244,60 @@ class VacuumStateTest(_HassCase):
         self.assertEqual(int(basic.entity.supported_features), 4096 | 8192 | 16)
         legacy = Consumer(self.hass, State("vacuum.bot", "docked", {}))  # no features known (a registry entry): all of them
         self.assertEqual(legacy.component["supported_features"], list(disc._VACUUM_FEATURES))
+
+
+class VacuumCommandsTest(_HassCase):
+    SERVICES = ("vacuum",)
+
+    def consumer(self):
+        return Consumer(self.hass, State("vacuum.bot", "docked", VacuumStateTest.ATTRS))
+
+    async def test_send_command_with_params_from_the_main_ha(self):
+        consumer = self.consumer()
+        await consumer.entity.async_send_command("clean_room", params={"room": "kitchen", "repeat": 2})
+        self.assertEqual(await self.run_here(consumer), [
+            ("vacuum", "send_command", {"entity_id": "vacuum.bot", "command": "clean_room", "params": {"room": "kitchen", "repeat": 2}})])
+        await consumer.entity.async_send_command("beep")
+        self.assertEqual(await self.run_here(consumer), [("vacuum", "send_command", {"entity_id": "vacuum.bot", "command": "beep"})])
+        await consumer.entity.async_send_command("go", params={"params": {"a": 1}})  # a parameter named params stays one
+        self.assertEqual((await self.run_here(consumer))[0][2]["params"], {"params": {"a": 1}})
+
+    async def test_send_command_params_cannot_retarget(self):
+        consumer = self.consumer()
+        await consumer.entity.async_send_command("go", params={"a": 1, "entity_id": "vacuum.other", "area_id": "kitchen"})
+        self.assertEqual(await self.run_here(consumer), [
+            ("vacuum", "send_command", {"entity_id": "vacuum.bot", "command": "go", "params": {"a": 1}})])
+
+    async def test_json_without_a_command_is_refused(self):
+        for payload in ('{"room": "kitchen"}', '{"command": 5}', '{"command": " "}'):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                disc.command_to_service("vacuum", "bot", "send_command", payload)
+
+    async def test_actions_from_the_main_ha(self):
+        consumer = self.consumer()
+        for action in ("async_start", "async_pause", "async_stop", "async_return_to_base", "async_clean_spot", "async_locate"):
+            await getattr(consumer.entity, action)()
+        await consumer.entity.async_set_fan_speed("turbo")
+        self.assertEqual([svc for _, svc, _ in await self.run_here(consumer)],
+                         ["start", "pause", "stop", "return_to_base", "clean_spot", "locate", "set_fan_speed"])
+
+
+class CommandTokenTest(unittest.TestCase):
+    """Command tokens match in any case on every platform, and a wrong one says what is accepted."""
+
+    def test_vacuum_and_lawn_mower_ignore_case(self):
+        self.assertEqual(disc.command_to_service("vacuum", "bot", "command", "START")[1], "start")
+        self.assertEqual(disc.command_to_service("vacuum", "bot", "command", " Return_To_Base ")[1], "return_to_base")
+        self.assertEqual(disc.command_to_service("lawn_mower", "m", "command", "START_MOWING")[1], "start_mowing")
+        self.assertEqual(disc.command_to_service("lawn_mower", "m", "command", "Dock")[1], "dock")
+
+    def test_unknown_token_names_the_accepted_ones_not_the_payload(self):
+        cases = {("vacuum", "command"): "start, pause, stop, return_to_base, clean_spot, locate",
+                 ("lawn_mower", "command"): "start_mowing, pause, dock", ("cover", "command"): "open, close, stop",
+                 ("valve", "command"): "open, close, stop", ("lock", "command"): "lock, unlock, open",
+                 ("alarm_control_panel", "command"): "arm_home, arm_away"}
+        for (domain, field), accepted in cases.items():
+            with self.subTest(domain=domain), self.assertRaises(ValueError) as caught:
+                disc.command_to_service(domain, "x", field, "DISARM CODE=1234 X")
+            self.assertIn(f"expected one of: {accepted}", str(caught.exception))
+            self.assertNotIn("1234", str(caught.exception))
