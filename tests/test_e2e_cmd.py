@@ -210,5 +210,63 @@ class RejectedCommandReasonTest(unittest.TestCase):
         self.assertIn("could not convert", pub.history[-1]["error"])
 
 
+# ----- m4 -----------------------------------------------------------------------------------------
+
+class RefusedCallIdTest(unittest.TestCase):
+
+    def _answer(self, payload, topic="light/turn_on"):
+        pub = _publisher()
+        pub._on_message(None, None, _message(f"{BASE}/call/{topic}", payload))
+        self.assertEqual(len(pub.results), 1, pub.results)
+        self.assertFalse(pub.results[0][2]["ok"])
+        return pub.results[0][2], pub.history[-1]
+
+    def test_the_reported_payloads(self):
+        for payload in ('{"_id": "r1", "brightness": NaN}', '{"_id": "r1", "brightness": -Infinity}',
+                        '{"_id": "r1", "brightness": 1e999}', '{"_id": "r1", "brightness": ' + "9" * 5000 + "}",
+                        '{"_id": "r1", "brightness": }', '{"brightness": NaN, "_id": "r1"}'):
+            with self.subTest(payload=payload[:60]):
+                answer, row = self._answer(payload)
+                self.assertIn("bad payload", answer["error"])
+                self.assertEqual(answer["id"], "r1")
+                self.assertEqual(row["id"], "r1")
+
+    def test_too_large_and_too_deep(self):
+        for payload in (json.dumps({"_id": 42, "text": "x" * (mp.CALL_MAX_BYTES + 1)}),
+                        '{"_id": 42, "a": ' + "[" * 100 + "]" * 100 + "}"):
+            with self.subTest(size=len(payload)):
+                self.assertEqual(self._answer(payload)[0]["id"], 42)
+
+    def test_a_denied_domain_with_a_payload_that_does_not_parse(self):
+        self.assertEqual(self._answer('{"_id": true, "x": NaN}', "shell_command/x")[0]["id"], True)
+
+    def test_the_id_keeps_its_type(self):
+        for literal, expected in (('"7"', "7"), ("7", 7), ("-7.5", -7.5), ("null", None), ("false", False),
+                                  ('"\\u005fx\\"y"', '_x"y')):
+            with self.subTest(literal=literal):
+                self.assertEqual(self._answer('{"_id": %s, "v": NaN}' % literal)[0]["id"], expected)
+
+    def test_an_escaped_key(self):
+        self.assertEqual(self._answer('{"\\u005fid": "e1", "v": NaN}')[0]["id"], "e1")
+
+    def test_what_is_not_the_outer_id(self):
+        """Pins null where no id of the outer object can be read."""
+        for payload in ('{"data": {"_id": "inner"}, "v": NaN}', '{"_id": NaN}', '{"_id": 1e999, "v": 1}', '{"_id": [1], "v": NaN}',
+                        '{"_id": ' + "9" * 5000 + "}", '[{"_id": "a"}]', '{"text": "\\"_id\\": \\"s\\"", "v": NaN}',
+                        '{"_id": {"a": 1}, "v": NaN}'):
+            with self.subTest(payload=payload[:60]):
+                self.assertIsNone(self._answer(payload)[0]["id"])
+
+    def test_the_last_id_wins_like_json(self):
+        self.assertEqual(self._answer('{"_id": 1, "_id": 2, "v": NaN}')[0]["id"], 2)
+
+    def test_linear_time(self):
+        for text in ('"{" + \'"_id":1,\' * 60000', '"{\\"_id\\": " + "\\"\\\\\\\\" * 80000',
+                     '"{" + \'"\\\\u005fid":1,\' * 20000', '"{\\"_id\\":1," + "[" * 250000',
+                     '"{" + \'"_id":\' * 60000 + "NaN"', '"{\\"_id\\": " + "9" * 250000'):
+            with self.subTest(text=text):
+                self.assertLess(_seconds(f"mp._refused_call_id({text})"), FAST_S)
+
+
 if __name__ == "__main__":
     unittest.main()

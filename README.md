@@ -999,8 +999,11 @@ hass_<domain>/manager/result                        outcome of a manager action,
   `persistent_notification` and `notify.persistent_notification` are not
   callable over MQTT and are left out of the MQTT service catalog; the Services
   page can still call them. `NaN`, `Infinity`, numbers too large to be finite
-  (`1e999`), payloads larger than 256 KB and JSON nested deeper than 64 levels
-  are rejected, with an answer on `result/...`. Values of keys ending in
+  (`1e999`), payloads larger than 256 KB, JSON nested deeper than 64 levels
+  and JSON that does not parse are rejected, with an answer on `result/...`
+  that still carries the `_id` when the outer object names one as a string, a
+  finite number, `true`, `false` or `null` (read from at most the first 256 KB,
+  without parsing the payload). Values of keys ending in
   `code`, `key`, `pin`, `otp` or `auth` as a word of their own (`code`, `user_code`,
   `api_key`, `user_pin`, `basic_auth`, not `zipcode`, `code_format`, `spin`,
   `author` or `oauth`), or in `usercode`, `passcode`, `pincode`, `password`,
