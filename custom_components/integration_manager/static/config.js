@@ -180,6 +180,9 @@ function itemList(values,t2){
   const more=document.createElement('button'); more.type='button'; more.dataset.add='1'; more.textContent='+ add an item'; more.onclick=()=>add('').focus();
   return {el,more};
 }
+// a radio group per rendered field: a browser groups radios by name across the whole form, and two sections can
+// each hold a field of the same name
+let RADIO_GROUPS=0;
 function field(f,t,p){
   t=t||{};
   if(f.type==='expandable'){  // a form section: its fields are sent as one object under the section's name
@@ -212,9 +215,9 @@ function field(f,t,p){
     if(custom){ const known=new Set(opts.map(o=>String(o.value)));
       for(const v of dv) if(v!==''&&v!=='undefined'&&v!=='null'&&!known.has(v)){ known.add(v); if(multi) extra.push(v); else opts.push({value:v,label:v}); } }
     const vmap={}; opts.forEach(o=>{vmap[String(o.value)]=o.value;}); wrap._values=vmap;  // the HTML value is a string; send what the schema offered
-    if(mode==='list'){ wrap.dataset.kind=multi?'checklist':'radio'; el=document.createElement('div'); el.className='radio';
+    if(mode==='list'){ wrap.dataset.kind=multi?'checklist':'radio'; el=document.createElement('div'); el.className='radio'; const group=++RADIO_GROUPS;
       opts.forEach(o=>{const l=document.createElement('label'); const on=multi?dv.includes(String(o.value)):String(dflt)===String(o.value);
-        l.innerHTML=`<input type="${multi?'checkbox':'radio'}" name="r_${esc(name)}" value="${esc(o.value)}" ${on?'checked':''}> ${esc(o.label)}`; el.appendChild(l);});
+        l.innerHTML=`<input type="${multi?'checkbox':'radio'}" name="r${group}" value="${esc(o.value)}" ${on?'checked':''}> ${esc(o.label)}`; el.appendChild(l);});
     }else{ el=document.createElement('select'); wrap.dataset.kind=multi?'multiselect':'select';
       if(multi){ el.multiple=true; el.size=Math.min(opts.length,8); } else if(!f.required) el.appendChild(new Option('—',''));
       opts.forEach(o=>{const op=new Option(o.label,o.value); if(dv.includes(String(o.value))) op.selected=true; el.appendChild(op);}); }
@@ -355,7 +358,8 @@ function render(r){
     const t=stepHead(r,`Menu: ${r.step_id}`); const mlab=t.menu_options||{};
     const w=document.createElement('div'); w.className='radio'; w.dataset.name='next_step_id'; w.dataset.kind='radio';
     const mo=r.menu_options||[]; const opts=Array.isArray(mo)?mo.map(o=>[String(o),String(o)]):Object.entries(mo).map(([k,v])=>[k,String(v??k)]);  // HA allows a list of step ids or {step_id: label}
-    opts.forEach(([v,lab],i)=>{const l=document.createElement('label');l.innerHTML=`<input type="radio" name="r_next_step_id" value="${esc(v)}" ${i===0?'checked':''}> ${esc(mlab[v]||lab)}`;w.appendChild(l);});
+    const group=++RADIO_GROUPS;
+    opts.forEach(([v,lab],i)=>{const l=document.createElement('label');l.innerHTML=`<input type="radio" name="r${group}" value="${esc(v)}" ${i===0?'checked':''}> ${esc(mlab[v]||lab)}`;w.appendChild(l);});
     $('#form').appendChild(w); $('#submit').hidden=false; $('#submit').textContent='Continue';
   }else if(r.type==='create_entry'){
     // an options flow ends with create_entry too, but it creates no entry: it saved the entry's options
