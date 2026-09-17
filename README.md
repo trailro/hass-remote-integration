@@ -995,8 +995,21 @@ hass_<domain>/manager/result                        outcome of a manager action,
   (`retained_cleanup_failed` with `retained_cleanup_error`) and the timeline
   records it; the cleanup of that identity (its documents and its discovery
   configs, nothing else) is kept on disk and retried every minute, also with no
-  integration installed, until the broker takes it. Starting the same
-  integration again before then cancels it: its documents are live again.
+  integration installed, until the broker takes it. If MQTT is disabled at the
+  uninstall, nothing is sent: an identity the container published before
+  (the one it recorded last) gets the same kept cleanup, the answer says
+  `retained_cleanup_deferred`, and it runs once MQTT is enabled again. A kept
+  cleanup belongs to the broker it is for (host, port, TLS and username, as
+  `retained_cleanup_broker` in the answer and `broker` in
+  `retained_cleanup_pending` of the MQTT status): it is tried only while the
+  MQTT settings name that broker, is never sent to another one, and completes
+  once that broker is configured again (`retained_cleanup_other_broker` in
+  the answer while it is not). If that broker is gone for good, stop the
+  container and delete `mqtt_cleanup_pending.json` (or remove its entry for
+  that broker). A cleanup kept by an earlier version, which did not record
+  the broker, belongs to the broker configured when the container first reads
+  it. Starting the same integration again on that broker before then cancels
+  it: its documents are live again.
   Entities that a restore, an
   import or a rebuild took away before a restart are removed there five
   minutes after Home Assistant in the container has started (only entities
@@ -1242,7 +1255,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
     mqtt_rules.json             per-entity MQTT rules
     mqtt_identity.json          base topic and discovery prefix retained data was last published under
     mqtt_undiscover.json        whether a discovery cleanup still waits for the broker's confirmation
-    mqtt_cleanup_pending.json   retained MQTT data of uninstalled integrations the broker could not clear yet (retried every minute)
+    mqtt_cleanup_pending.json   retained MQTT data of uninstalled integrations not cleared yet, per broker (unreachable, or MQTT disabled): retried every minute while that broker is configured
     ha.json                     Home Assistant version, version changes, boot failures, last restore
     restore-pending.json        a restore scheduled for the next restart (with its zip)
     restore-applied.json        outcome of a restore that could not be recorded (a full volume), recorded at the next boot
