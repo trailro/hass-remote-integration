@@ -481,16 +481,16 @@ def build_component(
             comp["source_type"] = attrs["source_type"]
 
     elif domain == "vacuum":
+        # MQTT vacuum has no value template: it reads `state` and `fan_speed` from the top level of the
+        # document (see document_extras); a battery level stays an attribute (the platform has none)
+        features = attrs.get("supported_features")
         comp.update(
             {
-                "value_template": _tpl(
-                    "{'state': value_json.state, 'battery_level': value_json.attributes.get('battery_level'),"
-                    " 'fan_speed': value_json.attributes.get('fan_speed')} | to_json"
-                ),
                 "command_topic": f"{cmd}/command",
                 "payload_start": "start", "payload_pause": "pause", "payload_stop": "stop",
                 "payload_return_to_base": "return_to_base", "payload_clean_spot": "clean_spot", "payload_locate": "locate",
-                "supported_features": ["start", "pause", "stop", "return_home", "status", "locate", "clean_spot", "fan_speed", "send_command"],
+                "supported_features": list(_VACUUM_FEATURES) if not isinstance(features, int)
+                else [name for name, bit in _VACUUM_FEATURES.items() if features & bit],
                 "send_command_topic": f"{cmd}/send_command",
             }
         )
@@ -507,6 +507,20 @@ def build_component(
         )
 
     return comp
+
+
+# MQTT vacuum feature names and the VacuumEntityFeature bits they stand for
+_VACUUM_FEATURES = {"start": 8192, "pause": 4, "stop": 8, "return_home": 16, "status": 128, "locate": 512,
+                    "clean_spot": 1024, "fan_speed": 32, "send_command": 256}
+
+
+def document_extras(state: State) -> dict[str, Any]:
+    """Top-level keys of the entity document for an MQTT platform that reads the document without a value
+    template: MQTT vacuum takes `fan_speed` from the top level (always present, so a speed that goes away
+    clears on the main HA instead of keeping the last one).  The same values stay under `attributes`."""
+    if state.entity_id.startswith("vacuum."):
+        return {"fan_speed": state.attributes.get("fan_speed")}
+    return {}
 
 
 def event_stream_topic(doc_topic: str) -> str:

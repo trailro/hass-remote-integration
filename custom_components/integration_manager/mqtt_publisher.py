@@ -2066,6 +2066,7 @@ class MqttPublisher:
             # up by the incremental pass (reports fire no state_changed event)
             "last_reported": state.last_reported.isoformat(),
             "published_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            **disc.document_extras(state),
         }
         if entry:
             doc.update(

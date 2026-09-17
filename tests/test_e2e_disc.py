@@ -16,6 +16,7 @@ from homeassistant import core, loader
 from homeassistant.core import State
 
 from custom_components.integration_manager import discovery as disc
+from custom_components.integration_manager import mqtt_publisher as mp
 
 BASE = "hass_demo"
 _CLASSES = {  # platform -> (module, entity class, schema)
@@ -31,10 +32,18 @@ _CLASSES = {  # platform -> (module, entity class, schema)
 
 
 def document(state: State) -> dict:
-    """The parts of the entity document the platforms read (MqttPublisher.build_document adds registry metadata)."""
-    domain, object_id = state.entity_id.split(".", 1)
-    return {"entity_id": state.entity_id, "domain": domain, "object_id": object_id, "state": state.state,
-            "attributes": dict(state.attributes)}
+    """The entity document MqttPublisher publishes for a state (an entity without a registry entry)."""
+    pub = object.__new__(mp.MqttPublisher)
+    pub.config = mp.MqttConfig(enabled=True, discovery_enabled=True)
+    pub._live_base, pub._live_prefix, pub._key_provider = BASE, None, lambda: BASE
+    pub.rules = mock.Mock()
+    pub.rules.for_entity.return_value = {}
+    pub.hass = mock.Mock()
+    pub.hass.data = {}
+    registry = mock.Mock()
+    registry.async_get.return_value = None
+    with mock.patch.object(mp.er, "async_get", return_value=registry):
+        return pub.build_document(state)[1]
 
 
 class _Logs(logging.Handler):
@@ -171,3 +180,41 @@ class NoValueTemplatesTest(_HassCase):
                 self.assertQuiet(consumer, State("update.u", st, {}))
                 self.assertQuiet(consumer, State("update.u", st, {k: None for k in attrs}))
         self.assertEqual(consumer.entity.installed_version, "1.0")
+
+
+class VacuumStateTest(_HassCase):
+    """MQTT vacuum has no value template and reads the document's top level: the fan speed was always 0 there."""
+
+    ATTRS = {"fan_speed_list": ["quiet", "standard", "turbo"], "fan_speed": "standard", "battery_level": 80,
+             "supported_features": 14140}
+
+    async def test_state_and_fan_speed_reach_the_main_ha(self):
+        docked = State("vacuum.bot", "docked", self.ATTRS)
+        consumer = Consumer(self.hass, docked)
+        self.assertQuiet(consumer, docked)
+        self.assertEqual((consumer.entity.activity, consumer.entity.fan_speed), ("docked", "standard"))
+        self.assertQuiet(consumer, State("vacuum.bot", "cleaning", {**self.ATTRS, "fan_speed": "turbo"}))
+        self.assertEqual((consumer.entity.activity, consumer.entity.fan_speed), ("cleaning", "turbo"))
+        self.assertQuiet(consumer, State("vacuum.bot", "cleaning", {k: v for k, v in self.ATTRS.items() if k != "fan_speed"}))
+        self.assertIsNone(consumer.entity.fan_speed)  # gone at the source: not the last speed
+
+    async def test_document_keeps_the_attributes(self):
+        doc = document(State("vacuum.bot", "docked", self.ATTRS))
+        self.assertEqual(doc["attributes"], self.ATTRS)
+        self.assertEqual((doc["state"], doc["fan_speed"]), ("docked", "standard"))
+        self.assertNotIn("fan_speed", document(State("fan.f", "on", {"fan_speed": "x"})))
+
+    async def test_battery_level_stays_an_attribute(self):
+        from homeassistant.components.mqtt.vacuum import MQTT_VACUUM_ATTRIBUTES_BLOCKED
+
+        self.assertNotIn("battery_level", MQTT_VACUUM_ATTRIBUTES_BLOCKED)
+        self.assertEqual(Consumer(self.hass, State("vacuum.bot", "docked", self.ATTRS)).component["json_attributes_topic"],
+                         f"{BASE}/demo/vacuum/bot")
+
+    async def test_features_follow_the_source(self):
+        consumer = Consumer(self.hass, State("vacuum.bot", "docked", self.ATTRS))
+        self.assertEqual(int(consumer.entity.supported_features), 14140)  # the source's; STATE (4096) is always there
+        basic = Consumer(self.hass, State("vacuum.bot", "docked", {"supported_features": 4096 | 8192 | 16}))
+        self.assertEqual(int(basic.entity.supported_features), 4096 | 8192 | 16)
+        legacy = Consumer(self.hass, State("vacuum.bot", "docked", {}))  # no features known (a registry entry): all of them
+        self.assertEqual(legacy.component["supported_features"], list(disc._VACUUM_FEATURES))
