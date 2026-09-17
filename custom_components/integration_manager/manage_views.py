@@ -114,9 +114,13 @@ class InstalledActionView(ManagerView):
                 # the uninstall cleared most of it already; this second pass only finds what the reconnect published since
                 key = instance_key(domain) or ""
                 res["retained_cleared"] = self.installer.last_identity_cleared + (await self.publisher.async_clear_identity(key) or 0)
-                if (pending := self.publisher.cleanup_pending(key)) is not None:
+                if pending := self.publisher.retained_cleanup_pending(key):
                     # removed here; the main Home Assistant keeps the entities until the broker takes the retried cleanup
-                    res["retained_cleanup_failed"], res["retained_cleanup_error"] = True, pending.get("error") or ""
+                    # (the settings' broker first; one pending on another broker waits until that broker is configured again)
+                    res["retained_cleanup_failed"], res["retained_cleanup_error"] = True, pending[0]["error"]
+                    res["retained_cleanup_broker"] = pending[0]["broker"]
+                    if pending[0]["other_broker"]:
+                        res["retained_cleanup_other_broker"] = True
             return self.json(res)
         if action == "rollback_full":
             return self.json(await self.installer.rollback_full(domain))

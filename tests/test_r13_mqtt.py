@@ -114,9 +114,10 @@ class _Case(unittest.IsolatedAsyncioTestCase):
     def on_disk(self):
         try:
             with open(os.path.join(self.dir, "integration_manager", "mqtt_cleanup_pending.json"), encoding="utf-8") as fh:
-                return json.load(fh)["pending"]
+                pending = json.load(fh)["pending"]
         except FileNotFoundError:
             return {}
+        return {r["base"]: r for r in pending} if isinstance(pending, list) else pending
 
     async def uninstall(self, pub, domain="demo"):
         """InstalledActionView with an installer that, like the real one, clears the identity once itself."""
@@ -149,7 +150,7 @@ class UninstallDuringAnOutageTest(_Case):
         self.assertIn("ConnectionRefusedError", res["retained_cleanup_error"])
         self.assertEqual(set(self.on_disk()), {"hass_demo"})
         self.assertEqual(self.on_disk()["hass_demo"]["prefix"], "homeassistant")
-        self.assertEqual(sorted(pub._cleanup_pending), ["hass_demo"])
+        self.assertEqual([k[0] for k in pub._cleanup_pending], ["hass_demo"])
 
     async def test_one_timeline_line(self):
         await self.fail_uninstall()
@@ -173,7 +174,7 @@ class RetriedWhenTheBrokerIsBackTest(_Case):
     async def test_runs_once_with_nothing_installed_even_after_a_restart(self):
         await self.fail_uninstall()
         pub = self.publisher()  # a restart: nothing installed, no identity, no connection
-        self.assertEqual(set(pub._cleanup_pending), {"hass_demo"})
+        self.assertEqual({k[0] for k in pub._cleanup_pending}, {"hass_demo"})
         await pub._on_cleanup_timer(None)  # still unreachable
         self.assertEqual(set(self.on_disk()), {"hass_demo"})
         broker = _Broker({**OURS, **KEPT})
