@@ -1,5 +1,6 @@
 """End-to-end campaign on 0.17.0, publisher side: status fields.
 
+- After a stop the MQTT status (and the answer of the stop) showed base_topic "hass_none", a name no topic uses.
 - A removal kept for an uninstall while MQTT was disabled still said "MQTT is disabled" once MQTT was enabled again
   with another broker, where the real reason is that its broker is not the configured one."""
 
@@ -8,6 +9,8 @@ import tempfile
 import threading
 import unittest
 from unittest import mock
+
+from homeassistant.helpers import entity_registry as er
 
 from custom_components.integration_manager import mqtt_publisher as mp
 from custom_components.integration_manager.mqtt_rules import MqttRules
@@ -26,6 +29,31 @@ def _publisher(identity):
     pub._cleanup_pending, pub._cleanup_pending_lock = {}, threading.Lock()
     pub.hass.config.path.side_effect = lambda *p: os.path.join(tempfile.gettempdir(), "hri-e2e-pub-none", *p)
     return pub
+
+
+class NoIdentityTest(unittest.TestCase):
+    def status(self, pub):
+        with mock.patch.object(er, "async_get", return_value=mock.Mock(entities={})), \
+                mock.patch.object(pub, "recent_commands", return_value=[]):
+            return pub.status()
+
+    def test_after_a_stop_no_topic_is_named(self):
+        status = self.status(_publisher(None))
+        for field in ("base_topic", "prefix", "manager_topic", "cmd_base", "call_base", "health_topic", "wanted_base_topic"):
+            with self.subTest(field=field):
+                self.assertIsNone(status[field])
+        self.assertFalse(status["has_identity"])
+        self.assertNotIn("hass_none", repr(status))
+
+    def test_with_an_integration_running_the_topics_are_there(self):
+        status = self.status(_publisher("hass_demo"))
+        self.assertEqual((status["base_topic"], status["prefix"], status["health_topic"], status["cmd_base"]),
+                         ("hass_demo", "hass_demo_", "hass_demo/health", "hass_demo/cmd"))
+
+    def test_the_connect_error_after_a_stop(self):
+        pub = _publisher(None)
+        pub._connect()
+        self.assertEqual(pub.stats["connect_error"], "no integration is running: MQTT has no identity (hass_<domain>) until one starts")
 
 
 class PendingCleanupReasonTest(unittest.TestCase):
