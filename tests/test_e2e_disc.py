@@ -350,3 +350,44 @@ class CoverFeaturesTest(_HassCase):
         with mock.patch.object(disc.er, "async_get", return_value=registry):
             comp = disc.build_component_from_entry(self.hass, entry, f"{BASE}/demo/cover/c", f"{BASE}/cmd", f"{BASE}_")
         self.assertEqual((comp["payload_open"], comp["payload_close"], comp["payload_stop"]), ("OPEN", "CLOSE", None))
+
+
+class FanStepTest(_HassCase):
+    SERVICES = ("fan",)
+
+    def fan(self, step, percentage):
+        return State("fan.f", "on" if percentage else "off", {"percentage": percentage, "percentage_step": step, "supported_features": 63})
+
+    async def test_four_speeds(self):
+        consumer = Consumer(self.hass, self.fan(25.0, 50))
+        self.assertEqual((consumer.entity.speed_count, consumer.entity.percentage_step), (4, 25.0))  # was 100 and 1
+        for pct in (0, 25, 50, 75, 100):
+            with self.subTest(percentage=pct):
+                self.assertQuiet(consumer, self.fan(25.0, pct))
+                self.assertEqual(consumer.entity.percentage, pct)
+        self.assertQuiet(consumer, State("fan.f", "unavailable", {}))
+        self.assertIsNone(consumer.entity.percentage)
+        for pct in (75, 30, 0, 100):
+            await consumer.entity.async_set_percentage(pct)
+        self.assertEqual([data["percentage"] for _, _, data in await self.run_here(consumer)], [75, 50, 0, 100])
+
+    async def test_three_speeds(self):
+        consumer = Consumer(self.hass, self.fan(100 / 3, 33))
+        self.assertEqual(consumer.entity.speed_count, 3)
+        for pct in (0, 33, 66, 100):
+            with self.subTest(percentage=pct):
+                self.assertQuiet(consumer, self.fan(100 / 3, pct))
+                self.assertEqual(consumer.entity.percentage, pct)
+        for pct in (33, 66, 100):
+            await consumer.entity.async_set_percentage(pct)
+        commanded = [data["percentage"] for _, _, data in await self.run_here(consumer)]
+        self.assertEqual(commanded, [33, 66, 100])  # what the source maps back to speeds 1, 2 and 3
+
+    async def test_step_one_keeps_the_default_range(self):
+        consumer = Consumer(self.hass, self.fan(1.0, 42))
+        self.assertNotIn("speed_range_max", consumer.component)
+        self.assertQuiet(consumer, self.fan(1.0, 42))
+        self.assertEqual((consumer.entity.speed_count, consumer.entity.percentage), (100, 42))
+        for step in (100.0, 0, None, "x", float("nan")):
+            with self.subTest(step=step):
+                self.assertIsNone(disc._speed_count(step))
