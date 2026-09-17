@@ -23,6 +23,7 @@ import posixpath
 
 from jsonio import fsync_dir, ha_vkey, write_json
 import shutil
+import struct
 import time
 import zipfile
 
@@ -79,6 +80,74 @@ INFO_MAX = 64 * 1024  # backup-info.json is a few hundred bytes; a huge one is a
 # files in a backup, as the Home Assistant backup import (ha_import.MAX_MEMBERS): a volume holds a few thousand, and
 # every member costs memory and time to read even when empty (500000 took 17 s and 286 MB to validate)
 MAX_MEMBERS = 100_000
+
+
+def _central_directory(fh) -> tuple[int, int, int] | None:
+    """(members the end record declares, start, size of the central directory), located as zipfile's _EndRecData
+    and _EndRecData64 locate them (Python 3.14); None where zipfile finds no archive or a corrupt one: it refuses
+    that itself."""
+    fh.seek(0, 2)
+    end = fh.tell()
+    if end < 22:
+        return None
+    fh.seek(end - 22)
+    rec, at = fh.read(22), end - 22
+    if not (rec[:4] == b"PK\x05\x06" and rec[-2:] == b"\0\0"):  # else a comment follows the record
+        first = max(end - 0xFFFF - 22, 0)
+        fh.seek(first)
+        data = fh.read(0xFFFF + 22)
+        i = data.rfind(b"PK\x05\x06")
+        if i < 0 or len(data) - i < 22:
+            return None
+        rec, at = data[i:i + 22], first + i
+    _sig, _disk, _cd_disk, _here, total, cd_size, _cd_offset, _comment = struct.unpack("<4s4H2LH", rec)
+    location = at
+    if at >= 20:
+        fh.seek(at - 20)
+        sig, disk, reloff, disks = struct.unpack("<4sLQL", fh.read(20))
+        if sig == b"PK\x06\x07":  # zip64: zipfile takes the count and the directory from the zip64 record
+            rec_at = at - 20 - 56
+            if disk != 0 or disks > 1 or reloff > rec_at:
+                return None
+            fh.seek(reloff)
+            data, extra = fh.read(56), rec_at - reloff
+            if not data.startswith(b"PK\x06\x06") and reloff != rec_at:
+                fh.seek(rec_at)
+                data, extra = fh.read(56), 0
+            if len(data) != 56 or not data.startswith(b"PK\x06\x06"):
+                return None
+            _sig, size, _made, _needs, _disk, _cd_disk, _here, total, cd_size, cd_offset = struct.unpack("<4sQ2H2L4Q", data)
+            if cd_offset + cd_size != reloff or size + 12 != 56 + extra:
+                return None
+            location = rec_at - extra
+    return (total, location - cd_size, cd_size) if location >= cd_size else None
+
+
+def zip_has_more_members(fh, limit: int) -> bool:
+    """Whether the zip archive in the seekable binary ``fh`` holds more than ``limit`` members, told from its end
+    records and central directory headers alone: zipfile.ZipFile builds an object for every member while it opens
+    the archive, before any count can be checked (300000 empty members took 4.5 s and 178 MB).  The headers are
+    walked (up to ``limit`` + 1 of them) because zipfile reads all of them whatever count the end record declares.
+    An archive zipfile cannot open is left to zipfile to refuse."""
+    found = _central_directory(fh)
+    if found is None:
+        return False
+    total, start, cd_size = found
+    if total > limit:
+        return True
+    fh.seek(start)
+    count = done = 0
+    while done < cd_size:
+        head = fh.read(46)
+        if len(head) != 46 or head[:4] != b"PK\x01\x02":
+            return False
+        count += 1
+        if count > limit:
+            return True
+        name, extra, comment = struct.unpack_from("<3H", head, 28)
+        fh.seek(name + extra + comment, 1)
+        done += 46 + name + extra + comment
+    return False
 
 
 def _excluded(rel: str) -> bool:
@@ -207,6 +276,9 @@ def describe(config_dir: str, name: str) -> dict:
         return dict(hit[1])
     info = {}
     try:
+        with open(path, "rb") as fh:
+            if zip_has_more_members(fh, MAX_MEMBERS + 1):
+                raise ValueError("too many members")  # listed without its info, as any archive that is no backup
         with zipfile.ZipFile(path) as zf:
             meta = zf.getinfo("backup-info.json")  # not "in namelist()": a list of every member, at every listing
             if meta.file_size <= INFO_MAX:
@@ -320,9 +392,10 @@ def validate(path: str) -> dict:
     """Raise ValueError unless `path` is a backup made by this tool (or at
     least carries the state marker) with safe member paths."""
     try:
-        with zipfile.ZipFile(path) as zf:
-            if len(zf.infolist()) > MAX_MEMBERS + 1:  # + backup-info.json; before anything walks the members
+        with open(path, "rb") as fh:
+            if zip_has_more_members(fh, MAX_MEMBERS + 1):  # + backup-info.json; before zipfile reads the members
                 raise ValueError(f"the archive holds more than {MAX_MEMBERS} files: not a backup of this tool")
+        with zipfile.ZipFile(path) as zf:
             names = zf.namelist()
             for n in names:
                 member = n[:-1] if n.endswith("/") else n
