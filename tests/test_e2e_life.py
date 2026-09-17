@@ -212,3 +212,40 @@ class DegradedChangeReportTest(unittest.TestCase):
             asyncio.run(inst._smoke_check("demo", "2.0", True))
         inst.async_finish_change_report.assert_not_awaited()
         self.assertIsNone(inst.state.pending_change)
+
+
+class _Response:
+    def __init__(self, message, status_code):
+        self.message, self.status = message, status_code
+
+
+class UnknownEntryAnswersTest(unittest.TestCase):
+    def view(self, cls, *args):
+        v = cls(*args)
+        v.json = lambda data, status_code=200: _Response(data, status_code)
+        v.json_message = lambda message, status_code=200: _Response(message, status_code)
+        return v
+
+    def hass(self):
+        async def known(entry_id):
+            raise UnknownEntry(entry_id)
+
+        return SimpleNamespace(config_entries=SimpleNamespace(
+            async_get_entry=lambda entry_id: None, async_reload=known, async_remove=known,
+            options=SimpleNamespace(async_init=known)))
+
+    def test_reconfigure_of_an_unknown_entry(self):
+        driver = flows_mod.FlowDriver(self.hass())
+        installer = SimpleNamespace(state=SimpleNamespace(installed={"demo": {}}), running="demo",
+                                    installed_manifest=lambda domain: {"config_flow": True}, running_tag="v1")
+        view = self.view(views.FlowStartView, driver, installer)
+        res = asyncio.run(views.FlowStartView.post.__wrapped__(view, None, {"domain": "demo", "source": "reconfigure", "entry_id": "nope"}))
+        self.assertEqual((res.status, res.message), (404, "no config entry nope of demo"))
+
+    def test_entry_actions_on_an_unknown_entry(self):
+        view = self.view(views.EntryActionView, flows_mod.FlowDriver(self.hass()))
+        request = SimpleNamespace(content_type="application/json")
+        for action in ("options", "reload", "delete"):
+            with self.subTest(action=action):
+                res = asyncio.run(view.post(request, "nope", action))
+                self.assertEqual((res.status, res.message), (404, "unknown config entry nope"))

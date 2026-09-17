@@ -13,7 +13,7 @@ from typing import Any
 
 
 from homeassistant import data_entry_flow
-from homeassistant.config_entries import SOURCE_RECONFIGURE, SOURCE_USER, ConfigEntry
+from homeassistant.config_entries import SOURCE_RECONFIGURE, SOURCE_USER, ConfigEntry, UnknownEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
 
@@ -146,7 +146,7 @@ class FlowDriver:
         if source == SOURCE_RECONFIGURE:
             entry = self.hass.config_entries.async_get_entry(entry_id or "")
             if entry is None or entry.domain != domain:
-                raise ValueError(f"no config entry {entry_id} of {domain}")
+                raise UnknownEntry(f"no config entry {entry_id} of {domain}")
             context["entry_id"] = entry.entry_id
         result = await self.hass.config_entries.flow.async_init(domain, context=context)
         if result.get("type") == "create_entry" and self.on_entry_created is not None:
