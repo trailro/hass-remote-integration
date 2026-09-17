@@ -385,9 +385,10 @@ _ENTITY_SERVICE_CALLS = frozenset({"entity_service_call", "batched_entity_servic
 class MqttPublisher:
     _stopping = False  # Home Assistant is stopping: no client may be created any more
     _identity_sweep_due = False  # the sweep of an identity that changed while disconnected failed: retried after a connect
-    # base topic -> {prefix, error, since}: uninstalled identities whose retained data the broker did not take, retried by
-    # a timer (no identity is needed).  Replaced as a whole, never changed in place, under the lock
-    _cleanup_pending: dict[str, dict[str, Any]] = {}
+    # (base topic, host, port, tls, username) -> {base, prefix, broker, error, since}: uninstalled identities whose retained
+    # data that broker did not take, retried by a timer (no identity is needed) while the settings name that broker, and
+    # never sent to another one.  Replaced as a whole, never changed in place, under the lock
+    _cleanup_pending: dict[tuple, dict[str, Any]] = {}
     _cleanup_pending_lock = threading.Lock()
     _cleanup_retrying = False
     _in_flight = 0  # service calls and commands whose service task has not finished
@@ -1028,6 +1029,7 @@ class MqttPublisher:
 
     def _clear_retained_checked(self, base_topic: str, discovery_prefix: str, docs: bool = True, warn: bool = True) -> tuple[int | None, str]:
         """Blocking: _clear_retained_under, with the reason when it was not done."""
+        key = self._pending_key(base_topic, self._broker_identity())  # the broker the scan reaches
         try:
             topics = [(f"{discovery_prefix}/device/+/config", 1)] + ([(f"{base_topic}/#", 1)] if docs else [])
             found = self._retained_scan("cleanup", topics)
@@ -1039,46 +1041,76 @@ class MqttPublisher:
         skipped = len(found) - len(ours)
         if skipped:
             _LOGGER.info("MQTT: left %s retained topics under %s alone (not ours)", skipped, base_topic)
-        if docs and (self._cleanup_pending.get(base_topic) or {}).get("prefix") == discovery_prefix:
-            self._set_cleanup_pending(base_topic, None)  # whoever swept it (an identity sweep too): nothing left to retry
+        if docs and (self._cleanup_pending.get(key) or {}).get("prefix") == discovery_prefix:
+            self._set_cleanup_pending(key, None)  # whoever swept it on its broker (an identity sweep too): nothing left to retry
         return len(ours), ""
 
     def _cleanup_pending_file(self) -> str:
         return self.hass.config.path("integration_manager", "mqtt_cleanup_pending.json")
 
-    def _read_cleanup_pending(self) -> dict[str, dict[str, Any]]:
-        """Blocking."""
+    def _broker_identity(self) -> dict[str, Any]:
+        """The broker the settings name, as far as a pending removal tells brokers apart (never the password)."""
+        return {"host": self.config.host, "port": self.config.port, "tls": self.config.tls, "username": self.config.username}
+
+    @staticmethod
+    def _pending_key(base: str, broker: dict[str, Any]) -> tuple:
+        return (base, str(broker["host"]), int(broker["port"]), bool(broker["tls"]), str(broker["username"]))
+
+    def _read_cleanup_pending(self) -> dict[tuple, dict[str, Any]]:
+        """Blocking.  Records written before they named their broker (a mapping by base topic) are bound to the broker
+        configured now, and saved so at once: a later change of the settings must not move them."""
         data = read_json(self._cleanup_pending_file(), None)
         pending = data.get("pending") if isinstance(data, dict) else None
-        if not isinstance(pending, dict):
+        unbound = isinstance(pending, dict)
+        if unbound:
+            pending = [{**rec, "base": base, "broker": self._broker_identity()} for base, rec in pending.items() if isinstance(rec, dict)]
+        if not isinstance(pending, list):
             return {}
-        return {base: rec for base, rec in pending.items() if isinstance(base, str) and base.startswith("hass_") and isinstance(rec, dict)}
+        out: dict[tuple, dict[str, Any]] = {}
+        for rec in pending:
+            try:
+                key = self._pending_key(rec["base"], rec["broker"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if isinstance(rec["base"], str) and rec["base"].startswith("hass_"):
+                out[key] = rec
+        if unbound:
+            try:
+                write_json(self._cleanup_pending_file(), {"pending": list(out.values())}, fsync=False)
+            except OSError as err:
+                _LOGGER.warning("MQTT: the pending retained cleanup could not be saved: %s", err)
+        return out
 
-    def _set_cleanup_pending(self, base: str, record: dict[str, Any] | None) -> bool:
-        """Blocking: records the removal of one identity as pending (record None: drops it).  Kept on disk: a restart
-        before the broker is back must not forget it.  True when something changed."""
+    def _set_cleanup_pending(self, key: tuple, record: dict[str, Any] | None) -> bool:
+        """Blocking: records the removal of one identity on one broker as pending (record None: drops it).  Kept on disk:
+        a restart before the broker is back must not forget it.  True when something changed."""
         with self._cleanup_pending_lock:
-            if record is None and base not in self._cleanup_pending:
+            if record is None and key not in self._cleanup_pending:
                 return False
-            pending = {b: r for b, r in self._cleanup_pending.items() if b != base}
+            pending = {k: r for k, r in self._cleanup_pending.items() if k != key}
             if record is not None:
-                pending[base] = record
+                pending[key] = record
             self._cleanup_pending = pending
             try:
-                write_json(self._cleanup_pending_file(), {"pending": pending}, fsync=False)
+                write_json(self._cleanup_pending_file(), {"pending": list(pending.values())}, fsync=False)
             except OSError as err:
                 _LOGGER.warning("MQTT: the pending retained cleanup could not be saved: %s", err)
         return True
 
-    def cleanup_pending(self, base: str) -> dict[str, Any] | None:
-        """The removal of this identity's retained data that failed and waits for the broker: {prefix, error, since}."""
-        return self._cleanup_pending.get(base)
+    def retained_cleanup_pending(self, base: str | None = None) -> list[dict[str, Any]]:
+        """The removals that wait for a broker (of one identity when `base` is given), those for the broker the settings
+        name first: {base_topic, broker (host:port), other_broker, deferred, error, since}."""
+        here, pending = self._pending_key("", self._broker_identity())[1:], self._cleanup_pending
+        keys = sorted((k for k in pending if base is None or k[0] == base), key=lambda k: (k[1:] != here, k))
+        return [{"base_topic": k[0], "broker": f"{k[1]}:{k[2]}", "other_broker": k[1:] != here, "deferred": bool(pending[k].get("deferred")),
+                 "error": pending[k].get("error") or "", "since": pending[k].get("since")} for k in keys]
 
-    def _cancel_pending_cleanup(self, base: str) -> None:
-        """Blocking: the identity is wanted again (installed and started before the broker came back): what it publishes
-        is live and stays.  What the uninstalled copy announced that this one does not have goes with the orphan sweep
-        of a later full republish, which reads the retained configs again first."""
-        if self._set_cleanup_pending(base, None):
+    def _cancel_pending_cleanup(self, key: tuple) -> None:
+        """Blocking: the identity is wanted again on that broker (installed and started before the broker came back): what
+        it publishes is live and stays.  What the uninstalled copy announced that this one does not have goes with the
+        orphan sweep of a later full republish, which reads the retained configs again first."""
+        base = key[0]
+        if self._set_cleanup_pending(key, None):
             self._orphan_sweep_due, self._boot_components = True, None
             _LOGGER.info("MQTT: %s runs again: the pending removal of its retained data is cancelled", base)
             events.emit("mqtt", f"pending removal of the retained data of {base} cancelled: {base} runs again")
@@ -1095,19 +1127,24 @@ class MqttPublisher:
 
     def _retry_pending_cleanups(self) -> None:
         """Blocking, under the connection lock: the removals an uninstall could not finish, from throwaway clients (no
-        identity needed), each under its own base topic and discovery prefix only."""
-        for base, rec in list(self._cleanup_pending.items()):
+        identity needed), each under its own base topic and discovery prefix only, and only on the broker it is for: the
+        settings may name another one by now, where an empty scan says nothing about the broker that keeps the data."""
+        here = self._pending_key("", self._broker_identity())[1:]
+        for key, rec in list(self._cleanup_pending.items()):
+            base = key[0]
             if self._stopping:
                 return
+            if key[1:] != here:
+                continue  # waits until the settings name that broker again
             if base == self.wanted_base_topic:
-                self._cancel_pending_cleanup(base)
+                self._cancel_pending_cleanup(key)
                 continue
             if base == self._live_base or not self.config.enabled:
                 continue  # still connected under it (the uninstall's reconnect comes next), or MQTT is off
             n, _why = self._clear_retained_checked(base, rec.get("prefix") or self.config.discovery_prefix, warn=False)
             if n is None:
                 return  # the broker is still unreachable: the next tick tries again
-            self._set_cleanup_pending(base, None)
+            self._set_cleanup_pending(key, None)
             _LOGGER.info("MQTT: the broker is reachable again: cleared %s retained topics of the uninstalled %s", n, base)
             events.emit("mqtt", f"cleared {n} retained topics of the uninstalled {base} (the broker was unreachable at the uninstall)")
 
@@ -1149,8 +1186,8 @@ class MqttPublisher:
             self.stats["connect_error"] = "no integration is running: MQTT has no identity (hass_<domain>) yet"
             _LOGGER.info("MQTT: %s", self.stats["connect_error"])
             return
-        if base in self._cleanup_pending:
-            self._cancel_pending_cleanup(base)
+        if (key := self._pending_key(base, self._broker_identity())) in self._cleanup_pending:
+            self._cancel_pending_cleanup(key)  # a removal pending on another broker stays: this one does not reach it
         # a different broker is a different namespace; other TLS settings may not reach the same one
         probe_key = f"{self.config.host}:{self.config.port}/{base}/{self.config.tls}/{self.config.ca_certs}/{self.config.tls_insecure}"
         if not self.config.force_base_topic and probe_key not in self._probed_ok:
@@ -2328,13 +2365,15 @@ class MqttPublisher:
         configs, so the consumer removes the entities."""
         if not self.config.enabled:
             return 0  # MQTT is off: this process published nothing, and the broker may not even take our credentials
-        prefix = self.config.discovery_prefix
+        prefix, broker = self.config.discovery_prefix, self._broker_identity()
         n, why = await self.hass.async_add_executor_job(self._clear_retained_checked, base_topic, prefix, True, False)  # logged below
         if n is None and base_topic:
             # the broker is unreachable: the uninstall stands, the removal waits for it (a timer, even with nothing installed)
-            known = self._cleanup_pending.get(base_topic)
+            key = self._pending_key(base_topic, broker)
+            known = self._cleanup_pending.get(key)
             since = (known or {}).get("since") or time.strftime("%Y-%m-%dT%H:%M:%S%z")
-            await self.hass.async_add_executor_job(self._set_cleanup_pending, base_topic, {"prefix": prefix, "error": why, "since": since})
+            await self.hass.async_add_executor_job(self._set_cleanup_pending, key, {"base": base_topic, "prefix": prefix, "broker": broker,
+                                                                                   "error": why, "since": since})
             if known is None:  # the uninstall tries twice: one line
                 _LOGGER.warning("MQTT: the retained data of the uninstalled %s stays on the broker for now (%s): retried every %s s",
                                 base_topic, why, CLEANUP_RETRY_S)
@@ -2963,7 +3002,7 @@ class MqttPublisher:
             "wanted_base_topic": self.wanted_base_topic,
             "identity_moved": self._connected and self.wanted_base_topic != self._live_base,
             "has_identity": bool(self.wanted_base_topic),
-            "retained_cleanup_pending": sorted(self._cleanup_pending),  # uninstalled identities the broker did not take yet
+            "retained_cleanup_pending": self.retained_cleanup_pending(),  # uninstalled identities a broker did not take yet
             "prefix": self.prefix,
             "force_base_topic": self.config.force_base_topic,
             "tls": self.config.tls,
