@@ -732,7 +732,9 @@ when its context matches, never leaves broken Python behind; a hunk that only
 adds or removes lines without a single context line, as `diff -U0` makes, is
 refused because it cannot be located; each hunk is looked for from its own line
 shifted by the hunks before it, like GNU patch, and a hunk whose lines occur in
-more than one place about as near is refused as ambiguous). Two optional
+more than one place about as near is refused as ambiguous; a patched block
+that also exists as a twin still counts as applied, unless an unpatched copy is
+about as near too). Two optional
 headers retire a patch on its own:
 
 ```python
