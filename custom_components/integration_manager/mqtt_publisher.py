@@ -93,6 +93,9 @@ HEALTH_GRACE_S = 900  # after a (re)start, at most this long before unavailable 
 HEALTH_STALE_S = 900  # no state written by the integration's entities (last_reported, value changed or not) for this long = degraded
 
 CONFIG_FILE = "integration_manager/mqtt.json"
+# Entities Home Assistant creates by itself in every instance, not by the integration or by the user: zone.home is the
+# container's own home location (its core configuration), and the main Home Assistant has its own.  Never published.
+NEVER_PUBLISHED_INTEGRATIONS = frozenset({"zone"})
 # A generic service call always answers: a service that blocks (e.g. an RF
 # request that cannot be sent in read-only mode) is reported as a timeout.
 def _call_timeout() -> int:
@@ -1815,7 +1818,11 @@ class MqttPublisher:
             return True
         # like _group_by_device: an entity without a registry entry (YAML platform) belongs to the platform that added it
         integration = platform_of(self.hass, entity_id)
-        return bool(integration and integration in self.config.exclude_integrations)
+        return bool(integration and self._integration_excluded(integration))
+
+    def _integration_excluded(self, integration: str | None) -> bool:
+        """Its entities are not published: excluded in the settings, or created by Home Assistant itself."""
+        return integration in self.config.exclude_integrations or integration in NEVER_PUBLISHED_INTEGRATIONS
 
     def _reject_empty_call(self, rest: str) -> None:
         """A call needs a JSON object ({} without data); an empty payload is what clearing a retained call looks like."""
@@ -2079,7 +2086,7 @@ class MqttPublisher:
         ent_reg = er.async_get(self.hass)
         entry = ent_reg.async_get(state.entity_id)
         integration = platform_of(self.hass, state.entity_id) or "unregistered"
-        if integration in self.config.exclude_integrations:
+        if self._integration_excluded(integration):
             return None
         rule = self.rules.for_entity(state.entity_id)
         if rule.get("exclude"):
@@ -2210,7 +2217,7 @@ class MqttPublisher:
             seen.add(state.entity_id)
             entry = ent_reg.async_get(state.entity_id)
             integration = platform_of(self.hass, state.entity_id) or "unregistered"
-            if integration in self.config.exclude_integrations:
+            if self._integration_excluded(integration):
                 continue
             rule = self.rules.for_entity(state.entity_id)
             if rule.get("exclude"):
@@ -2227,7 +2234,7 @@ class MqttPublisher:
             add(disc_id, block, state.entity_id, comp)
         loaded = set(self.hass.config.components)
         for entry in list(ent_reg.entities.values()):
-            if entry.entity_id in seen or entry.platform in self.config.exclude_integrations:
+            if entry.entity_id in seen or self._integration_excluded(entry.platform):
                 continue
             if entry.platform not in loaded:
                 continue  # an installed-but-stopped integration's entries are not announced under this identity
@@ -2565,7 +2572,7 @@ class MqttPublisher:
         devices no longer announced, swept from the broker (what an exclusion
         while disconnected could not clear)."""
         base, prefix = self.base_topic, self.config.discovery_prefix
-        excluded = set(self.config.exclude_integrations)
+        excluded = set(self.config.exclude_integrations) | NEVER_PUBLISHED_INTEGRATIONS
         try:
             found = await self.hass.async_add_executor_job(self._retained_scan, "resync", [(f"{base}/#", 1), (f"{prefix}/device/+/config", 1)])
         except Exception as err:  # noqa: BLE001
@@ -3077,12 +3084,14 @@ class MqttPublisher:
             "prefix": self.prefix,
             "force_base_topic": self.config.force_base_topic,
             "tls": self.config.tls,
-            "entities_total": len(self.hass.states.async_all()),
+            # what a full republish publishes a document for: excluded entities (by integration or by a rule) not counted
+            "entities_total": sum(1 for state in self.hass.states.async_all() if not self._excluded_now(state.entity_id)),
             # registry entries with no state (disabled or not yet added): no
             # document to publish, only announced through discovery
             "entities_registry_only": sum(
                 1 for e in er.async_get(self.hass).entities.values()
-                if self.hass.states.get(e.entity_id) is None and e.platform not in self.config.exclude_integrations
+                if self.hass.states.get(e.entity_id) is None and not self._integration_excluded(e.platform)
+                and not self.rules.for_entity(e.entity_id).get("exclude")
             ),
             "discovery_enabled": self.config.discovery_enabled,
             "discovery_prefix": self.config.discovery_prefix,

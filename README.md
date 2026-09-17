@@ -854,7 +854,16 @@ hass_<domain>/manager/result                        outcome of a manager action,
 
 - **Entity document**: state, attributes, `last_changed`, `last_updated`,
   `last_reported`, and the registry metadata (unique id, name, device class,
-  unit, icon, category, device). A vacuum's document also has `fan_speed` at
+  unit, icon, category, device). Every entity of the container's Home Assistant gets a
+  document, except the entities of the integrations listed in
+  `exclude_integrations` (default `["integration_manager"]`; set with `POST
+  /api/mqtt/config`, as a list or comma-separated text; their services are also
+  left out of the catalog and not callable over MQTT), entities excluded by a
+  rule, and `zone` entities: `zone.home` is the container's own home location,
+  which every Home Assistant creates by itself (one published by 0.17.0 or
+  older is removed from the main HA five minutes after the start, like any
+  excluded entity). `entities_total` in `GET
+  /api/mqtt/status` counts the entities with a state that get a document. A vacuum's document also has `fan_speed` at
   the top level (a copy of the attribute), because the main HA's MQTT vacuum
   reads it only there.
 - **Protocol and document size**: the container connects with MQTT 5, so a
