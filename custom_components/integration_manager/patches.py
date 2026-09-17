@@ -403,13 +403,16 @@ def _locate(lines: list[str], h: _Hunk, hint: int) -> tuple[str, int]:
     """("applied" | "pending" | "ambiguous" | "not applicable", index).  When
     both the original block and the patched block occur, the one nearer the
     hunk's own line decides: a matching line in another function is not this
-    fix.  ``hint`` is where the hunk should be, after the earlier hunks."""
+    fix.  ``hint`` is where the hunk should be, after the earlier hunks.
+    Twins of the patched block are no guess (the file reads the same
+    whichever one was patched) unless an unpatched copy is as near too."""
     new_at, new_amb = _find(lines, h.new_lines, hint)
     old_at, old_amb = _find(lines, h.old_lines, hint) if h.old_lines != h.new_lines else (-1, False)
     if old_at >= 0 and (new_at < 0 or abs(old_at - hint) < abs(new_at - hint)):
         return ("ambiguous", -1) if old_amb else ("pending", old_at)
     if new_at >= 0:
-        return ("ambiguous", -1) if new_amb else ("applied", new_at)
+        unpatched_near = new_amb and old_at >= 0 and abs(old_at - hint) <= 2 * abs(new_at - hint)
+        return ("ambiguous", -1) if unpatched_near else ("applied", new_at)
     return "not applicable", -1
 
 
