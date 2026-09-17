@@ -72,10 +72,11 @@ MAX_COLUMNS = 30
 MAX_COLORS = 50
 MATCH_BUDGET_S = 2.0  # per request: a pattern too slow for the lines on screen falls back to whole lines
 MAX_MATCH_CHARS = 4096
-# compiling has no time limit: the regex package writes out a counted repeat once per copy ((?P<a>a{60000}){60000},
-# 22 characters, ran 23 s and was killed for its memory).  A pattern is refused when its elements, each counted once
+# compiling has no time limit: the regex package's compile (in its C part) expands a counted repeat once per copy
+# ((?P<a>a{60000}){60000}, 22 characters, ran 23 s and was killed for its memory).  A pattern is refused when its elements, each counted once
 # per copy the repeats around it make, add up to more than this (~5 ms to compile at the limit, whatever the element)
 MAX_PATTERN_WEIGHT = 10_000
+_MAX_FLAG_PASSES = 32  # the regex package retries without a bound; each pass adds at least one global flag
 
 LOGFILES_HTML = load_template("logfiles")
 # the key of the file ids, new on every start: an id is a keyed hash of the file's real name, so the page can
@@ -153,16 +154,20 @@ def _pattern_weight(pattern: str, limit: int) -> int:
     compile uses, so a count spelled ``{6 0 0 0 0}`` in verbose mode, a brace
     in a character class or an escaped one reads here as it reads there."""
     core = _regex._regex_core
-    source = core.Source(pattern)
-    info = core.Info(0, source.char_type, {})
-    source.ignore_space = bool(info.flags & core.VERBOSE)
-    try:
-        tree = core._parse_pattern(source, info)
-    except core._UnscopedFlagSet:  # a global flag after the start: parsed again with it set, as the compile does
+    global_flags = 0
+    for _ in range(_MAX_FLAG_PASSES):
         source = core.Source(pattern)
-        info = core.Info(info.global_flags, source.char_type, {})
+        info = core.Info(global_flags, source.char_type, {})
         source.ignore_space = bool(info.flags & core.VERBOSE)
-        tree = core._parse_pattern(source, info)
+        try:
+            tree = core._parse_pattern(source, info)
+            break
+        except core._UnscopedFlagSet:
+            # a global flag after the start: parsed again with the flags seen so far set, as the compile does (once
+            # per such flag: (?b), (?e), (?p), (?r) can all follow one another)
+            global_flags = info.global_flags
+    else:
+        raise RuntimeError(f"still finding global flags after {_MAX_FLAG_PASSES} passes")
     total = 0
     stack = [(tree, 1)]
     while stack and total <= limit:
@@ -185,9 +190,12 @@ def _compiled(pattern: str) -> tuple[Any, str | None]:
         if _regex is not None:  # the stdlib re compiles a counted repeat as one instruction
             try:
                 weight = _pattern_weight(pattern, MAX_PATTERN_WEIGHT)
-            except (AttributeError, TypeError) as err:
-                # the parser is internal to the regex package, which is not pinned: a release that changed it must
-                # not let every pattern through unchecked
+            except (_regex.error, RecursionError):
+                raise
+            except Exception as err:  # noqa: BLE001 - never a 500, never an unchecked pattern
+                # the parser is internal to the regex package, which is not pinned: a release that changed it (or a
+                # pattern it parses in a way not foreseen here) must neither let the pattern through unchecked nor
+                # answer 500
                 return None, f"pattern cannot be checked with this version of the regex package ({type(err).__name__}: {err})"
             if weight > MAX_PATTERN_WEIGHT:
                 return None, (f"pattern repeats too much: with its counted repeats ({{n}}, {{m,n}}) written out it is longer "
