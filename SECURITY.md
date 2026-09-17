@@ -33,7 +33,8 @@ from plain HTTP traffic. These are:
   of CORS on the manager's routes;
 - secrets (MQTT password, GitHub token, the main Home Assistant's token,
   backup encryption keys) exposed through the API, the logs, the timeline, the
-  diagnostics zip or the UI; the log searches run on the masked text and a
+  diagnostics zip, the UI or what is published over MQTT (an entity's
+  `access_token`, or a URL carrying a token in a document); the log searches run on the masked text and a
   search for key material returns nothing by design, but redaction of material
   that carries no marker and no name in front of it is best effort — a report
   needs a case where something the scrubber does name comes out unmasked;
@@ -53,7 +54,8 @@ from plain HTTP traffic. These are:
   certificate is not verified, or that does not name the host;
 - path traversal or unsafe archive handling in backups, restores, imports,
   patches or log files, including a log file listing or tail that reaches a file
-  other than a log through a symbolic or hard link;
+  other than a log through a symbolic or hard link, or a backup that reads a file
+  outside `/config` through a symbolic link;
 - anything that lets a page on another origin make the manager do something.
 
 Problems in Home Assistant itself or in the integrations you run belong to
