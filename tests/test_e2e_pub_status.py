@@ -45,6 +45,15 @@ class NoIdentityTest(unittest.TestCase):
         self.assertFalse(status["has_identity"])
         self.assertNotIn("hass_none", repr(status))
 
+    def test_the_health_document_names_no_topic_either(self):
+        pub = _publisher(None)
+        pub._health_provider = None  # stopped: no integration to report
+        pub._started_at = 0
+        with mock.patch.object(mp, "_notification_count", return_value=0):
+            doc = pub.build_health()
+        self.assertIsNone(doc["base_topic"])
+        self.assertNotIn("hass_none", repr(doc))
+
     def test_with_an_integration_running_the_topics_are_there(self):
         status = self.status(_publisher("hass_demo"))
         self.assertEqual((status["base_topic"], status["prefix"], status["health_topic"], status["cmd_base"]),
