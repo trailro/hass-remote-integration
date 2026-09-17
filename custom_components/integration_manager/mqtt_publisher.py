@@ -70,7 +70,7 @@ from . import discovery as disc
 from . import events, writer
 from jsonio import read_json, write_json
 
-from .mqtt_rules import MqttRules
+from .mqtt_rules import MqttRules, matches
 from .services_catalog import service_rows
 
 TLS_CHECK_INTERVAL_S = 60  # at most one diagnostic handshake per minute while paho keeps failing to connect
@@ -433,6 +433,7 @@ class MqttPublisher:
         self._last_full = 0.0
         self._moving = False  # identity move in progress: nothing may be published under the old names
         self.rules = MqttRules(hass.config.path("integration_manager", "mqtt_rules.json"))
+        self.rules.components = self._rule_components
         self._republish_unsub = None
         self._health_last: dict[str, Any] = {}
         self._started_at = time.time()
@@ -2265,6 +2266,32 @@ class MqttPublisher:
             disc_id, block = disc.device_block(self.hass, entry.device_id, entry.platform, self.prefix)
             add(disc_id, block, entry.entity_id, comp)
         return groups, counts
+
+    def _rule_components(self, pattern: str) -> list[tuple[str, dict[str, Any]]]:
+        """(entity_id, component as announced without rules) of the entities a rule pattern matches now."""
+        ent_reg = er.async_get(self.hass)
+        out, seen = [], set()
+        for state in self.hass.states.async_all():
+            seen.add(state.entity_id)
+            if not matches(pattern, state.entity_id):
+                continue
+            integration = platform_of(self.hass, state.entity_id) or "unregistered"
+            if self._integration_excluded(integration):
+                continue
+            try:
+                out.append((state.entity_id, disc.build_component(self.hass, state, self._topic_for(state.entity_id, integration),
+                                                                  self._cmd_base(), self.prefix)))
+            except Exception:  # noqa: BLE001 - not announced at all (see _group_by_device): nothing to fit
+                continue
+        for entry in list(ent_reg.entities.values()):
+            if entry.entity_id in seen or not matches(pattern, entry.entity_id) or self._integration_excluded(entry.platform):
+                continue
+            try:
+                out.append((entry.entity_id, disc.build_component_from_entry(self.hass, entry, self._topic_for(entry.entity_id, entry.platform),
+                                                                             self._cmd_base(), self.prefix)))
+            except Exception:  # noqa: BLE001
+                continue
+        return out
 
     def _announced_groups(self) -> tuple[dict[str, tuple[dict[str, Any], dict[str, dict[str, Any]]]], dict[str, int]]:
         """_group_by_device plus the manager device, with via_device only towards devices that are announced too
