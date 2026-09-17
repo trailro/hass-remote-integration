@@ -29,7 +29,7 @@ async function options(){
   domInfo(); releases();
 }
 // the report on screen is only valid for the exact combination it was made for
-let CHECK=null;
+let CHECK=null, CHECKSEQ=0;
 function combo(){ return JSON.stringify([domain(),ref(),ha()]); }
 function invalidate(){ if(CHECK&&combo()!==CHECK.combo){ CHECK=null; $('#bprepare').disabled=$('#bstart').disabled=true; $('#bmsg').innerHTML='<span class="warn">selection changed: run Check again</span>'; } }
 ['#bdom','#bdomain','#brepo','#brel','#bref','#bha','#bhafree'].forEach(s=>{ $(s).addEventListener('change',invalidate); $(s).addEventListener('input',invalidate); });
@@ -51,8 +51,13 @@ function body(extra){ const b={domain:domain(),ref:ref(),ha:ha(),...extra}; cons
 $('#bcheck').onclick=async()=>{
   if(!domain()||!ref()){$('#bmsg').textContent='choose an integration and a version';return;}
   $('#bmsg').textContent='checking (download, pip --dry-run: up to a few minutes)…'; $('#breport').innerHTML=''; $('#bprepare').disabled=$('#bstart').disabled=true;
-  const r=await post('api/build/check',body({})); if(!r.ok){$('#bmsg').innerHTML='<span class="bad">'+esc(r.error)+'</span>'; return;}
-  REPORT=r.report; CHECK={id:r.check_id,combo:combo()}; $('#bmsg').textContent=''; $('#breport').innerHTML=renderPreflight(r.report)+(r.ha_check&&r.ha_check.version?`<div class="${r.ha_check.ok?'ok':'bad'}" style="margin-top:6px">Home Assistant ${esc(r.ha_check.version)}: ${r.ha_check.ok?'installable here':esc(r.ha_check.error)}</div>`:'');
+  // the answer belongs to the selection it was asked for: a newer Check, or a selection changed meanwhile, makes it stale
+  const seq=++CHECKSEQ, want=combo(); CHECK=null;
+  const r=await post('api/build/check',body({}));
+  if(seq!==CHECKSEQ) return;
+  if(combo()!==want){ $('#bmsg').innerHTML='<span class="warn">selection changed: run Check again</span>'; return; }
+  if(!r.ok){$('#bmsg').innerHTML='<span class="bad">'+esc(r.error)+'</span>'; return;}
+  REPORT=r.report; CHECK={id:r.check_id,combo:want}; $('#bmsg').textContent=''; $('#breport').innerHTML=renderPreflight(r.report)+(r.ha_check&&r.ha_check.version?`<div class="${r.ha_check.ok?'ok':'bad'}" style="margin-top:6px">Home Assistant ${esc(r.ha_check.version)}: ${r.ha_check.ok?'installable here':esc(r.ha_check.error)}</div>`:'');
   $('#bprepare').disabled=$('#bstart').disabled=!r.report.ok;
 };
 async function prepare(start){
