@@ -16,6 +16,7 @@ from aiohttp import web
 
 import backupkit
 from homeassistant import data_entry_flow
+from homeassistant.config_entries import UnknownEntry
 from homeassistant.const import __version__ as HA_VERSION
 from jsonio import ha_vkey
 from homeassistant.helpers.http import HomeAssistantView
@@ -397,6 +398,8 @@ class FlowStartView(ManagerView):
             return self.json(await self.flows.start(domain, source, entry_id or None))
         except data_entry_flow.UnknownHandler:
             return self.json_message(f"{domain} has no config flow", status_code=400)
+        except UnknownEntry as err:  # reconfigure of an entry id that does not exist (or belongs to another domain)
+            return self.json_message(str(err), status_code=404)
         except Exception as err:  # noqa: BLE001 - surfaced to the UI
             return self.json_message(f"{type(err).__name__}: {err}", status_code=500)
 
@@ -499,6 +502,8 @@ class EntryActionView(ManagerView):
                 return self.json({"ok": await self.flows.reload_entry(entry_id)})
             if action == "delete":
                 return self.json(await self.flows.remove_entry(entry_id))
+        except UnknownEntry:
+            return self.json_message(f"unknown config entry {entry_id}", status_code=404)
         except Exception as err:  # noqa: BLE001
             return self.json_message(f"{type(err).__name__}: {err}", status_code=500)
         return self.json_message("unknown action", status_code=400)
