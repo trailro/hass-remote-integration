@@ -268,5 +268,40 @@ class RefusedCallIdTest(unittest.TestCase):
                 self.assertLess(_seconds(f"mp._refused_call_id({text})"), FAST_S)
 
 
+# ----- c5 -----------------------------------------------------------------------------------------
+
+class UnreadableEntityIdTest(unittest.TestCase):
+
+    def test_ids_that_are_not_strings(self):
+        pub = _publisher()
+        pub._topics = {"light.published": "t"}
+        for ids in (5, 5.5, True, {"a": 1}, ["light.published", 5], [None]):
+            with self.subTest(ids=ids):
+                problem = pub._call_target_problem({"entity_id": ids}, "light", "turn_on")
+                self.assertEqual(problem, "the target cannot be read (entity_id): entity, device, area, floor and label ids must be strings")
+
+    def test_the_call_is_answered_and_never_reaches_home_assistant(self):
+        called = []
+
+        async def service(*a, **k):
+            called.append(a)
+
+        async def run():
+            pub = _running_publisher()
+            del pub._call_target_problem  # the real check
+            pub._service_reach = lambda *_a: None
+            pub._topics = {"light.published": "t"}
+            pub.hass.services.async_call = service
+            with self.assertLogs(mp._LOGGER, "WARNING"):
+                pub._on_call("light/turn_on", json.dumps({"_id": "c5", "entity_id": 5}))
+                await _settle()
+            return pub
+
+        pub = asyncio.run(run())
+        self.assertEqual(called, [])
+        self.assertIn("the target cannot be read", pub.results[-1][2]["error"])
+        self.assertEqual(pub.results[-1][2]["id"], "c5")
+
+
 if __name__ == "__main__":
     unittest.main()

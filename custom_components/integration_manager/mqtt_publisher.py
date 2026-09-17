@@ -1870,6 +1870,9 @@ class MqttPublisher:
         from homeassistant.helpers.target import TargetSelection, async_extract_referenced_entity_ids
 
         ids = data.get("entity_id")
+        if ids is not None and not (isinstance(ids, str) or isinstance(ids, list) and all(isinstance(x, str) for x in ids)):
+            # dropped below, it would reach the service unchecked (Home Assistant then fails on it with a TypeError)
+            return "the target cannot be read (entity_id): entity, device, area, floor and label ids must be strings"
         named = [ids] if isinstance(ids, str) else ids if isinstance(ids, list) else []
         # "a, b" is split by the service schema only after this check: split it the same way first
         split = [p.strip().lower() for x in named if isinstance(x, str) for p in x.split(",") if p.strip()]
