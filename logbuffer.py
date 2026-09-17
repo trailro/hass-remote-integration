@@ -42,7 +42,9 @@ _TORN_ID = re.compile(r'\{"id":\s*(\d+)')  # the id at the start of a record who
 # whether a secret was logged types the secret), the Log files page may be asked for a file by a name that holds what
 # its mask hides, and a client may put a credential in any URL (HA's signed paths: authSig).  Those values are masked
 # before a record is written, so they never reach process.log or the container log.
-_URL_QUERY = re.compile(r"([^\s\"'?#]*)\?([^\s\"'#]+)")
+# the query runs to whitespace or a fragment: a quote inside a value is part of it (a closing quote after a masked
+# value goes with it, which errs on the side of hiding)
+_URL_QUERY = re.compile(r"([^\s\"'?#]*)\?([^\s#]+)")
 _URL_ORIGIN = re.compile(r"^(?:[A-Za-z][A-Za-z0-9+.-]*:)?//[^/]*")  # http://host, or //host (a scheme-relative URL)
 _LOG_SEARCH_PATHS = ("/api/logs", "/api/log_files/tail")  # the paths themselves: not /x/api/logs, not /api/logs/level
 # on the log search endpoints every value is masked but these, in the form the pages send them

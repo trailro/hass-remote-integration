@@ -364,6 +364,15 @@ class QueryParameterNamesTest(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(logbuffer.mask_query_secrets(f"GET /x?{name}={SECRET}&a=1"), f"GET /x?{name}=***&a=1")
 
+    def test_a_quote_inside_a_value_does_not_end_it(self):
+        for line, masked in ((f'GET /x?token=abc"{SECRET} HTTP/1.1', "GET /x?token=*** HTTP/1.1"),
+                             (f"GET /x?api_key=a'{SECRET}&page=2 HTTP/1.1", "GET /x?api_key=***&page=2 HTTP/1.1"),
+                             (f'"GET /api/logs?q=x"{SECRET} HTTP/1.1" 200', '"GET /api/logs?q=*** HTTP/1.1" 200'),
+                             ("url='https://h/p?a=1&b=two'", "url='https://h/p?a=1&b=two'")):
+            with self.subTest(line=line):
+                self.assertEqual(logbuffer.mask_query_secrets(line), masked)
+                self.assertNotIn(SECRET, logbuffer.mask_query_secrets(line))
+
     def test_the_search_endpoints_are_matched_exactly(self):
         for path in ("/api/logs", "/api/log_files/tail", "/api/logs/", "/api/%6Cogs", "http://10.0.0.2:8222/api/logs"):
             with self.subTest(path=path):
