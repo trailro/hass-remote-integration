@@ -276,15 +276,21 @@ class RestoreCancelView(ManagerView):
         async with _HA_CHANGE_LOCK:
             self.installer.busy = True
             try:
-                cancelled, for_version, name = await self.hass.async_add_executor_job(_cancel_restore_by_hand, self.hass.config.config_dir)
+                # a full rollback already selected the older version: cancelled alone, its restore would leave that
+                # code to boot on the config entries the newer version migrated (migration_error)
+                rollback = self.installer.state.rollback_backup
+                meta = await self.hass.async_add_executor_job(backupkit._pending_meta, self.hass.config.config_dir) or {}  # noqa: SLF001
+                if rollback and meta.get("name") == rollback:
+                    undo = getattr(self.installer, "_rollback_undo", None)
+                    undo = undo if undo and undo[2] == meta.get("zip") else None
+                    return self.json({"ok": False, "rollback": rollback,
+                                      "error": f"this restore belongs to a full rollback, which already selected the older version: restart to finish it"
+                                               + (f", or start {undo[0]} {undo[1]} again on Integration to undo the rollback (that drops this restore)" if undo else "")})
+                cancelled, for_version, _name = await self.hass.async_add_executor_job(_cancel_restore_by_hand, self.hass.config.config_dir)
                 if for_version:
                     return self.json({"ok": False, "for_version": for_version,
                                       "error": f"this restore belongs to the scheduled switch to Home Assistant {for_version}: cancel that switch on System "
                                                "(choose the running version), which drops its restore too"})
-                if cancelled and name and name == self.installer.state.rollback_backup:
-                    # the full rollback's restore will not happen: nothing else ends that backup's protection
-                    self.installer.state.rollback_backup = self.installer.state.rollback_at = None
-                    self.installer._save_state()  # noqa: SLF001
             finally:
                 self.installer.busy = False
         return self.json({"ok": True, "cancelled": cancelled})

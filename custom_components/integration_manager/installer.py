@@ -994,7 +994,12 @@ class Installer:
         import backupkit
 
         scheduled = backupkit.pending_archive(self.config_dir)
-        if scheduled is not None and (own_restore is None or os.path.basename(scheduled) != own_restore):
+        rollback = self._rollback_undo if scheduled is not None and self._rollback_undo and self._rollback_undo[2] == os.path.basename(scheduled) else None
+        # the version a full rollback left, started again: the rollback is undone and its restore dropped with it
+        undo = rollback if own_restore is None and rollback == (domain, tag, os.path.basename(scheduled or "")) else None
+        if scheduled is not None and undo is None and (own_restore is None or os.path.basename(scheduled) != own_restore):
+            if rollback:
+                return {"ok": False, "error": f"a full rollback restores its backup at the next restart: restart to finish it, or start {rollback[0]} {rollback[1]} again to undo it"}
             return {"ok": False, "error": "a restore is scheduled for the next restart: restart (or cancel it in the Backup card) first"}
         min_ha = self.min_ha_of(domain, tag)
         if min_ha and not boot and ha_vkey(str(min_ha)) > ha_vkey(homeassistant.const.__version__):
@@ -1100,6 +1105,14 @@ class Installer:
             self.state.last_action = f"started {domain} {tag}; patches: {patch_outcome}" + ("; restart required" if needs_restart else "") \
                 + ("; restart required for its YAML config" if yaml_pending else "")
             self._save_state()
+            if undo is not None:
+                # dropped only once this version is recorded: killed in between, the boot restores the older configuration
+                # and deploys this version over it, which migrates it again; the other order boots the older code on it
+                await self.hass.async_add_executor_job(self._cancel_own_restore, undo[2])
+                self._rollback_undo = None
+                self.state.rollback_backup = self.state.rollback_at = None  # no restore of it is coming
+                self.state.last_action += f"; the full rollback to {leaving_tag} is undone, its restore cancelled"
+                self._save_state()
             events.emit("switch" if (switching and was_running) else "start",
                         f"{domain} {tag}" + ((f" (back to the loaded version: the switch to {leaving_tag} is abandoned)" if abandoned is not None
                                               else f" (from {rec.get('previous_tag')})") if switching and was_running else "")
@@ -1649,6 +1662,9 @@ class Installer:
                 _LOGGER.warning("retained MQTT documents of %s not cleared: %s", domain, err)
 
     _rollback_running = False
+    # (domain, the tag a completed full rollback left, the archive of its restore): starting that tag again before
+    # the restart undoes the rollback, restore included.  In memory: the restart that ends this process applies it
+    _rollback_undo: tuple[str, str, str] | None = None
 
     async def rollback_full(self, domain: str | None = None, rejected: bool = False) -> dict[str, Any]:
         """Previous version AND the backup taken before the switch (registries,
@@ -1688,7 +1704,7 @@ class Installer:
             return {"ok": False, "error": "no previous version + pre-update backup recorded for this integration"}
         # start() rewrites previous_tag / pre_update_backup on the same dict:
         # keep what the rollback needs before calling it
-        prev_tag, backup = rec["previous_tag"], rec["pre_update_backup"]
+        prev_tag, backup, left_tag = rec["previous_tag"], rec["pre_update_backup"], rec.get("running_tag")
         zip_path = os.path.join(self.config_dir, backupkit.BACKUP_DIR, backup)  # backups live in <config>/backups
         from .views import _HA_CHANGE_LOCK
 
@@ -1760,6 +1776,7 @@ class Installer:
         self.state.last_action = f"full rollback of {domain} to {prev_tag}: restoring {backup} at restart"
         self.state.rollback_backup, self.state.rollback_at = backup, intent_at
         self._save_state()
+        self._rollback_undo = (domain, left_tag, zip_name) if left_tag and left_tag != prev_tag else None
         events.emit("rollback", f"{domain} back to {prev_tag}; {backup} restored at the next restart", domain=domain, tag=prev_tag)
         return {"ok": True, "tag": prev_tag, "restore": backup, "restart_required": True}
 
