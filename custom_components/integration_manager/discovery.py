@@ -312,24 +312,32 @@ def build_component(
             )
 
     elif domain == "cover":
+        # MQTT cover derives its features from the topics and payloads: announce only what the source supports
+        # (CoverEntityFeature bits), or a tilt-only cover gets open/close/stop buttons that fail here
+        features = attrs.get("supported_features")
+
+        def supports(bits: int) -> bool:
+            return not isinstance(features, int) or bool(features & bits)
+
         comp.update(
             {"value_template": _STATE_TPL,
              "state_open": "open", "state_closed": "closed", "state_opening": "opening",
-             "state_closing": "closing", "state_stopped": "stopped",
-             "command_topic": f"{cmd}/command", "payload_open": "OPEN", "payload_close": "CLOSE", "payload_stop": "STOP"}
+             "state_closing": "closing", "state_stopped": "stopped"}
         )
+        moves = {"payload_open": ("OPEN", 1), "payload_close": ("CLOSE", 2), "payload_stop": ("STOP", 8)}
+        if supports(1 | 2 | 8):
+            comp["command_topic"] = f"{cmd}/command"
+            comp.update({key: payload if supports(bit) else None for key, (payload, bit) in moves.items()})
         if dc := _device_class(entry, attrs):
             comp["device_class"] = dc
         if attrs.get("current_position") is not None:
-            comp.update(
-                {"position_topic": doc_topic, "position_template": _attr_or_empty('current_position'),
-                 "set_position_topic": f"{cmd}/position"}
-            )
+            comp.update({"position_topic": doc_topic, "position_template": _attr_or_empty('current_position')})
+            if supports(4):
+                comp["set_position_topic"] = f"{cmd}/position"
         if attrs.get("current_tilt_position") is not None:
-            comp.update(
-                {"tilt_status_topic": doc_topic, "tilt_status_template": _attr_or_empty('current_tilt_position'),
-                 "tilt_command_topic": f"{cmd}/tilt"}
-            )
+            comp.update({"tilt_status_topic": doc_topic, "tilt_status_template": _attr_or_empty('current_tilt_position')})
+            if supports(16 | 32 | 64 | 128):  # the main HA turns a tilt command topic into all four tilt features
+                comp["tilt_command_topic"] = f"{cmd}/tilt"
 
     elif domain == "valve":
         comp.update(
@@ -555,6 +563,8 @@ def build_component_from_entry(
     yet added by its integration): built from the registry's capabilities
     so the consuming HA creates it, disabled, with the right shape."""
     attrs: dict[str, Any] = dict(entry.capabilities or {})
+    if isinstance(getattr(entry, "supported_features", None), int):
+        attrs["supported_features"] = entry.supported_features  # the features to announce, as a state would have them
     if entry.unit_of_measurement:
         attrs["unit_of_measurement"] = entry.unit_of_measurement
     state = State(entry.entity_id, "unknown", attrs, validate_entity_id=False)
@@ -762,6 +772,8 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
         if field == "position":
             return "cover", "set_cover_position", {**t, "position": int(_finite(p))}
         if field == "tilt":
+            if p.upper() == "STOP":  # MQTT cover sends its stop-tilt payload to the tilt command topic
+                return "cover", "stop_cover_tilt", t
             return "cover", "set_cover_tilt_position", {**t, "tilt_position": int(_finite(p))}
     if domain == "valve":
         if field == "command":
