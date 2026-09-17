@@ -141,5 +141,27 @@ class MemberCapBeforeZipFileTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 1.0)
 
 
+class DescribeMemoInodeTest(unittest.TestCase):
+    """A same-size backup moved over another within one mtime tick was listed with the old record."""
+
+    def setUp(self):
+        self.cfg = _volume()
+        self.addCleanup(shutil.rmtree, self.cfg, True)
+        backupkit._DESCRIBED.clear()
+
+    def test_a_same_size_rewrite_with_the_same_mtime_is_read_again(self):
+        path = _zip(self.cfg, "a.zip", {"ha_version": A, "label": "aaaa"})
+        st = os.stat(path)
+        self.assertEqual(backupkit.describe(self.cfg, "a.zip")["label"], "aaaa")
+        other = _zip(self.cfg, "b.tmp", {"ha_version": A, "label": "bbbb"})
+        with zipfile.ZipFile(path) as za, zipfile.ZipFile(other) as zb:  # the same names and sizes: the same layout
+            self.assertEqual([(i.filename, i.file_size) for i in za.infolist()], [(i.filename, i.file_size) for i in zb.infolist()])
+        os.utime(other, ns=(st.st_atime_ns, st.st_mtime_ns))
+        os.replace(other, path)
+        st2 = os.stat(path)
+        self.assertEqual((st2.st_size, st2.st_mtime_ns), (st.st_size, st.st_mtime_ns))
+        self.assertEqual(backupkit.describe(self.cfg, "a.zip")["label"], "bbbb")
+
+
 if __name__ == "__main__":
     unittest.main()
