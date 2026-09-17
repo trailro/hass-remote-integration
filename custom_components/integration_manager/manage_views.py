@@ -85,7 +85,7 @@ class RunView(ManagerView):
                 await self.publisher.async_after_start(res)
             else:
                 await self.publisher.async_reconnect()
-            res["mqtt"] = {"connected": self.publisher.stats.get("connected"), "base_topic": self.publisher.status().get("base_topic"),
+            res["mqtt"] = {"connected": self.publisher.stats.get("connected"), "base_topic": self.publisher.base_topic if (getattr(self.publisher, "_live_base", None) or getattr(self.publisher, "wanted_base_topic", "x")) else None,
                            "connect_error": self.publisher.stats.get("connect_error")}
         return self.json(res)
 
