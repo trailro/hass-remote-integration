@@ -1028,7 +1028,11 @@ secret) to require a password:
   including one opened a moment before (each logout starts a new session
   generation, signed into the cookie and kept across restarts and restores).
   When the volume cannot record the logout (full or read-only), every session
-  still ends and the page says that they are valid again after a restart;
+  still ends and the page says so, but only until the container restarts: the
+  volume keeps the generation of the last logout it recorded, so at the restart
+  the sessions issued between that logout and the failed one are valid again
+  (until they expire), and the ones issued after the failed one (a login right
+  after it included) end. Log out again once the volume is fixed;
 - scripts send the password as `Authorization: Bearer <password>` (the
   scheme in any case);
 - a line end at either end of `HRI_PASSWORD` (an `.env` file saved with
@@ -1328,7 +1332,7 @@ points:
 | Area | Endpoints |
 |---|---|
 | Status | `GET /api/status`, `GET /api/summary`, `GET /api/manager`, `GET /api/manager/history?hours=`, `GET /api/mqtt/status`, `GET /api/events`, `GET /api/notifications`, `POST /api/notifications/dismiss_all`, `POST /api/notifications/<id>/dismiss` |
-| Login | `POST /api/login` (`{"password": …}`, sets the session cookie; `503` with the reason while `HRI_PASSWORD_FILE` is empty or unreadable), `POST /api/logout` (ends every session; `500` with `ok: false` when the volume could not record it, which ends them until a restart) |
+| Login | `POST /api/login` (`{"password": …}`, sets the session cookie; `503` with the reason while `HRI_PASSWORD_FILE` is empty or unreadable), `POST /api/logout` (ends every session; `500` with `ok: false` when the volume could not record it, which ends them until a restart; at the restart the sessions issued since end instead) |
 | Integration | `POST /api/install`, `GET /api/change_reports`, `POST /api/run/{start,stop,cancel_pending_start}`, `GET /api/releases`, `GET /api/releases/preview?domain=&tag=`, `POST /api/releases/preflight`, `POST /api/updates/check`, `POST /api/installed/<domain>/{uninstall,rollback_full,remove_version}`, `GET/POST /api/registry` |
 | Builder / dev | `GET /api/catalog?q=`, `GET /api/build/options`, `POST /api/build/{check,prepare}`, `GET /api/dev`, `POST /api/dev/install` |
 | Configuration | `POST /api/flow/start`, `GET /api/flow/progress`, `POST/DELETE /api/flow/<id>`, `POST/DELETE /api/options/<flow_id>`, `GET/POST /api/yaml/<domain>`, `GET /api/entries`, `POST /api/entries/<entry_id>/{options,reload,delete}` |

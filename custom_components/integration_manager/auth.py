@@ -157,8 +157,10 @@ class Auth:
         """Blocking: every session issued until now ends, also one issued in
         the same second as an earlier logout.  Written to the volume so it
         holds across a restart; when the write fails (a full or read-only
-        volume) the sessions still end now, and the OSError tells the caller
-        that they are valid again after a restart."""
+        volume) the sessions still end now, and the OSError tells the caller:
+        the file keeps the generation before, so at a restart the sessions
+        issued before this logout are valid again and the ones issued after it
+        end."""
         generation = max(int(time.time()) + 1, self.generation + 1)
         try:
             if self.revoked_path:

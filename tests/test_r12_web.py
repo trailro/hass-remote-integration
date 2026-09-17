@@ -347,6 +347,21 @@ class LogoutVolumeRefusedTest(unittest.TestCase):
             self.assertEqual(resp.cookies[name]["max-age"], "0")
             self.assertEqual(resp.cookies[name].value, "")
 
+    def test_at_the_restart_the_sessions_before_come_back_and_the_ones_after_end(self):
+        """Pins behaviour that already held (the README states both halves)."""
+        path = os.path.join(self.tmp, "auth_revoked")
+        auth = auth_mod.Auth("pw", b"k" * 32, path)
+        self.logout(auth)  # recorded
+        before = auth.new_session()
+        os.mkdir(path + ".tmp")  # the next write fails, also as root
+        with self.assertLogs(auth_mod._LOGGER, logging.ERROR):
+            self.assertEqual(self.logout(auth).status, 500)
+        after = auth.new_session()
+        self.assertEqual((auth.valid_session(before), auth.valid_session(after)), (False, True))
+        restarted = auth_mod.Auth("pw", b"k" * 32, path)
+        restarted.load_revoked()
+        self.assertEqual((restarted.valid_session(before), restarted.valid_session(after)), (True, False))
+
     def test_a_recorded_logout_answers_as_before(self):
         """Pins behaviour that already held."""
         auth = auth_mod.Auth("pw", b"k" * 32, os.path.join(self.tmp, "auth_revoked"))
