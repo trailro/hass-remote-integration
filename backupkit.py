@@ -74,6 +74,9 @@ EXCLUDE_GLOBS = (
     # the record of what happened (timeline, resource history, change reports) must survive a restore
     f"{STATE_DIR}/events.jsonl*", f"{STATE_DIR}/resource_history.json*", f"{STATE_DIR}/change_reports.json*",
     f"{STATE_DIR}/latest_versions.json*", f"{STATE_DIR}/mqtt_undiscover.json",  # a restore must not bring back older "latest" versions
+    # what the broker holds is outside the volume: an older ledger or cleanup list would forget retained data still
+    # on the broker (the main HA keeps those entities) or clear data published since
+    f"{STATE_DIR}/mqtt_identity.json*", f"{STATE_DIR}/mqtt_cleanup_pending.json*",
 )
 KEEP_DEFAULT = 5
 INFO_MAX = 64 * 1024  # backup-info.json is a few hundred bytes; a huge one is a zip bomb

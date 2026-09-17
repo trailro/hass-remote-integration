@@ -22,7 +22,8 @@ from plain HTTP traffic. These are:
 
 - with a password set: any way to use the UI or the API without it, such as a
   path the check misses, a forged or replayed session after the password
-  changed or after a logout, or guessing faster than the lockout allows; also
+  changed or after a logout (other than the sessions a logout the volume could
+  not record gives back at a restart, a documented limit), or guessing faster than the lockout allows; also
   while `HRI_PASSWORD_FILE` is empty or unreadable, which must refuse every
   password;
 
@@ -36,7 +37,8 @@ from plain HTTP traffic. These are:
   search for key material returns nothing by design, but redaction of material
   that carries no marker and no name in front of it is best effort — a report
   needs a case where something the scrubber does name comes out unmasked;
-- the text of a log search, or a credential in a request URL, written to
+- the text of a log search (in any spelling of its path), or a credential in a
+  request URL, written to
   `process.log` or the container log; a log search answer (rows, `cursor`,
   truncation, the lines a Log files search read) that differs between a right
   and a wrong guess of a masked value;
