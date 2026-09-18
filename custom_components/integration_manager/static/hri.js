@@ -11,6 +11,15 @@ async function _answer(r){const text=await r.text(); try{return JSON.parse(text)
 async function post(url,body){return _answer(await fetch(url,{method:'POST',headers:{'content-type':'application/json','X-Requested-With':'fetch'},body:JSON.stringify(body||{})}));}
 async function del(url){return _answer(await fetch(url,{method:'DELETE',headers:{'X-Requested-With':'fetch'}}));}
 const log=m=>{console.log(m); const el=$('#flash'); if(el){el.textContent=m; clearTimeout(el._t); el._t=setTimeout(()=>{el.textContent=''},8000);}};
+// a fetch with the header the endpoint requires, saved under the server's file name or `fallback` (a plain link
+// cannot send it); a refusal (a probe already running: 429) is shown, not saved
+async function fetchDownload(b,path,label,fallback){b.disabled=true; try{
+  const r=await fetch(path,{headers:{'X-Requested-With':'fetch'}});
+  if(!r.ok){const j=await r.json().catch(()=>({})); alert(label+': '+(j.message||('HTTP '+r.status))); return;}
+  const name=((r.headers.get('Content-Disposition')||'').match(/filename="?([^";]+)"?/)||[])[1]||fallback;
+  const url=URL.createObjectURL(await r.blob()); const a=document.createElement('a'); a.href=url; a.download=name;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url),30000);
+ }catch(err){alert(label+': '+err);}finally{b.disabled=false;}}
 function chipBar(sel,counts,on,after){ $(sel).innerHTML=Object.keys(counts).sort().map(k=>`<span class="tag ${on.has(k)?'on':''}" data-k="${esc(k)}">${esc(k)} ${counts[k]}</span>`).join('');
  document.querySelectorAll(sel+' .tag').forEach(t=>t.onclick=()=>{const k=t.dataset.k;on.has(k)?on.delete(k):on.add(k);after();}); }
 
