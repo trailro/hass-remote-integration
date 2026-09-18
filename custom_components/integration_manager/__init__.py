@@ -23,7 +23,7 @@ from .import_views import ImportApplyAllView, ImportApplyView, ImportClearView, 
 from .devices_page import DeviceActionView, DevicesApiView, DevicesPageView
 from .entities_page import EntitiesApiView, EntitiesPageView, EntityActionView
 from .logs_page import LogLevelView, LoggersApiView, LogsApiView, LogsPageView
-from .logfiles_page import LogFilesPageView, LogFilesView, LogFileTailView
+from .logfiles_page import LogFileDownloadView, LogFilesPageView, LogFilesView, LogFileTailView
 from .services_page import ServiceCallView, ServicesApiView, ServicesPageView
 from .ha_updater import HaUpdater
 from .scheduler import Scheduler
@@ -235,6 +235,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         LogFilesPageView(),
         LogFilesView(hass, installer),
         LogFileTailView(hass, installer),
+        LogFileDownloadView(hass, installer),
         MemoryDiagView(hass),
         ManagerStatusView(manager_device),
         ManagerHistoryView(manager_device),
