@@ -47,6 +47,27 @@ async function ha(force){
   $('#haver').innerHTML=list.map(v=>`<option ${v===pick?'selected':''}>${esc(v)}</option>`).join('');
   $('#hanote').textContent=h.pending?`wanted version ${h.desired}: applied at the next process restart (choose ${h.current} and Install selected version to cancel)`:'';
   haPlan($('#haver').value);
+  haCheckShow($('#haver').value);  // the cached verdict, if this version was already checked; never a new pip run from the 60 s refresh
+}
+// Whether the selected version's pinned requirements have a wheel for this image's Python.  Checked on the
+// server (pip, no install), cached there per version; here only the last answer per version, so re-selecting
+// a version is instant and the periodic refresh never asks again.
+const HACHK={};
+function haCheckText(c){
+  if(!c) return '';
+  if(!c.ok) return `<span class="bad">unlikely to install: ${esc((c.blockers||[]).join('; '))}</span>`;
+  if(c.checked===false) return `<span class="mut">${esc((c.notes||[]).join('; ')||'not checked')}</span>`;
+  return `<span class="ok">installs here</span> <span class="mut">${esc((c.notes||[]).join('; '))}</span>`;
+}
+function haCheckShow(v){ $('#hacheck').innerHTML=v?haCheckText(HACHK[v]):''; }
+async function haCheck(v){
+  if(!v) return null;
+  if(HACHK[v]){haCheckShow(v);return HACHK[v];}
+  $('#hacheck').innerHTML='<span class="mut">checking the requirements of '+esc(v)+'…</span>';
+  const r=await post('api/ha/check',{version:v});
+  if(!r.ok){$('#hacheck').innerHTML=`<span class="warn">${esc(r.error||'check failed')}</span>`;return null;}
+  HACHK[v]=r.check; if($('#haver').value===v) haCheckShow(v);  // the selection may have moved on while pip ran
+  return r.check;
 }
 const vparts=s=>{const m=String(s).match(/^(\d+)\.(\d+)\.(\d+)(?:b(\d+))?$/); return m?[+m[1],+m[2],+m[3],m[4]===undefined?1:0,+(m[4]||0)]:String(s).split('.').map(Number);};
 const vcmp=(a,b)=>{const x=vparts(a),y=vparts(b);for(let i=0;i<Math.max(x.length,y.length);i++){const d=(x[i]||0)-(y[i]||0);if(d)return d;}return 0;};  // a beta sorts before its release
@@ -74,7 +95,13 @@ async function haSet(v,action){
     rebuild:`Home Assistant ${v} starts with a clean configuration and the integration is rebuilt from the backup taken now.`,
     keep:down?'The current configuration is kept.':'The new version migrates the configuration as usual.'}[mode];
   if(!confirm(`${action==='rollback'?'Roll back':'Switch'} to Home Assistant ${v} and restart the process?\n\n- A backup of the current configuration is taken first.\n- ${cfg}\n- A version that is not installed yet takes a few minutes; the current venv is kept for rollback.`))return;
-  const r=await post('api/ha/'+action,action==='update'?{version:v,config:mode}:{config:mode}); if(!r.ok){log('ERROR: '+r.error);return;}
+  let r=await post('api/ha/'+action,action==='update'?{version:v,config:mode}:{config:mode});
+  if(!r.ok&&r.needs_force){
+    HACHK[v]=r.check; haCheckShow(v);
+    if(!confirm(`Home Assistant ${v} is unlikely to install:\n\n- ${(r.check&&r.check.blockers||[r.error]).join('\n- ')}\n\nThe container would fall back to ${HA.current} after pip fails. Schedule it anyway?`)){log('ERROR: '+r.error);return;}
+    r=await post('api/ha/'+action,{version:v,config:mode,force:true});
+  }
+  if(!r.ok){log('ERROR: '+r.error);return;}
   if((r.warnings||[]).length&&!confirm(`Home Assistant ${v} is scheduled, but:\n\n- ${r.warnings.join('\n- ')}\n\nRestart now? (Cancel keeps it scheduled: choose the running version to drop it.)`)){ log(`HA ${v} scheduled, not restarted: ${r.warnings.join(' · ')}`); ha(); return; }
   const rr=await post('api/restart'); if(!rr.ok){log('ERROR: '+rr.error);return;}
   log(`HA ${v} scheduled, backup ${r.backup}${r.restore?', configuration from '+r.restore:''}${r.config==='rebuild'?', clean start with rebuild':''}; restarting…`); setTimeout(()=>location.reload(),8000);
@@ -82,7 +109,8 @@ async function haSet(v,action){
 let HA=null;
 $('#haupdate').onclick=()=>haSet($('#haupdate').dataset.v,'update');
 $('#hapick').onclick=()=>haSet($('#haver').value,'update');
-$('#haver').onchange=()=>haPlan($('#haver').value);
+$('#haver').onchange=()=>{haPlan($('#haver').value); haCheck($('#haver').value);};
+$('#hacheckbtn').onclick=()=>{$('#hacheckbtn').disabled=true; delete HACHK[$('#haver').value]; haCheck($('#haver').value).finally(()=>{$('#hacheckbtn').disabled=false;});};
 $('#harefresh').onclick=()=>{$('#harefresh').disabled=true;ha(true).finally(()=>{$('#harefresh').disabled=false;});};
 $('#harollback').onclick=()=>{const v=HA&&HA.previous; if(!v)return; const sel=$('#haver'); if(![...sel.options].some(o=>o.value===v)) sel.add(new Option(v,v));
   const shown=$('#haplan').dataset.v===v; sel.value=v;

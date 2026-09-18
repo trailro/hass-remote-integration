@@ -183,7 +183,25 @@ class HaUpdater:
 
             py = ".".join(str(x) for x in sys.version_info[:3])
             if not SpecifierSet(spec).contains(py, prereleases=True):
-                raise ValueError(f"{version} needs Python {spec}; this image has {py} (rebuild the image first)")
+                # reads like the dependency refusal in preflight.ha_version_report: what the version needs,
+                # what this image has, what to do about it
+                raise ValueError(f"Home Assistant {version} needs Python {spec}; this image has {py} "
+                                 "(rebuild the image with that Python, or choose a newer Home Assistant version)")
+
+    async def dependency_check(self, version: str) -> dict[str, Any]:
+        """The other half of ``validate``: that one refuses a version this
+        image's Python cannot run (``requires_python``), this one a version
+        whose pinned requirements have no wheel for it.  Both are about the
+        image's Python, not about policy.  A venv already installed for this
+        Python is not resolved again: the entrypoint boots it as it is."""
+        from . import preflight
+
+        version = version.strip()
+        if await self.hass.async_add_executor_job(self._venv_for_this_python, version):
+            return {"version": version, "ok": True, "checked": False, "blockers": [], "warnings": [],
+                    "notes": [f"Home Assistant {version} is already installed for this Python: nothing to resolve"],
+                    "missing": [], "python": sys.version.split()[0]}
+        return await preflight.ha_version_report(self.hass, version)
 
     async def async_set_desired(self, version: str) -> dict[str, Any]:
         """Like set_desired, but validated first (otherwise the entrypoint
