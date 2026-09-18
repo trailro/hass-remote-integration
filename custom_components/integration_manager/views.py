@@ -294,15 +294,35 @@ class HaActionView(ManagerView):
         """
         if request.content_type != "application/json":
             return self.json_message("Content-Type must be application/json", status_code=400)
-        if action not in ("update", "rollback"):
+        if action not in ("update", "rollback", "check"):
             return self.json_message("unknown action", status_code=400)
         hass = self.installer.hass
         try:
             body = await _json_object(request)
+            if action == "check":
+                # read-only: what the System page shows for the version in the selector.  Nothing is
+                # scheduled, so a version this image's Python cannot run answers here instead of raising.
+                target = str(body.get("version", "")).strip()
+                if target == HA_VERSION:
+                    return self.json({"ok": True, "check": {"version": target, "ok": True, "checked": False, "blockers": [], "warnings": [],
+                                                            "notes": [f"Home Assistant {target} is the version running now"], "missing": []}})
+                try:
+                    await self.updater.validate(target)
+                except ValueError as err:
+                    return self.json({"ok": True, "check": {"version": target, "ok": False, "checked": True, "blockers": [str(err)],
+                                                            "warnings": [], "notes": [], "missing": []}})
+                return self.json({"ok": True, "check": await self.updater.dependency_check(target)})
             if action == "update":
                 target = str(body.get("version", "")).strip()
                 if target != HA_VERSION:
                     await self.updater.validate(target)
+                    # before anything is scheduled and before the restart: an older release pins requirements
+                    # that have no wheel for this image's Python, and pip only finds that out minutes into the
+                    # install, after which the container falls back.  force: the operator knows better (a
+                    # compiler added with HRI_APT_PACKAGES, for example).
+                    if body.get("force") is not True and not (check := await self.updater.dependency_check(target))["ok"]:
+                        return self.json({"ok": False, "needs_force": True, "check": check,
+                                          "error": "; ".join(check["blockers"])})
             else:
                 target = await hass.async_add_executor_job(self.updater.previous_version)
             if target == HA_VERSION:
@@ -318,6 +338,8 @@ class HaActionView(ManagerView):
                             version=HA_VERSION)
                 return self.json({"ok": True, "desired": HA_VERSION, "cancelled": desired, "dropped": dropped})
             result = await async_change_ha_version(self.installer, self.updater, target, str(body.get("config") or "keep"), action)
+            if action == "update" and body.get("force") is True:
+                events.emit("ha", f"Home Assistant {target} scheduled with the dependency check skipped (force)", version=target)
         except (ValueError, BadRequest) as err:
             return self.json({"ok": False, "error": str(err)})
         except OSError as err:  # a full disk while backing up, an unreadable backup
