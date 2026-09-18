@@ -5,7 +5,8 @@ entries (any string value ending in .log, plus rotated siblings), the
 registry's ``log_dir`` directory, and ``*.log`` / ``*.log.*`` files in the
 config dir root that are not Home Assistant's own.  ``/logfiles`` is the
 page, ``/api/log_files`` the file list and ``/api/log_files/tail`` the last
-lines of one file (default 50).
+lines of one file (default 50) and ``/api/log_files/download`` the whole
+of one file, masked the same way and streamed as an attachment.
 
 How a line becomes columns is the user's ``log_format`` setting (rules in
 ``clean_log_format``); without one, or when a line does not match, the line
@@ -13,6 +14,8 @@ is shown whole."""
 
 from __future__ import annotations
 
+import codecs
+import errno
 import functools
 import hashlib
 import hmac
@@ -20,6 +23,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import time
 from typing import Any
 from urllib.parse import unquote_plus
@@ -32,6 +36,7 @@ except ImportError:  # pragma: no cover - requirements.txt installs it
 from aiohttp import web
 from homeassistant.core import HomeAssistant
 
+from .hostguard import CSP
 from .http_util import ManagerView
 from .ui import load_template, render
 
@@ -44,6 +49,14 @@ MAX_SCAN_BYTES = 32 * 1024 * 1024  # a filter that matches nothing must not read
 # instead of at the byte budget.  Counted on every line the rules could change, whatever the search is for, so
 # where a search stops says nothing about what the rules hide
 MAX_MASKED_OUT = 20_000
+# a download sends the last MAX_SCAN_BYTES of a longer file: the tail's budget, for the same reason.  Masking is
+# what the operator is given the file for and it costs per line, so an uncapped download would hold an executor
+# thread for as long as the log is long (and the page hands the answer to the browser as one blob).  The last
+# bytes are the newest lines, which is what a log is downloaded for; the answer says so in the file name and in
+# the X-Log-Truncated header, and the page says so next to the button
+DOWNLOAD_CHUNK = 256 * 1024  # text masked per executor job: the event loop runs between chunks
+MAX_LINE_CHARS = 1024 * 1024  # a file with no newline in it must not be held whole before it can be masked
+MAX_DOWNLOAD_NAME = 120
 # what the one-line rules of diagnostics._scrub_one_line_rules need to find before they change a line: a line
 # holding none of these, as it is or percent-decoded (logbuffer.mask_query_secrets decides on the decoded name and
 # path: ?%73ession=), comes out of them unchanged, so the search skips them for it.  A rule added there needs its
@@ -389,6 +402,145 @@ def _tail_masked(path: str, lines: int, needle: str) -> tuple[list[str], int]:
     return [line for line in scrub_lines(found) if needle.lower() in line.lower()], scanned
 
 
+def _mask_forward_lines(lines: list[str], in_block: bool) -> tuple[list[str], bool]:
+    """``lines`` masked for a read that goes forward through a file, plus the
+    key-block state to hand to the next batch.
+
+    diagnostics.scrub_lines does the masking the page shows (a whole PEM
+    block, key material with no marker left above it, and the one-line
+    rules), and it only sees the batch it is given: a block whose ``BEGIN``
+    line was in an earlier batch is not a block to it.  So the marker is
+    tracked here across batches, and every line below such a ``BEGIN`` is
+    masked whole until the ``END`` marker, whatever it holds.
+    diagnostics.mask_key_material_lines carries the same state the other way,
+    for a tail, which reads backwards from an ``END`` marker upwards."""
+    from .diagnostics import scrub_lines  # diagnostics imports this module
+
+    inside = []
+    for line in lines:
+        begin, end = "-----BEGIN " in line, "-----END " in line
+        inside.append(in_block and not end)
+        if begin or end:
+            in_block = begin and not end  # a marker pair on one line opens nothing
+    return ["***" if hidden else text for hidden, text in zip(inside, scrub_lines(lines))], in_block
+
+
+class _MaskedDownload:
+    """Blocking: one log file read forward and masked, a chunk at a time.
+
+    The file is never held: a chunk of text is read, masked and handed to the
+    caller, which writes it to the response before asking for the next one.
+    A file longer than MAX_SCAN_BYTES is sent from its end (the newest lines,
+    as a tail), starting at the first whole line; ``truncated`` says so."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.truncated = False
+        self._fh: Any = None
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")  # a multi-byte character across a chunk boundary
+        self._pending = ""
+        self._in_block = False
+        self._left = MAX_SCAN_BYTES
+
+    def open(self) -> None:
+        """Raises OSError (the view answers 404) when the file is gone, is a
+        link, or has more than one name."""
+        fd = os.open(self.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+                # the listing skips a symlink and a file with more than one hard link (see _log_files), but it
+                # was taken before this request: the file that is actually opened is checked again here, so a
+                # name that became a link meanwhile cannot hand out secrets.yaml
+                raise OSError(errno.EPERM, "not a plain file with a single name")
+            self._fh = open(fd, "rb")
+        except BaseException:
+            os.close(fd)
+            raise
+        size = self._fh.seek(0, os.SEEK_END)
+        start = max(0, size - MAX_SCAN_BYTES)
+        self._fh.seek(start)
+        if start:
+            self.truncated = True
+            self._fh.readline(MAX_LINE_CHARS)  # the line the cut fell in: dropped rather than sent as half a line
+
+    def chunk(self) -> bytes:
+        """The next masked chunk, or b"" at the end of what is sent."""
+        while True:
+            raw = self._fh.read(min(DOWNLOAD_CHUNK, self._left)) if self._left > 0 else b""
+            self._left -= len(raw)
+            self._pending += self._decoder.decode(raw, not raw)
+            if not raw:
+                lines, self._pending = ([self._pending] if self._pending else []), ""
+                return self._masked(lines, terminated=False)  # the file's last line, as it ended
+            lines = self._pending.split("\n")
+            self._pending = lines.pop()  # a line the chunk cut in two: masked with the rest of it, next round
+            terminated = True
+            if len(self._pending) > MAX_LINE_CHARS:
+                # a file with no newline in it: sent on without one, so what follows joins it again
+                lines.append(self._pending)
+                self._pending, terminated = "", False
+            if lines:
+                return self._masked(lines, terminated)
+
+    def _masked(self, lines: list[str], terminated: bool) -> bytes:
+        if not lines:
+            return b""
+        masked, self._in_block = _mask_forward_lines(lines, self._in_block)
+        return ("\n".join(masked) + ("\n" if terminated else "")).encode("utf-8")
+
+    def close(self) -> None:
+        if self._fh is not None:
+            self._fh.close()
+            self._fh = None
+
+
+def _download_name(masked_name: str, truncated: bool) -> str:
+    """A file name for the Content-Disposition, from the masked name the
+    listing shows: the real name is never given out, and what is left is cut
+    down to what every file system takes (the mask itself writes ``***``).
+
+    A mask can take the extension with it (``session-token=alpha.log`` is
+    masked from the ``=`` on), so a name left without one gets ``.log``: what
+    is saved is a log file and should open as one."""
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", masked_name)[-MAX_DOWNLOAD_NAME:].strip("-.") or "log"
+    if not os.path.splitext(safe)[1]:
+        safe += ".log"
+    if truncated:
+        root, ext = os.path.splitext(safe)
+        safe = f"{root}-last-{MAX_SCAN_BYTES // (1024 * 1024)}MiB{ext}"
+    return safe
+
+
+async def _select_file(hass: HomeAssistant, installer, query) -> tuple[dict[str, Any] | None, str | None, int]:
+    """(file, refusal, status) for the file ``query`` names in the listing as
+    it is now, shared by the tail and the download so both are reached the
+    same way.
+
+    Never an arbitrary path: a file of this listing, by its id (the page) or
+    by the masked name the listing shows (an API caller).  Not by its real
+    name, which the listing never gives out and which would confirm a guess
+    at what the mask hides.  An empty listing is (None, None, 0): what to
+    answer for it is the caller's."""
+    from .diagnostics import scrub  # diagnostics imports this module
+
+    files = await hass.async_add_executor_job(
+        _log_files, hass.config.config_dir, installer, _entry_paths(hass, installer.running))
+    if not files:
+        return None, None, 0
+    if query.get("id"):
+        matches = [f for f in files if _file_id(f["name"]) == query["id"]]
+    elif query.get("file"):
+        matches = [f for f in files if scrub(f["name"]) == query["file"]]
+    else:
+        matches = files[:1]
+    if not matches:
+        return None, "unknown file", 404
+    if len(matches) > 1:
+        return None, "several log files show this name: select the file by its id", 409
+    return matches[0], None, 200
+
+
 def _format_lines(fmt: dict[str, Any], raw_lines: list[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
     """(columns, rows, error); a row has ``cells`` (None when the line did not
     match), ``raw`` and ``color``.  Matching has a time budget per request:
@@ -474,27 +626,70 @@ class LogFileTailView(ManagerView):
         except ValueError:
             return self.json_message("lines must be an integer", status_code=400)
         fmt, fmt_error = await self.hass.async_add_executor_job(clean_log_format, self.installer.settings.data.get("log_format"))
-        files = await self.hass.async_add_executor_job(_log_files, self.hass.config.config_dir, self.installer, _entry_paths(self.hass, self.installer.running))
-        if not files:
-            return self.json({"path": None, "bytes": None, "columns": [], "lines": [], "total_lines_scanned": 0, "format_error": fmt_error})
-        # never open arbitrary paths: a file of this listing, by its id (the page) or by the masked name the
-        # listing shows (an API caller).  Not by its real name: the listing never gives that out, and accepting
-        # it would confirm a guess of what the mask hides
-        if q.get("id"):
-            matches = [f for f in files if _file_id(f["name"]) == q["id"]]
-        elif q.get("file"):
-            matches = [f for f in files if scrub(f["name"]) == q["file"]]
-        else:
-            matches = files[:1]
-        if not matches:
-            return self.json_message("unknown file", status_code=404)
-        if len(matches) > 1:
-            return self.json_message("several log files show this name: select the file by its id", status_code=409)
-        chosen = matches[0]
+        chosen, refusal, status = await _select_file(self.hass, self.installer, q)
+        if chosen is None:
+            if not status:  # no log file at all: an empty window, not an error
+                return self.json({"path": None, "bytes": None, "columns": [], "lines": [], "total_lines_scanned": 0, "format_error": fmt_error})
+            return self.json_message(refusal, status_code=status)
         try:
             raw_lines, scanned = await self.hass.async_add_executor_job(_tail_masked, chosen["path"], lines, q.get("q", ""))
         except OSError as err:
-            return self.json_message(f"cannot read the file (rotated away?): {err}", status_code=404)
+            # strerror, not the exception: its text carries the path it failed on
+            return self.json_message(f"cannot read the file (rotated away?): {err.strerror or type(err).__name__}", status_code=404)
         columns, rows, slow = await self.hass.async_add_executor_job(_format_lines, fmt, raw_lines)
         return self.json({"path": scrub(chosen["path"]), "bytes": chosen["bytes"], "total_lines_scanned": scanned,
                           "columns": columns, "lines": rows, "format_error": fmt_error or slow})
+
+
+class LogFileDownloadView(ManagerView):
+    """The whole of one log file, masked as the page masks it, as an attachment.
+
+    The gates are the tail's: the header this UI sends, and a file of the
+    current listing reached by its id or its masked name, so a link on any
+    page cannot pull a log and no path can be asked for.  Masking runs on the
+    stream, chunk by chunk in the executor, so the answer is never built in
+    memory and a long file cannot be handed over faster than it can be
+    masked.  A file longer than MAX_SCAN_BYTES is sent from its end and the
+    answer says so (the file name, and X-Log-Truncated)."""
+
+    url = "/api/log_files/download"
+
+    def __init__(self, hass: HomeAssistant, installer) -> None:
+        self.hass = hass
+        self.installer = installer
+
+    async def get(self, request: web.Request) -> web.StreamResponse:
+        if request.headers.get("X-Requested-With") != "fetch":
+            return self.json_message("X-Requested-With: fetch required", status_code=400)  # a log file is for this UI, not for any page's requests
+        from .diagnostics import scrub  # diagnostics imports this module
+
+        chosen, refusal, status = await _select_file(self.hass, self.installer, request.query)
+        if chosen is None:
+            return self.json_message(refusal or "the running integration writes no log file", status_code=status or 404)
+        reader = _MaskedDownload(chosen["path"])
+        try:
+            await self.hass.async_add_executor_job(reader.open)
+        except OSError as err:
+            # strerror, not the exception: its text carries the path it failed on
+            return self.json_message(f"cannot read the file (rotated away, or no longer a plain file): "
+                                     f"{err.strerror or type(err).__name__}", status_code=404)
+        name = _download_name(scrub(chosen["name"]), reader.truncated)
+        response = web.StreamResponse(headers={
+            "Content-Disposition": f'attachment; filename="{name}"',
+            "Content-Type": "text/plain; charset=utf-8",
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            # prepared inside the handler, so the host guard no longer gets to put the policy on it
+            "Content-Security-Policy": CSP,
+            **({"X-Log-Truncated": str(MAX_SCAN_BYTES)} if reader.truncated else {}),
+        })
+        try:
+            await response.prepare(request)
+            while chunk := await self.hass.async_add_executor_job(reader.chunk):
+                await response.write(chunk)
+            await response.write_eof()
+        except OSError:
+            pass  # rotated away while it was being sent: the answer has begun, so it can only end short
+        finally:
+            await self.hass.async_add_executor_job(reader.close)
+        return response
