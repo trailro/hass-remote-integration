@@ -59,6 +59,8 @@ STATUS_RETRY_AFTER_S = 5  # the install page refreshes itself this often; client
 STATE_DIR = os.path.join(CONFIG_DIR, "integration_manager")
 HA_FILE = os.path.join(STATE_DIR, "ha.json")
 LOG_FILE = os.path.join(STATE_DIR, "ha-install.log")
+APT_LOG_FILE = os.path.join(STATE_DIR, "apt-install.log")  # what apt wrote at the last boot that ran it
+APT_LISTS_DIR = "/var/lib/apt/lists"
 REBUILD_FILE = os.path.join(STATE_DIR, "rebuild-pending.json")  # custom_components/integration_manager/ha_import.py
 CONSTRAINTS_URL = "https://raw.githubusercontent.com/home-assistant/core/{version}/homeassistant/package_constraints.txt"
 PYPI_URL = "https://pypi.org/pypi/homeassistant/json"
@@ -370,15 +372,17 @@ def _written(out) -> int:
         return -1
 
 
-def _run_pip(cmd: list[str], out, idle_timeout: float = PIP_IDLE_TIMEOUT_S) -> None:
+def _run_pip(cmd: list[str], out, idle_timeout: float = PIP_IDLE_TIMEOUT_S, env: dict[str, str] | None = None) -> None:
     """subprocess.run(check=True), with pip in its own process group: a kill takes the whole group, also the
     build backends pip started (a kill of pip alone left those running).
 
     The budget is on silence, not on the whole run: the fixed wall clock it replaced killed an install that was
     still working (a small machine, a slow mirror, a big wheel) and then threw the venv away, so the retry
     started from zero and ran into the same wall.  pip writes a line per package into ``out``, so the file
-    growing is progress; nothing written for ``idle_timeout`` is a hang and still ends the install."""
-    with subprocess.Popen(cmd, stdout=out, stderr=subprocess.STDOUT, start_new_session=True) as proc:
+    growing is progress; nothing written for ``idle_timeout`` is a hang and still ends the install.
+
+    apt runs through this too (see _apt_install): it writes a line per package the same way."""
+    with subprocess.Popen(cmd, stdout=out, stderr=subprocess.STDOUT, start_new_session=True, env=env) as proc:
         try:
             written, deadline = -1, time.monotonic() + idle_timeout
             poll = max(0.05, min(PIP_POLL_S, idle_timeout))  # never sleep past the deadline (a short budget in a test)
@@ -401,6 +405,100 @@ def _run_pip(cmd: list[str], out, idle_timeout: float = PIP_IDLE_TIMEOUT_S) -> N
             raise
     if rc:
         raise subprocess.CalledProcessError(rc, cmd)
+
+
+# Debian package names (policy 5.6.1: at least two characters, lowercase letters, digits, "+", "-", "."), with the
+# optional :architecture.  What HRI_APT_PACKAGES holds goes into apt-get's argv, so anything else in it - an option,
+# a URL, a path, a shell metacharacter - is not a package and is never passed on (nothing here sees a shell either).
+APT_PACKAGE_RE = re.compile(r"[a-z0-9][a-z0-9+.-]+(?::[a-z0-9][a-z0-9-]*)?")
+
+
+def apt_packages_wanted() -> tuple[list[str], list[str]]:
+    """(packages, refused) from HRI_APT_PACKAGES: names separated by spaces or commas, duplicates dropped."""
+    packages: list[str] = []
+    refused: list[str] = []
+    for token in re.split(r"[\s,]+", os.environ.get("HRI_APT_PACKAGES", "").strip()):
+        if not token:
+            continue
+        if not APT_PACKAGE_RE.fullmatch(token):
+            refused.append(token)
+        elif token not in packages:
+            packages.append(token)
+    return packages, refused
+
+
+def _dpkg_installed(name: str) -> bool:
+    """One dpkg-query per package: a name that is not installed is an error exit, not a line, so asking for them
+    together cannot say which of them is missing.  No dpkg at all (another base image, a test): let apt decide."""
+    try:
+        proc = subprocess.run(["dpkg-query", "-W", "-f=${db:Status-Status}", name],
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and proc.stdout.decode("utf-8", errors="replace").strip() == "installed"
+
+
+def _clean_apt_lists() -> None:
+    """The package lists apt-get update downloaded (tens of MB) are of no use after the install, as in the
+    Dockerfile; the directory itself stays, apt-get needs it."""
+    for name in os.listdir(APT_LISTS_DIR) if os.path.isdir(APT_LISTS_DIR) else []:
+        path = os.path.join(APT_LISTS_DIR, name)
+        try:
+            shutil.rmtree(path) if os.path.isdir(path) and not os.path.islink(path) else os.remove(path)
+        except OSError:
+            pass
+
+
+def _apt_install(packages: list[str]) -> None:
+    """apt-get update + install into the container, no shell anywhere; raises like an install that failed.
+    Its output goes to apt-install.log (one install per file, as ha-install.log), not into the container log."""
+    env = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}  # a package asking a question would hang the boot
+    with open(APT_LOG_FILE, "w", encoding="utf-8") as fh:
+        fh.write(f"# apt-get install {' '.join(packages)}, {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        fh.flush()
+        # the same idle budget as pip: a slow mirror runs on, a run that writes nothing for 15 minutes is a hang
+        _run_pip(["apt-get", "update"], fh, env=env)
+        _run_pip(["apt-get", "install", "-y", "--no-install-recommends", *packages], fh, env=env)
+    _clean_apt_lists()
+
+
+def ensure_apt_packages(state: dict) -> None:
+    """Install what HRI_APT_PACKAGES asks for before Home Assistant starts: the system components pip cannot
+    install (the ffmpeg binary, BlueZ), which the image does not carry for every user.  Nothing of this is
+    fatal - a refused name, no network, an unknown package: it is logged, recorded in ha.json for the System
+    page, and the boot goes on without them (the integration that needs them then fails, visibly)."""
+    packages, refused = apt_packages_wanted()
+    if not packages and not refused:
+        state.pop("apt", None)  # the variable is gone: the record of an earlier boot no longer describes this one
+        return
+    record = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "packages": packages, "refused": refused, "ok": True, "error": "", "note": ""}
+    if refused:
+        log(f"HRI_APT_PACKAGES: not a Debian package name, nothing installed for {', '.join(refused)}")
+        record.update(ok=False, error=f"not a Debian package name: {', '.join(refused)}")
+    if not packages:
+        record["note"] = "nothing to install"
+        state["apt"] = record
+        return
+    _phase(f"checking the system packages from HRI_APT_PACKAGES: {', '.join(packages)}")
+    missing = [p for p in packages if not _dpkg_installed(p)]
+    if not missing:
+        # a restart must not download hundreds of MB again
+        log(f"system packages already installed: {', '.join(packages)}")
+        record["note"] = "already installed"
+        state["apt"] = record
+        return
+    _phase(f"installing the system packages {', '.join(missing)} (apt-get, a few minutes)")
+    log(f"apt-get install {' '.join(missing)} (output in {os.path.relpath(APT_LOG_FILE, CONFIG_DIR)})")
+    try:
+        _apt_install(missing)
+    except Exception as err:  # noqa: BLE001
+        log(f"installing the system packages FAILED ({err}); booting without them, see {os.path.relpath(APT_LOG_FILE, CONFIG_DIR)}")
+        record.update(ok=False, note=f"not installed: {', '.join(missing)}", error=f"{type(err).__name__}: {err}")
+        state["apt"] = record
+        return
+    log(f"installed the system packages {', '.join(missing)}")
+    record["note"] = f"installed {', '.join(missing)}"
+    state["apt"] = record
 
 
 def install(version: str) -> bool:
@@ -887,6 +985,9 @@ def _prepare() -> str:
     clean_import_leftovers()
     state = load_state()
     merge_applied_restore(state)
+    # before anything pip does: a wheel that links against a system library, and Home Assistant itself
+    # (the ffmpeg binary), find what the operator asked for already there
+    ensure_apt_packages(state)
     wanted = state.get("desired") or state.get("current")
     if not wanted:
         # Fresh volume: start from the newest stable HA, not the version the

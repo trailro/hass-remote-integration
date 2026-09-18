@@ -149,6 +149,7 @@ class HaUpdater:
             "previous": state.get("previous"),
             "change": state.get("change"),  # {to, mode, backup, applied?} until that version booted
             "installed_venvs": venvs,
+            "apt": state.get("apt"),  # what the entrypoint did with HRI_APT_PACKAGES at this boot (None: unset)
             "last_error": state.get("last_error", ""),
             "pending": bool(state.get("desired")) and state.get("desired") != current,
             "update_available": bool(avail.get("latest_stable")) and _key(avail["latest_stable"]) > _key(current),
