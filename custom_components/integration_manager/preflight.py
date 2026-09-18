@@ -290,8 +290,12 @@ def _system_dep_warnings(requirements: list[str]) -> list[str]:
     """Blocking (it looks at the filesystem): one line per requirement of _SYSTEM_DEPS whose program or
     library this container does not have.  A package whose system dependency is there says nothing."""
     out: list[str] = []
-    for name in dict.fromkeys(_req_name(req) for req in requirements if req):
-        if not (entry := _SYSTEM_DEPS.get(_canon(name))):
+    seen: dict[str, str] = {}  # the same package twice (a manifest requirement pip also resolved) warns once
+    for req in requirements:
+        name = _req_name(req) if req else ""
+        seen.setdefault(_canon(name), name)
+    for key, name in seen.items():
+        if not (entry := _SYSTEM_DEPS.get(key)):
             continue
         missing = [f"the program {b}" for b in entry[0] if not _present("bin", b)]
         missing += [f"the library {lib}" for lib in entry[1] if not _present("lib", lib)]
