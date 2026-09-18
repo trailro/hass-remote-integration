@@ -28,8 +28,57 @@ ghState().catch(()=>{});
 // fetchDownload is in hri.js: the Log files page downloads a log file the same way
 $('#diagzip').onclick=()=>fetchDownload($('#diagzip'),'api/diagnostics','Diagnostics zip','hri-diagnostics.zip');
 $('#memsnap').onclick=()=>fetchDownload($('#memsnap'),'api/diag/memory','Memory snapshot',`hri-memory-${new Date().toISOString().slice(0,19).replace(/[-:]/g,'')}.json`);
+const vparts=s=>{const m=String(s).match(/^(\d+)\.(\d+)\.(\d+)(?:b(\d+))?$/); return m?[+m[1],+m[2],+m[3],m[4]===undefined?1:0,+(m[4]||0)]:String(s).split('.').map(Number);};
+const vcmp=(a,b)=>{const x=vparts(a),y=vparts(b);for(let i=0;i<Math.max(x.length,y.length);i++){const d=(x[i]||0)-(y[i]||0);if(d)return d;}return 0;};  // a beta sorts before its release
+// Whether a version's pinned requirements have a wheel for this image's Python.  Checked on the server (pip,
+// no install), cached there per version for an hour; /api/ha hands over what that cache already holds, so
+// painting the list and the selection costs nothing and the 60 s refresh never starts a pip run.
+const HACHK={};
+function haCheckText(c){
+  if(!c) return '';
+  if(!c.ok) return `<span class="bad">unlikely to install: ${esc((c.blockers||[]).join('; '))}</span>`;
+  if(c.checked===false) return `<span class="mut">${esc((c.notes||[]).join('; ')||'not checked')}</span>`;
+  return `<span class="ok">installs here</span> <span class="mut">${esc((c.notes||[]).join('; '))}</span>`;
+}
+// what is known about a version without asking anything: an answer already in hand, or the image's baseline -
+// everything below it is refused before an install is scheduled, and that is arithmetic, not a check
+function haKnown(v){
+  if(HACHK[v]) return HACHK[v];
+  const b=HA&&HA.baseline;
+  return b&&v&&vcmp(v,b)<0?{version:v,ok:false,checked:true,missing:[],warnings:[],notes:[],
+    blockers:[`${v} is older than this image's baseline ${b}; not installable here`]}:null;
+}
+function haCheckShow(v){ $('#hacheck').innerHTML=v?haCheckText(haKnown(v)):''; }
+// the mark a version carries in the list; nothing is claimed about one nobody has checked
+function haMark(v){
+  const c=haKnown(v);
+  if(c) return c.ok===false?' ✗':(c.checked===false?'':' ✓');
+  return HA&&(HA.installed_venvs||[]).includes(v)?' ✓':'';  // already on the volume: it boots as it is
+}
+async function haCheck(v){
+  if(!v) return null;
+  const known=haKnown(v); if(known&&(HACHK[v]||!known.ok)){haCheckShow(v);return known;}  // answered, or refused before pip gets a say
+  $('#hacheck').innerHTML='<span class="mut">checking the requirements of '+esc(v)+'…</span>';
+  const r=await post('api/ha/check',{version:v});
+  if(!r.ok){$('#hacheck').innerHTML=`<span class="warn">${esc(r.error||'check failed')}</span>`;return null;}
+  HACHK[v]=r.check; if(HA) haOptions(HA);  // the answer becomes that version's mark in the list too
+  if($('#haver').value===v) haCheckShow(v);  // the selection may have moved on while pip ran
+  return r.check;
+}
+// The list: the newest few releases, plus everything this box already has - installed on the volume, running
+// now, scheduled, or the one a rollback goes back to - however old that is, so nothing an operator has can
+// fall off it.  "show all versions" asks /api/ha for the rest; nothing is lost either way.
+function haOptions(h){
+  const sel=$('#haver'), keep=sel.value, list=(h.all_versions||h.versions||[]).slice().reverse();
+  const pick=keep&&list.includes(keep)?keep:h.current;  // the 60 s refresh must not reset what the user chose
+  sel.innerHTML=list.map(v=>`<option value="${esc(v)}" ${v===pick?'selected':''}>${esc(v)}${haMark(v)}</option>`).join('');
+  $('#halistnote').textContent=h.all_versions?`all ${list.length} releases`
+    :`newest ${h.recent_n||list.length} of ${h.versions_total||list.length} releases, plus what this box has installed, runs or has scheduled`;
+}
 async function ha(force){
-  const h=await (await fetch('api/ha'+(force?'?refresh=1':''),{headers:{'X-Requested-With':'fetch'}})).json(); HA=h;
+  const q=[force?'refresh=1':'',$('#haall').checked?'all=1':''].filter(Boolean).join('&');
+  const h=await (await fetch('api/ha'+(q?'?'+q:''),{headers:{'X-Requested-With':'fetch'}})).json(); HA=h;
+  Object.assign(HACHK,h.verdicts||{});  // what the server already knew: painted, never re-resolved
   $('#hacur').innerHTML=`<span class="ok">${esc(h.current)}</span> <span class="mut">python ${esc(h.python)}${h.in_venv?'':' · <span class="warn">not running from a venv (old image)</span>'}</span>`;
   $('#halatest').innerHTML=(h.latest_stable?`${esc(h.latest_stable)} <span class="mut">(${esc(h.latest_published||'')})</span>${h.update_available?' <span class="tag warn">update available</span>':' <span class="tag ok">up to date</span>'}`:`<span class="warn">${esc(h.error||'unknown')}</span>`)+` <span class="mut">· checked ${esc((h.checked_at||'').slice(11,16))}</span>`;
   $('#havenvs').textContent=(h.installed_venvs||[]).join(', ')||'—';
@@ -42,35 +91,11 @@ async function ha(force){
   $('#haerr').textContent=h.last_error||'—';
   $('#haupdate').textContent=`Update to ${h.latest_stable||'…'}`; $('#haupdate').disabled=!h.update_available; $('#haupdate').dataset.v=h.latest_stable||'';
   $('#harollback').disabled=!h.previous; $('#harollback').textContent=h.previous?`Roll back HA to ${h.previous}`:'Roll back HA';
-  const keep=$('#haver').value, list=(h.recent||[]).slice().reverse(); if(keep&&!list.includes(keep)&&keep===h.previous) list.push(keep);
-  const pick=keep&&list.includes(keep)?keep:h.current;  // the 60 s refresh must not reset what the user chose
-  $('#haver').innerHTML=list.map(v=>`<option ${v===pick?'selected':''}>${esc(v)}</option>`).join('');
+  haOptions(h);
   $('#hanote').textContent=h.pending?`wanted version ${h.desired}: applied at the next process restart (choose ${h.current} and Install selected version to cancel)`:'';
   haPlan($('#haver').value);
   haCheckShow($('#haver').value);  // the cached verdict, if this version was already checked; never a new pip run from the 60 s refresh
 }
-// Whether the selected version's pinned requirements have a wheel for this image's Python.  Checked on the
-// server (pip, no install), cached there per version; here only the last answer per version, so re-selecting
-// a version is instant and the periodic refresh never asks again.
-const HACHK={};
-function haCheckText(c){
-  if(!c) return '';
-  if(!c.ok) return `<span class="bad">unlikely to install: ${esc((c.blockers||[]).join('; '))}</span>`;
-  if(c.checked===false) return `<span class="mut">${esc((c.notes||[]).join('; ')||'not checked')}</span>`;
-  return `<span class="ok">installs here</span> <span class="mut">${esc((c.notes||[]).join('; '))}</span>`;
-}
-function haCheckShow(v){ $('#hacheck').innerHTML=v?haCheckText(HACHK[v]):''; }
-async function haCheck(v){
-  if(!v) return null;
-  if(HACHK[v]){haCheckShow(v);return HACHK[v];}
-  $('#hacheck').innerHTML='<span class="mut">checking the requirements of '+esc(v)+'…</span>';
-  const r=await post('api/ha/check',{version:v});
-  if(!r.ok){$('#hacheck').innerHTML=`<span class="warn">${esc(r.error||'check failed')}</span>`;return null;}
-  HACHK[v]=r.check; if($('#haver').value===v) haCheckShow(v);  // the selection may have moved on while pip ran
-  return r.check;
-}
-const vparts=s=>{const m=String(s).match(/^(\d+)\.(\d+)\.(\d+)(?:b(\d+))?$/); return m?[+m[1],+m[2],+m[3],m[4]===undefined?1:0,+(m[4]||0)]:String(s).split('.').map(Number);};
-const vcmp=(a,b)=>{const x=vparts(a),y=vparts(b);for(let i=0;i<Math.max(x.length,y.length);i++){const d=(x[i]||0)-(y[i]||0);if(d)return d;}return 0;};  // a beta sorts before its release
 function haPlan(v){
   const box=$('#haplan'); if(!HA||!v||vcmp(v,HA.current)>=0){box.hidden=true;box.innerHTML='';box.dataset.v='';return 'keep';}
   const b=(HA.config_backups||{})[v], was=box.dataset.v===v?(box.querySelector('input[name=haconfig]:checked')||{}).value:null;
@@ -110,6 +135,7 @@ let HA=null;
 $('#haupdate').onclick=()=>haSet($('#haupdate').dataset.v,'update');
 $('#hapick').onclick=()=>haSet($('#haver').value,'update');
 $('#haver').onchange=()=>{haPlan($('#haver').value); haCheck($('#haver').value);};
+$('#haall').onchange=()=>{$('#haall').disabled=true; ha().finally(()=>{$('#haall').disabled=false;});};
 $('#hacheckbtn').onclick=()=>{$('#hacheckbtn').disabled=true; delete HACHK[$('#haver').value]; haCheck($('#haver').value).finally(()=>{$('#hacheckbtn').disabled=false;});};
 $('#harefresh').onclick=()=>{$('#harefresh').disabled=true;ha(true).finally(()=>{$('#harefresh').disabled=false;});};
 $('#harollback').onclick=()=>{const v=HA&&HA.previous; if(!v)return; const sel=$('#haver'); if(![...sel.options].some(o=>o.value===v)) sel.add(new Option(v,v));

@@ -23,13 +23,15 @@ const BLOCKED = {
 const CLEAN = { version: '2026.9.2', ok: true, checked: true, missing: [], blockers: [], warnings: [], notes: ['all 48 pinned requirements have a wheel'] };
 const UNCHECKED = { version: '2026.6.0', ok: true, checked: false, missing: [], blockers: [], warnings: [], notes: ['could not check Home Assistant 2026.6.0: error: resolution-too-deep'] };
 
-// the check block, with its own $ and post
-function checker(answers) {
+// the check block, with its own $ and post.  HA is what /api/ha last answered; null here, so no baseline
+// arithmetic and no list repaint interferes with what the check itself paints (tests/js/ha_list.mjs has those)
+function checker(answers, HA = null) {
   const els = {}, sent = [];
   const $ = s => (els[s] ??= Object.assign(new El(s === '#haver' ? 'select' : 'div'), { id: s.slice(1) }));
   const post = async (url, body) => { sent.push([url, body]); return answers.shift(); };
-  const code = between('const HACHK={};', "$('#haver').onchange");
-  const api = new Function('$', 'post', 'esc', code + '\nreturn {haCheck, haCheckShow, HACHK};')($, post, esc);
+  const code = between('const HACHK={};', 'async function ha(force)');
+  const api = new Function('$', 'post', 'esc', 'HA', 'vcmp',
+    code + '\nreturn {haCheck, haCheckShow, HACHK};')($, post, esc, HA, (a, b) => (a === b ? 0 : a < b ? -1 : 1));
   return { $, sent, ...api };
 }
 
