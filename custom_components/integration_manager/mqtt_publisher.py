@@ -2986,6 +2986,21 @@ class MqttPublisher:
             # _publish_device_discovery adds the removal form for entity_id itself
             self._publish_device_discovery(disc_id, block, remaining)
             return
+        # never published by this process, only carried from the one before (excluded by a rule at this start, or
+        # still setting up): the carry has to end here too, or the config keeps announcing it to the consumer
+        key = _comp_key(entity_id)
+        for disc_id, comps in (self._boot_components or {}).items():
+            if key not in comps or (disc_id, key) in self._boot_removed:
+                continue
+            self._note_boot_removed(disc_id, [entity_id])
+            block = self._blocks.get(disc_id)
+            live = self._discovery_map.get(disc_id)
+            if block is None or live is None:
+                return  # no config of ours to correct: the full republish (or the sweep) clears the device
+            payload_comps = dict(live)
+            self._publish_device_discovery(disc_id, block, payload_comps, removed={key: comps[key].get("platform", entity_id.split(".", 1)[0])})
+            return
+            return
 
     # ----- events ----------------------------------------------------------
 

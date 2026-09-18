@@ -39,6 +39,31 @@ class LastLiveEntityRemovedTest(StartWindowCase):
         self.assertIsNone(self.raw_config())
 
 
+class CarriedEntityExcludedTest(StartWindowCase):
+    """Found end to end: an entity only the previous process announced (excluded by a rule at this start, or still
+    setting up) was excluded now.  Nothing of this process held it, so the carry went on and the main Home Assistant
+    kept the entity in full until the sweep five minutes later."""
+
+    LIVE, SETTING_UP = ("sensor.a",), ("sensor.b",)
+
+    async def test_the_carry_ends_and_the_removal_form_goes_out(self):
+        self.pub.rules.set("sensor.b", exclude=True)
+        self.pub._remove_component("sensor.b")
+        components = self.config()["components"]
+        self.assertEqual(components.get("sensor_b"), {"platform": "sensor"}, "sensor.b was still announced in full")
+        self.assertIn("unique_id", components.get("sensor_a", {}))  # the live one stays
+        await self.pub.async_republish_all()
+        self.assert_removed_for_good("sensor_b")
+
+    async def test_the_device_goes_when_its_last_live_entity_follows(self):
+        self.pub.rules.set("sensor.b", exclude=True)
+        self.pub._remove_component("sensor.b")
+        self.registry.entities.pop("sensor.a")
+        self.states.pop("sensor.a")
+        self.pub._on_registry(SimpleNamespace(data={"action": "remove", "entity_id": "sensor.a"}))
+        self.assertIsNone(self.raw_config(), "nothing left on the device: its config should be cleared")
+
+
 class GenuinelyLastEntityRemovedTest(StartWindowCase):
     """Nothing carried from an earlier process: the last entity of the device really is the last one."""
 
