@@ -18,7 +18,7 @@ from .installer import _DOMAIN_RE, Installer
 from .installer import save_lock as _save_lock
 from .installer import tag_ok as _tag_ok
 from .logfiles_page import clean_log_format
-from .settings import DEFAULTS, HEALTH_MODES
+from .settings import DEFAULTS, HEALTH_MODES, WATCHDOG_BOUNDS
 from .mqtt_publisher import MqttPublisher
 from .http_util import ManagerView, with_body
 
@@ -421,13 +421,13 @@ class SettingsView(ManagerView):
                 return self.json({"ok": False, "error": "backup_keep must be >= 0"})
             new["backup_keep"] = keep
         for key, lo, hi in (("smoke_test_s", 0, 86400), ("backup_daily_hour", 0, 23), ("health_stale_s", 60, 86400), ("health_unavailable_pct", 1, 100),
-                             ("resource_history_h", 1, 120)):
+                             ("resource_history_h", 1, 120), *((k, *b) for k, b in WATCHDOG_BOUNDS.items())):
             if key in body:
                 try:
                     new[key] = min(hi, max(lo, int(body[key])))
                 except (TypeError, ValueError, OverflowError):
                     return self.json({"ok": False, "error": f"{key} must be an integer"})
-        for key in ("auto_rollback", "release_check", "backup_daily"):
+        for key in ("auto_rollback", "release_check", "backup_daily", "watchdog"):
             if key in body:
                 if not isinstance(body[key], bool):
                     return self.json({"ok": False, "error": f"{key} must be true/false"})
