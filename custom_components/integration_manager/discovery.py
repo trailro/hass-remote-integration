@@ -562,6 +562,9 @@ def build_component(
     return comp
 
 
+# What the main HA's MQTT vacuum accepts as a state; anything else is dropped there, silently
+_VACUUM_ACTIVITIES = frozenset({"cleaning", "docked", "idle", "paused", "returning", "error"})
+
 # MQTT vacuum feature names and the VacuumEntityFeature bits they stand for
 _VACUUM_FEATURES = {"start": 8192, "pause": 4, "stop": 8, "return_home": 16, "status": 128, "locate": 512,
                     "clean_spot": 1024, "fan_speed": 32, "send_command": 256}
@@ -569,10 +572,19 @@ _VACUUM_FEATURES = {"start": 8192, "pause": 4, "stop": 8, "return_home": 16, "st
 
 def document_extras(state: State) -> dict[str, Any]:
     """Top-level keys of the entity document for an MQTT platform that reads the document without a value
-    template: MQTT vacuum takes `fan_speed` from the top level (always present, so a speed that goes away
-    clears on the main HA instead of keeping the last one).  The same values stay under `attributes`."""
+    template: MQTT vacuum takes `fan_speed` and `state` from the top level (fan_speed is always present, so
+    a speed that goes away clears on the main HA instead of keeping the last one).  The same values stay
+    under `attributes`, and `state` here replaces the document's own.
+
+    A vacuum is the one platform with no value template, so `_STATE_TPL` cannot turn an unknown state into
+    the no-value payload: MQTT vacuum drops any state that is not one of its six activities and keeps the
+    one it had, which left a stale activity on the main HA.  `null` is what that platform reads as "no
+    activity", which is what `unknown` means here; `unavailable` takes the entity offline through its
+    availability topic either way, and sending null with it keeps a stale activity from reappearing when
+    it comes back."""
     if state.entity_id.startswith("vacuum."):
-        return {"fan_speed": state.attributes.get("fan_speed")}
+        return {"fan_speed": state.attributes.get("fan_speed"),
+                "state": state.state if state.state in _VACUUM_ACTIVITIES else None}
     return {}
 
 

@@ -234,6 +234,21 @@ class VacuumStateTest(_HassCase):
         self.assertEqual((doc["state"], doc["fan_speed"]), ("docked", "standard"))
         self.assertNotIn("fan_speed", document(State("fan.f", "on", {"fan_speed": "x"})))
 
+    async def test_a_state_the_platform_does_not_know_clears_the_activity(self):
+        """`unknown` reached the main HA as that word, and MQTT vacuum drops a state that is not one of its
+        six activities: the entity kept the one it had.  Every other platform has `_STATE_TPL` for this."""
+        consumer = Consumer(self.hass, State("vacuum.bot", "cleaning", self.ATTRS))
+        self.assertQuiet(consumer, State("vacuum.bot", "cleaning", self.ATTRS))
+        self.assertEqual(consumer.entity.activity, "cleaning")
+        for st in ("unknown", "unavailable"):
+            with self.subTest(state=st):
+                self.assertQuiet(consumer, State("vacuum.bot", st, self.ATTRS))
+                self.assertIsNone(consumer.entity.activity)
+                self.assertQuiet(consumer, State("vacuum.bot", "cleaning", self.ATTRS))
+                self.assertEqual(consumer.entity.activity, "cleaning")
+        self.assertIsNone(document(State("vacuum.bot", "unknown", self.ATTRS))["state"])
+        self.assertEqual(document(State("vacuum.bot", "docked", self.ATTRS))["state"], "docked")
+
     async def test_battery_level_stays_an_attribute(self):
         from homeassistant.components.mqtt.vacuum import MQTT_VACUUM_ATTRIBUTES_BLOCKED
 

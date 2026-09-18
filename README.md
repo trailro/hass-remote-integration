@@ -271,7 +271,7 @@ deployed, its requirements installed, patches applied, and the config entries
 the manager disabled (on a stop or a switch) are enabled again; an entry you
 disabled yourself stays disabled. A backup is taken first when something
 changes. Starting a version other than the deployed one runs its preflight
-first (not for a dev build or an integration without a GitHub repository; see
+first (not for an integration without a GitHub repository; see
 [Updating the integration](#updating-the-integration)); blockers ask whether
 to start anyway. If a start fails after the new files went out, the files of the
 version that was running are put back.
@@ -407,8 +407,11 @@ started from your main HA over MQTT refuses on blockers, since nobody is there
 to confirm, and says why in its result. Through the API, `POST /api/run/start`
 answers `needs_force` with the report, and `force: true` starts anyway; a
 version that is not in the store is refused plainly, with nothing to force.
-Starting the version that is already deployed, a dev build, an integration
-without a GitHub repository, a rollback and a restore skip the preflight. A
+Starting the version that is already deployed, an integration without a GitHub
+repository, a rollback and a restore skip the preflight. A dev build does not:
+the check reads the copy on the volume, never GitHub, so an uploaded tree is as
+checkable as a release, and its report is keyed on when that copy was
+installed, so the next upload is checked again. A
 preflight that cannot run (GitHub is unreachable, for example) does not stop the
 start; the API result then says why in `preflight_note`, and a start that passes
 with warnings carries them in `preflight_warnings`. A stored copy with no
@@ -1059,9 +1062,12 @@ hass_<domain>/manager/result                        outcome of a manager action,
   which every Home Assistant creates by itself (one published by 0.17.0 or
   older is removed from the main HA five minutes after the start, like any
   excluded entity). `entities_total` in `GET
-  /api/mqtt/status` counts the entities with a state that get a document. A vacuum's document also has `fan_speed` at
-  the top level (a copy of the attribute), because the main HA's MQTT vacuum
-  reads it only there.
+  /api/mqtt/status` counts the entities with a state that get a document. A vacuum's document also has `fan_speed` and
+  `state` at the top level (copies of the attribute and of the state), because
+  the main HA's MQTT vacuum reads them only there. That `state` is `null` when
+  the vacuum's state is not one of the six activities that platform knows
+  (`unknown` and `unavailable`): it drops anything else and would otherwise
+  keep showing the activity it had.
 - **Protocol and document size**: the container connects with MQTT 5, so a
   broker can announce the largest packet it accepts. A document over that
   maximum, or over 1 MiB when none is announced, is skipped rather than sent: a
