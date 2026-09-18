@@ -4,7 +4,20 @@ async function sysStatus(){
   if(IMS) imRender();
   $('#restart').disabled=s.busy; $('#restartnote').textContent=s.state.restart_required?'restart required (new code for an already loaded integration)':'';
   $('#last').textContent=s.state.last_action?('last action: '+s.state.last_action):'';
+  wdRender(s.watchdog);
 }
+// what the watchdog last did, what it is waiting for and where it stopped: one line under the setting
+function wdRender(w){ if(!w) return; const p=[];
+  if(w.gave_up) p.push('<span class="warn">given up: '+esc(w.gave_up)+'</span>');
+  else if(w.pending) p.push(`<span class="warn">in error for ${Math.round(w.pending.bad_for_s/60)} min of ${Math.round(w.pending.window_s/60)}</span>`);
+  if(w.last) p.push(`last action ${esc(w.last.at)}: restarted after ${Math.round((w.last.unhealthy_s||0)/60)} min of error (${esc(w.last.reason||'')}), attempt ${w.last.attempt} — ${esc(w.last.next||'')}`);
+  if(w.restarts_24h) p.push(`${w.restarts_24h} automatic restart${w.restarts_24h>1?'s':''} in the last 24 h (max ${w.max_per_day})`);
+  $('#wdlast').innerHTML=p.join(' · ');
+}
+$('#wd').onchange=$('#wdafter').onchange=$('#wdint').onchange=$('#wdday').onchange=async()=>{
+  const r=await post('api/settings',{watchdog:$('#wd').checked,watchdog_after_min:parseInt($('#wdafter').value,10)||15,
+    watchdog_min_interval_min:parseInt($('#wdint').value,10)||60,watchdog_max_per_day:parseInt($('#wdday').value,10)||3});
+  $('#wdmsg').textContent=r.ok?(r.watchdog?`on: after ${r.watchdog_after_min} min, at most ${r.watchdog_max_per_day}/day`:'off'):'ERROR: '+r.error; sysStatus();};
 $('#smoke').onchange=$('#autorb').onchange=$('#relcheck').onchange=async()=>{const r=await post('api/settings',{smoke_test_s:parseInt($('#smoke').value,10)||0,auto_rollback:$('#autorb').checked,release_check:$('#relcheck').checked}); $('#automsg').textContent=r.ok?'saved':'ERROR: '+r.error;};
 $('#relnow').onclick=async()=>{$('#relnow').disabled=true; $('#automsg').textContent='checking…'; const r=await post('api/updates/check'); $('#automsg').textContent=r.ok?(Object.keys(r.updates).length?'updates: '+Object.entries(r.updates).map(([d,t])=>d+' → '+t).join(', '):'everything up to date'):'ERROR: '+r.error; $('#relnow').disabled=false; sysStatus();};
 async function ghState(){const r=await (await fetch('api/settings')).json(); $('#ghstate').textContent=r.github_token_set?'set':'not set'; if(document.activeElement!==$('#allowedhosts')) $('#allowedhosts').value=r.allowed_hosts||'';}
@@ -171,7 +184,8 @@ The process restarts now; the entrypoint replaces ${parts?parts.join(', '):'.sto
   $('#bkcancel').hidden=!r.pending_restore;
   const lr=r.last_restore; $('#bkpending').textContent=r.pending_restore?`a restore is scheduled for the next restart (${(r.pending_parts||[]).join(', ')})`:(lr?`last restore ${lr.at}: ${lr.ok?'ok, '+lr.files+' files (pre-restore copy '+lr.pre_restore+')':'FAILED: '+lr.error}`:'');
 }
-async function bkSettings(){const r=await (await fetch('api/settings')).json(); if(document.activeElement!==$('#bkhour')){$('#bkdaily').checked=!!r.backup_daily; $('#bkhour').value=r.backup_daily_hour;} $('#smoke').value=r.smoke_test_s; $('#autorb').checked=!!r.auto_rollback; $('#relcheck').checked=!!r.release_check;}
+async function bkSettings(){const r=await (await fetch('api/settings')).json(); if(document.activeElement!==$('#bkhour')){$('#bkdaily').checked=!!r.backup_daily; $('#bkhour').value=r.backup_daily_hour;} $('#smoke').value=r.smoke_test_s; $('#autorb').checked=!!r.auto_rollback; $('#relcheck').checked=!!r.release_check;
+  $('#wd').checked=!!r.watchdog; for(const [id,k] of [['#wdafter','watchdog_after_min'],['#wdint','watchdog_min_interval_min'],['#wdday','watchdog_max_per_day']]) if(document.activeElement!==$(id)) $(id).value=r[k];}
 $('#bkdaily').onchange=$('#bkhour').onchange=async()=>{const r=await post('api/settings',{backup_daily:$('#bkdaily').checked,backup_daily_hour:parseInt($('#bkhour').value,10)||0}); $('#bkmsg').textContent=r.ok?(r.backup_daily?`daily backup at ${r.backup_daily_hour}:00`:'daily backup off'):'ERROR: '+r.error;};
 bkSettings().catch(()=>{});
 $('#bkcancel').onclick=async()=>{ if(!confirm('Cancel the scheduled restore?')) return; const r=await post('api/backups/restore/cancel'); $('#bkmsg').textContent=r.ok?'restore cancelled':'ERROR: '+r.error; backups(); };
