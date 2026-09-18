@@ -4,6 +4,7 @@ import os
 import shutil
 import sys
 import unittest
+from unittest import mock
 
 from tests.test_r4_lifecycle import make_venv
 from tests import test_r12_backup_pypi as r12
@@ -46,7 +47,8 @@ class InstalledVenvWithReleaseListTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_baseline_still_applies_to_an_installed_venv(self):
         make_venv(self.cfg, "2026.7.1")
-        with self.assertRaises(ValueError) as ctx:
-            await self.updater(_Session(self.payload())).validate("2026.7.1")
+        with mock.patch.dict(os.environ, {"HA_VERSION_MIN": "2026.8.0"}):  # stated, not read from the image
+            with self.assertRaises(ValueError) as ctx:
+                await self.updater(_Session(self.payload())).validate("2026.7.1")
         self.assertIn("baseline", str(ctx.exception))
 

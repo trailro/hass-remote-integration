@@ -49,7 +49,9 @@ class _Updater:
         loop = asyncio.get_running_loop()
         self.hass = SimpleNamespace(config=SimpleNamespace(config_dir=self.cfg, path=lambda *p: os.path.join(self.cfg, *p)),
                                     async_add_executor_job=lambda f, *a: loop.run_in_executor(None, f, *a))
-        env = mock.patch.dict(os.environ, {"HA_VERSION_DEFAULT": BASELINE})
+        # both, explicitly: the image these tests run in carries its own floor, and a test that reads it
+        # would answer a different question in every build
+        env = mock.patch.dict(os.environ, {"HA_VERSION_DEFAULT": BASELINE, "HA_VERSION_MIN": BASELINE})
         env.start()
         self.addCleanup(env.stop)
         preflight._HA_REPORTS.clear()

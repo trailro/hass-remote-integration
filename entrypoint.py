@@ -51,6 +51,10 @@ def _parse_port(raw: str) -> int | None:
 
 PORT = _parse_port(os.environ.get("HRI_PORT", "8087"))
 DEFAULT_VERSION = os.environ.get("HA_VERSION_DEFAULT", "2026.8.3")
+# The oldest version this image installs (ha_updater refuses anything older, with no force).  A
+# DEFAULT_VERSION under it would put a version on a fresh volume that the UI then refuses to go back to,
+# so the floor wins and says so.
+MIN_VERSION = os.environ.get("HA_VERSION_MIN", "")
 EXTRA_REQUIREMENTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "requirements.txt")  # installed next to homeassistant
 MAX_BOOT_FAILURES = 3
 PIP_IDLE_TIMEOUT_S = 15 * 60  # pip writes a line per package: nothing at all for this long is a hang, not a slow download
@@ -994,6 +998,9 @@ def _prepare() -> str:
         # image happened to be built with (HA_VERSION_LATEST=0 disables that).
         _phase("asking PyPI for the newest Home Assistant")
         wanted = (latest_stable() if os.environ.get("HA_VERSION_LATEST", "1") != "0" else None) or DEFAULT_VERSION
+        if MIN_VERSION and ha_vkey(wanted) < ha_vkey(MIN_VERSION):
+            log(f"Home Assistant {wanted} is older than this image's floor {MIN_VERSION}: installing {MIN_VERSION} instead")
+            wanted = MIN_VERSION
         log(f"fresh volume: installing Home Assistant {wanted}")
     current = state.get("current")
     # last_error stays until a new version change is asked for (ha_updater.set_desired clears it): a
