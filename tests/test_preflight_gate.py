@@ -50,9 +50,15 @@ class GateTest(unittest.TestCase):
         self.assertTrue(res["blocked"])
         self.assertEqual(run.await_args.args[3], "v2.0.0")
 
-    def test_dev_build_and_no_repo_are_not_gated(self):
-        res, run = _gate(FakeInstaller(versions=("v1.0.0", "local")), "local", {"ok": False})
-        self.assertEqual((res["blocked"], res["skipped"]), (False, "dev build"))
+    def test_a_dev_build_is_gated_like_any_other_version(self):
+        """It used to be skipped.  The check reads the stored copy, not GitHub, so an uploaded tree is
+        exactly as checkable - and a syntax error in one costs two restarts and a rollback otherwise."""
+        res, run = _gate(FakeInstaller(versions=("v1.0.0", "local")), "local", {"ok": False, "blockers": ["legacy.py:5: bad"]})
+        self.assertEqual((res["blocked"], res["skipped"]), (True, None))
+        self.assertEqual(run.await_args.args[3], "local")
+        self.assertEqual(run.await_args.kwargs["source_dir"], "/versions/probe/local")
+
+    def test_no_repo_is_not_gated(self):
         res, run = _gate(FakeInstaller(repo=None), "v2.0.0", {"ok": False})
         self.assertFalse(res["blocked"])
         run.assert_not_awaited()
