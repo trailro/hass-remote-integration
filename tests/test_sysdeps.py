@@ -110,6 +110,65 @@ class MapTest(NoCache):
             self.assertEqual(name, preflight._canon(name))
             self.assertTrue(any(preflight._SYSTEM_DEPS[name]), name)  # an entry that needs nothing is a typo
 
+    def test_pydub_wants_the_ffmpeg_binary(self):
+        """pydub.utils.get_encoder_name() shells out to ffmpeg/avconv: it imports, and decodes nothing."""
+        with mock.patch.object(preflight.shutil, "which", return_value=None):
+            warnings = preflight._system_dep_warnings(["pydub==0.25.1"])
+        self.assertIn("pydub is a wrapper over the program ffmpeg", warnings[0])
+
+
+class BluetoothTest(NoCache):
+    """bleak, bluetooth-adapters, habluetooth talk to BlueZ over the system D-Bus and dbus-fast opens the
+    socket itself: they install and import perfectly, and there is no adapter in the container."""
+
+    def _warn(self, reqs, socket=False):
+        sockets = ("/nonexistent-hri/system_bus_socket",)
+        if socket:
+            d = tempfile.mkdtemp(prefix="hri-dbus-")
+            self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+            path = os.path.join(d, "system_bus_socket")
+            open(path, "w").close()
+            sockets = (path,)
+        with mock.patch.object(preflight, "_DBUS_SOCKETS", sockets):
+            return preflight._system_dep_warnings(reqs)
+
+    def test_a_bluetooth_requirement_warns_about_the_host_stack(self):
+        warnings = self._warn(["bleak==3.0.2"])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("bleak needs the host's Bluetooth stack, which a container cannot provide by itself",
+                      warnings[0])
+        self.assertIn("bluetoothd", warnings[0])
+        self.assertIn("README", warnings[0])
+
+    def test_it_does_not_claim_a_package_would_fix_it(self):
+        warnings = self._warn(["habluetooth==7.0.0"])
+        self.assertIn("No package installs that", warnings[0])
+        self.assertNotIn("wrapper over", warnings[0])  # a different problem from _SYSTEM_DEPS, said differently
+
+    def test_every_name_of_the_set_is_canonical_and_warns(self):
+        for name in preflight._BLUETOOTH_DEPS:
+            self.assertEqual(name, preflight._canon(name))
+            self.assertEqual(len(self._warn([name])), 1, name)
+            preflight._PRESENT.clear()
+
+    def test_a_mounted_host_dbus_socket_says_nothing(self):
+        """The operator who mounted it has already done the compose work; the warning would be noise."""
+        self.assertEqual(self._warn(["bleak", "dbus-fast"], socket=True), [])
+
+    def test_the_socket_is_looked_for_once(self):
+        with mock.patch.object(preflight, "_DBUS_SOCKETS", ("/nonexistent-hri/system_bus_socket",)), \
+                mock.patch.object(preflight.os.path, "exists", mock.Mock(return_value=False)) as exists:
+            for _ in range(3):
+                preflight._system_dep_warnings(["bleak", "habluetooth"])
+        exists.assert_called_once_with("/nonexistent-hri/system_bus_socket")
+
+    def test_it_reaches_the_report(self):
+        inst = _installer(self, ["bleak==3.0.2"])
+        with mock.patch.object(preflight, "_DBUS_SOCKETS", ("/nonexistent-hri/system_bus_socket",)):
+            report = _run(inst)
+        self.assertTrue(report["ok"])
+        self.assertIn("bleak needs the host's Bluetooth stack", "\n".join(report["warnings"]))
+
 
 class LookupCacheTest(NoCache):
     def test_the_image_is_looked_at_once_per_program(self):
