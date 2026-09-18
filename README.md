@@ -759,6 +759,19 @@ the last 32 MB of a file, and a search also stops after 20000 lines that hold
 something the masking looks at (a word such as `token` or `key`); *lines read*
 says how far it got.
 
+**Download file**, next to the tail controls, saves the selected file whole.
+It is masked exactly as the table is, line by line as it is sent, so nothing
+is held in memory. A key block stays masked to its end even when the download
+has long passed its `BEGIN` marker, and even when the log never closed it with
+an `END` marker. The file is saved under its masked name, never its real one;
+a name the mask cut the extension off gets `.log` back, so it opens as a log.
+A file larger than 32 MB is sent from its end, the newest lines, which is the
+tail's budget and is there for the same reason: masking costs per line, and
+the page hands the whole answer to the browser at once. The name of the saved
+file then says `-last-32MiB`, and the answer carries
+`X-Log-Truncated: 33554432`. The button fetches with the header the endpoint
+requires, which a plain link cannot send.
+
 By default every line is shown whole. The **Formatting** box at the bottom of
 the page splits lines into columns. A format is a JSON object:
 
@@ -1566,7 +1579,7 @@ tails, logs or diagnostics, or run or store patch code, also need `X-Requested-W
 `/api/patch_editor` (reading, *Check* and *Save*), `/api/patches/<domain>` (and its `/upload`), `/api/backups/upload`,
 `/api/import/upload`, `/api/parity`, `/api/releases/preview`,
 `/api/diagnostics`, `/api/diag/memory` (also without `refs`), `/api/logs`,
-`/api/log_files` and `/api/log_files/tail`, and aborting a flow
+`/api/log_files`, `/api/log_files/tail` and `/api/log_files/download`, and aborting a flow
 (`DELETE /api/flow/<id>`, `DELETE /api/options/<flow_id>`); without it they answer `400`.
 `?refresh=1` on `/api/releases` and `/api/ha` is ignored without it.
 `GET /api/status` answers without the header too (for monitors and
@@ -1588,7 +1601,7 @@ points:
 | Backups | `GET /api/backups`, `POST /api/backups/create`, `POST /api/backups/upload`, `GET /api/backups/<name>/download`, `POST /api/backups/<name>/{restore,delete}`, `POST /api/backups/restore/cancel` (answers `cancelled`; a restore that belongs to a scheduled Home Assistant version change is refused with `for_version`, and a full rollback's restore with `rollback`, the backup it restores) |
 | Import | `POST /api/import/upload`, `GET/POST /api/import/inspect`, `POST /api/import/{apply,apply_all,clear}` |
 | Cutover | `GET /api/parity`, `POST /api/parity/{test,remove_orphans}`, `POST /api/cutover/{status,enable,undo}`; `enable` takes `force`, which skips the checks on the main Home Assistant (MQTT loaded, the integration's config entries, entity ids still registered there) but not the container's own (an integration running, health, MQTT connected), and the answer and the timeline say `forced`; `undo` answers `cleared_discovery_configs` and `manager_device_kept`; a check on the main HA that cannot run (unreachable, its registry unreadable) blocks the enable rather than passing. Removing an orphan while discovery is off is refused, except for the manager device while `manager_discovery` announces it |
-| Logs | `GET /api/logs?level=&prefix=&q=&since_id=&limit=` (`limit` 1 to 2000, `since_id` 0 to 2^63-1, otherwise `400`; the answer carries `cursor`, the next `since_id`), `GET /api/logs/loggers`, `POST /api/logs/level` (`{"logger": …, "level": …}`), `GET /api/log_files` (an `id` per file, which changes at every start), `GET /api/log_files/tail?id=&file=&lines=&q=` (`file` is the masked name, answered `409` when several files share it; a real name is not accepted), `GET/POST /api/settings` (`log_format`) |
+| Logs | `GET /api/logs?level=&prefix=&q=&since_id=&limit=` (`limit` 1 to 2000, `since_id` 0 to 2^63-1, otherwise `400`; the answer carries `cursor`, the next `since_id`), `GET /api/logs/loggers`, `POST /api/logs/level` (`{"logger": …, "level": …}`), `GET /api/log_files` (an `id` per file, which changes at every start), `GET /api/log_files/tail?id=&file=&lines=&q=` (`file` is the masked name, answered `409` when several files share it; a real name is not accepted), `GET /api/log_files/download?id=&file=` (the same file selection; the file masked and streamed as an attachment under its masked name, at most its last 32 MB, `X-Log-Truncated` when it was cut), `GET/POST /api/settings` (`log_format`) |
 | Diagnostics | `GET /api/diagnostics` (zip, secrets removed), `GET /api/diag/memory[?refs=<type>]` (one probe at a time: a second one meanwhile answers `429`) |
 
 `POST /api/logs/level` accepts any existing logger; a logger that does not
