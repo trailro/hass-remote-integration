@@ -5,6 +5,7 @@ pip would take from a source archive is built into a temporary directory,
 every patch is evaluated against the new code and against the requirement
 versions the update would bring, a requirement known to be a wrapper over a
 program or a shared library the image does not carry is reported as a warning,
+so is one pip backtracked years behind what the requirement allows,
 the manifest's dependencies are checked
 against HA's loader, and the minimum Home Assistant version (hacs.json) is
 compared with the target.  The report says what would change and whether
@@ -52,6 +53,44 @@ MAX_REPORTS = 32  # a report is several kB and every gate key carries the copy's
 # reinstalls add keys faster than staleness retires them, so the sweep alone does not bound the dict
 _REPORTS: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
 GITHUB_API = "https://api.github.com/repos/{repo}"
+PYPI_JSON = "https://pypi.org/pypi/{name}/json"
+PYPI_TIMEOUT_S = 20  # the lag check is an extra: it never makes the preflight wait longer than a GitHub call does
+PYPI_MAX_BYTES = 6 * 1024 * 1024  # a project with thousands of files (aiohttp's index is 9 MB) is not read at all
+MAX_PYPI_LOOKUPS = 12  # a manifest with forty requirements must not turn the preflight into forty round trips
+
+# A resolution that fell far behind.  pip backtracks: when the newest release of a requirement needs
+# something that cannot be installed here (a dependency with no wheel for this Python, so a compiler this
+# image has not got), pip does not fail - it walks back through older releases until one resolves.  Where
+# the requirement names no lower bound it can walk back years: "python-miio" asked for without a bound
+# resolves to 0.2.0 from 2017 (and pulls in "typing" and "pretty-cron"), the preflight is green and the
+# integration breaks the first time it talks to a device.  A silent, ancient resolution is worse than an
+# honest refusal, so it is reported - as a warning, never a blocker: pip did produce an install that works,
+# and an old release is occasionally what the requirement really wants.
+#
+# "Far behind" has to stay quiet about the many legitimate reasons a resolution is not the newest release,
+# so two independent signals have to agree:
+#
+#   * an older release SERIES - a lower major, or the same major and a lower minor, than the newest release
+#     that satisfies the requirement.  A patch-level lag (1.4.2 where 1.4.7 exists) is never reported: that
+#     is ordinary, and being held on a patch release is normal.
+#   * and at least RESOLUTION_LAG_DAYS between the two releases.  This is what a series gap alone cannot
+#     do: a major published last week while the resolution is three months old says nothing about
+#     backtracking, and a calendar-versioned package (2026.1.0) opens a new "major" every year without any
+#     of them being stale.  Two years of lag is not a versioning scheme, it is a resolution that went
+#     somewhere else.
+#
+# What is not compared at all:
+#   * anything Home Assistant pins in package_constraints.txt, and the requirements that come from the
+#     manifest's dependencies: HA's resolution is HA's decision, deliberate, and not this preflight's
+#     business.  Only what the integration itself declares, and what that pulls in, is measured.
+#   * releases this Python is excluded from by their own requires_python: when the newer releases dropped
+#     this Python, pip taking an older one is the right answer, not a backtrack.
+#   * pre-releases, unless the resolution is itself a pre-release - pip does not take them by default.
+#   * a version PyPI does not list (a direct archive URL, a VCS checkout): there is nothing to compare it
+#     with, and PyPI that cannot be reached says nothing rather than guessing.
+# The newest that satisfies is measured against the requirement's own specifier, so an integration that
+# caps a requirement on purpose ("foo<2") is compared with the newest foo 1.x, not with foo 3.0.
+RESOLUTION_LAG_DAYS = 730
 
 
 class StoredCopyUnusable(ValueError):
@@ -329,6 +368,149 @@ def _system_dep_warnings(requirements: list[str]) -> list[str]:
     return out
 
 
+def _pypi_releases(raw: bytes) -> dict[str, tuple[str, str]]:
+    """Blocking: {version: (release day, requires_python)} out of PyPI's JSON for one project.  A version
+    whose files are all yanked, or that has no file left at all, is not a version pip can take."""
+    out: dict[str, tuple[str, str]] = {}
+    for ver, files in ((json.loads(raw) or {}).get("releases") or {}).items():
+        live = [f for f in (files or []) if isinstance(f, dict) and not f.get("yanked")]
+        if not live:
+            continue
+        day = min(str(f.get("upload_time_iso_8601") or f.get("upload_time") or "") for f in live)[:10]
+        rpy = next((str(f.get("requires_python") or "") for f in live if f.get("requires_python")), "")
+        out[str(ver)] = (day, rpy)
+    return out
+
+
+async def _pypi_index(hass: HomeAssistant, name: str) -> dict[str, tuple[str, str]] | None:
+    """What PyPI lists for ``name``, or None when it cannot be read.  Nothing here is a blocker and nothing
+    here is a guess: an unreachable, oversized or unreadable index simply says nothing."""
+    import urllib.parse
+
+    try:
+        import aiohttp
+
+        url = PYPI_JSON.format(name=urllib.parse.quote(name, safe=""))
+        async with async_get_clientsession(hass).get(url, timeout=aiohttp.ClientTimeout(total=PYPI_TIMEOUT_S)) as resp:
+            if resp.status != 200:
+                return None
+            raw = await read_capped(resp, f"the PyPI index of {name}", PYPI_MAX_BYTES)
+        return await hass.async_add_executor_job(_pypi_releases, raw)
+    except Exception as err:  # noqa: BLE001 - offline, PyPI down, an index too big to read: no warning, no failure
+        _LOGGER.debug("PyPI index of %s not read: %s", name, err)
+        return None
+
+
+def _days_between(older: str, newer: str) -> int | None:
+    from datetime import date
+
+    try:
+        return (date.fromisoformat(newer) - date.fromisoformat(older)).days
+    except ValueError:
+        return None
+
+
+def _resolution_lag(name: str, resolved: str, req_text: str | None, index: dict[str, tuple[str, str]],
+                    python: str) -> str | None:
+    """The warning for one resolved package, or None (see RESOLUTION_LAG_DAYS for the rule).  Pure:
+    ``index`` is what PyPI lists, ``req_text`` the integration's own requirement when it has one (a
+    package pip only pulled in has none), ``python`` the image's version ("3.14.0")."""
+    from packaging.specifiers import InvalidSpecifier, SpecifierSet
+    from packaging.version import InvalidVersion, Version
+
+    def _ver(text: str) -> Any:
+        try:
+            return Version(text)
+        except InvalidVersion:
+            return None
+
+    got = _ver(resolved)
+    if got is None:
+        return None
+    want = SpecifierSet("")
+    if req_text:
+        try:
+            from packaging.requirements import Requirement
+
+            want = Requirement(req_text).specifier
+        except Exception:  # noqa: BLE001
+            return None
+    here = _ver(python)
+    got_day = ""
+    releases: list[tuple[Any, str, str]] = []
+    for text, (day, rpy) in index.items():
+        ver = _ver(text)
+        if ver is None:
+            continue
+        if ver == got:
+            got_day = day
+        if ver.is_prerelease and not got.is_prerelease:
+            continue
+        if not want.contains(ver, prereleases=got.is_prerelease):
+            continue
+        if rpy and here is not None:
+            try:
+                if not SpecifierSet(rpy).contains(here, prereleases=True):
+                    continue
+            except InvalidSpecifier:
+                pass
+        releases.append((ver, text, day))
+    if not got_day or not releases:
+        return None  # PyPI does not list what pip resolved (a direct URL), or nothing there satisfies
+    newest, newest_text, newest_day = max(releases, key=lambda row: row[0])
+    if (newest.major, newest.minor) <= (got.major, got.minor):
+        return None
+    days = _days_between(got_day, newest_day)
+    if days is None or days < RESOLUTION_LAG_DAYS:
+        return None
+    behind = sum(1 for ver, _, _ in releases if ver > got)
+    asked = f"the requirement {req_text!r}" if req_text else f"this Python ({python})"
+    return (f"pip resolved {name} {resolved}, released {got_day}: {behind} release{'' if behind == 1 else 's'} "
+            f"and {days / 365.25:.1f} years behind {newest_text} ({newest_day}), the newest that satisfies "
+            f"{asked}. Nothing asks for the old release, so something else in the resolved set forced it down "
+            "- the usual cause is a dependency of the newer releases that has no wheel for this Python. It "
+            f"installs and resolves cleanly, and the integration then runs against {name} as it was in "
+            f"{got_day[:4]}")
+
+
+def _constraint_names(path: str) -> set[str]:
+    """Blocking: the distributions Home Assistant pins in its package_constraints.txt.  Where pip lands for
+    one of them is HA's decision and deliberate, never a backtrack this preflight should report."""
+    out: set[str] = set()
+    for line in _read_text(path).splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line and not line.startswith("-"):
+            out.add(_canon(_req_name(line)))
+    return out
+
+
+async def _resolution_warnings(hass: HomeAssistant, installer, own_reqs: list[str], pip_rows: list[dict[str, Any]],
+                               dep_reqs: list[str]) -> list[str]:
+    """One line per package of the resolved set pip settled far behind on.  The manifest's own requirements
+    are looked up first, because the number of PyPI round trips is capped."""
+    own: dict[str, str] = {}
+    for req in own_reqs:
+        if req and (name := _req_name(req)):
+            own.setdefault(_canon(name), req)
+    if not own:
+        return []  # a version that declares no requirements of its own has nothing here that is its doing
+    pinned = await hass.async_add_executor_job(_constraint_names, installer.constraints)
+    from_ha = {_canon(_req_name(req)) for req in dep_reqs if req} - set(own)
+    rows = [row for row in pip_rows if row.get("name") and row.get("version")
+            and _canon(str(row["name"])) not in pinned and _canon(str(row["name"])) not in from_ha]
+    rows.sort(key=lambda row: _canon(str(row["name"])) not in own)  # stable: the manifest's own first, pip's order after
+    python = ".".join(str(x) for x in sys.version_info[:3])
+    out: list[str] = []
+    for row in rows[:MAX_PYPI_LOOKUPS]:
+        name = str(row["name"])
+        index = await _pypi_index(hass, name)
+        if not index:
+            continue
+        if (hit := _resolution_lag(name, str(row["version"]), own.get(_canon(name)), index, python)):
+            out.append(hit)
+    return out
+
+
 def _catches_import_error(handler: Any) -> bool:
     import ast
 
@@ -555,6 +737,10 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
         # (the resolved set too: the package that needs it is often pulled in by another one)
         warnings += await hass.async_add_executor_job(
             _system_dep_warnings, [*all_reqs, *(str(r.get("name") or "") for r in pip["install"])])
+        # 4c. where pip's backtracking landed: a resolution years behind installs cleanly and breaks at runtime
+        if pip["ok"]:
+            warnings += await _resolution_warnings(hass, installer, [r for r in new_reqs if r not in refused],
+                                                   pip["install"], dep_reqs)
 
         new_versions = {str(r["name"]).lower().replace("_", "-"): str(r["version"]) for r in pip["install"] if r.get("name")}
         for name, ver in installed_now.items():
