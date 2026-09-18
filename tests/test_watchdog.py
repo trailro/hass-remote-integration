@@ -192,6 +192,21 @@ class WindowTest(_Base):
                 inst.restart.assert_not_awaited()
                 self.assertIsNone(inst.watchdog_pending)
 
+    def test_an_integration_that_was_never_configured_is_left_alone(self):
+        """error, but the reason is that nothing configured it: a restart cannot fix that (build_health never
+        answers the smoke test's "unconfigured", so the reason is what tells them apart)."""
+        inst = self.installer()
+        sch = self.scheduler(inst)
+        self.verdict = {"state": "error", "reason": "not loaded (no config entry, no YAML setup)"}
+        for _ in range(120):
+            self.tick(sch)
+        inst.restart.assert_not_awaited()
+        self.assertIsNone(inst.watchdog_pending)
+        self.verdict = dict(ERROR)  # a real fault after it is configured still acts
+        for _ in range(16):
+            self.tick(sch)
+        inst.restart.assert_awaited_once()
+
     def test_a_health_check_that_raises_is_no_verdict_and_no_restart(self):
         inst = self.installer()
         sch = self.scheduler(inst)

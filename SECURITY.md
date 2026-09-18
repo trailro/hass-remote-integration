@@ -53,7 +53,7 @@ from plain HTTP traffic. These are:
 - with MQTT `tls` on and `tls_insecure` off: a connection to a broker whose
   certificate is not verified, or that does not name the host;
 - path traversal or unsafe archive handling in backups, restores, imports,
-  patches or log files, including a log file listing or tail that reaches a file
+  patches or log files, including a log file listing, tail or download that reaches a file
   other than a log through a symbolic or hard link, or a backup that reads a file
   outside `/config` through a symbolic link;
 - anything that lets a page on another origin make the manager do something.
