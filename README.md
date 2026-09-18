@@ -941,9 +941,13 @@ hass_<domain>/manager/result                        outcome of a manager action,
   are still kept for the orphan sweep (see *Stop, uninstall, restore*); when
   it was the last entity of a device that is gone from the container too, the device's
   discovery config is cleared as well, so no empty device is left on the main HA
-  until the next full republish. Renaming a device, or changing its model or its
-  parent, reaches the main HA within a few seconds instead of waiting for that
-  republish. A button, scene or notify entity has no state to mirror but still
+  until the next full republish. In those first five minutes the entities an
+  earlier process announced and that have not finished setting up here count as
+  entities of their device: the device keeps its config (with a removal form for
+  the one that went) until the orphan sweep decides, so they are not taken off
+  the main HA and brought back a moment later. Renaming a device, or changing
+  its model or its parent, reaches the main HA within a few seconds instead of
+  waiting for that republish. A button, scene or notify entity has no state to mirror but still
   follows the availability of the entity behind it, so it shows unavailable on
   the main HA while that entity is.
   An integration named `call`, `cmd`, `result`, `services`, `manager`,
