@@ -172,6 +172,7 @@ class State:
     smoke_announced: str | None = None             # "at" of the failed smoke verdict already raised as a notification
     last_restore_reported: str | None = None      # "at" of the restore outcome already put on the timeline
     pending_rollback: dict[str, Any] | None = None  # {domain, tag, backup}: a full rollback whose restore is scheduled but whose start did not finish
+    watchdog: dict[str, Any] | None = None         # health watchdog: {restarts: [epoch], attempts, last, gave_up, announced}; survives its own restart
 
 
 _NONE = type(None)
@@ -180,7 +181,7 @@ _STATE_TYPES: dict[str, tuple[type, ...]] = {
     "pending_smoke": (dict, _NONE), "pending_start": (dict, _NONE), "last_smoke": (dict, _NONE), "last_release_check": (int,),
     "rollback_backup": (str, _NONE), "rollback_at": (str, _NONE), "release_updates": (dict,), "pending_change": (dict, _NONE),
     "suspended_entries": (list, _NONE), "smoke_announced": (str, _NONE), "last_restore_reported": (str, _NONE),
-    "pending_rollback": (dict, _NONE),
+    "pending_rollback": (dict, _NONE), "watchdog": (dict, _NONE),
 }
 
 
@@ -793,6 +794,7 @@ class Installer:
             "running": info,
             "installed": infos,
             "smoke_test": self.smoke,
+            "watchdog": self.watchdog_status(),
             "updates": self.updates,
             "updates_checked_at": self.updates_checked_at,
             "registry": self.registry(),
@@ -2036,6 +2038,146 @@ class Installer:
             jsonio.update_json(os.path.join(self.state_dir, "ha.json"), take_back)
         except OSError:
             pass
+
+    # ----- health watchdog ---------------------------------------------------
+    # The verdict is judged by the scheduler once a minute; everything that has
+    # to survive the restart it triggers (the rate cap, the backoff ladder, the
+    # last action, the notification still to be raised) lives in state.json, as
+    # the MQTT manager actions keep their limits in manager_actions.json.
+
+    WATCHDOG_BACKOFF_STEPS = 4  # the window doubles at most this often: 15 -> 30 -> 60 -> 120 -> 240 min
+    WATCHDOG_DAY_S = 86400
+    watchdog_pending: dict[str, Any] | None = None  # set by the scheduler each tick: {"bad_for_s", "window_s", "reason"}
+
+    def watchdog_record(self) -> dict[str, Any]:
+        """The persisted watchdog record, normalised (state.json can be edited by hand)."""
+        rec = self.state.watchdog if isinstance(self.state.watchdog, dict) else {}
+        cut = time.time() - self.WATCHDOG_DAY_S
+        runs = [float(t) for t in (rec.get("restarts") or []) if isinstance(t, (int, float)) and not isinstance(t, bool)]
+        try:
+            attempts = max(0, int(rec.get("attempts") or 0))
+        except (TypeError, ValueError):
+            attempts = 0
+        return {"restarts": sorted(t for t in runs if t > cut), "attempts": attempts,
+                "last": rec.get("last") if isinstance(rec.get("last"), dict) else None,
+                "gave_up": str(rec.get("gave_up") or ""),
+                "announced": str(rec.get("announced") or "")}
+
+    def _watchdog_save(self, rec: dict[str, Any]) -> None:
+        self.state.watchdog = rec
+        self._save_state()
+
+    def watchdog_window_s(self) -> int:
+        """How long the verdict must have been ``error`` before the next restart:
+        the configured window, doubled once per restart that did not help."""
+        cfg = self.settings.watchdog()
+        step = min(self.watchdog_record()["attempts"], self.WATCHDOG_BACKOFF_STEPS)
+        return cfg["after_min"] * 60 * (2 ** step)
+
+    def watchdog_cap_refusal(self) -> tuple[str, bool] | None:
+        """The rate cap, checked against what survived the last restart: None while
+        the watchdog may act, otherwise (why not, is that a give-up).  The daily
+        maximum is a give-up -- it is said once and nothing is tried until the
+        integration recovers; the minimum interval is only a wait."""
+        cfg, rec, now = self.settings.watchdog(), self.watchdog_record(), time.time()
+        if len(rec["restarts"]) >= cfg["max_per_day"]:
+            return (f"{len(rec['restarts'])} automatic restarts in the last 24 h is the maximum "
+                    f"({cfg['max_per_day']}/day)"), True
+        if rec["restarts"]:
+            wait = cfg["min_interval_min"] * 60 - (now - rec["restarts"][-1])
+            if wait > 0:
+                return f"the last automatic restart was less than {cfg['min_interval_min']} min ago ({int(wait / 60) + 1} min to go)", False
+        if rec["gave_up"]:
+            # the restarts that filled the day have aged out of the 24 h window: it may act again
+            rec["gave_up"] = ""
+            self._watchdog_save(rec)
+            events.emit("health", "health watchdog: the 24 h window has moved on; it may restart the process again",
+                        integration=self.state.domain)
+        return None
+
+    def watchdog_recovered(self) -> None:
+        """An ``ok`` verdict: the backoff ladder and a give-up go, the 24 h ledger
+        stays (it is a cap on how often the watchdog may act, not on how often the
+        integration may break)."""
+        rec = self.watchdog_record()
+        if not rec["attempts"] and not rec["gave_up"]:
+            return  # nothing to reset; restarts that aged out of the 24 h window are dropped on every read
+        events.emit("health", "health watchdog: the integration is healthy again; the backoff is reset",
+                    integration=self.state.domain)
+        rec["attempts"], rec["gave_up"] = 0, ""
+        self._watchdog_save(rec)
+
+    async def watchdog_restart(self, reason: str, unhealthy_s: int) -> dict[str, Any]:
+        """Act: record what was done (so the restart cannot lose it), put it on the
+        timeline, then restart.  The notification is raised at the next boot
+        (announce_watchdog), like the smoke test's."""
+        cfg, rec = self.settings.watchdog(), self.watchdog_record()
+        now = time.time()
+        rec["restarts"] = rec["restarts"] + [now]
+        rec["attempts"] += 1
+        left = cfg["max_per_day"] - len(rec["restarts"])
+        next_window = cfg["after_min"] * (2 ** min(rec["attempts"], self.WATCHDOG_BACKOFF_STEPS))
+        if left <= 0:
+            # gave_up is not set here: the next tick finds the cap reached and says so once, in its own line
+            plan = "no further automatic restart today: look at the integration"
+        else:
+            plan = (f"if it is still in error after {next_window} min (and at least {cfg['min_interval_min']} min "
+                    f"from now), it is restarted again; {left} left today")
+        rec["last"] = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "integration": self.state.domain, "reason": reason,
+                       "unhealthy_s": int(unhealthy_s), "attempt": rec["attempts"], "next": plan}
+        self._watchdog_save(rec)  # last_action is not touched: restart() sets its own, and watchdog.last is the record
+        events.emit("restart", f"health watchdog: {self.state.domain or 'the integration'} has been in error for "
+                               f"{int(unhealthy_s / 60)} min ({reason}); restarting the process (attempt {rec['attempts']}); {plan}",
+                    domain=self.state.domain, attempt=rec["attempts"], reason=reason)
+        _LOGGER.error("health watchdog: %s in error for %s s (%s): restarting the process (attempt %s); %s",
+                      self.state.domain, int(unhealthy_s), reason, rec["attempts"], plan)
+        res = await self.restart()
+        if not res.get("ok"):
+            # the restart itself was refused (an action started between the check and here): the attempt did
+            # not happen, so it must not cost a slot of the daily cap nor a step of the backoff
+            rolled = self.watchdog_record()
+            rolled["restarts"] = [t for t in rolled["restarts"] if t != now]
+            rolled["attempts"] = max(0, rolled["attempts"] - 1)
+            rolled["gave_up"] = ""
+            rolled["last"] = {**rec["last"], "next": f"not restarted: {res.get('error')}"}
+            self._watchdog_save(rolled)
+            events.emit("restart", f"health watchdog: the restart was refused ({res.get('error')})", domain=self.state.domain)
+        return res
+
+    def watchdog_give_up(self, why: str) -> None:
+        """Stop trying and say so, once."""
+        rec = self.watchdog_record()
+        if rec["gave_up"] == why:
+            return
+        rec["gave_up"] = why
+        self._watchdog_save(rec)
+        events.emit("error", f"health watchdog: not restarting any more ({why}); it tries again when the "
+                             "integration reports ok, or when the 24 h window has moved on", domain=self.state.domain)
+
+    def announce_watchdog(self) -> None:
+        """The last automatic restart as a persistent notification, once per action;
+        called at boot, because the restart it describes ended the process that
+        would have shown it."""
+        from homeassistant.components import persistent_notification as pn
+
+        rec = self.watchdog_record()
+        last = rec["last"]
+        if not isinstance(last, dict) or not last.get("at") or last.get("at") == rec["announced"]:
+            return
+        pn.async_create(self.hass, f"The health watchdog restarted the process at {last['at']}: "
+                                   f"{last.get('integration') or 'the integration'} had been in error for "
+                                   f"{int((last.get('unhealthy_s') or 0) / 60)} min ({last.get('reason') or 'no reason recorded'}). "
+                                   f"Attempt {last.get('attempt')}. Next: {last.get('next') or '—'}.",
+                        title="Health watchdog", notification_id="hri_watchdog")
+        rec["announced"] = last["at"]
+        self._watchdog_save(rec)
+
+    def watchdog_status(self) -> dict[str, Any]:
+        """What the System page and the status API show."""
+        cfg, rec = self.settings.watchdog(), self.watchdog_record()
+        return {**cfg, "restarts_24h": len(rec["restarts"]), "attempts": rec["attempts"],
+                "window_min": int(self.watchdog_window_s() / 60), "gave_up": rec["gave_up"],
+                "last": rec["last"], "pending": self.watchdog_pending}
 
     async def _requirements_for(self, domain: str) -> list[str]:
         """Manifest requirements plus those of the integration's dependencies."""
