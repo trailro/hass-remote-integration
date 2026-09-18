@@ -214,8 +214,9 @@ come as source archives runs their build code (`setup.py`, PEP 517 hooks) in the
 container, as the install would. *Prepare* installs
 exactly the combination that passed, at the commit Check saw: if a branch has
 moved since, run Check again, and if GitHub cannot say which commit the ref
-points at, Prepare refuses. Check also warns about configuration the
-release cannot take over: config entries here while the release has no config
+points at, Prepare refuses. Check also warns when one of the release's
+requirements only wraps a program or a shared library this image does not have,
+and about configuration the release cannot take over: config entries here while the release has no config
 flow, entries at a newer version than its config flow (Home Assistant cannot
 migrate an entry back), and YAML stored here that a config flow release will
 import. A release that declares a newer minimum Home Assistant in `hacs.json`
@@ -382,7 +383,9 @@ memory, per stored copy and running Home Assistant version, so a restart or a
 reinstall forgets them; the *Preflight* button checks the release on GitHub and
 is not reused). If the version is installed again while its check runs, the
 start is refused: start it again. Blockers stop the switch and
-are listed with a choice to start anyway; warnings do not stop it. An update
+are listed with a choice to start anyway; warnings do not stop it (a
+requirement that wraps a program or library the image does not carry is one of
+them). An update
 started from your main HA over MQTT refuses on blockers, since nobody is there
 to confirm, and says why in its result. Through the API, `POST /api/run/start`
 answers `needs_force` with the report, and `force: true` starts anyway; a
@@ -526,6 +529,18 @@ three have to support that Python:
   compiler, so a pure-Python package builds and one with C code is a blocker.
   A requirement given as an archive URL is built from that URL; one from a VCS
   URL or a local directory is not built by the preflight.
+- **What a requirement needs from the image.** Some packages install perfectly
+  and are only a wrapper over a program or a shared library the container must
+  already carry: `ha-ffmpeg` over `ffmpeg`, `PyTurboJPEG` over
+  `libturbojpeg.so.0`, `pyaudio` over `libportaudio.so.2`. pip cannot see that,
+  so the integration starts and fails the moment it uses that part. The
+  preflight knows a list of such packages and looks for what they need in this
+  container (a program on `PATH`, a library in the library directories or known
+  to `ldconfig`). What is missing is a warning, not a blocker, and names the
+  package and what it wants: an integration is often useful without the part
+  that needs it. A package whose program or library is there says nothing, and
+  one that is not on the list is not checked. The list lives in
+  `preflight.py` (`_SYSTEM_DEPS`), one line per package.
 - **The integration's own code.** The preflight compiles every `.py` file with
   the image's Python (a syntax error is a blocker naming the file and line, and
   so is a file over 5 MB or one too deeply nested for the parser),
