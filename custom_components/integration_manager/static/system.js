@@ -30,7 +30,7 @@ async function ha(force){
   $('#havenvs').textContent=(h.installed_venvs||[]).join(', ')||'—';
   const apt=h.apt;  // what the entrypoint did with HRI_APT_PACKAGES at this boot; a failure is not fatal, so it shows here
   $('#haapt').innerHTML=!apt?'<span class="mut">none (HRI_APT_PACKAGES not set)</span>'
-    :`${esc((apt.packages||[]).join(', ')||'—')} <span class="${apt.ok?'ok':'bad'}">${esc(apt.note||(apt.ok?'ok':'failed'))}</span>`
+    :`${esc((apt.packages||[]).join(', ')||'—')} <span class="${apt.error?'mut':apt.ok?'ok':'bad'}">${esc(apt.note||(apt.ok?'ok':'failed'))}</span>`
       +(apt.error?` <span class="bad">${esc(apt.error)}</span>`:'')
       +((apt.refused||[]).length?` <span class="warn">refused: ${esc(apt.refused.join(', '))}</span>`:'')
       +' <span class="mut">· log: integration_manager/apt-install.log</span>';
