@@ -197,7 +197,8 @@ class UpdaterTest(unittest.IsolatedAsyncioTestCase):
         self.up._releases = {V: ">=3.15"}
         with mock.patch.object(self.up, "available", mock.AsyncMock(return_value={})), \
              mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("HA_VERSION_DEFAULT", None)
+            for var in ("HA_VERSION_DEFAULT", "HA_VERSION_MIN"):  # no floor at all: the refusal under test is the Python one
+                os.environ.pop(var, None)
             with self.assertRaises(ValueError) as ctx:
                 await self.up.validate(V)
         python_refusal = str(ctx.exception)

@@ -102,6 +102,14 @@ class CrashLoopFallbackTest(EntrypointMainBase):
         self.write({"current": B, "desired": B, "previous": A, "change": {"to": B, "mode": "keep", "applied": True}, "boot_failures": 3})
         self.assertEqual(self.boot(), A)
 
+    def test_a_fresh_volume_never_starts_below_the_image_floor(self):
+        """HA_VERSION_DEFAULT is what a fresh volume installs and HA_VERSION_MIN the oldest the manager
+        will switch to; a default under the floor would install a version the UI then refuses."""
+        with mock.patch.object(self.ep, "MIN_VERSION", B), mock.patch.object(self.ep, "DEFAULT_VERSION", A), \
+             mock.patch.dict(os.environ, {"HA_VERSION_LATEST": "0"}):
+            self.write({})
+            self.assertEqual(self.boot(), B)
+
     def test_a_fresh_volume_does_not_call_the_version_it_installed_proven(self):
         """"proven" means run.py saw this version reach STARTED.  The compatibility rule that reads an
         existing volume's "current" as proven used to claim a fresh volume's first install too, where
