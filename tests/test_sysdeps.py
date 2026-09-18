@@ -1,0 +1,240 @@
+"""Requirements that install perfectly but only wrap a program or a shared library the image does not
+carry: the map, the lookup in this container, and the warning's way to the start gate, the Preflight
+report and the environment builder's Check."""
+
+import asyncio
+import json
+import os
+import shutil
+import tempfile
+import unittest
+from types import SimpleNamespace
+from unittest import mock
+
+from custom_components.integration_manager import build_views, manage_views, preflight
+from custom_components.integration_manager.installer import Installer, State
+
+
+def _hass(record=None):
+    async def job(fn, *args):
+        if record is not None:
+            record.append(fn)
+        return fn(*args)
+    return SimpleNamespace(async_add_executor_job=job, is_running=True, loop=mock.Mock(), async_create_task=mock.Mock())
+
+
+def _installer(test, requirements, running="1.0", target="2.0"):
+    """An installer whose store holds ``target``: a manifest with ``requirements`` and one clean module."""
+    d = tempfile.mkdtemp(prefix="hri-sysdep-")
+    test.addCleanup(shutil.rmtree, d, ignore_errors=True)
+    inst = object.__new__(Installer)
+    inst.config_dir, inst.state_dir = d, os.path.join(d, "integration_manager")
+    inst.versions_dir = os.path.join(inst.state_dir, "versions")
+    inst.constraints = ""
+    inst._req_versions_cache = {}
+    inst.state = State(domain="demo", installed={"demo": {"running_tag": running, "versions": {
+        running: {}, target: {"installed_at": "2026-09-01T10:00:00", "min_ha": None}}}})
+    inst.spec = lambda dom: {"repo": "owner/repo"}
+    inst.settings = SimpleNamespace(github_headers=lambda: {})
+    inst.installed_manifest = lambda dom=None: {"version": running}
+    inst._entries_of = lambda dom: []
+    inst.site_packages_for = lambda dom: d
+    stored = inst._version_dir("demo", target)
+    os.makedirs(stored, exist_ok=True)
+    with open(os.path.join(stored, "manifest.json"), "w", encoding="utf-8") as fh:
+        json.dump({"domain": "demo", "version": target, "config_flow": True, "requirements": requirements}, fh)
+    with open(os.path.join(stored, "__init__.py"), "w", encoding="utf-8") as fh:
+        fh.write("X = 1\n")
+    return inst
+
+
+def _run(inst, install_rows=(), target="2.0", record=None):
+    pip = {"ok": True, "install": list(install_rows), "stderr": ""}
+    with mock.patch.object(preflight, "_pip_dry_run", return_value=pip):
+        return asyncio.run(preflight.run(_hass(record), inst, "demo", target, source_dir=inst._version_dir("demo", target)))
+
+
+def _sysdep_warning(report):
+    return next((w for w in report["warnings"] if "is a wrapper over" in w), None)
+
+
+class NoCache(unittest.TestCase):
+    """The lookup is cached for the life of the process; a test must not inherit another test's image."""
+
+    def setUp(self):
+        preflight._PRESENT.clear()
+        self.addCleanup(preflight._PRESENT.clear)
+
+
+class MapTest(NoCache):
+    def test_a_missing_program_warns_and_names_it(self):
+        with mock.patch.object(preflight.shutil, "which", return_value=None):
+            warnings = preflight._system_dep_warnings(["ha-ffmpeg==3.2.2"])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("ha-ffmpeg is a wrapper over the program ffmpeg", warnings[0])
+        self.assertIn("does not have", warnings[0])
+
+    def test_a_program_that_is_there_says_nothing(self):
+        with mock.patch.object(preflight.shutil, "which", return_value="/usr/bin/ffmpeg"):
+            self.assertEqual(preflight._system_dep_warnings(["ha-ffmpeg==3.2.2"]), [])
+
+    def test_a_missing_library_warns(self):
+        with mock.patch.object(preflight, "_library_present", return_value=False):
+            warnings = preflight._system_dep_warnings(["PyTurboJPEG"])
+        self.assertIn("PyTurboJPEG is a wrapper over the library libturbojpeg.so.0", warnings[0])
+
+    def test_a_library_that_is_there_says_nothing(self):
+        with mock.patch.object(preflight, "_library_present", return_value=True):
+            self.assertEqual(preflight._system_dep_warnings(["PyTurboJPEG"]), [])
+
+    def test_a_package_not_in_the_map_is_untouched(self):
+        with mock.patch.object(preflight.shutil, "which", return_value=None), \
+                mock.patch.object(preflight, "_library_present", return_value=False):
+            self.assertEqual(preflight._system_dep_warnings(["aiohttp==3.9.0", "pyserial>=3.5"]), [])
+
+    def test_the_name_is_matched_the_way_pypi_does(self):
+        """Case, "-" and "_" do not matter, and a version, extras or a marker are not part of the name."""
+        for req in ("PyTurboJPEG", "pyturbojpeg==1.7.5", "PYTURBOJPEG[extra]>=1.0",
+                    "pyturbojpeg ; sys_platform == 'linux'"):
+            with mock.patch.object(preflight, "_library_present", return_value=False):
+                self.assertEqual(len(preflight._system_dep_warnings([req])), 1, req)
+        with mock.patch.object(preflight.shutil, "which", return_value=None):
+            self.assertEqual(len(preflight._system_dep_warnings(["HA_FFmpeg==3.2.2"])), 1)
+
+    def test_the_same_package_twice_warns_once(self):
+        with mock.patch.object(preflight.shutil, "which", return_value=None):
+            self.assertEqual(len(preflight._system_dep_warnings(["ha-ffmpeg==3.2.2", "HA_FFmpeg"])), 1)
+
+    def test_every_entry_of_the_map_is_canonical(self):
+        for name in preflight._SYSTEM_DEPS:
+            self.assertEqual(name, preflight._canon(name))
+            self.assertTrue(any(preflight._SYSTEM_DEPS[name]), name)  # an entry that needs nothing is a typo
+
+
+class LookupCacheTest(NoCache):
+    def test_the_image_is_looked_at_once_per_program(self):
+        which = mock.Mock(return_value=None)
+        with mock.patch.object(preflight.shutil, "which", which):
+            for _ in range(3):
+                preflight._system_dep_warnings(["ha-ffmpeg", "ffmpeg-python"])  # both want ffmpeg
+        which.assert_called_once_with("ffmpeg")
+
+    def test_and_once_per_library(self):
+        lib = mock.Mock(return_value=False)
+        with mock.patch.object(preflight, "_library_present", lib):
+            for _ in range(3):
+                preflight._system_dep_warnings(["pyaudio", "sounddevice"])  # both want libportaudio
+        lib.assert_called_once_with("libportaudio.so.2")
+
+
+class LibraryLookupTest(NoCache):
+    def test_a_multiarch_directory_counts(self):
+        d = tempfile.mkdtemp(prefix="hri-lib-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        os.makedirs(os.path.join(d, "x86_64-linux-gnu"))
+        open(os.path.join(d, "x86_64-linux-gnu", "libturbojpeg.so.0"), "w").close()
+        with mock.patch.object(preflight, "_LIB_DIRS", (d,)):
+            self.assertTrue(preflight._library_present("libturbojpeg.so.0"))
+
+    def test_nowhere_and_unknown_to_ldconfig(self):
+        with mock.patch.object(preflight, "_LIB_DIRS", ("/nonexistent-hri",)), \
+                mock.patch("ctypes.util.find_library", return_value=None):
+            self.assertFalse(preflight._library_present("libnothing.so.9"))
+
+    def test_ldconfig_finds_one_installed_elsewhere(self):
+        with mock.patch.object(preflight, "_LIB_DIRS", ("/nonexistent-hri",)), \
+                mock.patch("ctypes.util.find_library", return_value="libturbojpeg.so.0") as find:
+            self.assertTrue(preflight._library_present("libturbojpeg.so.0"))
+        find.assert_called_once_with("turbojpeg")  # the soname without lib and without .so.N
+
+
+@unittest.skipUnless(os.path.exists("/config/venv-current"), "only inside the manager's container")
+class TheRealImageTest(NoCache):
+    """What the container really has: no ffmpeg, libturbojpeg since 0.16.0 (for PyTurboJPEG)."""
+
+    def test_ffmpeg_is_not_in_the_image(self):
+        self.assertIsNone(shutil.which("ffmpeg"))
+        self.assertEqual(len(preflight._system_dep_warnings(["ha-ffmpeg==3.2.2"])), 1)
+
+    def test_libturbojpeg_is(self):
+        self.assertTrue(preflight._library_present("libturbojpeg.so.0"))
+        self.assertEqual(preflight._system_dep_warnings(["PyTurboJPEG==1.7.5"]), [])
+
+
+class ReportTest(NoCache):
+    def test_a_requirement_of_the_version_warns_without_blocking(self):
+        inst = _installer(self, ["ha-ffmpeg==3.2.2"])
+        with mock.patch.object(preflight.shutil, "which", return_value=None):
+            report = _run(inst)
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["blockers"], [])
+        self.assertIn("ha-ffmpeg is a wrapper over the program ffmpeg", _sysdep_warning(report))
+
+    def test_a_package_pip_pulls_in_for_it_warns_too(self):
+        inst = _installer(self, ["some-camera-lib==1.0"])
+        with mock.patch.object(preflight, "_library_present", return_value=False):
+            report = _run(inst, [{"name": "PyTurboJPEG", "version": "1.7.5"}])
+        self.assertIn("PyTurboJPEG", _sysdep_warning(report))
+
+    def test_a_satisfied_requirement_says_nothing(self):
+        inst = _installer(self, ["ha-ffmpeg==3.2.2"])
+        with mock.patch.object(preflight.shutil, "which", return_value="/usr/bin/ffmpeg"):
+            report = _run(inst)
+        self.assertIsNone(_sysdep_warning(report))
+
+    def test_the_container_is_not_looked_at_on_the_event_loop(self):
+        inst, seen = _installer(self, ["ha-ffmpeg==3.2.2"]), []
+        with mock.patch.object(preflight.shutil, "which", return_value=None):
+            _run(inst, record=seen)
+        self.assertIn(preflight._system_dep_warnings, seen)
+
+
+class ItReachesTheStartGateTest(NoCache):
+    def _start(self, gate):
+        view = object.__new__(manage_views.RunView)
+        view.installer = SimpleNamespace(hass=None, start=mock.AsyncMock(return_value={"ok": True, "tag": "2.0"}))
+        view.publisher = SimpleNamespace(stats={}, base_topic="t", async_after_start=mock.AsyncMock())
+        request = SimpleNamespace(headers={}, query={}, content_type="application/json",
+                                  json=mock.AsyncMock(return_value={"domain": "demo", "tag": "2.0"}))
+        with mock.patch.object(manage_views.preflight, "gate", mock.AsyncMock(return_value=gate)):
+            return json.loads(asyncio.run(view.post(request, action="start")).body)
+
+    def test_the_gate_passes_and_carries_the_warning(self):
+        inst = _installer(self, ["ha-ffmpeg==3.2.2"])
+        preflight._REPORTS.clear()
+        self.addCleanup(preflight._REPORTS.clear)
+        with mock.patch.object(preflight, "_pip_dry_run", return_value={"ok": True, "install": [], "stderr": ""}), \
+                mock.patch.object(preflight.shutil, "which", return_value=None):
+            res = asyncio.run(preflight.gate(_hass(), inst, "demo", "2.0"))
+        self.assertFalse(res["blocked"])
+        self.assertIn("ha-ffmpeg", _sysdep_warning(res["report"]))
+        started = self._start(res)
+        self.assertTrue(started["ok"])
+        self.assertIn("ha-ffmpeg", "\n".join(started["preflight_warnings"]))
+
+
+class ItReachesTheBuilderCheckTest(NoCache):
+    def test_check_answers_with_it(self):
+        inst = _installer(self, ["ha-ffmpeg==3.2.2"])  # installed_domain is "demo": no "replaces" warning
+        view = object.__new__(build_views.BuildCheckView)
+        view.hass, view.installer, view.updater = _hass(), inst, None
+        view._pf, view._checks = SimpleNamespace(_lock=asyncio.Lock()), {}
+        request = SimpleNamespace(headers={}, query={}, content_type="application/json",
+                                  json=mock.AsyncMock(return_value={"domain": "demo", "ref": "2.0"}))
+
+        async def stored(hass, installer, domain, ref, *args, **kwargs):  # the Check downloads; check the stored copy
+            return await real_run(hass, installer, domain, ref, source_dir=installer._version_dir(domain, "2.0"))
+
+        real_run = preflight.run
+        with mock.patch.object(build_views, "_commit_of", mock.AsyncMock(return_value="abc1234")), \
+                mock.patch.object(build_views.preflight, "run", stored), \
+                mock.patch.object(preflight, "_pip_dry_run", return_value={"ok": True, "install": [], "stderr": ""}), \
+                mock.patch.object(preflight.shutil, "which", return_value=None):
+            res = json.loads(asyncio.run(view.post(request)).body)
+        self.assertTrue(res["ok"])
+        self.assertTrue(res["report"]["ok"])
+        self.assertIn("ha-ffmpeg is a wrapper over the program ffmpeg", _sysdep_warning(res["report"]))
+
+
+if __name__ == "__main__":
+    unittest.main()
