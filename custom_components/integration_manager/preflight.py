@@ -3,7 +3,9 @@ unpacked into a scratch directory, its requirements are resolved by pip in
 dry-run mode against this venv (nothing is installed into it), every package
 pip would take from a source archive is built into a temporary directory,
 every patch is evaluated against the new code and against the requirement
-versions the update would bring, the manifest's dependencies are checked
+versions the update would bring, a requirement known to be a wrapper over a
+program or a shared library the image does not carry is reported as a warning,
+the manifest's dependencies are checked
 against HA's loader, and the minimum Home Assistant version (hacs.json) is
 compared with the target.  The report says what would change and whether
 anything blocks the update.  Used by "Preflight" on the Config page and by
@@ -229,6 +231,76 @@ def _may_provide(module: str, distributions: set[str]) -> bool:
     return any(d == want or (d.startswith(_SHIM_PREFIXES) and d.split("-", 1)[1] == want) for d in distributions)
 
 
+# Packages that pip installs perfectly but that are only a wrapper over something the image must already
+# carry: a program on PATH or a shared library.  pip cannot see this, so the integration starts and fails
+# the moment it uses that part (PyTurboJPEG did, which is why the image carries libturbojpeg since 0.16.0).
+# Not a blocker: an operator may use only the parts of the integration that do without it.
+#
+# One line per package: distribution name (normalised by _canon, so case, "-", "_" and "." do not matter)
+# -> (programs on PATH, shared libraries).  Either side may be empty.  To extend it, add a line.
+_SYSTEM_DEPS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "ha-ffmpeg": (("ffmpeg",), ()),
+    "ffmpeg-python": (("ffmpeg",), ()),
+    "pytesseract": (("tesseract",), ()),
+    "speechrecognition": (("flac",), ()),
+    "pyturbojpeg": ((), ("libturbojpeg.so.0",)),
+    "pyaudio": ((), ("libportaudio.so.2",)),
+    "sounddevice": ((), ("libportaudio.so.2",)),
+    "python-magic": ((), ("libmagic.so.1",)),
+    "pyusb": ((), ("libusb-1.0.so.0",)),
+    "libpcap": ((), ("libpcap.so.0.8",)),
+    "pyudev": ((), ("libudev.so.1",)),
+    "python-vlc": ((), ("libvlc.so.5",)),
+    "python-mpv": ((), ("libmpv.so.2",)),
+    "opencv-python": ((), ("libGL.so.1",)),
+    "opencv-contrib-python": ((), ("libGL.so.1",)),
+}
+
+# the image is what it is for the life of the process: each program and library is looked for once
+_PRESENT: dict[str, bool] = {}
+_LIB_DIRS = ("/usr/lib", "/lib", "/usr/local/lib", "/usr/lib64")
+
+
+def _library_present(soname: str) -> bool:
+    """Blocking: whether the shared library is in this image.  The plain and the multiarch library
+    directories (/usr/lib/x86_64-linux-gnu, /usr/lib/aarch64-linux-gnu), then ctypes' own lookup,
+    which asks ldconfig's cache and so also finds one installed somewhere else."""
+    import ctypes.util
+
+    for base in _LIB_DIRS:
+        if os.path.isfile(os.path.join(base, soname)):
+            return True
+        try:
+            subdirs = [d for d in os.listdir(base) if d.endswith("-linux-gnu")]
+        except OSError:
+            continue
+        if any(os.path.isfile(os.path.join(base, d, soname)) for d in subdirs):
+            return True
+    stem = re.sub(r"^lib", "", soname).split(".so", 1)[0]  # libturbojpeg.so.0 -> turbojpeg
+    return bool(stem) and bool(ctypes.util.find_library(stem))
+
+
+def _present(kind: str, name: str) -> bool:
+    if (hit := _PRESENT.get(f"{kind}:{name}")) is None:
+        hit = _PRESENT[f"{kind}:{name}"] = (shutil.which(name) is not None) if kind == "bin" else _library_present(name)
+    return hit
+
+
+def _system_dep_warnings(requirements: list[str]) -> list[str]:
+    """Blocking (it looks at the filesystem): one line per requirement of _SYSTEM_DEPS whose program or
+    library this container does not have.  A package whose system dependency is there says nothing."""
+    out: list[str] = []
+    for name in dict.fromkeys(_req_name(req) for req in requirements if req):
+        if not (entry := _SYSTEM_DEPS.get(_canon(name))):
+            continue
+        missing = [f"the program {b}" for b in entry[0] if not _present("bin", b)]
+        missing += [f"the library {lib}" for lib in entry[1] if not _present("lib", lib)]
+        if missing:
+            out.append(f"{name} is a wrapper over {' and '.join(missing)}, which this image does not have: "
+                       "it installs, but whatever the integration does with it fails at runtime")
+    return out
+
+
 def _catches_import_error(handler: Any) -> bool:
     import ast
 
@@ -451,6 +523,11 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
             if not b["built"]:
                 blockers.append(f"{b['name']} {b['version']} has no wheel for Python {py} on {platform.machine()} and cannot be built here "
                                 f"(the image has no compiler): {b['error']}")
+        # 4b. a requirement that installs but only wraps a program or library the image does not carry
+        # (the resolved set too: the package that needs it is often pulled in by another one)
+        warnings += await hass.async_add_executor_job(
+            _system_dep_warnings, [*all_reqs, *(str(r.get("name") or "") for r in pip["install"])])
+
         new_versions = {str(r["name"]).lower().replace("_", "-"): str(r["version"]) for r in pip["install"] if r.get("name")}
         for name, ver in installed_now.items():
             key = name.lower().replace("_", "-")
