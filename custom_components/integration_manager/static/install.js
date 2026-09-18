@@ -35,7 +35,7 @@ function invalidate(){ if(CHECK&&combo()!==CHECK.combo){ CHECK=null; $('#bprepar
 ['#bdom','#bdomain','#brepo','#brel','#bref','#bha','#bhafree'].forEach(s=>{ $(s).addEventListener('change',invalidate); $(s).addEventListener('input',invalidate); });
 function domInfo(){
   const d=domain(); const s=(OPT.registry||{})[d]; const inst=(OPT.installed||{})[d]||[];
-  $('#bdominfo').innerHTML=s?`<b>${esc(d)}</b> · ${s.repo?'github.com/'+esc(s.repo):'local directory (dev mode: no releases)'} · in store: ${inst.map(esc).join(', ')||'nothing'}${OPT.running&&OPT.running.domain===d?' · <span class="ok">running '+esc(OPT.running.tag||'')+'</span>':''}`:(d?`<b>${esc(d)}</b> is new: give its GitHub owner/repo; it is added to the registry at Check`:'');
+  $('#bdominfo').innerHTML=s?`<b>${esc(d)}</b> · ${s.repo?'github.com/'+esc(s.repo):'local directory (dev mode: no releases)'} · in store: ${inst.map(esc).join(', ')||'nothing'}${OPT.running&&OPT.running.domain===d?' · <span class="ok">running '+esc(OPT.running.tag||'')+'</span>':''}`:(d?`<b>${esc(d)}</b> is new: give its GitHub owner/repo; Check only looks at it, Prepare adds it to the registry`:'');
 }
 async function releases(force){
   const d=domain(); const sel=$('#brel'); const keep=sel.value; sel.innerHTML='<option value="">(loading…)</option>'; $('#brelinfo').textContent='';

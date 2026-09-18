@@ -207,7 +207,9 @@ integration, any release, branch or commit, and a Home Assistant version, then
 *Check*. Check resolves the ref to a commit, downloads that commit into a scratch directory, resolves its
 Python requirements with `pip --dry-run`, evaluates patches and dependencies
 and the minimum HA version, and tells you whether anything blocks the
-combination, without installing anything. Resolving and building packages that
+combination, without installing anything. It changes nothing on the volume
+either: a repository you typed in yourself is added to the registry by
+*Prepare*, not by *Check*. Resolving and building packages that
 come as source archives runs their build code (`setup.py`, PEP 517 hooks) in the
 container, as the install would. *Prepare* installs
 exactly the combination that passed, at the commit Check saw: if a branch has
