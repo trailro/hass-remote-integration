@@ -61,9 +61,10 @@ MAX_PYPI_LOOKUPS = 12  # a manifest with forty requirements must not turn the pr
 # A resolution that fell far behind.  pip backtracks: when the newest release of a requirement needs
 # something that cannot be installed here (a dependency with no wheel for this Python, so a compiler this
 # image has not got), pip does not fail - it walks back through older releases until one resolves.  Where
-# the requirement names no lower bound it can walk back years: "python-miio" asked for without a bound
-# resolves to 0.2.0 from 2017 (and pulls in "typing" and "pretty-cron"), the preflight is green and the
-# integration breaks the first time it talks to a device.  A silent, ancient resolution is worse than an
+# the requirement names no lower bound it can walk back years, to a release whose API the integration was
+# never written against: the preflight is green and the integration breaks the first time it talks to a
+# device.  (What pip walks back to depends on the day: the release that blocks the newest version may get a
+# wheel, and then the same requirement resolves to the newest again.)  A silent, ancient resolution is worse than an
 # honest refusal, so it is reported - as a warning, never a blocker: pip did produce an install that works,
 # and an old release is occasionally what the requirement really wants.
 #

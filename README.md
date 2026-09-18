@@ -551,8 +551,9 @@ three have to support that Python:
 - **Where pip's resolution landed.** When the newest release of a requirement
   needs something that cannot be installed here, pip does not fail: it walks
   back through older releases until one resolves. A requirement with no lower
-  bound (`python-miio` rather than `python-miio>=0.5.12`) can send it back
-  years, and that resolution installs cleanly and breaks at runtime. After the
+  bound (`some-lib` rather than `some-lib>=2`) can send it back years, to a
+  release the integration was never written against: it installs cleanly and
+  breaks at runtime. After the
   dry run the preflight asks PyPI what the newest release that satisfies the
   requirement is, and warns when the resolved one is both in an older release
   series and at least two years older than it, naming both versions and their
@@ -1409,7 +1410,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | `HRI_REGISTRY` | `ghcr.io/trailro` | Where Compose pulls the image from: `ghcr.io/trailro` (GitHub Container Registry) or `docker.io/trailro26` (Docker Hub); the same image either way. A `docker-compose.yml` from 0.16.0 or older ignores it and pulls from GitHub Container Registry: download the file again to use it |
 | `TZ` | `UTC` | Time zone; an unknown zone falls back to UTC, with an error in the log |
 | `HA_VERSION_LATEST` | `1` | `0` installs the image's baseline HA on a fresh volume instead of the newest |
-| `HRI_APT_PACKAGES` | unset | Debian packages the container installs at boot, before Home Assistant starts, for what pip cannot install (the `ffmpeg` binary, BlueZ): names separated by spaces or commas, for example `ffmpeg libpcap0.8`. Only Debian package names are accepted (`libc6:arm64` too); anything else — an option, a URL, a path, a shell metacharacter — is refused with a line in the log and nothing is installed for it, and the value never reaches a shell. Packages that are already installed are not installed again, so a restart costs nothing. A failure (no network, an unknown package) is recorded on **System** and does not stop the boot. The output is in `integration_manager/apt-install.log` |
+| `HRI_APT_PACKAGES` | unset | Debian packages the container installs at boot, before Home Assistant starts, for what pip cannot install (the `ffmpeg` binary, BlueZ): names separated by spaces or commas, for example `ffmpeg libpcap0.8`. Only Debian package names are accepted (`libc6:arm64` too); anything else — an option, a URL, a path, a shell metacharacter — is refused with a line in the log and nothing is installed for it, and the value never reaches a shell. Packages that are already installed are not installed again, so a restart costs nothing; they live in the container, not on the volume, so recreating the container or updating the image installs them again. A failure (no network, an unknown package) is recorded on **System** and does not stop the boot. The output is in `integration_manager/apt-install.log` |
 | `HRI_DEV_SRC` | `./dev-src` | Dev mode: directory mounted at `/dev-src` |
 | `HRI_DEBUGPY` | unset | Dev mode: debugger port |
 | `HRI_DEBUGPY_HOST` | `127.0.0.1` | Dev mode: address debugpy binds inside the container (the dev overlay sets `0.0.0.0`) |
