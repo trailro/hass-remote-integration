@@ -542,10 +542,15 @@ three have to support that Python:
   preflight knows a list of such packages and looks for what they need in this
   container (a program on `PATH`, a library in the library directories or known
   to `ldconfig`). What is missing is a warning, not a blocker, and names the
-  package and what it wants: an integration is often useful without the part
-  that needs it. A package whose program or library is there says nothing, and
+  package, what it wants and the Debian package that carries it, ending with
+  the setting to make: `Set HRI_APT_PACKAGES=ffmpeg (next to what it already
+  names) and recreate the container`. An integration is often useful without
+  the part that needs it. A package whose program or library is there says nothing, and
   one that is not on the list is not checked. The list lives in
-  `preflight.py` (`_SYSTEM_DEPS`), one line per package. What is checked is the
+  `preflight.py` (`_SYSTEM_DEPS`), one line per package, next to the Debian
+  package each program and library comes from (`_DEBIAN_PACKAGE`); a program
+  or library whose package is not obvious is warned about without one, rather
+  than with a name that may not exist. What is checked is the
   manifest's own requirements, those of the Home Assistant components it names
   under `dependencies` (that is where `ha-ffmpeg` comes from) and everything pip
   resolves for them.
