@@ -168,7 +168,13 @@ class HaStatusView(ManagerView):
         self.updater = updater
 
     async def get(self, request: web.Request) -> web.Response:
-        return self.json(await self.updater.status(force=request.query.get("refresh") == "1" and request.headers.get("X-Requested-With") == "fetch"))
+        """``?all=1``: every stable release instead of the newest few (plus
+        what this box has installed, runs or has scheduled, which are in both).
+        It reads the release list already in memory, so unlike ``?refresh=1``
+        it costs no PyPI call and needs no fetch header."""
+        return self.json(await self.updater.status(
+            force=request.query.get("refresh") == "1" and request.headers.get("X-Requested-With") == "fetch",
+            all_versions=request.query.get("all") == "1"))
 
 
 _HA_CHANGE_LOCK = asyncio.Lock()

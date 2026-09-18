@@ -25,6 +25,12 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 PYPI_URL = "https://pypi.org/pypi/homeassistant/json"
 CACHE_S = 600
 _STABLE = re.compile(r"^\d{4}\.\d{1,2}\.\d+\Z")  # \Z: "$" also matches before a trailing newline
+# How many of the newest stable releases the System page offers without being asked for more.  Home Assistant
+# publishes a release every month and a handful of patches on top of it, and this image's Python only has wheels
+# for the newest of them, so a list of every release ever published is a list of entries that answer "no": ten
+# covers the last two or three months, which is the range a version change is really chosen from.  Not a
+# setting: "show all versions" is one click away and loses nothing, so there is nothing here to get wrong.
+RECENT_N = 10
 
 
 class HaUpdater:
@@ -33,6 +39,7 @@ class HaUpdater:
         self.file = hass.config.path("integration_manager", "ha.json")
         self._cache: tuple[float, dict[str, Any]] | None = None
         self._releases: dict[str, str | None] = {}
+        self._stable: list[str] = []  # every stable release PyPI still offers, oldest first (what "show all" lists)
 
     def _read(self) -> dict[str, Any]:
         try:
@@ -88,11 +95,12 @@ class HaUpdater:
             stable = sorted((v for v in releases if _STABLE.match(v)), key=_key)
             latest = stable[-1] if stable else None
             self._releases = {v: files[0].get("requires_python") for v, files in releases.items()}
+            self._stable = stable
             info = {
                 "latest_stable": latest,
                 "latest_published": (releases[latest][0]["upload_time"][:10] if latest else None),
                 "requires_python": data["info"].get("requires_python"),
-                "recent": stable[-8:],
+                "recent": stable[-RECENT_N:],
                 "error": "",
                 "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             }
@@ -134,13 +142,28 @@ class HaUpdater:
             raise ValueError("no previous Home Assistant version recorded")
         return prev
 
-    async def status(self, force: bool = False) -> dict[str, Any]:
+    async def status(self, force: bool = False, all_versions: bool = False) -> dict[str, Any]:
         state, venvs = await self.hass.async_add_executor_job(lambda: (self._read(), self._installed_venvs()))
         avail = await self.available(force)
         current = homeassistant.const.__version__
-        versions = sorted(set(avail.get("recent") or []) | set(venvs) | ({state["previous"]} if state.get("previous") else set()), key=_key)
-        config_backups = await self.hass.async_add_executor_job(self._config_backups, versions, current)
+        # Nothing this box already has may fall off the offered list, however old it is: a venv on the volume
+        # boots without downloading anything, the running version is how a scheduled change is cancelled, and
+        # a scheduled or previous version is what a rollback goes back to.
+        kept = set(venvs) | {current} | {v for v in (state.get("desired"), state.get("previous")) if v}
+        offered = set(avail.get("recent") or []) | kept
+        everything = set(self._stable) | kept
+        versions = sorted(offered, key=_key)
+        listed = sorted(everything, key=_key) if all_versions else versions
+        # a downgrade plan only for what this image would take; the default list always keeps its own entries
+        plan_for = [v for v in listed if v in offered or not self._image_refusal(v)]
+        config_backups = await self.hass.async_add_executor_job(self._config_backups, plan_for, current)
         return {
+            "versions": versions,  # what the page offers by default
+            "recent_n": RECENT_N,
+            "versions_total": len(everything),  # what "show all" would list
+            **({"all_versions": listed} if all_versions else {}),
+            "baseline": os.environ.get("HA_VERSION_DEFAULT") or "",  # anything older is refused: the page marks those itself
+            "verdicts": self.verdicts(listed),
             "current": current,
             "python": sys.version.split()[0],
             "venv": sys.prefix,
@@ -172,11 +195,19 @@ class HaUpdater:
                 if not self._releases:
                     raise ValueError(f"cannot check Home Assistant {version} against PyPI ({avail.get('error') or 'no release list'}): try again")
                 raise ValueError(f"{version} is not a Home Assistant release on PyPI")
+        if reason := self._image_refusal(version):
+            raise ValueError(reason)
+
+    def _image_refusal(self, version: str) -> str:
+        """Why this image cannot install ``version``, decided from what is
+        already in memory - no PyPI call, no pip run - or "" when nothing
+        there objects.  What ``validate`` raises, and what the System page
+        marks a version with before anyone clicks anything."""
         floor = os.environ.get("HA_VERSION_DEFAULT")
         if floor and _key(version) < _key(floor):
             # older releases have no wheels for this image's Python: pip would
             # grind for minutes and the entrypoint would fall back
-            raise ValueError(f"{version} is older than this image's baseline {floor}; not installable here")
+            return f"{version} is older than this image's baseline {floor}; not installable here"
         spec = self._releases.get(version)
         if spec:
             from packaging.specifiers import SpecifierSet
@@ -185,8 +216,33 @@ class HaUpdater:
             if not SpecifierSet(spec).contains(py, prereleases=True):
                 # reads like the dependency refusal in preflight.ha_version_report: what the version needs,
                 # what this image has, what to do about it
-                raise ValueError(f"Home Assistant {version} needs Python {spec}; this image has {py} "
-                                 "(rebuild the image with that Python, or choose a newer Home Assistant version)")
+                return (f"Home Assistant {version} needs Python {spec}; this image has {py} "
+                        "(rebuild the image with that Python, or choose a newer Home Assistant version)")
+        return ""
+
+    def verdicts(self, versions: list[str]) -> dict[str, dict[str, Any]]:
+        """What is known about each version without resolving anything, in the
+        shape ``dependency_check`` answers in: the Python a release needs, and
+        a report ``preflight`` still holds from this hour (its own check, or
+        the one ``POST /api/ha/update`` ran before it refused).  A version
+        older than the image's baseline is left out on purpose: the answer
+        carries ``baseline`` once and the page does that arithmetic itself,
+        which keeps "show all versions" from repeating the same sentence a
+        thousand times.  Rendering the System page must never start a pip run,
+        so nothing here resolves anything."""
+        from . import preflight
+
+        floor = os.environ.get("HA_VERSION_DEFAULT")
+        out: dict[str, dict[str, Any]] = {}
+        for version in versions:
+            if floor and _key(version) < _key(floor):
+                continue
+            if reason := self._image_refusal(version):
+                out[version] = {"version": version, "ok": False, "checked": True, "blockers": [reason],
+                                "warnings": [], "notes": [], "missing": []}
+            elif (hit := preflight.ha_recent(version)) is not None:
+                out[version] = hit
+        return out
 
     async def dependency_check(self, version: str) -> dict[str, Any]:
         """The other half of ``validate``: that one refuses a version this
