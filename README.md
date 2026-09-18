@@ -497,31 +497,34 @@ Every version change, up or down, takes a backup of the current configuration
 first. This is what makes it practical to try an integration on several Home
 Assistant versions.
 
-**How far back you can go is decided by the image's Python, not by a policy.**
-Home Assistant pins every requirement to an exact version, and an older
-release pins versions that were published before this image's Python existed,
-so PyPI has no wheel for them and the image has no compiler to build one. PyPI
-does not say so in advance (`requires_python` is a lower bound only), so before
-anything is scheduled the manager resolves the chosen version's pins against
-this Python — nothing is installed, the answer is cached for an hour — and
-refuses a version whose requirements cannot install, naming the package. On
-**System**, *Check selected version* (and picking a version in the list) shows
-the same verdict for the selection. When the resolution cannot answer the
-question at all (PyPI unreachable, pip gave up), the page says *could not
-check* and nothing is refused: a check that did not run is not a reason to
-block. If you know better — you added a compiler with
-`HRI_APT_PACKAGES=build-essential`, say — the confirmation offers to schedule
-it anyway.
+**How far back you can go is decided by the image, not by preference.** Two
+rules refuse an older version, both before anything is scheduled. The first is
+the image's baseline, `HA_VERSION_DEFAULT` (2026.8.3 in this image): anything
+older is refused outright, and no force lifts it. The second applies above the
+baseline: an older release pins requirements published before this image's
+Python existed, PyPI has no wheel for them and the image has no compiler, so
+the manager resolves the chosen version's pins itself — nothing is installed,
+the answer is cached for an hour — and refuses a version whose requirements
+cannot install, naming the package. A check can take minutes on an old version,
+and only one runs at a time. On **System**, *Check selected version* (and
+picking a version in the list) shows the same verdict for the selection. When
+the resolution cannot answer the question at all (PyPI unreachable, pip gave
+up), the page says *could not check* and nothing is refused: a check that did
+not run is not a reason to block. If you know better — you added a compiler
+with `HRI_APT_PACKAGES=build-essential`, say — the confirmation offers to
+schedule the version anyway. That covers the pin check only; a version below
+the baseline stays refused. *Python versions* has the details of both.
 
-Because of that floor, the list offers the **ten newest stable releases** plus
-everything this box already has — every venv on the volume, the running
+Because of those floors, the list offers the **ten newest stable releases**
+plus everything this box already has — every venv on the volume, the running
 version, a scheduled one, the one a rollback goes back to — however old those
 are, so nothing you have can fall off it. *Show all versions* adds the rest,
-every release PyPI still offers. Each entry carries what is already known
-about it, with nothing resolved to find out: ✓ it installs here (checked
-within the hour, or its venv is on the volume), ✗ it is refused before
-anything is scheduled (older than the image's baseline, or a pin with no
-wheel), and no mark when nobody has checked.
+every stable release PyPI still offers (betas are never listed). Each entry
+carries what is already known about it, with nothing resolved to find out: ✓ it
+installs here (checked within the hour, or its venv is on the volume), ✗ it is
+refused before anything is scheduled (older than the image's baseline, a Python
+this image does not have, or a pin with no wheel), and no mark when nobody has
+checked or the check could not answer.
 
 Home Assistant migrates its configuration forward only: a newer version
 rewrites `.storage` in its own format and never converts it back. A downgrade
@@ -556,11 +559,18 @@ The container has one Python interpreter, the image's (`python:3.14`). Home
 Assistant, the integration and every package it requires run on it, so all
 three have to support that Python:
 
-- **Home Assistant.** Only versions whose PyPI `requires_python` accepts the
-  image's Python are offered on **System** or installed. A version that would
-  need another Python is refused before the restart. While PyPI cannot be
-  reached a version is refused too ("try again"), unless its venv is already
-  installed for this Python. A release whose files were all yanked on PyPI is
+- **The image's baseline.** The image is built with a baseline Home Assistant
+  version (`HA_VERSION_DEFAULT`, a build-time `ARG`, 2026.8.3 in this image)
+  and refuses everything older than it outright, before any of the checks
+  below and with no force path. A venv of an older version already on the
+  volume can still be switched to, and a rollback to the recorded previous
+  version is not blocked by it. To go lower, build the image yourself with
+  `--build-arg HA_VERSION=<older>`.
+- **Home Assistant.** A version whose PyPI `requires_python` does not accept
+  the image's Python is refused before the restart; it is still shown in the
+  list, marked ✗ with the reason. While PyPI cannot be reached a version is
+  refused too ("try again"), unless its venv is already installed for this
+  Python. A release whose files were all yanked on PyPI is
   never offered, installed or picked for a first start; a venv of it (or of a
   version PyPI no longer lists) already installed for this Python can still be
   switched to.
@@ -569,15 +579,20 @@ three have to support that Python:
   resolved separately: every requirement `homeassistant==<version>` pins has to
   have a wheel for this Python and architecture, because the image has no
   compiler. A version with a pin that has none is refused before the change is
-  scheduled, naming the package (`force` overrides it; the manager device's
-  install action has no override). This is what sets the practical floor on
-  this image: measured against its CPython 3.14.7 on `aarch64` in September
-  2026, **Home Assistant 2026.5.0 and newer resolve entirely from wheels**,
-  and every release from 2026.4.4 back does not — 2026.4.x on `fnv-hash-fast`
-  and `lru-dict`, 2026.1.0–2026.3.0 on `lru-dict` alone, and 2025.10.0 and
-  older on `aiohttp` and several more. That floor is not a rule in the code:
-  it moves down by itself as those projects publish wheels for this Python,
-  and it moves up when the image's Python does.
+  scheduled, naming the package — at most eight of them per version, enough to
+  describe it and few enough to bound the check. `force` overrides this one
+  refusal and nothing else; the manager device's install action has no
+  override. This is the second floor, under the baseline: measured against
+  this image's CPython 3.14.7 on `aarch64` in September 2026, **Home Assistant
+  2026.5.0 and newer resolve entirely from wheels**, and every release from
+  2026.4.4 back does not — 2026.4.x on `fnv-hash-fast` and `lru-dict`,
+  2026.1.0–2026.3.0 on `lru-dict` alone, and 2025.10.0 and older on `aiohttp`
+  and several more. Since this image's baseline is 2026.8.3, the baseline
+  refuses all of those first; the pin check is what decides once the baseline
+  sits below the wheel floor, or the image moves to a newer Python. Neither
+  number is a rule in the code: the wheel floor was measured on `aarch64`
+  only, it moves down by itself as those projects publish wheels for this
+  Python, and it moves up when the image's Python does.
   A venv already installed for this Python is not resolved again: the
   entrypoint boots it as it is.
 - **The integration's requirements.** The preflight resolves them with pip
@@ -1707,10 +1722,13 @@ variable is not set.
 `GET /api/ha` answers the version list as `versions`: the `recent_n` newest
 stable releases (`recent` is still only those) plus every installed venv, the
 running version, a scheduled one and the previous one. `versions_total` is how
-many there are in all, and `?all=1` answers them as `all_versions` — it reads
-the release list already in memory, so unlike `?refresh=1` it costs no PyPI
-call and needs no `X-Requested-With: fetch`. `baseline` is the image's
-`HA_VERSION_DEFAULT`: anything older is refused, which the page works out for
+many there are in all, and `?all=1` answers every stable release plus those
+same local entries as `all_versions` — it reads the release list already in
+memory, so unlike `?refresh=1` it costs no extra PyPI call and needs no
+`X-Requested-With: fetch`. While PyPI has never answered in this process there
+is no release list, so `all_versions` and `versions_total` fall back to what
+the box has. `baseline` is the image's `HA_VERSION_DEFAULT` (`""` if the image
+was built without one): anything older is refused, which the page works out for
 itself rather than being told once per version. `verdicts` maps a version to
 the `check` of `POST /api/ha/check` where that is known without resolving
 anything — a report still in the hour-long cache, or the Python a release
@@ -1718,18 +1736,28 @@ needs.
 
 `POST /api/ha/check` (`{"version": …}`) answers `check`: whether that version's
 pinned requirements resolve from wheels on this image's Python, without
-installing anything — `ok`, `checked`, `blockers`, `warnings`, `notes`,
-`missing` (the pins with no wheel), `python`, `machine`, `requirements`.
-`checked: false` means the question could not be answered (pip timed out, PyPI
-was unreachable, the resolver gave up); `ok` then stays `true`, since nothing
-was found against the version. The answer is cached per version and image
-Python for an hour. `POST /api/ha/update` runs the same check and, without
-`force: true`, refuses a version it blocks with `needs_force`, the report in
-`check` and the blockers in `error` — before it takes a backup or writes
-anything. A version the image's Python cannot run at all (`requires_python`)
-is refused by `POST /api/ha/update` with no `needs_force`: force cannot
-rebuild the image. The manager device's *Install Home Assistant* action takes
-the same refusal and has no force.
+installing anything — `version`, `ok`, `checked`, `blockers`, `warnings`,
+`notes`, `missing` (the pins with no wheel), and, when pip actually ran,
+`python`, `machine`, `requirements` and `duration_s`. `checked: false` means
+the question could not be answered (pip timed out, PyPI was unreachable, the
+resolver gave up); `ok` then stays `true`, since nothing was found against the
+version. The version running now answers `checked: false` with a note and runs
+no pip, and so does a version already installed for this Python ("nothing to
+resolve"); a version the baseline, `requires_python` or PyPI itself refuses
+answers `ok: false` with that refusal as the blocker rather than an error. The
+request itself answers `ok: true` in all of those: the verdict is `check.ok`.
+The answer is cached per version and image Python for an hour, and only one
+check runs at a time.
+
+`POST /api/ha/update` runs the same check and, without `force: true`, refuses a
+version it blocks with `needs_force`, the report in `check` and the blockers in
+`error` — before it takes a backup or writes anything. `force` skips that check
+and nothing else: a version older than the image's baseline, one this image's
+Python cannot run (`requires_python`), or one PyPI does not list is refused
+with no `needs_force`, because force cannot rebuild the image. A forced update
+puts *scheduled with the dependency check skipped (force)* on the timeline,
+whether or not the check would have passed. The manager device's *Install Home
+Assistant* action takes all of those refusals and has no force at all.
 
 `GET /api/summary` includes `manager_update`: the running release and the
 newer ones the banner shows. `POST /api/run/start` takes `force`; a tag that is
@@ -1816,6 +1844,13 @@ progress (50): try again later`.
   version that says *could not check* is not refused: the resolution could not
   answer (PyPI unreachable, or pip gave up on the dependency graph), and the
   install may well work.
+- **A Home Assistant version is refused as "older than this image's
+  baseline".** The image is built with a baseline version (`HA_VERSION_DEFAULT`,
+  2026.8.3 here) and refuses everything below it outright. This is not the pin
+  check, and *Schedule anyway* is not offered. A venv of an older version
+  already on the volume can still be switched to, and a rollback to the
+  previous version is not blocked by it. To go lower, build the image yourself
+  with `--build-arg HA_VERSION=<older>`.
 - **"restart required" does not go away.** Click *Restart process* on the
   Overview; some changes (a new version of a loaded integration, YAML) only take
   effect at a restart.
@@ -1902,7 +1937,10 @@ A few things that shaped the code, useful if you read it:
   image to that Python. An image with a newer Python is tested against Home
   Assistant and the manager before release, not against every integration: after
   updating hass-remote-integration, run the preflight on the integration you
-  use.
+  use. How far back Home Assistant can go has two other floors: the image's
+  baseline (`HA_VERSION_DEFAULT`, which no force lifts) and, under it, the
+  oldest release whose pinned requirements still have wheels for this Python
+  (see *Python versions*).
 - Packages without a wheel for your architecture that need a compiler (C, Rust)
   cannot be installed. Wheels differ between amd64 and arm64, so an integration
   can install on one and not the other.
