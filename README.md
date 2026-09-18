@@ -497,6 +497,22 @@ Every version change, up or down, takes a backup of the current configuration
 first. This is what makes it practical to try an integration on several Home
 Assistant versions.
 
+**How far back you can go is decided by the image's Python, not by a policy.**
+Home Assistant pins every requirement to an exact version, and an older
+release pins versions that were published before this image's Python existed,
+so PyPI has no wheel for them and the image has no compiler to build one. PyPI
+does not say so in advance (`requires_python` is a lower bound only), so before
+anything is scheduled the manager resolves the chosen version's pins against
+this Python — nothing is installed, the answer is cached for an hour — and
+refuses a version whose requirements cannot install, naming the package. On
+**System**, *Check selected version* (and picking a version in the list) shows
+the same verdict for the selection. When the resolution cannot answer the
+question at all (PyPI unreachable, pip gave up), the page says *could not
+check* and nothing is refused: a check that did not run is not a reason to
+block. If you know better — you added a compiler with
+`HRI_APT_PACKAGES=build-essential`, say — the confirmation offers to schedule
+it anyway.
+
 Home Assistant migrates its configuration forward only: a newer version
 rewrites `.storage` in its own format and never converts it back. A downgrade
 therefore asks what the older version starts with:
@@ -538,6 +554,22 @@ three have to support that Python:
   never offered, installed or picked for a first start; a venv of it (or of a
   version PyPI no longer lists) already installed for this Python can still be
   switched to.
+- **Home Assistant's own pins.** `requires_python` is a lower bound, so it does
+  not refuse a version whose pinned requirements predate this Python. Those are
+  resolved separately: every requirement `homeassistant==<version>` pins has to
+  have a wheel for this Python and architecture, because the image has no
+  compiler. A version with a pin that has none is refused before the change is
+  scheduled, naming the package (`force` overrides it; the manager device's
+  install action has no override). This is what sets the practical floor on
+  this image: measured against its CPython 3.14.7 on `aarch64` in September
+  2026, **Home Assistant 2026.5.0 and newer resolve entirely from wheels**,
+  and every release from 2026.4.4 back does not — 2026.4.x on `fnv-hash-fast`
+  and `lru-dict`, 2026.1.0–2026.3.0 on `lru-dict` alone, and 2025.10.0 and
+  older on `aiohttp` and several more. That floor is not a rule in the code:
+  it moves down by itself as those projects publish wheels for this Python,
+  and it moves up when the image's Python does.
+  A venv already installed for this Python is not resolved again: the
+  entrypoint boots it as it is.
 - **The integration's requirements.** The preflight resolves them with pip
   against the running venv. A package whose `requires_python` excludes the
   image's Python, or that conflicts with Home Assistant's pins, is a blocker.
@@ -1637,7 +1669,7 @@ points:
 | Patches | `GET /api/patches/<domain>`, `POST /api/patches/<domain>/upload`, `POST /api/patches/<domain>/<name>/{apply,delete}`, `GET /api/patch_editor/<domain>?name=`, `POST /api/patch_editor/<domain>/{check,save}` |
 | MQTT | `GET/POST /api/mqtt/config`, `GET/POST /api/mqtt/rules`, `POST /api/mqtt/{reconnect,republish}`, `GET /api/mqtt/discovery`, `GET /api/mqtt/commands` |
 | Entities | `GET /api/entities`, `POST /api/entities/<entity_id>/{rename,name,disable,enable,delete,mqtt_exclude,mqtt_include,mqtt_name}`, `GET /api/devices`, `POST /api/devices/<device_id>/{name,delete}`, `GET /api/services`, `POST /api/services/call` |
-| System | `GET /api/ha`, `POST /api/ha/{update,rollback}`, `POST /api/restart`, `GET/POST /api/settings` |
+| System | `GET /api/ha`, `POST /api/ha/{update,rollback,check}`, `POST /api/restart`, `GET/POST /api/settings` |
 | Backups | `GET /api/backups`, `POST /api/backups/create`, `POST /api/backups/upload`, `GET /api/backups/<name>/download`, `POST /api/backups/<name>/{restore,delete}`, `POST /api/backups/restore/cancel` (answers `cancelled`; a restore that belongs to a scheduled Home Assistant version change is refused with `for_version`, and a full rollback's restore with `rollback`, the backup it restores) |
 | Import | `POST /api/import/upload`, `GET/POST /api/import/inspect`, `POST /api/import/{apply,apply_all,clear}` |
 | Cutover | `GET /api/parity`, `POST /api/parity/{test,remove_orphans}`, `POST /api/cutover/{status,enable,undo}`; `enable` takes `force`, which skips the checks on the main Home Assistant (MQTT loaded, the integration's config entries, entity ids still registered there) but not the container's own (an integration running, health, MQTT connected), and the answer and the timeline say `forced`; `undo` answers `cleared_discovery_configs` and `manager_device_kept`; a check on the main HA that cannot run (unreachable, its registry unreadable) blocks the enable rather than passing. Removing an orphan while discovery is off is refused, except for the manager device while `manager_discovery` announces it |
@@ -1661,6 +1693,21 @@ wait through), `gave_up`, `last` (`at`, `integration`, `reason`,
 `GET /api/ha` includes `apt`: what this boot did with `HRI_APT_PACKAGES`
 (`packages`, `refused`, `ok`, `note`, `error`, `at`), or `null` when the
 variable is not set.
+
+`POST /api/ha/check` (`{"version": …}`) answers `check`: whether that version's
+pinned requirements resolve from wheels on this image's Python, without
+installing anything — `ok`, `checked`, `blockers`, `warnings`, `notes`,
+`missing` (the pins with no wheel), `python`, `machine`, `requirements`.
+`checked: false` means the question could not be answered (pip timed out, PyPI
+was unreachable, the resolver gave up); `ok` then stays `true`, since nothing
+was found against the version. The answer is cached per version and image
+Python for an hour. `POST /api/ha/update` runs the same check and, without
+`force: true`, refuses a version it blocks with `needs_force`, the report in
+`check` and the blockers in `error` — before it takes a backup or writes
+anything. A version the image's Python cannot run at all (`requires_python`)
+is refused by `POST /api/ha/update` with no `needs_force`: force cannot
+rebuild the image. The manager device's *Install Home Assistant* action takes
+the same refusal and has no force.
 
 `GET /api/summary` includes `manager_update`: the running release and the
 newer ones the banner shows. `POST /api/run/start` takes `force`; a tag that is
@@ -1737,6 +1784,16 @@ progress (50): try again later`.
   integration that needs them fails where you can see it. Bluetooth needs more
   than a package: the container also has to reach the host's adapter and D-Bus,
   which no package can give it.
+- **A Home Assistant version is refused as "unlikely to install".** Its pinned
+  requirements have no wheel for this image's Python (the message names them),
+  and the image carries no compiler, so pip would fail minutes into the install
+  and the container would fall back to the version you came from. Choose a
+  newer version, or add a compiler with `HRI_APT_PACKAGES=build-essential`,
+  recreate the container and confirm the version anyway when the page offers to
+  — building those packages takes a long time and needs the memory for it. A
+  version that says *could not check* is not refused: the resolution could not
+  answer (PyPI unreachable, or pip gave up on the dependency graph), and the
+  install may well work.
 - **"restart required" does not go away.** Click *Restart process* on the
   Overview; some changes (a new version of a loaded integration, YAML) only take
   effect at a restart.
