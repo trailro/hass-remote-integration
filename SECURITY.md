@@ -69,6 +69,12 @@ those projects.
   those installs for a small gain in a single-purpose container. Keep the
   container unprivileged (no `--privileged`), pass only the devices it needs,
   and keep the volume private to Docker.
+- **`HRI_APT_PACKAGES` installs Debian packages as root inside the
+  container.** They come from Debian's own repositories, through apt, at boot;
+  the names are validated and never reach a shell, but a package's maintainer
+  scripts run as root like any `apt-get install`. Only the operator sets this —
+  it is part of the container's environment, and nothing in the UI, the API or
+  an integration can change it.
 - **Other services on the same host name see the session cookie.** Browsers
   send cookies to every port of a host, so a web app on another port of the
   same IP address or name receives `hri_session_<port>` and can overwrite it.

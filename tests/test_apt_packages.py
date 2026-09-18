@@ -252,5 +252,21 @@ class AptBootTest(unittest.TestCase):
         self.assertTrue(record["ok"])
 
 
+class AptDocsTest(unittest.TestCase):
+    """The variable is only usable when the shipped compose file passes it in, and only found when it is documented."""
+
+    def read(self, name):
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), name), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_compose_passes_the_variable_into_the_container(self):
+        self.assertIn('HRI_APT_PACKAGES: "${HRI_APT_PACKAGES:-}"', self.read("docker-compose.yml"))
+
+    def test_the_readme_documents_the_variable_and_its_log(self):
+        readme = self.read("README.md")
+        self.assertIn("| `HRI_APT_PACKAGES` | unset |", readme)
+        self.assertIn("apt-install.log", readme)
+
+
 if __name__ == "__main__":
     unittest.main()

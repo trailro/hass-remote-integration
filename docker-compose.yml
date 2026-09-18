@@ -26,6 +26,7 @@ services:
       HRI_PASSWORD_FILE: "${HRI_PASSWORD_FILE:-}"  # optional: read the password from this file instead (e.g. a Docker secret)
       HRI_COOKIE_SECURE: "${HRI_COOKIE_SECURE:-}"  # 1: mark the session cookie Secure (behind a reverse proxy with TLS)
       HA_VERSION_LATEST: "${HA_VERSION_LATEST:-1}"  # 0: a fresh volume installs the image's baseline Home Assistant
+      HRI_APT_PACKAGES: "${HRI_APT_PACKAGES:-}"     # e.g. "ffmpeg": Debian packages installed at boot, for what pip cannot install
       HRI_CALL_TIMEOUT: "${HRI_CALL_TIMEOUT:-60}"   # seconds a service call may take (over MQTT and from the Services page)
       HRI_DEBUG: "${HRI_DEBUG:-}"                   # 1: debug logging for the manager
       HRI_TRACE_IMPORT: "${HRI_TRACE_IMPORT:-}"     # diagnostics: log who imports these packages
