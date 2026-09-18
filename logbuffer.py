@@ -46,7 +46,7 @@ _TORN_ID = re.compile(r'\{"id":\s*(\d+)')  # the id at the start of a record who
 # value goes with it, which errs on the side of hiding)
 _URL_QUERY = re.compile(r"([^\s\"'?#]*)\?([^\s#]+)")
 _URL_ORIGIN = re.compile(r"^(?:[A-Za-z][A-Za-z0-9+.-]*:)?//[^/]*")  # http://host, or //host (a scheme-relative URL)
-_LOG_SEARCH_PATHS = ("/api/logs", "/api/log_files/tail")  # the paths themselves: not /x/api/logs, not /api/logs/level
+_LOG_SEARCH_PATHS = ("/api/logs", "/api/log_files/tail", "/api/log_files/download")  # the paths themselves: not /x/api/logs, not /api/logs/level
 # on the log search endpoints every value is masked but these, in the form the pages send them
 _LOG_SEARCH_PLAIN = {
     "level": re.compile(r"[A-Za-z]{1,10}"),
