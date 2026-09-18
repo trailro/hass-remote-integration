@@ -66,7 +66,7 @@ class RestartFailureTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_failure_in_executor_step(self):
         inst = self.installer()
-        with mock.patch.object(inst, "_reset_boot_failures", side_effect=RuntimeError("boom")), self.assertLogs(level="ERROR"):
+        with mock.patch.object(inst, "_undo_boot_failure", side_effect=RuntimeError("boom")), self.assertLogs(level="ERROR"):
             res = await inst.restart()
         self.assertEqual((res["ok"], inst.busy, self.stops), (False, False, []))
 

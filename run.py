@@ -232,6 +232,9 @@ async def _boot() -> int:
     # installer.restart arms it when it asks HA to stop: a stop that hangs before HA's first stage
     # never fires EVENT_HOMEASSISTANT_STOP, where _on_stop below would otherwise arm it
     hass.data["hri_stop_watchdog"] = _arm_stop_watchdog
+    # and takes this boot's failure count back through the same helper as the stop path: one boot, one
+    # increment, taken back once, so the crashes of earlier boots stay counted towards the fallback
+    hass.data["hri_undo_boot_failure"] = _undo_boot_failure
 
     for domain in ("http", "integration_manager"):
         if not await async_setup_component(hass, domain, config):
