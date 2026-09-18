@@ -368,7 +368,7 @@ update. One downloaded before 0.18.0 does not pass `HRI_APT_PACKAGES` on, so
 setting it in `.env` does nothing at all: download the compose file again (the
 command in *Quick start*) when you update.
 
-The image carries a healthcheck, so `docker ps` says `healthy` once the manager
+Since 0.19.0 the image carries a healthcheck, so `docker ps` says `healthy` once the manager
 API answers and `unhealthy` when it stops answering, and
 `depends_on: condition: service_healthy` works. Unlike the two settings above
 this one needs no new compose file: a service that does not define
@@ -714,7 +714,8 @@ not start.
 
 ### Health
 
-`hass_<domain>/health` carries a verdict: `ok`, `degraded` or `error`, with the
+`hass_<domain>/health` carries a verdict: `ok`, `degraded`, `error` or
+`stopped` (nothing is running), with the
 reason, entity counts and when the integration last wrote a state. With
 discovery on, your main HA gets a connectivity sensor and a health sensor for
 the container. The thresholds are on the **MQTT** page; mark an integration
@@ -727,10 +728,13 @@ until somebody looks. The **health watchdog** (on **System**, *off by
 default*) restarts the process when the verdict has been `error` without
 interruption for a while: 15 minutes by default, at most once an hour and at
 most three times a day. Only `error` counts — a `degraded` version is kept on
-purpose, `stopped` is your decision, and `unconfigured` has nothing to judge.
+purpose and `stopped` is your decision. An integration that is installed but
+not configured yet also reports `error` (`not loaded (no config entry, no YAML
+setup)`); a restart cannot configure it, so the watchdog leaves that one alone.
 
 It never fights the rest of the manager. Nothing is restarted while an
 install, start, stop, backup, import, restore or full rollback is running,
+while no integration runs or Home Assistant itself is not running yet,
 while a restore, a rebuild, a Home Assistant version change, a deferred start
 or a full rollback is waiting for the next restart, while a smoke test is
 pending or a config entry is still setting up, nor in the first 15 minutes
@@ -739,7 +743,8 @@ restart it decided against puts one line on the timeline for that stretch, not
 one a minute.
 
 It cannot loop. After a restart the clock starts again from that boot, and the
-window doubles for the next attempt (15 → 30 → 60 minutes and on), so a
+window doubles for the next attempt (15 → 30 → 60 → 120 → 240 minutes, where
+it stops doubling), so a
 restart that did not help is not repeated at the same rate. When the daily
 maximum is reached it gives up, says so once, and waits: an `ok` verdict
 resets the ladder and the give-up, and the daily count drains as the restarts
@@ -1396,7 +1401,7 @@ What is in place:
   so is the login page's own `<style>` element.
 - Secrets (MQTT password, GitHub token, parent HA token) are write-only in the
   UI, stored in files readable only by the owner, and never logged or included
-  in the diagnostics zip. The diagnostics zip, the log file tails, the records on
+  in the diagnostics zip. The diagnostics zip, the log file tails and downloads, the records on
   the Logs page (message and traceback) and the inspection of an imported Home
   Assistant backup mask passwords (also `pwd`, `*_pw`, passphrases, passcodes
   and PIN codes), tokens, credentials, session ids, signatures, WiFi and other
@@ -1421,7 +1426,7 @@ What is in place:
   how long it takes do not depend on what the masking hides.
   The web server logs every request line to `process.log` and the container
   log. Before a line is written, the search text of the Logs and Log files
-  pages, the `file` a tail asks for, and URL parameters named like a credential
+  pages, the `file` a tail or a download asks for, and URL parameters named like a credential
   (`access_token`, `authSig`, …) become `***`, so searching for your own secret
   does not write it to disk. A search path counts in any spelling (`/API/logs`,
   `//api/logs`, `/api/logs;x`, `/x/../api/logs`), including the ones the
@@ -1484,7 +1489,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | `HRI_REGISTRY` | `ghcr.io/trailro` | Where Compose pulls the image from: `ghcr.io/trailro` (GitHub Container Registry) or `docker.io/trailro26` (Docker Hub); the same image either way. A `docker-compose.yml` from 0.16.0 or older ignores it and pulls from GitHub Container Registry: download the file again to use it |
 | `TZ` | `UTC` | Time zone; an unknown zone falls back to UTC, with an error in the log |
 | `HA_VERSION_LATEST` | `1` | `0` installs the image's baseline HA on a fresh volume instead of the newest |
-| `HRI_APT_PACKAGES` | unset | Debian packages the container installs at boot, before Home Assistant starts, for what pip cannot install (the `ffmpeg` binary, BlueZ): names separated by spaces or commas, for example `ffmpeg libpcap0.8`. Only Debian package names are accepted (`libc6:arm64` too); anything else — an option, a URL, a path, a shell metacharacter — is refused with a line in the log and nothing is installed for it, and the value never reaches a shell. Packages that are already installed are not installed again, so a restart costs nothing; they live in the container, not on the volume, so recreating the container or updating the image installs them again. A failure (no network, an unknown package) is recorded on **System** and does not stop the boot. The output is in `integration_manager/apt-install.log`. A `docker-compose.yml` from 0.17.2 or older does not pass it to the container: download the file again to use it |
+| `HRI_APT_PACKAGES` | unset | Debian packages the container installs at boot, before Home Assistant starts, for what pip cannot install (the `ffmpeg` binary, BlueZ): names separated by spaces or commas, for example `ffmpeg libpcap0.8t64`. Only Debian package names are accepted (`libc6:arm64` too); anything else — an option, a URL, a path, a shell metacharacter — is refused with a line in the log and nothing is installed for it, and the value never reaches a shell. Packages that are already installed are not installed again, so a restart costs nothing; they live in the container, not on the volume, so recreating the container or updating the image installs them again. A failure (no network, an unknown package) is recorded on **System** and does not stop the boot. The output is in `integration_manager/apt-install.log`. A `docker-compose.yml` from 0.17.2 or older does not pass it to the container: download the file again to use it |
 | `HRI_DEV_SRC` | `./dev-src` | Dev mode: directory mounted at `/dev-src` |
 | `HRI_DEBUGPY` | unset | Dev mode: debugger port |
 | `HRI_DEBUGPY_HOST` | `127.0.0.1` | Dev mode: address debugpy binds inside the container (the dev overlay sets `0.0.0.0`) |
@@ -1646,7 +1651,8 @@ exist yet (a library imported later) needs a dotted Python name, and at most
 `GET/POST /api/settings` carries the health watchdog as `watchdog` (a boolean,
 off by default), `watchdog_after_min` (5–720), `watchdog_min_interval_min`
 (15–1440) and `watchdog_max_per_day` (1–24); numbers outside the range are
-clamped, not refused. `GET /api/status` answers `watchdog` with those settings
+clamped, not refused. `GET /api/status` answers `watchdog` with the same rules
+under shorter names (`enabled`, `after_min`, `min_interval_min`, `max_per_day`)
 plus `restarts_24h`, `attempts`, `window_min` (what the next attempt has to
 wait through), `gave_up`, `last` (`at`, `integration`, `reason`,
 `unhealthy_s`, `attempt`, `next`) and `pending` (`bad_for_s`, `window_s`,
@@ -1692,7 +1698,7 @@ progress (50): try again later`.
   a scheduled restore, removing unused venvs) the
   page and every `/api/` path answer `503` with a `Retry-After: 5`, and under
   `/api/` with a JSON body naming the phase (`phase`) and the seconds since the
-  container started (`elapsed`), so a healthcheck does not call the container healthy while there is no
+  container started (`elapsed`), so the image's healthcheck does not call the container healthy while there is no
   manager API yet. `docker stop` during these steps stops pip and exits at
   once. A version in `integration_manager/ha.json` that is not a Home
   Assistant version number (edited by hand) is ignored and logged. A slow install
@@ -1711,7 +1717,7 @@ progress (50): try again later`.
   why. A password changes nothing: the `401` of `/api/status` is the manager
   answering. To see the probe's own error, run it by hand:
   `docker exec <name> python -c "import http.client, os;
-  c = http.client.HTTPConnection('127.0.0.1', int(os.environ['HRI_PORT']));
+  c = http.client.HTTPConnection('127.0.0.1', int(os.environ.get('HRI_PORT') or 8087));
   c.request('GET', '/api/status'); print(c.getresponse().status)"`.
 - **The page says Home Assistant is not started: a restore failed and could not
   be put back.** The configuration is half restored and the page names the

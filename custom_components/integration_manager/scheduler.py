@@ -215,9 +215,14 @@ class Scheduler:
         if verdict is None:
             return  # unknown: the stretch keeps running, nothing is decided on it
         state = verdict.get("state")
+        if state == "error" and "no config entry, no YAML setup" in (verdict.get("reason") or ""):
+            # an integration installed but never configured reports error, not the smoke test's "unconfigured":
+            # a restart cannot configure it, so the watchdog leaves it alone (the Integration page says what to do)
+            self._watchdog_clear()
+            return
         if state != "error":
-            # degraded is kept on purpose (a version that did set up), stopped is an operator's
-            # decision and unconfigured means there is nothing to judge: none of them is acted on
+            # degraded is kept on purpose (a version that did set up) and stopped is an operator's
+            # decision: neither is acted on
             self._watchdog_clear()
             if state == "ok":
                 inst.watchdog_recovered()
