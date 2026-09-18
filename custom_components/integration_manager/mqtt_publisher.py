@@ -2397,12 +2397,10 @@ class MqttPublisher:
             # domains (switch.x + light.x on one device)
             "components": {_comp_key(eid): comp for eid, comp in comps.items()},
         }
-        if self._orphan_sweep_due and self._boot_components:
-            # announced before this start and not (yet) here: kept until the orphan sweep decides
-            # (an entity still setting up comes back; one a restore took away gets its removal form)
-            for key, comp in self._boot_components.get(discovery_id, {}).items():
-                if (discovery_id, key) not in self._boot_removed:
-                    payload["components"].setdefault(key, comp)
+        # announced before this start and not (yet) here: kept until the orphan sweep decides
+        # (an entity still setting up comes back; one a restore took away gets its removal form)
+        for key, comp in self._boot_carried(discovery_id).items():
+            payload["components"].setdefault(key, comp)
         # Entities that were in this device last time and are gone now must
         # be sent once in HA's removal form, otherwise the consumer keeps them.
         gone_ids = set(self._discovery_map.get(discovery_id, {})) - set(comps)
@@ -2420,6 +2418,17 @@ class MqttPublisher:
             self._blocks[discovery_id] = block
         # not published (disconnected/moving): the map keeps the old components,
         # so the next full republish computes the removal forms again
+
+    def _boot_carried(self, discovery_id: str, without=()) -> dict[str, dict[str, Any]]:
+        """Components an earlier process announced for this device that this process has not removed: entities that
+        are still setting up here.  They count as entities of the device, so the last one this process has going away
+        must not clear its config (that would take them off the consumer until they finish setting up).  `without`
+        are entities that are going away now: they did set up here, so nothing is carried for them."""
+        if not (self._orphan_sweep_due and self._boot_components):
+            return {}
+        dropped = {_comp_key(entity_id) for entity_id in without}
+        return {key: comp for key, comp in self._boot_components.get(discovery_id, {}).items()
+                if key not in dropped and (discovery_id, key) not in self._boot_removed}
 
     def _note_boot_removed(self, discovery_id: str, entity_ids) -> None:
         """Removed from the consumer by this process (removal forms, or the device config cleared): until the orphan
@@ -2447,7 +2456,9 @@ class MqttPublisher:
         moved_in = {did for did, (_b, comps) in groups.items() if any(prev_owner.get(eid) not in (None, did) for eid in comps)}
         with_removals = {did for did in groups if set(self._discovery_map.get(did, {})) - set(groups[did][1])}
         for gone in set(self._discovery_map) - set(groups):
-            if self._publish(self._discovery_topic(gone), None, qos=1):
+            if self._boot_carried(gone, self._discovery_map.get(gone, ())) and (block := self._blocks.get(gone)) is not None:
+                self._publish_device_discovery(gone, block, {})  # entities still setting up: removal forms, not a clear
+            elif self._publish(self._discovery_topic(gone), None, qos=1):
                 self._note_boot_removed(gone, self._discovery_map.pop(gone))
         for disc_id in sorted(groups, key=lambda d: (d not in with_removals, depth(d))):
             block, comps = groups[disc_id]
@@ -2963,7 +2974,7 @@ class MqttPublisher:
             if not remaining:
                 if groups is None:
                     groups, _ = self._group_by_device()
-                if disc_id not in groups:
+                if disc_id not in groups and not self._boot_carried(disc_id, [entity_id]):
                     # Last entity of a device that is gone from here too (a deleted
                     # config entry): a config carrying nothing but the removal form
                     # leaves an empty device on the consumer until the next full

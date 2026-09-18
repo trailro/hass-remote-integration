@@ -55,13 +55,16 @@ class Registry:
         return self.entities.get(entity_id)
 
 
-class StartWindow(unittest.IsolatedAsyncioTestCase):
+class StartWindowCase(unittest.IsolatedAsyncioTestCase):
     """A process that started a moment ago: the previous one announced sensor.a and sensor.b on the demo device, the
     retained config says so (the boot components), and the orphan sweep is still five minutes away."""
 
+    LIVE = ("sensor.a", "sensor.b")  # entities this process has
+    SETTING_UP = ()  # announced by the previous process and not here (yet): still setting up
+
     async def asyncSetUp(self):
         self.tmp = tempfile.mkdtemp()
-        self.registry = Registry("sensor.a", "sensor.b")
+        self.registry = Registry(*self.LIVE, *self.SETTING_UP)
         self.states = {eid: State(eid, "5", {"unit_of_measurement": "W", "device_class": "power"}) for eid in self.registry.entities}
         pub = mp.MqttPublisher.__new__(mp.MqttPublisher)
         pub.config = mp.MqttConfig(enabled=True, discovery_enabled=True)
@@ -95,12 +98,19 @@ class StartWindow(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.patch.stop)
         groups, _ = pub._group_by_device()
         pub._boot_components = {self.did: {mp._comp_key(eid): comp for eid, comp in groups[self.did][1].items()}}
+        for eid in self.SETTING_UP:  # not in this process yet: only the previous process's config has them
+            self.registry.entities.pop(eid)
+            self.states.pop(eid)
         await pub.async_republish_all()  # the first full republish of this process: both announced
-        self.assertEqual(set(self.config()["components"]), {"sensor_a", "sensor_b"})
+        self.assertEqual(set(self.config()["components"]), {mp._comp_key(eid) for eid in (*self.LIVE, *self.SETTING_UP)})
+
+    def raw_config(self):
+        """The last config payload of the demo device, None once it was cleared."""
+        topic = self.pub._discovery_topic(self.did)
+        return [p for t, p in self.published if t == topic][-1]
 
     def config(self):
-        topic = self.pub._discovery_topic(self.did)
-        return json.loads([p for t, p in self.published if t == topic][-1])
+        return json.loads(self.raw_config())
 
     async def run_debounced(self):
         """The registry burst is over: the debounced discovery refresh runs (what the main HA gets 3 s later)."""
@@ -114,6 +124,8 @@ class StartWindow(unittest.IsolatedAsyncioTestCase):
         comps = self.config()["components"]
         self.assertNotIn("unique_id", comps.get(key, {}), f"{key} announced again: {comps.get(key)}")
 
+
+class StartWindow(StartWindowCase):
     async def test_rename_in_the_window_stays_renamed(self):
         entry = self.registry.entities.pop("sensor.a")
         entry.entity_id = "sensor.renamed"
