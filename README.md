@@ -1355,7 +1355,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
   custom_components/<domain>/   the deployed integration
   integration_manager/
     state.json                  running integration, versions, pending actions
-    settings.json               settings, tokens, log-file format (mode 600)
+    settings.json               settings, tokens, log-file format (mode 600); a damaged one is kept as settings.json.corrupt-<time>
     auth_key                    signs login sessions, only with a password set (mode 600)
     auth_revoked                time of the last logout: sessions from before it are invalid
     mqtt.json                   broker configuration (mode 600)
@@ -1371,7 +1371,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
     import-map.json             entity and device ids an import aligns at boot
     latest_versions.json        last known releases (update entities, the banner)
     manager_actions.json        when each MQTT manager action last ran
-    registry.json               your registry entries (see below)
+    registry.json               your registry entries (see below); one that cannot be read is kept as registry.json.corrupt-<time> when an entry is added
     versions/<domain>/<tag>/    version store
     patches/<domain>/           your patches
     yaml/<domain>.yaml          YAML configuration
