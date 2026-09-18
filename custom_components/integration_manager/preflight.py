@@ -867,3 +867,170 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
 
         if not source_dir:  # the stored copy stays
             await hass.async_add_executor_job(_cleanup)
+
+
+# ----- a Home Assistant version, before the restart installs it ------------
+#
+# The image carries one Python and no compiler; Home Assistant pins every
+# requirement with "==", and an older release pins versions that were built
+# before this Python existed.  ``requires_python`` does not say so (it is a
+# lower bound only), so such a version is offered, the entrypoint starts the
+# install and pip fails minutes later.  This resolves the same thing first.
+#
+# Not a full resolve of the dependency graph: with everything below the pins
+# unconstrained, pip backtracks through thousands of candidates and gives up
+# with "resolution-too-deep" - on good versions too (2026.9.2 does), so that
+# answer says nothing about the version.  What decides the install is
+# narrower and deterministic: every pin Home Assistant itself names must have
+# a wheel for this interpreter.  ``--no-deps`` asks exactly that (no graph to
+# walk), ``--only-binary=:all:`` makes pip refuse what it would otherwise try
+# to compile, and ``--dry-run`` installs nothing.
+
+HA_CACHE_S = 3600  # the answer for (version, Python) changes only when PyPI grows a wheel: an hour is plenty
+MAX_HA_REPORTS = 32
+MAX_HA_MISSING = 8  # pins named one per pip run: enough to describe a version, few enough to bound the check
+_HA_REPORTS: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+_HA_LOCK = asyncio.Lock()  # one check at a time; LOCK belongs to the integration preflight and can be held for minutes
+
+_PIP_NO_DEPS = ("-m", "pip", "install", "--dry-run", "--quiet", "--report", "-", "--ignore-installed", "--no-deps", "--only-binary=:all:")
+_NO_WHEEL_RE = re.compile(r"Could not find a version that satisfies the requirement (\S+)")
+_HA_VERSION_RE = re.compile(r"\d{4}\.\d{1,2}\.\d+(b\d+)?\Z")
+
+
+def _pip_no_deps(python: str, requirements: list[str]) -> subprocess.CompletedProcess:
+    """Blocking: resolve ``requirements`` one by one (no dependency graph),
+    wheels only, installing nothing."""
+    return _run_pip([python, *_PIP_NO_DEPS, *requirements])
+
+
+def _req_key(req: str) -> str:
+    return re.split(r"[=<>!~ \[(]", req, maxsplit=1)[0].strip().lower().replace("_", "-").replace(".", "-")
+
+
+def _ha_pins(python: str, version: str) -> tuple[list[str] | None, str]:
+    """Blocking: the requirements ``homeassistant==version`` pins, read from
+    pip's own resolution report (its metadata, not a second source)."""
+    try:
+        proc = _pip_no_deps(python, [f"homeassistant=={version}"])
+    except subprocess.TimeoutExpired:
+        return None, f"pip did not finish within {PIP_TIMEOUT_S}s"
+    if proc.returncode != 0:
+        err = proc.stderr.strip()
+        if (m := _NO_WHEEL_RE.search(err)) and _req_key(m.group(1)) == "homeassistant":
+            return [], f"no such Home Assistant release on PyPI: {m.group(1)}"
+        return None, _pip_reason(err)
+    try:
+        report = json.loads(proc.stdout or "{}")
+        meta = (report["install"][0]).get("metadata") or {}
+    except (ValueError, LookupError):
+        return None, "pip report was not the expected JSON"
+    return [str(r) for r in (meta.get("requires_dist") or [])], ""
+
+
+def _ha_wheel_check(python: str, version: str) -> dict[str, Any]:
+    """Blocking, for the executor: what would stop ``pip install
+    homeassistant==version`` in this image.  ``checked`` is False when pip
+    answered something that is not about a missing wheel (a timeout, no
+    index, a resolver artifact): that is "could not check", never a blocker.
+    """
+    import platform
+
+    t0 = time.monotonic()
+    py = ".".join(str(x) for x in sys.version_info[:3])
+    machine = platform.machine()
+    out: dict[str, Any] = {"version": version, "python": py, "machine": machine, "ok": True, "checked": True,
+                           "blockers": [], "warnings": [], "notes": [], "missing": [], "requirements": 0}
+
+    pins, err = _ha_pins(python, version)
+    if pins is None:
+        out.update(checked=False, notes=[f"could not check Home Assistant {version} against PyPI: {err}"],
+                   duration_s=round(time.monotonic() - t0, 1))
+        return out
+    if not pins:
+        # the release itself has no file pip can take (yanked between the version list and this check)
+        out.update(ok=False, blockers=[f"Home Assistant {version} cannot be installed here: {err or 'no distribution on PyPI'}"],
+                   duration_s=round(time.monotonic() - t0, 1))
+        return out
+
+    # a pin behind an environment marker (an extra, another platform) is not part of what the entrypoint installs
+    base = [r for r in pins if ";" not in r]
+    out["requirements"] = len(base)
+    left, missing = list(base), []
+    for _ in range(MAX_HA_MISSING):
+        try:
+            proc = _pip_no_deps(python, left)
+        except subprocess.TimeoutExpired:
+            out.update(checked=False, notes=[f"could not check Home Assistant {version}: pip did not finish within {PIP_TIMEOUT_S}s"])
+            break
+        if proc.returncode == 0:
+            break
+        err = proc.stderr.strip()
+        m = _NO_WHEEL_RE.search(err)
+        if not m:
+            # "resolution-too-deep", a network failure, an index that answered 503: pip did not say a wheel is
+            # missing, so nothing here knows whether the install would work.  Said plainly, not turned into a refusal.
+            out.update(checked=False, notes=[f"could not check Home Assistant {version}: {_pip_reason(err)}"])
+            break
+        req = m.group(1)
+        missing.append(req)
+        key = _req_key(req)
+        left = [r for r in left if _req_key(r) != key]
+    else:
+        out["warnings"].append(f"Home Assistant {version} pins more than {MAX_HA_MISSING} requirements without a wheel for "
+                               f"Python {py}: only the first {MAX_HA_MISSING} are named")
+
+    if missing:
+        out["ok"] = False
+        out["missing"] = missing
+        one = len(missing) == 1
+        out["blockers"].append(
+            f"Home Assistant {version} needs {', '.join(missing)}, with no wheel for Python {py} on {machine}; "
+            f"this image has no compiler to build {'it' if one else 'them'} "
+            "(add one with HRI_APT_PACKAGES=build-essential and force, or choose a newer Home Assistant version)")
+    elif out["checked"]:
+        out["notes"].append(f"all {len(base)} pinned requirements of Home Assistant {version} have a wheel for Python {py} on {machine}")
+    if len(base) != len(pins):
+        out["notes"].append(f"{len(pins) - len(base)} conditional requirement(s) not checked (they depend on extras or another platform)")
+    out["duration_s"] = round(time.monotonic() - t0, 1)
+    return out
+
+
+def ha_remember(version: str, report: dict[str, Any]) -> None:
+    now = time.monotonic()
+    for key in [k for k, (at, _) in _HA_REPORTS.items() if now - at >= HA_CACHE_S]:
+        del _HA_REPORTS[key]
+    _HA_REPORTS[(version, _ha_python_key())] = (now, report)
+    while len(_HA_REPORTS) > MAX_HA_REPORTS:
+        del _HA_REPORTS[min(_HA_REPORTS, key=lambda k: _HA_REPORTS[k][0])]
+
+
+def ha_recent(version: str) -> dict[str, Any] | None:
+    hit = _HA_REPORTS.get((version, _ha_python_key()))
+    return hit[1] if hit and time.monotonic() - hit[0] < HA_CACHE_S else None
+
+
+def _ha_python_key() -> str:
+    """The second half of the cache key: the image's Python (and the
+    architecture it was built for), which is what decides the answer."""
+    import platform
+
+    return f"{sys.version.split()[0]}-{platform.machine()}"
+
+
+async def ha_version_report(hass: HomeAssistant, version: str) -> dict[str, Any]:
+    """Whether ``homeassistant==version`` would install in this image, without
+    installing it: ``ok`` False with ``blockers`` naming the pins that have no
+    wheel, ``checked`` False when pip could not answer that question at all
+    (then ``ok`` stays True - the version is not refused for a check that did
+    not run).  Cached per (version, image Python) for HA_CACHE_S."""
+    version = version.strip()
+    if not _HA_VERSION_RE.fullmatch(version):
+        raise ValueError(f"not a Home Assistant version: {version[:40]!r}")
+    if (hit := ha_recent(version)) is not None:
+        return hit
+    async with _HA_LOCK:
+        if (hit := ha_recent(version)) is not None:  # resolved while this call waited for the lock
+            return hit
+        report = await hass.async_add_executor_job(_ha_wheel_check, sys.executable, version)
+    ha_remember(version, report)
+    return report
