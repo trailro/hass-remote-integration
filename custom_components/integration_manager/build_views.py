@@ -45,13 +45,14 @@ def _check_token(domain: str, ref: str, ha: str, commit: str = "") -> str:
     return hashlib.sha1(f"{domain}|{ref}|{ha}|{commit}".encode()).hexdigest()[:16]
 
 
-async def _commit_of(hass: HomeAssistant, installer: Installer, domain: str, ref: str) -> str:
+async def _commit_of(hass: HomeAssistant, installer: Installer, domain: str, ref: str, repo: str = "") -> str:
     """The commit a tag, branch or SHA points at now ("" when GitHub cannot say): a branch that moves
-    between Check and Prepare must not install code the check never saw."""
+    between Check and Prepare must not install code the check never saw.  ``repo`` names the repository
+    when it is not (yet) in the registry: Check must not have to register one to look it up."""
     import aiohttp
     from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-    repo = (installer.spec(domain) or {}).get("repo")
+    repo = repo or (installer.spec(domain) or {}).get("repo") or ""
     if not repo:
         return ""
     try:
@@ -165,7 +166,11 @@ class BuildCheckView(ManagerView):
         at = self._checks.get(token)
         return check_id == token and at is not None and time.monotonic() - at < CHECK_TTL_S
 
-    async def _resolve(self, body: dict[str, Any]) -> tuple[str, str, str]:
+    async def _resolve(self, body: dict[str, Any], register: bool = False) -> tuple[str, str, str, str]:
+        """(domain, ref, ha, repo).  Only Prepare (``register=True``) writes the repository into the
+        registry: a Check is a question, and it left the repository registered (and rewrote a damaged
+        registry.json) although nothing was installed.  The repo it returns is passed to the lookups
+        that would otherwise need the entry."""
         domain = str(body.get("domain", "")).strip().lower()
         repo = str(body.get("repo", "") or "").strip().strip("/")
         ref = str(body.get("ref", "")).strip()
@@ -182,16 +187,16 @@ class BuildCheckView(ManagerView):
                 raise ValueError("repo must be owner/name")
             if spec and spec.get("repo") and spec["repo"] != repo:
                 raise ValueError(f"{domain} is registered with {spec['repo']}; use another domain name for a different repository")
-            if not spec or not spec.get("repo"):
+            if register and (not spec or not spec.get("repo")):
                 self.installer.add_to_registry(domain, repo, str(body.get("name") or "")[:80] or None)
         elif not spec or not spec.get("repo"):
             raise ValueError(f"{domain} is not in the registry: give its GitHub owner/repo")
-        return domain, ref, ha
+        return domain, ref, ha, repo or str(spec.get("repo") or "")
 
     @with_body
     async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
         try:
-            domain, ref, ha = await self._resolve(body)
+            domain, ref, ha, repo = await self._resolve(body)  # a check registers nothing: Prepare does
         except ValueError as err:
             return self.json({"ok": False, "error": str(err)})
         ha_check: dict[str, Any] = {"version": ha or None, "ok": True, "error": ""}
@@ -205,10 +210,10 @@ class BuildCheckView(ManagerView):
                             "error": f"older than the running {HA_VERSION}: switch Home Assistant down on the System page first (it asks what the older version starts with)"}
         # the commit first, the download by that commit: a branch that moves during the check must not
         # leave a check id naming a commit whose code was never looked at
-        commit = await _commit_of(self.hass, self.installer, domain, ref)
+        commit = await _commit_of(self.hass, self.installer, domain, ref, repo)
         async with self._pf._lock:
             try:
-                report = await preflight.run(self.hass, self.installer, domain, ref, ha or None, archive_ref=commit or None)
+                report = await preflight.run(self.hass, self.installer, domain, ref, ha or None, archive_ref=commit or None, repo=repo)
             except Exception as err:  # noqa: BLE001
                 return self.json({"ok": False, "error": f"{type(err).__name__}: {err}", "ha_check": ha_check})
         if not ha_check["ok"]:
@@ -244,10 +249,10 @@ class BuildPrepareView(ManagerView):
             return self.json({"ok": False, "error": f"Home Assistant {wanted_ha} is older than the running {HA_VERSION}: switch Home Assistant "
                                                     "down on the System page first (it asks what the older version starts with), then prepare here"})
         try:
-            domain, ref, ha = await self._check._resolve(body)
+            domain, ref, ha, repo = await self._check._resolve(body, register=True)  # installing it needs the entry
         except ValueError as err:
             return self.json({"ok": False, "error": str(err)})
-        commit = await _commit_of(self.hass, self.installer, domain, ref)
+        commit = await _commit_of(self.hass, self.installer, domain, ref, repo)
         if not commit and not _SHA_RE.match(ref):
             # the download must be the commit Check verified, and a tag or branch can move in between
             return self.json({"ok": False, "error": f"GitHub did not say which commit {ref} points at now, so Prepare cannot install exactly what Check verified: try again in a moment"})

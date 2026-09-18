@@ -383,14 +383,14 @@ async def gate(hass: HomeAssistant, installer, domain: str, tag: str | None) -> 
 
 
 async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: str | None = None,
-              archive_ref: str | None = None, source_dir: str | None = None) -> dict[str, Any]:
+              archive_ref: str | None = None, source_dir: str | None = None, repo: str | None = None) -> dict[str, Any]:
     """``archive_ref``: the commit to download (``ref`` names it in the report); ``source_dir``: check that
-    stored copy instead of downloading anything (the start gate)."""
+    stored copy instead of downloading anything (the start gate); ``repo``: the repository to read, for a
+    check of one that is not in the registry (the environment builder registers nothing before Prepare)."""
     t0 = time.monotonic()
-    spec = installer.spec(domain)
-    if not spec or not spec.get("repo"):
+    repo = repo or (installer.spec(domain) or {}).get("repo")
+    if not repo:
         raise ValueError(f"{domain}: no GitHub repository known (registry)")
-    repo = spec["repo"]
     blockers: list[str] = []
     warnings: list[str] = []
 

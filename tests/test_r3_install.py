@@ -103,7 +103,7 @@ class CheckResolvesTheCommitFirstTest(unittest.TestCase):
         check = object.__new__(build_views.BuildCheckView)
         check.hass, check.installer, check.updater = None, installer, None
         check._pf, check._checks = SimpleNamespace(_lock=asyncio.Lock()), {}
-        check._resolve = mock.AsyncMock(return_value=("demo", "main", ""))
+        check._resolve = mock.AsyncMock(return_value=("demo", "main", "", "owner/demo"))
         run = mock.AsyncMock(return_value={"ok": True, "blockers": [], "warnings": []})
         # the branch points at A until the download happened, at B afterwards
         commit_of = mock.AsyncMock(side_effect=lambda *a: self.B if run.await_count else self.A)

@@ -495,7 +495,7 @@ class PrepareCommitTest(unittest.TestCase):
         view.hass, view.publisher = None, None
         view.installer = SimpleNamespace(install=mock.AsyncMock(return_value={"ok": False, "error": "stop"}))
         view.updater = SimpleNamespace(status=mock.AsyncMock(return_value={"current": build_views.HA_VERSION}))
-        view._check = SimpleNamespace(_resolve=mock.AsyncMock(return_value=("demo", ref, "")), checked=lambda *a: True)
+        view._check = SimpleNamespace(_resolve=mock.AsyncMock(return_value=("demo", ref, "", "owner/demo")), checked=lambda *a: True)
         with mock.patch.object(build_views, "_commit_of", mock.AsyncMock(return_value=commit)):
             return _body(asyncio.run(view.post(_request(body={"domain": "demo", "ref": ref})))), view.installer.install
 

@@ -328,7 +328,7 @@ class VersionChangeLockNeverWaitedForTest(unittest.TestCase):
         running = build_views.HA_VERSION
         view.updater = SimpleNamespace(status=mock.AsyncMock(return_value={"current": running, "pending": True, "desired": OLDER}),
                                        cancel_config_change=lambda: [], set_desired=lambda v: {})
-        view._check = SimpleNamespace(_resolve=mock.AsyncMock(return_value=("demo", "v1", running)), checked=lambda *a: True)
+        view._check = SimpleNamespace(_resolve=mock.AsyncMock(return_value=("demo", "v1", running, "owner/demo")), checked=lambda *a: True)
         view.json = lambda d: d
         with mock.patch.object(build_views, "_commit_of", mock.AsyncMock(return_value="0" * 40)), mock.patch.object(build_views.events, "emit"):
             return await build_views.BuildPrepareView.post.__wrapped__(view, None, {"domain": "demo", "ref": "v1", "ha": running})
