@@ -366,6 +366,12 @@ def build_component(
             comp.update({"tilt_status_topic": doc_topic, "tilt_status_template": _attr_or_empty('current_tilt_position')})
             if supports(16 | 32 | 64 | 128):  # the main HA turns a tilt command topic into all four tilt features
                 comp["tilt_command_topic"] = f"{cmd}/tilt"
+                if not supports(128):
+                    # Open/close tilt travel as tilt_opened_value (100) and tilt_closed_value (0) on this topic;
+                    # a source that cannot set a tilt position refuses those, so the two boundaries become
+                    # open_cover_tilt / close_cover_tilt instead (stop already sends its own payload_stop_tilt).
+                    comp["tilt_command_template"] = _tpl(
+                        "'OPEN' if value | int(-1) == 100 else ('CLOSE' if value | int(-1) == 0 else value)")
 
     elif domain == "valve":
         comp.update(
@@ -812,8 +818,11 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
         if field == "position":
             return "cover", "set_cover_position", {**t, "position": int(_finite(p))}
         if field == "tilt":
-            if p.upper() == "STOP":  # MQTT cover sends its stop-tilt payload to the tilt command topic
-                return "cover", "stop_cover_tilt", t
+            # MQTT cover sends its stop-tilt payload to the tilt command topic, and for a source that cannot set a
+            # tilt position the tilt command template turns the open/close boundary values into these tokens.
+            if p.upper() in ("OPEN", "CLOSE", "STOP"):
+                return "cover", _service_for(p, {"OPEN": "open_cover_tilt", "CLOSE": "close_cover_tilt",
+                                                 "STOP": "stop_cover_tilt"}), t
             return "cover", "set_cover_tilt_position", {**t, "tilt_position": int(_finite(p))}
     if domain == "valve":
         if field == "command":

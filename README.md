@@ -971,7 +971,12 @@ hass_<domain>/manager/result                        outcome of a manager action,
   surrounding spaces ignored); any other payload is refused rather than read
   as *off*, with the reason under *recent commands* and in the log. The action
   tokens of a cover, valve, lock, alarm panel, vacuum or lawn mower match in any
-  case; an unknown one is refused with the tokens that are accepted. A command
+  case; an unknown one is refused with the tokens that are accepted. Tilting a
+  cover open or closed on the main HA arrives as tilt position 100 or 0, which
+  is what its MQTT cover sends; when the cover here cannot set a tilt position,
+  those two become `cover.open_cover_tilt` and `cover.close_cover_tilt` instead
+  (and so does a tilt position of 100 or 0 sent from there, the only tilt such a
+  cover has). A position in between is still a position. A command
   larger than 256 KB, or nested deeper than 64 levels, is refused unread, with
   the reason in the same two places. A command, service call or manager action
   published with `retain` is never carried out, because a physical effect must
@@ -991,8 +996,7 @@ hass_<domain>/manager/result                        outcome of a manager action,
   A text value shows on the main HA without its leading and trailing spaces
   (Home Assistant strips what a template renders; a value sent from there
   keeps them). A vacuum command sent from the main HA carries its parameters
-  only as a mapping (the main HA drops a list). Tilting a cover open or closed
-  there arrives as tilt position 100 or 0. A category set with an MQTT rule
+  only as a mapping (the main HA drops a list). A category set with an MQTT rule
   reaches an entity the main HA already has only after the main HA restarts,
   like `enabled_by_default`. Covers, vacuums and water heaters show the
   features the entity supports here, and a fan offers the same speed steps.
