@@ -291,6 +291,11 @@ class HaActionView(ManagerView):
 
         What a change prepares applies only when its version boots.  Asking
         for the running version cancels a scheduled change.
+
+        ``update`` first resolves the target's pinned requirements against this
+        image's Python (``check`` below) and refuses a version they cannot
+        install with ``needs_force``; ``force: true`` schedules it anyway.
+        ``check`` answers that report for one version and changes nothing.
         """
         if request.content_type != "application/json":
             return self.json_message("Content-Type must be application/json", status_code=400)
