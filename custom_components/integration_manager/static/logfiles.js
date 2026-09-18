@@ -14,7 +14,11 @@ async function loadFiles(){
  }
  sel.innerHTML=files.map(f=>`<option value="${esc(f.id)}" ${pick&&f.id===pick.id?'selected':''}>${esc(f.name)} (${(f.bytes/1024).toFixed(0)} KB${f.active?', active':''}${f.source?', '+esc(f.source):''})</option>`).join('');
  if(!files.length) sel.innerHTML='<option value="">(the running integration writes no log file)</option>';
+ $('#download').disabled=!files.length;
 }
+// the whole file, masked as the table is: fetchDownload (hri.js) sends the header the endpoint requires, which a
+// plain link cannot.  By id, so the file saved is the file shown even when another file carries the same label
+$('#download').onclick=()=>fetchDownload($('#download'),'/api/log_files/download?id='+encodeURIComponent($('#file').value),'Download','log.txt');
 let LOADING=false, AGAIN=false;
 async function load(){ if(LOADING){ AGAIN=true; return; } LOADING=true; try{ do{ AGAIN=false; await loadNow(); }while(AGAIN); } finally { LOADING=false; } }  // no overlapping polls; a change made meanwhile loads right after
 async function loadNow(){
