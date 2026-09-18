@@ -135,6 +135,7 @@ HRI_PORT=8087             # port of the UI
 # HRI_VERSION=0.18.0      # optional: pin a release (default: latest)
 # HRI_REGISTRY=docker.io/trailro26  # optional: pull from Docker Hub (default: ghcr.io/trailro)
 # HRI_PASSWORD=...        # optional: require a password for the UI and API
+# HRI_APT_PACKAGES=ffmpeg  # optional: Debian packages installed at boot (what pip cannot install)
 ```
 
 If your MQTT broker runs in Docker, the container must reach it. Put what is
@@ -215,7 +216,9 @@ container, as the install would. *Prepare* installs
 exactly the combination that passed, at the commit Check saw: if a branch has
 moved since, run Check again, and if GitHub cannot say which commit the ref
 points at, Prepare refuses. Check also warns when one of the release's
-requirements only wraps a program or a shared library this image does not have,
+requirements needs something the image or the host does not provide (a program
+or a shared library this image does not carry, the host's Bluetooth stack), when
+pip's resolution landed years behind what the requirement allows,
 and about configuration the release cannot take over: config entries here while the release has no config
 flow, entries at a newer version than its config flow (Home Assistant cannot
 migrate an entry back), and YAML stored here that a config flow release will
@@ -358,7 +361,9 @@ ends the process on its own after about 235 s, before Docker kills it) and runs 
 restart policy is required: a restart from the UI or MQTT exits the process
 and relies on Docker to start it again. A `docker-compose.yml` downloaded before 0.14.0
 still says 120 s: download it again (or change `stop_grace_period`) when you
-update.
+update. One downloaded before 0.18.0 does not pass `HRI_APT_PACKAGES` on, so
+setting it in `.env` does nothing at all: download the compose file again (the
+command in *Quick start*) when you update.
 
 The top bar shows the version that runs and the commit its image was built
 from (`v0.18.0 · 1a2b3c4`), linking to that release. When GitHub has newer
@@ -383,9 +388,9 @@ memory, per stored copy and running Home Assistant version, so a restart or a
 reinstall forgets them; the *Preflight* button checks the release on GitHub and
 is not reused). If the version is installed again while its check runs, the
 start is refused: start it again. Blockers stop the switch and
-are listed with a choice to start anyway; warnings do not stop it (a
-requirement that wraps a program or library the image does not carry is one of
-them). An update
+are listed with a choice to start anyway; warnings do not stop it (a requirement
+that needs a program, a library or the host's Bluetooth stack the container has
+not got, and a resolution pip backtracked years behind, are warnings). An update
 started from your main HA over MQTT refuses on blockers, since nobody is there
 to confirm, and says why in its result. Through the API, `POST /api/run/start`
 answers `needs_force` with the report, and `force: true` starts anyway; a
@@ -540,7 +545,10 @@ three have to support that Python:
   package and what it wants: an integration is often useful without the part
   that needs it. A package whose program or library is there says nothing, and
   one that is not on the list is not checked. The list lives in
-  `preflight.py` (`_SYSTEM_DEPS`), one line per package.
+  `preflight.py` (`_SYSTEM_DEPS`), one line per package. What is checked is the
+  manifest's own requirements, those of the Home Assistant components it names
+  under `dependencies` (that is where `ha-ffmpeg` comes from) and everything pip
+  resolves for them.
 - **What a requirement needs from the host.** `bleak`,
   `bluetooth-adapters`, `dbus-fast` and `habluetooth` install and import
   perfectly and then look for BlueZ on the system D-Bus: they need the host's
@@ -561,8 +569,10 @@ three have to support that Python:
   everything that is not backtracking: patch-level lag, a major published
   recently, releases this Python is excluded from, pre-releases, packages Home
   Assistant pins in its own constraints, and the requirements that come from
-  the manifest's `dependencies`. When PyPI cannot be reached it says nothing
-  rather than guessing.
+  the manifest's `dependencies`. At most twelve packages are looked up per
+  preflight (the manifest's own requirements first), and a version that declares
+  no requirements of its own is not checked at all. When PyPI cannot be reached
+  it says nothing rather than guessing.
 - **The integration's own code.** The preflight compiles every `.py` file with
   the image's Python (a syntax error is a blocker naming the file and line, and
   so is a file over 5 MB or one too deeply nested for the parser),
@@ -1264,10 +1274,12 @@ name (a reverse proxy with its own name, see below).
 
 Over plain HTTP the password and the session travel unencrypted, so on a
 network you do not trust put the UI behind a reverse proxy with TLS. The status
-page served on every boot until Home Assistant runs (the PyPI lookup, a version
-install, the requirements, a scheduled restore, removing unused venvs, or while
-a failed restore waits for a retry) is not protected. It shows the phase and,
-for a failed restore, the name of the backup to restore from; until Home
+page served on every boot until Home Assistant runs (the system packages of
+`HRI_APT_PACKAGES`, the PyPI lookup, a version install, the requirements, a
+scheduled restore, removing unused venvs, or while a failed restore waits for a
+retry) is not protected. It shows the phase, which names the Debian packages
+`HRI_APT_PACKAGES` asks for, and, for a failed restore, the name of the backup
+to restore from; until Home
 Assistant starts and while no password is set, it also shows the tail of the
 last install log, which the System page shows to anyone without a
 password anyway. While a failed restore holds the boot, `/api/` paths answer
@@ -1410,7 +1422,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | `HRI_REGISTRY` | `ghcr.io/trailro` | Where Compose pulls the image from: `ghcr.io/trailro` (GitHub Container Registry) or `docker.io/trailro26` (Docker Hub); the same image either way. A `docker-compose.yml` from 0.16.0 or older ignores it and pulls from GitHub Container Registry: download the file again to use it |
 | `TZ` | `UTC` | Time zone; an unknown zone falls back to UTC, with an error in the log |
 | `HA_VERSION_LATEST` | `1` | `0` installs the image's baseline HA on a fresh volume instead of the newest |
-| `HRI_APT_PACKAGES` | unset | Debian packages the container installs at boot, before Home Assistant starts, for what pip cannot install (the `ffmpeg` binary, BlueZ): names separated by spaces or commas, for example `ffmpeg libpcap0.8`. Only Debian package names are accepted (`libc6:arm64` too); anything else — an option, a URL, a path, a shell metacharacter — is refused with a line in the log and nothing is installed for it, and the value never reaches a shell. Packages that are already installed are not installed again, so a restart costs nothing; they live in the container, not on the volume, so recreating the container or updating the image installs them again. A failure (no network, an unknown package) is recorded on **System** and does not stop the boot. The output is in `integration_manager/apt-install.log` |
+| `HRI_APT_PACKAGES` | unset | Debian packages the container installs at boot, before Home Assistant starts, for what pip cannot install (the `ffmpeg` binary, BlueZ): names separated by spaces or commas, for example `ffmpeg libpcap0.8`. Only Debian package names are accepted (`libc6:arm64` too); anything else — an option, a URL, a path, a shell metacharacter — is refused with a line in the log and nothing is installed for it, and the value never reaches a shell. Packages that are already installed are not installed again, so a restart costs nothing; they live in the container, not on the volume, so recreating the container or updating the image installs them again. A failure (no network, an unknown package) is recorded on **System** and does not stop the boot. The output is in `integration_manager/apt-install.log`. A `docker-compose.yml` from 0.17.2 or older does not pass it to the container: download the file again to use it |
 | `HRI_DEV_SRC` | `./dev-src` | Dev mode: directory mounted at `/dev-src` |
 | `HRI_DEBUGPY` | unset | Dev mode: debugger port |
 | `HRI_DEBUGPY_HOST` | `127.0.0.1` | Dev mode: address debugpy binds inside the container (the dev overlay sets `0.0.0.0`) |
@@ -1569,6 +1581,10 @@ points:
 exist yet (a library imported later) needs a dotted Python name, and at most
 50 of those can be created.
 
+`GET /api/ha` includes `apt`: what this boot did with `HRI_APT_PACKAGES`
+(`packages`, `refused`, `ok`, `note`, `error`, `at`), or `null` when the
+variable is not set.
+
 `GET /api/summary` includes `manager_update`: the running release and the
 newer ones the banner shows. `POST /api/run/start` takes `force`; a tag that is
 not in the version store is refused without a preflight or `needs_force`. Without
@@ -1600,9 +1616,9 @@ progress (50): try again later`.
   Without a password the page shows pip's progress; it is also in
   `integration_manager/ha-install.log` on the volume, while the container log
   shows only the start and end of the install. From the start of the
-  container until Home Assistant is started (the PyPI lookup, the system
-  packages of `HRI_APT_PACKAGES`, the install, the
-  manager's requirements, a scheduled restore, removing unused venvs) the
+  container until Home Assistant is started (the system packages of
+  `HRI_APT_PACKAGES`, the PyPI lookup, the install, the manager's requirements,
+  a scheduled restore, removing unused venvs) the
   page and every `/api/` path answer `503` with a `Retry-After: 5`, and under
   `/api/` with a JSON body naming the phase (`phase`) and the seconds since the
   container started (`elapsed`), so a healthcheck does not call the container healthy while there is no
@@ -1723,9 +1739,10 @@ A few things that shaped the code, useful if you read it:
   can install on one and not the other.
 - Packages that load native system libraries (`libusb`, `bluez`, codecs) need
   those libraries in the image. The image carries `libturbojpeg`, which Home
-  Assistant's camera component wants; nothing else is added for a particular
-  integration. The preflight does not check them. A missing library shows up
-  when the integration loads.
+  Assistant's camera component wants; `HRI_APT_PACKAGES` adds what a particular
+  integration needs, installed at boot. The preflight warns about the packages
+  it knows (`_SYSTEM_DEPS` in `preflight.py`); any other missing library shows
+  up when the integration loads.
 - Renaming an entity here recreates it on the consuming Home Assistant. The
   discovery `unique_id` is derived from the entity id, so a rename looks like a
   different entity to the consumer: the old one is deleted and a new one is
