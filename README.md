@@ -207,9 +207,9 @@ integration, any release, branch or commit, and a Home Assistant version, then
 *Check*. Check resolves the ref to a commit, downloads that commit into a scratch directory, resolves its
 Python requirements with `pip --dry-run`, evaluates patches and dependencies
 and the minimum HA version, and tells you whether anything blocks the
-combination, without installing anything. It changes nothing on the volume
-either: a repository you typed in yourself is added to the registry by
-*Prepare*, not by *Check*. Resolving and building packages that
+combination, without installing anything. It leaves nothing on the volume
+either: the scratch directory goes when it finishes, and a repository you typed
+in yourself is added to the registry by *Prepare*, not by *Check*. Resolving and building packages that
 come as source archives runs their build code (`setup.py`, PEP 517 hooks) in the
 container, as the install would. *Prepare* installs
 exactly the combination that passed, at the commit Check saw: if a branch has
@@ -940,7 +940,8 @@ hass_<domain>/manager/result                        outcome of a manager action,
   first five minutes after a start, while entities announced before the start
   are still kept for the orphan sweep (see *Stop, uninstall, restore*); when
   it was the last entity of a device that is gone from the container too, the device's
-  discovery config is cleared as well, so no empty device is left on the main HA
+  discovery config is cleared as well (unless entities carried from the previous
+  process are still setting up, see below), so no empty device is left on the main HA
   until the next full republish. In those first five minutes the entities an
   earlier process announced and that have not finished setting up here count as
   entities of their device: the device keeps its config (with a removal form for
@@ -976,7 +977,9 @@ hass_<domain>/manager/result                        outcome of a manager action,
   is what its MQTT cover sends; when the cover here cannot set a tilt position,
   those two become `cover.open_cover_tilt` and `cover.close_cover_tilt` instead
   (and so does a tilt position of 100 or 0 sent from there, the only tilt such a
-  cover has). A position in between is still a position. A command
+  cover has). A position in between is still sent as a position, which such a
+  cover refuses: the main HA offers the slider anyway, because its MQTT cover
+  takes every tilt feature from the tilt topic. A command
   larger than 256 KB, or nested deeper than 64 levels, is refused unread, with
   the reason in the same two places. A command, service call or manager action
   published with `retain` is never carried out, because a physical effect must
@@ -1370,8 +1373,8 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
   venv-<ha version>/            one per installed Home Assistant (venv-current links the active one)
   custom_components/<domain>/   the deployed integration
   integration_manager/
-    state.json                  running integration, versions, pending actions
-    settings.json               settings, tokens, log-file format (mode 600); a damaged one is kept as settings.json.corrupt-<time>
+    state.json                  running integration, versions, pending actions; an unreadable one is kept as state.json.corrupt-<stamp>
+    settings.json               settings, tokens, log-file format (mode 600); a damaged one is kept as settings.json.corrupt-<stamp>
     auth_key                    signs login sessions, only with a password set (mode 600)
     auth_revoked                time of the last logout: sessions from before it are invalid
     mqtt.json                   broker configuration (mode 600)
@@ -1387,7 +1390,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
     import-map.json             entity and device ids an import aligns at boot
     latest_versions.json        last known releases (update entities, the banner)
     manager_actions.json        when each MQTT manager action last ran
-    registry.json               your registry entries (see below); one that cannot be read is kept as registry.json.corrupt-<time> when an entry is added
+    registry.json               your registry entries (see below); one that cannot be read is kept as registry.json.corrupt-<stamp> when an entry is added
     versions/<domain>/<tag>/    version store
     patches/<domain>/           your patches
     yaml/<domain>.yaml          YAML configuration

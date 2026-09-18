@@ -3000,7 +3000,6 @@ class MqttPublisher:
             payload_comps = dict(live)
             self._publish_device_discovery(disc_id, block, payload_comps, removed={key: comps[key].get("platform", entity_id.split(".", 1)[0])})
             return
-            return
 
     # ----- events ----------------------------------------------------------
 
