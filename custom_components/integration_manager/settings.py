@@ -31,10 +31,19 @@ DEFAULTS: dict[str, Any] = {
     "health_stale_s": 900,      # degraded when no entity reported for this long (default for every integration)
     "health_unavailable_pct": 50,  # degraded when at least this share of the entities is unavailable
     "health": {},               # per integration: {"<domain>": {"stale_s": 900, "mode": "periodic"|"event", "unavailable_pct": 50}}
+    # Health watchdog: restart the process when the verdict stays "error" (never degraded, stopped or unconfigured)
+    "watchdog": False,             # off by default: an automatic restart is never a surprise
+    "watchdog_after_min": 15,      # the verdict must be "error" for this long without interruption
+    "watchdog_min_interval_min": 60,  # at most one automatic restart in this many minutes
+    "watchdog_max_per_day": 3,     # and at most this many in 24 h; then it gives up and says so
     "dev_source_dir": "/dev-src",  # bind-mounted directory to install an integration from (dev mode)
     "log_format": {},           # Log files page: {"pattern": regex with named groups, "hide", "dim", "color_by", "colors"}
     "resource_history_h": 48,   # Overview resource history: hours kept, one sample a minute (1-120)
 }
+# (lo, hi) for the watchdog numbers: the API and Settings.watchdog() clamp to the same bounds.
+# after_min is never under 5: the health verdict is only republished every minute, and anything
+# shorter would act on one or two samples.
+WATCHDOG_BOUNDS = {"watchdog_after_min": (5, 720), "watchdog_min_interval_min": (15, 1440), "watchdog_max_per_day": (1, 24)}
 HEALTH_MODES = ("periodic", "event")  # event: the integration only writes states on events, so silence is not a fault
 
 
@@ -144,6 +153,14 @@ class Settings:
                 base["mode"] = own["mode"]
         return base
 
+    def watchdog(self) -> dict[str, Any]:
+        """The effective watchdog rules.  The bounds are the ones SettingsView
+        enforces, applied again here: settings.json can be edited by hand."""
+        return {"enabled": self.bool_("watchdog"),
+                "after_min": self.int_("watchdog_after_min", *WATCHDOG_BOUNDS["watchdog_after_min"]),
+                "min_interval_min": self.int_("watchdog_min_interval_min", *WATCHDOG_BOUNDS["watchdog_min_interval_min"]),
+                "max_per_day": self.int_("watchdog_max_per_day", *WATCHDOG_BOUNDS["watchdog_max_per_day"])}
+
     @property
     def dev_source_dir(self) -> str:
         return str(self.data.get("dev_source_dir") or DEFAULTS["dev_source_dir"])
@@ -158,5 +175,9 @@ class Settings:
                 "health_stale_s": self.int_("health_stale_s", 60, 86400), "health_unavailable_pct": self.int_("health_unavailable_pct", 1, 100),
                 "health": self.data.get("health") if isinstance(self.data.get("health"), dict) else {},
                 "dev_source_dir": self.dev_source_dir,
+                "watchdog": self.bool_("watchdog"),
+                "watchdog_after_min": self.int_("watchdog_after_min", *WATCHDOG_BOUNDS["watchdog_after_min"]),
+                "watchdog_min_interval_min": self.int_("watchdog_min_interval_min", *WATCHDOG_BOUNDS["watchdog_min_interval_min"]),
+                "watchdog_max_per_day": self.int_("watchdog_max_per_day", *WATCHDOG_BOUNDS["watchdog_max_per_day"]),
                 "resource_history_h": self.int_("resource_history_h", 1, 120),
                 "log_format": self.data.get("log_format") if isinstance(self.data.get("log_format"), dict) else {}}
