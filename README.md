@@ -88,7 +88,10 @@ automations, no recorder. It runs exactly one integration and publishes it.
 - Docker with Compose.
 - An MQTT broker reachable from the container (mosquitto or any other).
 - Your main Home Assistant with the MQTT integration, if you want the entities
-  to appear there.
+  to appear there — **2025.10 or newer**, and 2026.5 or newer if the integration
+  you mirror has a `date`, `time` or `datetime` entity (see *What the main Home
+  Assistant needs*). The Home Assistant inside the container is a different
+  thing entirely, and the container installs it itself.
 - Access to the hardware your integration needs: a USB/serial device passed
   into the container, or a network bridge (see [Hardware access](#hardware-access)).
 
@@ -1363,6 +1366,34 @@ hass_<domain>/manager/result                        outcome of a manager action,
   retained data and every cleanup connect the same way. Client certificates
   are not supported.
 
+### What the main Home Assistant needs
+
+Discovery uses the device-based MQTT format, and some of what it publishes only
+newer Home Assistant understands. Measured against real instances of each
+release, with the container publishing an integration of 14 entities:
+
+| Main Home Assistant | What happens |
+|---|---|
+| **2025.10 and newer** | Everything works. Entities get the ids they have in the container, nothing is logged. |
+| 2024.11 – 2025.9 | Every entity is created and works, but `default_entity_id` is silently dropped, so ids are generated from the device name (`sensor.hri_probe_no_device_probe_demo` instead of `sensor.probe_demo`). Nothing says so in any log. Anything on the main instance that names the original id — an automation, a script, a dashboard card — points at nothing. |
+| Below 2024.11 | Nothing arrives at all: those releases do not subscribe to `<prefix>/device/+/config`, so no entity is created and no error appears anywhere. |
+
+Two details on top of that:
+
+- **`date`, `time` and `datetime` entities need 2026.5 or newer.** Home
+  Assistant gained MQTT platforms for those three domains in 2026.5. An older
+  main instance rejects the *whole device's* discovery payload over one of
+  them — not just that entity — with `value must be one of [...] @
+  data['components'][...]['platform']` in its log, so the device's other
+  entities disappear with it. Until the main instance is updated, exclude those
+  entities from MQTT (the Entities page, or a rule) and the rest of the device
+  comes back.
+- **Colour temperature on mirrored lights needs 2025.2 or newer**
+  (`color_temp_kelvin`).
+
+The Home Assistant *inside the container* is unrelated to this: it is the one
+the manager installs, and its own floor is in *Python versions*.
+
 ---
 
 ## Security
@@ -1955,6 +1986,11 @@ A few things that shaped the code, useful if you read it:
 - Cutover does not remove the integration from your main HA for you: do that
   yourself before enabling discovery (the Cutover page checks it when the main
   HA is configured).
+- The main Home Assistant has its own floor: below 2025.10 the entities come
+  up with generated ids instead of their own, and below 2024.11 nothing arrives
+  at all (see *What the main Home Assistant needs*). Nothing in the container
+  can detect which version the main instance runs, so neither case is reported
+  anywhere — the entities simply look wrong, or never appear.
 - The Python version is fixed by the image. Home Assistant versions or
   integrations that need another Python cannot run until a release moves the
   image to that Python. An image with a newer Python is tested against Home
