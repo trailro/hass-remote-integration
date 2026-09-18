@@ -99,6 +99,21 @@ def _attr_or_empty(name: str) -> str:
 # payload (PAYLOAD_NONE) and per-entity availability marks the entity offline.
 _STATE_TPL = _tpl("'None' if value_json.state in ['unavailable', 'unknown'] else value_json.state")
 
+# Availability on the entity's own document: 'unavailable' at the source is offline on the consumer.
+_AVAILABILITY_TPL = _tpl("'offline' if value_json.state == 'unavailable' else 'online'")
+# Same, for a platform with no no-value payload: an unknown state has nothing honest to show either.
+_AVAILABILITY_UNKNOWN_TPL = _tpl("'offline' if value_json.state in ['unavailable', 'unknown'] else 'online'")
+
+
+def _offline_when_unknown(comp: dict[str, Any]) -> None:
+    """MQTT text takes the payload as the value, whatever it is: it has no PAYLOAD_NONE, so the 'None' every other
+    platform reads as "no value" would show as that word.  An unknown source state makes the entity unavailable on
+    the consumer instead, the way an unavailable one already does; a value that really is 'None' (or empty) is
+    untouched, because it is the source state that decides, not the payload."""
+    for avail in comp.get("availability", ()):
+        if avail.get("value_template") == _AVAILABILITY_TPL:
+            avail["value_template"] = _AVAILABILITY_UNKNOWN_TPL
+
 
 def _common(entry: er.RegistryEntry | None, state: State, doc_topic: str, prefix: str) -> dict[str, Any]:
     domain, object_id = state.entity_id.split(".", 1)
@@ -122,7 +137,7 @@ def _common(entry: er.RegistryEntry | None, state: State, doc_topic: str, prefix
         # unavailable; the consumer then shows unavailable, not stale values
         "availability": [
             {"topic": status_topic},
-            {"topic": doc_topic, "value_template": _tpl("'offline' if value_json.state == 'unavailable' else 'online'")},
+            {"topic": doc_topic, "value_template": _AVAILABILITY_TPL},
         ],
         "availability_mode": "all",
         "payload_available": "online",
@@ -433,6 +448,7 @@ def build_component(
 
     elif domain == "text":
         comp.update({"value_template": _STATE_TPL, "command_topic": f"{cmd}/value"})
+        _offline_when_unknown(comp)  # no PAYLOAD_NONE here: 'None' would be the value shown
         if attrs.get("min") is not None:
             comp["min"] = int(attrs["min"])
         if attrs.get("max") is not None:

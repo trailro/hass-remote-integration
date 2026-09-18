@@ -29,6 +29,10 @@ _CLASSES = {  # platform -> (module, entity class, schema)
     "water_heater": ("water_heater", "MqttWaterHeater", "DISCOVERY_SCHEMA"),
     "text": ("text", "MqttTextEntity", "DISCOVERY_SCHEMA"),
     "lawn_mower": ("lawn_mower", "MqttLawnMower", "DISCOVERY_SCHEMA"),
+    "select": ("select", "MqttSelect", "DISCOVERY_SCHEMA"),
+    "number": ("number", "MqttNumber", "DISCOVERY_SCHEMA"),
+    "lock": ("lock", "MqttLock", "DISCOVERY_SCHEMA"),
+    "device_tracker": ("device_tracker", "MqttDeviceTracker", "DISCOVERY_SCHEMA"),
 }
 
 
