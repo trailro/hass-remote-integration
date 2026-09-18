@@ -73,6 +73,8 @@ class MapTest(NoCache):
         self.assertEqual(len(warnings), 1)
         self.assertIn("ha-ffmpeg is a wrapper over the program ffmpeg", warnings[0])
         self.assertIn("does not have", warnings[0])
+        self.assertTrue(warnings[0].endswith("Set HRI_APT_PACKAGES=ffmpeg (next to what it already names) "
+                                             "and recreate the container"), warnings[0])
 
     def test_a_program_that_is_there_says_nothing(self):
         with mock.patch.object(preflight.shutil, "which", return_value="/usr/bin/ffmpeg"):
@@ -110,6 +112,46 @@ class MapTest(NoCache):
             self.assertEqual(name, preflight._canon(name))
             self.assertTrue(any(preflight._SYSTEM_DEPS[name]), name)  # an entry that needs nothing is a typo
 
+    def test_the_warning_names_the_debian_package_of_the_library(self):
+        with mock.patch.object(preflight, "_library_present", return_value=False):
+            warnings = preflight._system_dep_warnings(["PyTurboJPEG"])
+        self.assertIn("Set HRI_APT_PACKAGES=libturbojpeg0", warnings[0])
+
+    def test_a_dependency_without_a_known_package_invents_none(self):
+        """No line in _DEBIAN_PACKAGE: the warning still says what is missing and nothing about apt."""
+        with mock.patch.dict(preflight._DEBIAN_PACKAGE, {}, clear=True), \
+                mock.patch.object(preflight.shutil, "which", return_value=None):
+            warnings = preflight._system_dep_warnings(["ha-ffmpeg==3.2.2"])
+        self.assertIn("ha-ffmpeg is a wrapper over the program ffmpeg", warnings[0])
+        self.assertNotIn("HRI_APT_PACKAGES", warnings[0])
+
+    def test_only_what_is_missing_is_asked_for(self):
+        """An entry whose program is there and whose library is not names the library's package only."""
+        with mock.patch.dict(preflight._SYSTEM_DEPS, {"demo": (("ffmpeg",), ("libGL.so.1",))}), \
+                mock.patch.object(preflight.shutil, "which", return_value="/usr/bin/ffmpeg"), \
+                mock.patch.object(preflight, "_library_present", return_value=False):
+            warnings = preflight._system_dep_warnings(["demo"])
+        self.assertIn("Set HRI_APT_PACKAGES=libgl1 ", warnings[0])
+        self.assertNotIn("ffmpeg", warnings[0])
+
+    def test_every_program_and_library_of_the_map_has_a_package(self):
+        """A new entry without a line in _DEBIAN_PACKAGE is deliberate; this test says which one it is."""
+        for name, (bins, libs) in preflight._SYSTEM_DEPS.items():
+            for dep in bins + libs:
+                self.assertIn(dep, preflight._DEBIAN_PACKAGE, f"{name} wants {dep}")
+
+    def test_no_package_line_is_left_over(self):
+        wanted = {dep for bins, libs in preflight._SYSTEM_DEPS.values() for dep in bins + libs}
+        self.assertEqual(set(preflight._DEBIAN_PACKAGE) - wanted, set())
+
+    def test_the_package_names_are_debian_package_names(self):
+        """What the warning tells the operator to set has to survive entrypoint.APT_PACKAGE_RE."""
+        import re
+
+        allowed = re.compile(r"[a-z0-9][a-z0-9+.-]+")
+        for dep, pkg in preflight._DEBIAN_PACKAGE.items():
+            self.assertTrue(allowed.fullmatch(pkg), f"{dep} -> {pkg}")
+
     def test_pydub_wants_the_ffmpeg_binary(self):
         """pydub.utils.get_encoder_name() shells out to ffmpeg/avconv: it imports, and decodes nothing."""
         with mock.patch.object(preflight.shutil, "which", return_value=None):
@@ -144,6 +186,7 @@ class BluetoothTest(NoCache):
         warnings = self._warn(["habluetooth==7.0.0"])
         self.assertIn("No package installs that", warnings[0])
         self.assertNotIn("wrapper over", warnings[0])  # a different problem from _SYSTEM_DEPS, said differently
+        self.assertNotIn("HRI_APT_PACKAGES", warnings[0])  # and no setting to try: the adapter is on the host
 
     def test_every_name_of_the_set_is_canonical_and_warns(self):
         for name in preflight._BLUETOOTH_DEPS:

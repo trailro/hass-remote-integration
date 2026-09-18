@@ -297,6 +297,26 @@ _SYSTEM_DEPS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "opencv-contrib-python": ((), ("libGL.so.1",)),
 }
 
+# What installs each of those programs and libraries on the image's Debian (trixie): the value the warning
+# tells the operator to put in HRI_APT_PACKAGES.  Every name was looked up in the image's own apt index -
+# libmagic1 and libpcap0.8 exist there only as virtual packages, so the real ones (…t64) are named.  A
+# program or library whose package is not obvious simply has no line here and the warning says nothing
+# about apt rather than naming a package that may not exist.
+_DEBIAN_PACKAGE: dict[str, str] = {
+    "ffmpeg": "ffmpeg",
+    "tesseract": "tesseract-ocr",
+    "flac": "flac",
+    "libturbojpeg.so.0": "libturbojpeg0",
+    "libportaudio.so.2": "libportaudio2",
+    "libmagic.so.1": "libmagic1t64",
+    "libusb-1.0.so.0": "libusb-1.0-0",
+    "libpcap.so.0.8": "libpcap0.8t64",
+    "libudev.so.1": "libudev1",
+    "libvlc.so.5": "libvlc5",
+    "libmpv.so.2": "libmpv2",
+    "libGL.so.1": "libgl1",
+}
+
 # Requirements that install, import and even work, but only against the host's Bluetooth stack: they talk
 # to BlueZ ("org.bluez") over the system D-Bus, and dbus-fast opens /run/dbus/system_bus_socket itself.
 # Verified one by one in the published wheels.  This is not a missing package - no Debian package puts an
@@ -355,11 +375,22 @@ def _system_dep_warnings(requirements: list[str]) -> list[str]:
         seen.setdefault(_canon(name), name)
     for key, name in seen.items():
         if entry := _SYSTEM_DEPS.get(key):
-            missing = [f"the program {b}" for b in entry[0] if not _present("bin", b)]
-            missing += [f"the library {lib}" for lib in entry[1] if not _present("lib", lib)]
+            missing: list[str] = []
+            packages: list[str] = []
+            for kind, label, wanted in (("bin", "the program", entry[0]), ("lib", "the library", entry[1])):
+                for dep in wanted:
+                    if _present(kind, dep):
+                        continue
+                    missing.append(f"{label} {dep}")
+                    if (pkg := _DEBIAN_PACKAGE.get(dep)) and pkg not in packages:
+                        packages.append(pkg)
             if missing:
-                out.append(f"{name} is a wrapper over {' and '.join(missing)}, which this image does not have: "
-                           "it installs, but whatever the integration does with it fails at runtime")
+                text = (f"{name} is a wrapper over {' and '.join(missing)}, which this image does not have: "
+                        "it installs, but whatever the integration does with it fails at runtime")
+                if packages:
+                    text += (f". Set HRI_APT_PACKAGES={' '.join(packages)} (next to what it already names) "
+                             "and recreate the container")
+                out.append(text)
         if key in _BLUETOOTH_DEPS and not _host_dbus_present():
             out.append(f"{name} needs the host's Bluetooth stack, which a container cannot provide by itself: "
                        "a running bluetoothd reached over the host's D-Bus system socket, the host's network "
