@@ -541,6 +541,27 @@ three have to support that Python:
   that needs it. A package whose program or library is there says nothing, and
   one that is not on the list is not checked. The list lives in
   `preflight.py` (`_SYSTEM_DEPS`), one line per package.
+- **What a requirement needs from the host.** `bleak`,
+  `bluetooth-adapters`, `dbus-fast` and `habluetooth` install and import
+  perfectly and then look for BlueZ on the system D-Bus: they need the host's
+  Bluetooth stack, which a container cannot provide by itself and which no
+  package installs. The preflight warns about them while the host's D-Bus
+  socket is not mounted into the container; see [Hardware
+  access](#hardware-access) for what a compose file has to give them.
+- **Where pip's resolution landed.** When the newest release of a requirement
+  needs something that cannot be installed here, pip does not fail: it walks
+  back through older releases until one resolves. A requirement with no lower
+  bound (`python-miio` rather than `python-miio>=0.5.12`) can send it back
+  years, and that resolution installs cleanly and breaks at runtime. After the
+  dry run the preflight asks PyPI what the newest release that satisfies the
+  requirement is, and warns when the resolved one is both in an older release
+  series and at least two years older than it, naming both versions and their
+  dates. It is a warning, never a blocker, and it is deliberately quiet about
+  everything that is not backtracking: patch-level lag, a major published
+  recently, releases this Python is excluded from, pre-releases, packages Home
+  Assistant pins in its own constraints, and the requirements that come from
+  the manifest's `dependencies`. When PyPI cannot be reached it says nothing
+  rather than guessing.
 - **The integration's own code.** The preflight compiles every `.py` file with
   the image's Python (a syntax error is a blocker naming the file and line, and
   so is a file over 5 MB or one too deeply nested for the parser),
@@ -772,6 +793,13 @@ visible there:
 - **Network devices** need nothing special, but note that the container does
   not see mDNS/multicast from your LAN in bridge networking: configure devices
   by IP address.
+- **Bluetooth** is not a package problem: `bleak` and the rest install and
+  import in any container, and then find no adapter. The container needs the
+  host's Bluetooth stack: a running `bluetoothd`, the host's D-Bus system
+  socket (`volumes: ["/run/dbus:/run/dbus:ro"]`), host networking and
+  `NET_ADMIN`/`NET_RAW`. Even then the adapter is shared with the host.
+  The preflight warns about a requirement that needs it while the socket is not
+  mounted.
 
 ---
 
