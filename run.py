@@ -47,6 +47,7 @@ if __name__ == "__main__":  # the process run.py is, not a module that imports i
 # homeassistant import.  A port passed as config would only become a pending
 # "trial" that the frontend websocket must promote; SETUP_PORT changes the
 # built-in default, so the stored stable port equals ours on a fresh volume.
+# Home Assistant older than 2026.8.0 ignores it: see _http_config().
 os.environ["SETUP_PORT"] = os.environ.get("HRI_PORT", "8087")
 
 TRACEMALLOC_DEFAULT_FRAMES = 25
@@ -187,7 +188,9 @@ async def _boot() -> int:
         },
         # No "http" section on purpose: it would be migrated into the http
         # store as a pending trial (see SETUP_PORT above). Defaults are fine:
-        # bind 0.0.0.0, port from SETUP_PORT.
+        # bind 0.0.0.0, port from SETUP_PORT.  Older Home Assistant is the
+        # exception, and _http_config() explains itself.
+        **_http_config(),
         "integration_manager": {},
     }
 
@@ -249,7 +252,8 @@ async def _boot() -> int:
     if actual_port != HTTP_PORT:
         _LOGGER.error(
             "http bound to port %s, expected %s; delete /config/.storage/http "
-            "and make sure SETUP_PORT=%s is set",
+            "and make sure SETUP_PORT=%s is set (on Home Assistant older than "
+            "2026.8.0 the port comes from the http: section instead)",
             actual_port,
             HTTP_PORT,
             HTTP_PORT,
@@ -402,6 +406,33 @@ def _install_boot_signal_handlers(boot_task: asyncio.Task, get_hass: Callable[[]
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, on_signal, sig)
+
+
+def _http_config() -> dict:
+    """The `http:` section to pass, which is none at all on any Home Assistant
+    that knows SETUP_PORT.
+
+    SETUP_PORT and the store that reads it (`components/http/config.py`, whose
+    `default_server_port()` looks the variable up) arrived together in 2026.8.0.
+    Before that the variable is ignored and the port comes from the `http:`
+    section, which on those versions is ordinary configuration read straight
+    into `server_port` - the pending "trial" a newer store would make of it
+    does not exist there, so the objection above does not apply.  Without this
+    the manager bound 8123 on every older release and killed itself at the
+    check below, whatever the operator had configured.
+
+    Feature detection rather than a version comparison: the thing that has to
+    exist is the module that reads the variable.
+    """
+    try:
+        from importlib.util import find_spec
+
+        if find_spec("homeassistant.components.http.config") is not None:
+            return {}
+    except (ImportError, ValueError):  # no parent package, or a namespace oddity: fall through to the section
+        pass
+    _LOGGER.info("this Home Assistant does not know SETUP_PORT: passing http.server_port=%s instead", HTTP_PORT)
+    return {"http": {"server_port": HTTP_PORT}}
 
 
 def _mark_boot_ok() -> None:

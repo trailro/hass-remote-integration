@@ -33,6 +33,15 @@ _STABLE = re.compile(r"^\d{4}\.\d{1,2}\.\d+\Z")  # \Z: "$" also matches before a
 RECENT_N = 10
 
 
+def _floor() -> str:
+    """The oldest Home Assistant this image installs.  HA_VERSION_MIN, not
+    HA_VERSION_DEFAULT: the version the image installs on a fresh volume is a
+    choice (a recent, well-tested one), while the floor is a limit (the oldest
+    release this code was measured on).  An image built before the two were
+    split has only the one variable, and it stands for both."""
+    return os.environ.get("HA_VERSION_MIN") or os.environ.get("HA_VERSION_DEFAULT") or ""
+
+
 class HaUpdater:
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
@@ -162,7 +171,8 @@ class HaUpdater:
             "recent_n": RECENT_N,
             "versions_total": len(everything),  # what "show all" would list
             **({"all_versions": listed} if all_versions else {}),
-            "baseline": os.environ.get("HA_VERSION_DEFAULT") or "",  # anything older is refused: the page marks those itself
+            "baseline": _floor(),  # anything older is refused: the page marks those itself
+            "default_version": os.environ.get("HA_VERSION_DEFAULT") or "",  # what a fresh volume installs, which is not the floor
             "verdicts": self.verdicts(listed),
             "current": current,
             "python": sys.version.split()[0],
@@ -203,7 +213,7 @@ class HaUpdater:
         already in memory - no PyPI call, no pip run - or "" when nothing
         there objects.  What ``validate`` raises, and what the System page
         marks a version with before anyone clicks anything."""
-        floor = os.environ.get("HA_VERSION_DEFAULT")
+        floor = _floor()
         if floor and _key(version) < _key(floor):
             # older releases have no wheels for this image's Python: pip would
             # grind for minutes and the entrypoint would fall back
@@ -232,7 +242,7 @@ class HaUpdater:
         so nothing here resolves anything."""
         from . import preflight
 
-        floor = os.environ.get("HA_VERSION_DEFAULT")
+        floor = _floor()
         out: dict[str, dict[str, Any]] = {}
         for version in versions:
             if floor and _key(version) < _key(floor):

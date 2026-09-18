@@ -216,3 +216,24 @@ class StatusViewTest(_Updater, unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FloorAndDefaultTest(_Updater, unittest.IsolatedAsyncioTestCase):
+    """HA_VERSION_MIN (the oldest version this image installs) is not HA_VERSION_DEFAULT (what a fresh
+    volume installs).  They used to be one variable, so lowering the floor also changed what a new box
+    started with - and an image built to reach an older release installed that older release too."""
+
+    async def test_the_floor_is_ha_version_min_when_it_is_set(self):
+        with mock.patch.dict(os.environ, {"HA_VERSION_MIN": OLD, "HA_VERSION_DEFAULT": BASELINE}):
+            self.assertEqual(self.up._image_refusal(BASELINE), "")
+            between = "2026.1.0"  # older than what a fresh volume installs, newer than the floor
+            self.assertEqual(self.up._image_refusal(between), "")
+            self.assertIn("older than this image's baseline", self.up._image_refusal(ANCIENT))
+            out = await self.status()
+            self.assertEqual((out["baseline"], out["default_version"]), (OLD, BASELINE))
+
+    async def test_an_image_without_the_new_variable_keeps_the_old_meaning(self):
+        with mock.patch.dict(os.environ, {"HA_VERSION_DEFAULT": BASELINE}, clear=False):
+            os.environ.pop("HA_VERSION_MIN", None)
+            self.assertIn("older than this image's baseline", self.up._image_refusal(OLD))
+            self.assertEqual((await self.status())["baseline"], BASELINE)
