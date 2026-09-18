@@ -928,7 +928,11 @@ hass_<domain>/manager/result                        outcome of a manager action,
   `sensor.camera_front`), both are announced, the main HA gives one a `_2`
   suffix, and the log names them; `discovery_default_id_duplicates` counts
   them. A light, fan, siren or humidifier whose state is `unknown` stays
-  unknown on the main HA. An entity disabled in the container stays on the
+  unknown on the main HA. A `text` entity whose state is `unknown` or
+  `unavailable` here shows unavailable on the main HA rather than a value: its
+  MQTT platform takes every payload as the text, so there is no payload that
+  means *no value* there. A text whose value really is the word `None`, or
+  empty, is shown as it is. An entity disabled in the container stays on the
   main HA with its customisations and shows unavailable there; it is still
   announced, with `enabled_by_default: false`, which the main HA applies only
   when it creates an entity. Deleting the entity removes it there, and so do
