@@ -295,7 +295,10 @@ and no notification. A health check that itself fails (an exception in the
 manager, not a verdict) is tried again every minute, three times, and then
 recorded as `unknown`, never rolled back. A failed, degraded or unknown smoke test raises a
 notification and stays in the last error until another version runs healthy,
-also across the rollback's restart.
+also across the rollback's restart. The smoke test judges a *change* once,
+minutes after it; for an integration that breaks later, on a version that has
+been running fine, see the [health watchdog](#the-health-watchdog), which is
+off by default and stands down while a smoke test is pending.
 
 ### 4. Connect MQTT
 
@@ -716,6 +719,38 @@ reason, entity counts and when the integration last wrote a state. With
 discovery on, your main HA gets a connectivity sensor and a health sensor for
 the container. The thresholds are on the **MQTT** page; mark an integration
 that only writes on events as `event`, so silence is not reported as a fault.
+
+#### The health watchdog
+
+An integration that goes into `error` at three in the morning stays that way
+until somebody looks. The **health watchdog** (on **System**, *off by
+default*) restarts the process when the verdict has been `error` without
+interruption for a while: 15 minutes by default, at most once an hour and at
+most three times a day. Only `error` counts — a `degraded` version is kept on
+purpose, `stopped` is your decision, and `unconfigured` has nothing to judge.
+
+It never fights the rest of the manager. Nothing is restarted while an
+install, start, stop, backup, import, restore or full rollback is running,
+while a restore, a rebuild, a Home Assistant version change, a deferred start
+or a full rollback is waiting for the next restart, while a smoke test is
+pending or a config entry is still setting up, nor in the first 15 minutes
+after a boot — the integration gets its whole grace window to set up first. A
+restart it decided against puts one line on the timeline for that stretch, not
+one a minute.
+
+It cannot loop. After a restart the clock starts again from that boot, and the
+window doubles for the next attempt (15 → 30 → 60 minutes and on), so a
+restart that did not help is not repeated at the same rate. When the daily
+maximum is reached it gives up, says so once, and waits: an `ok` verdict
+resets the ladder and the give-up, and the daily count drains as the restarts
+age out of the last 24 hours. All of that survives the restart it triggers —
+it lives in `state.json`, like the smoke test's verdict.
+
+Every action is visible: a timeline entry naming the reason it acted on, the
+attempt number and what it will do next; a persistent notification raised at
+the boot after the restart (the restart ends the process that would have shown
+it); and `watchdog` in `GET /api/status`, which the **System** page shows under
+the setting.
 
 The **Overview** keeps a resource history: memory, CPU, event-loop lag and
 volume usage, one sample a minute, for 48 hours by default and up to 120
@@ -1468,8 +1503,8 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
   venv-<ha version>/            one per installed Home Assistant (venv-current links the active one)
   custom_components/<domain>/   the deployed integration
   integration_manager/
-    state.json                  running integration, versions, pending actions; an unreadable one is kept as state.json.corrupt-<stamp>
-    settings.json               settings, tokens, log-file format (mode 600); a damaged one is kept as settings.json.corrupt-<stamp>
+    state.json                  running integration, versions, pending actions, the health watchdog's ledger (its restarts of the last 24 h, the backoff step, the last action); an unreadable one is kept as state.json.corrupt-<stamp>
+    settings.json               settings (backup retention, smoke test, health thresholds, health watchdog), tokens, log-file format (mode 600); a damaged one is kept as settings.json.corrupt-<stamp>
     auth_key                    signs login sessions, only with a password set (mode 600)
     auth_revoked                time of the last logout: sessions from before it are invalid
     mqtt.json                   broker configuration (mode 600)
@@ -1607,6 +1642,15 @@ points:
 `POST /api/logs/level` accepts any existing logger; a logger that does not
 exist yet (a library imported later) needs a dotted Python name, and at most
 50 of those can be created.
+
+`GET/POST /api/settings` carries the health watchdog as `watchdog` (a boolean,
+off by default), `watchdog_after_min` (5–720), `watchdog_min_interval_min`
+(15–1440) and `watchdog_max_per_day` (1–24); numbers outside the range are
+clamped, not refused. `GET /api/status` answers `watchdog` with those settings
+plus `restarts_24h`, `attempts`, `window_min` (what the next attempt has to
+wait through), `gave_up`, `last` (`at`, `integration`, `reason`,
+`unhealthy_s`, `attempt`, `next`) and `pending` (`bad_for_s`, `window_s`,
+`reason`) while a stretch of `error` is being timed.
 
 `GET /api/ha` includes `apt`: what this boot did with `HRI_APT_PACKAGES`
 (`packages`, `refused`, `ok`, `note`, `error`, `at`), or `null` when the
