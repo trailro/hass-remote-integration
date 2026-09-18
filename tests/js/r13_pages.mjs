@@ -33,7 +33,7 @@ const pick = (root, input) => { for (const r of radios(root)) if (r !== input &&
   out.sections = { groups, untouched, picked: collect(form) };
 }
 {  // F6: Memory snapshot fetches with the header the endpoint requires, and saves the answer
-  const code = between(read('system.js'), 'async function fetchDownload(', 'async function ha(');
+  const code = between(read('hri.js'), 'async function fetchDownload(', 'function chipBar(');  // shared with the Log files page's Download
   const line = read('system.js').split('\n').find(l => l.startsWith("$('#memsnap').onclick="));
   out.memsnap = {};
   for (const [name, answer] of Object.entries({
