@@ -6,7 +6,8 @@
 #   verify.sh test      discovery components against HA's MQTT schemas (after any discovery change)
 #   verify.sh unit      unit tests (tests/) in the container's HA venv, against the repo's copy of the code
 # Reads HRI_NAME, HRI_PORT, HRI_IMAGE, HRI_NETWORK, HRI_PASSWORD (or HRI_PASSWORD_FILE, which wins) and TZ
-# from the environment or a .env file.  start exits non-zero when the API does not come up (timeout, restart loop).
+# from the environment or a .env file.  HRI_ENV="K=V K2=V2" passes more to the container, which is how CI
+# boots a version other than the newest (HA_VERSION_LATEST=0, HA_VERSION_DEFAULT=<version>).  start exits non-zero when the API does not come up (timeout, restart loop).
 set -u
 cd "$(dirname "$0")"
 [ -f .env ] && . ./.env
@@ -36,6 +37,7 @@ start() {
   else
     set --
   fi
+  for kv in ${HRI_ENV:-}; do set -- "$@" -e "$kv"; done
   docker run -d --name "$NAME" --restart unless-stopped --init --stop-timeout 240 \
     ${HRI_NETWORK:+--network "$HRI_NETWORK"} -p "$PORT:$PORT" \
     -v "$NAME:/config" \

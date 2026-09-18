@@ -44,12 +44,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # ha: which Home Assistant the fresh volume installs.  "newest" is what a user gets by default;
+          # "default" is HA_VERSION_DEFAULT, what a box with no network to PyPI falls back to; "floor" is
+          # HA_VERSION_MIN, the oldest this image claims to install.  A floor nothing boots is a promise
+          # nobody checked, which is how 2026.8.0 once became a documented baseline that could not run.
           - arch: amd64
             name: Build, boot and discovery schemas
             runner: ubuntu-latest
+            ha: newest
           - arch: arm64
             name: Boot on arm64
             runner: ubuntu-24.04-arm
+            ha: newest
+          - arch: amd64
+            name: Boot the image's default Home Assistant
+            runner: ubuntu-latest
+            ha: default
+          - arch: amd64
+            name: Boot the oldest Home Assistant this image claims
+            runner: ubuntu-latest
+            ha: floor
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     env:
@@ -67,12 +81,28 @@ jobs:
           build-args: HRI_BUILD=${{ github.sha }}
           cache-from: type=gha,scope=ci-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=ci-${{ matrix.arch }}
+      - name: Which Home Assistant this job boots
+        run: |
+          case "${{ matrix.ha }}" in
+            newest) ;;  # nothing to set: a fresh volume takes the newest stable
+            default) echo "HRI_ENV=HA_VERSION_LATEST=0" >> "$GITHUB_ENV"
+                     echo "EXPECT_HA=$(docker run --rm hass-remote-integration:local printenv HA_VERSION_DEFAULT)" >> "$GITHUB_ENV" ;;
+            floor)   floor=$(docker run --rm hass-remote-integration:local printenv HA_VERSION_MIN)
+                     echo "HRI_ENV=HA_VERSION_LATEST=0 HA_VERSION_DEFAULT=$floor" >> "$GITHUB_ENV"
+                     echo "EXPECT_HA=$floor" >> "$GITHUB_ENV" ;;
+          esac
       - name: Boot on a fresh volume (installs Home Assistant)
         run: sh verify.sh start
       - name: Manager API is up without restarts
         run: |
-          curl -fsS http://127.0.0.1:8087/api/status | python3 -c "import json, sys; s = json.load(sys.stdin); print('Home Assistant', s['ha_version'])"
+          got=$(curl -fsS http://127.0.0.1:8087/api/status | python3 -c "import json, sys; print(json.load(sys.stdin)['ha_version'])")
+          echo "Home Assistant $got"
           test "$(docker inspect -f '{{.RestartCount}}' hri-ci)" = "0"
+          # the version-pinned jobs must have installed the version they asked for, not fallen back to another
+          if [ -n "${EXPECT_HA:-}" ] && [ "$got" != "$EXPECT_HA" ]; then
+            echo "expected Home Assistant $EXPECT_HA, got $got" >&2
+            exit 1
+          fi
       - name: Discovery payloads against the MQTT schemas
         run: sh verify.sh test
       - name: Unit tests

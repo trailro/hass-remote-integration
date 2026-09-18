@@ -572,7 +572,11 @@ three have to support that Python:
   than the floor is refused outright, before any of the checks below and with
   no force path. A venv of an older version already on the volume can still be
   switched to, and a rollback to the recorded previous version is not blocked
-  by it. The floor is where this manager was measured, not a guess: 2026.5.0,
+  by it. Both are booted in CI on every change — the newest stable Home
+  Assistant, the default and the floor, each on a fresh volume with the
+  discovery schemas and the unit tests run against it — so neither number is a
+  claim nobody checks. The floor is where this manager was measured, not a
+  guess: 2026.5.0,
   2026.6.0 and 2026.7.0 were each run end to end (the manager, its UI and API,
   MQTT discovery to a main Home Assistant, all 13 manager and 31 domain
   discovery components, a preflight, a backup and a command round trip), as
