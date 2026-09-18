@@ -580,6 +580,17 @@ three have to support that Python:
 What the preflight cannot see is caught by the smoke test after the switch:
 a version that does not set up is rolled back automatically.
 
+Some of what an integration needs is not a Python package at all and pip
+cannot install it: the `ffmpeg` binary that Home Assistant's `ffmpeg`
+component and everything built on it calls, BlueZ and D-Bus for Bluetooth
+(which also want the host's hardware and bus, so the package alone is not
+enough), and system libraries a wheel links against. The image carries only
+libjpeg-turbo: ffmpeg would add about 400 MB to every install for the few
+integrations that use it. `HRI_APT_PACKAGES` declares what this container
+needs instead — the entrypoint installs those Debian packages at boot, before
+Home Assistant starts, and does nothing when they are already there. **System**
+shows what it did, and a failure does not stop the boot.
+
 ### Backups
 
 Taken automatically before every start that changes something, before every
@@ -1398,6 +1409,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | `HRI_REGISTRY` | `ghcr.io/trailro` | Where Compose pulls the image from: `ghcr.io/trailro` (GitHub Container Registry) or `docker.io/trailro26` (Docker Hub); the same image either way. A `docker-compose.yml` from 0.16.0 or older ignores it and pulls from GitHub Container Registry: download the file again to use it |
 | `TZ` | `UTC` | Time zone; an unknown zone falls back to UTC, with an error in the log |
 | `HA_VERSION_LATEST` | `1` | `0` installs the image's baseline HA on a fresh volume instead of the newest |
+| `HRI_APT_PACKAGES` | unset | Debian packages the container installs at boot, before Home Assistant starts, for what pip cannot install (the `ffmpeg` binary, BlueZ): names separated by spaces or commas, for example `ffmpeg libpcap0.8`. Only Debian package names are accepted (`libc6:arm64` too); anything else — an option, a URL, a path, a shell metacharacter — is refused with a line in the log and nothing is installed for it, and the value never reaches a shell. Packages that are already installed are not installed again, so a restart costs nothing. A failure (no network, an unknown package) is recorded on **System** and does not stop the boot. The output is in `integration_manager/apt-install.log` |
 | `HRI_DEV_SRC` | `./dev-src` | Dev mode: directory mounted at `/dev-src` |
 | `HRI_DEBUGPY` | unset | Dev mode: debugger port |
 | `HRI_DEBUGPY_HOST` | `127.0.0.1` | Dev mode: address debugpy binds inside the container (the dev overlay sets `0.0.0.0`) |
@@ -1443,6 +1455,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
     resource_history.json       resource samples of the Overview
     hacs_catalog.json           cached HACS list for the Install page search
     ha-install.log              pip output of the last Home Assistant version install
+    apt-install.log             apt output of the last boot that installed HRI_APT_PACKAGES
     import.tar                  an uploaded Home Assistant backup, until it is inspected
     import-extracted/           what the inspection unpacked from it, until the import or Clear
   .storage.pre-rebuild-<time>/  .storage set aside by a clean start: removed once the rebuild finished or a restore replaced .storage; kept (and logged) when the clean start was dropped, delete it by hand
@@ -1586,7 +1599,8 @@ progress (50): try again later`.
   Without a password the page shows pip's progress; it is also in
   `integration_manager/ha-install.log` on the volume, while the container log
   shows only the start and end of the install. From the start of the
-  container until Home Assistant is started (the PyPI lookup, the install, the
+  container until Home Assistant is started (the PyPI lookup, the system
+  packages of `HRI_APT_PACKAGES`, the install, the
   manager's requirements, a scheduled restore, removing unused venvs) the
   page and every `/api/` path answer `503` with a `Retry-After: 5`, and under
   `/api/` with a JSON body naming the phase (`phase`) and the seconds since the
@@ -1604,6 +1618,18 @@ progress (50): try again later`.
   shown in `docker logs <name>`; the restore is retried every 5 minutes. To
   start on the configuration as it is, delete
   `integration_manager/restore-pending.json` on the volume.
+- **The integration needs `ffmpeg` or another system package.** Name the
+  Debian packages in `HRI_APT_PACKAGES` (see *Environment variables*) and
+  restart the container: the entrypoint installs them before Home Assistant
+  starts, and the page shows that step like the other boot phases. What apt
+  printed is in `integration_manager/apt-install.log` on the volume, and
+  **System** shows, next to the venvs, what this boot did with the variable: the
+  packages, whether they were already installed, the names it refused (anything
+  that is not a Debian package name) and the error of a failed install. Nothing
+  of this stops the boot — Home Assistant starts without the packages and the
+  integration that needs them fails where you can see it. Bluetooth needs more
+  than a package: the container also has to reach the host's adapter and D-Bus,
+  which no package can give it.
 - **"restart required" does not go away.** Click *Restart process* on the
   Overview; some changes (a new version of a loaded integration, YAML) only take
   effect at a restart.
