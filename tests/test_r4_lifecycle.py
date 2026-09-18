@@ -102,6 +102,24 @@ class CrashLoopFallbackTest(EntrypointMainBase):
         self.write({"current": B, "desired": B, "previous": A, "change": {"to": B, "mode": "keep", "applied": True}, "boot_failures": 3})
         self.assertEqual(self.boot(), A)
 
+    def test_a_fresh_volume_does_not_call_the_version_it_installed_proven(self):
+        """"proven" means run.py saw this version reach STARTED.  The compatibility rule that reads an
+        existing volume's "current" as proven used to claim a fresh volume's first install too, where
+        nothing has ever booted."""
+        self.write({"desired": B})
+        self.assertEqual(self.boot(), B)
+        state = self.state()
+        self.assertEqual((state["current"], state["proven"]), (B, ""))
+
+    def test_a_first_version_that_never_boots_is_not_told_it_booted_before(self):
+        self.write({"desired": B})
+        self.assertEqual(self.boot(), B)  # installs B and records it, unproven
+        self.write({**self.state(), "boot_failures": 3})
+        self.assertEqual(self.boot(), B)  # nothing to fall back to on a fresh volume
+        error = self.state()["last_error"]
+        self.assertNotIn("booted fine before", error)
+        self.assertIn("no other version to go back to", error)
+
     def test_fallen_back_from_venv_is_pruned_once_the_target_booted(self):
         self.write({"current": A, "desired": A, "fallback_from": B, "proven": A, "boot_failures": 0})
         self.assertEqual(self.boot(), A)

@@ -1044,7 +1044,12 @@ def _prepare() -> str:
         state["boot_failures"] = 0
         save_state(state)
     elif failures >= MAX_BOOT_FAILURES:
+        # a fresh volume whose first version cannot boot: nothing to go back to, but say what is wrong
+        # rather than leaving the last error of a boot that never happened
         log(f"{wanted} failed to boot {failures} times and there is nothing to fall back to; retrying")
+        state["last_error"] = (f"Home Assistant {wanted} crashed at boot {failures} times in a row and this volume has no "
+                               "other version to go back to (see the container log)")
+        save_state(state)
 
     if not venv_ok(wanted):
         _phase(f"checking that Home Assistant {wanted} supports this Python", wanted)
@@ -1082,6 +1087,11 @@ def _prepare() -> str:
     # fallback_from is cleared by run.py once HA actually reaches STARTED; until then its venv is kept
     state["current"] = wanted
     state.setdefault("desired", wanted)
+    # This version has not booted yet: run.py records "proven" when it does.  Seeding the key keeps the
+    # compatibility rule above (a volume from before "proven" existed ran a version that booted) from
+    # claiming a fresh volume's first install, where "current" is a version nothing has ever started -
+    # which turned a version that cannot boot at all into a loop no fallback would break.
+    state.setdefault("proven", "")
     save_state(state)
     _phase("removing unused venvs", wanted)
     if not state.get("_corrupt"):

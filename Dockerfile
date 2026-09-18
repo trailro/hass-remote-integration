@@ -4,13 +4,20 @@ FROM python:3.14-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae
 # Home Assistant is NOT baked in: entrypoint.py installs the wanted version
 # into /config/venv-<version> (on the volume) at start, so the manager UI
 # can update or roll back HA with a restart, and image rebuilds are cheap.
+# What a fresh volume installs when it is not told to take the newest, and the fallback when PyPI cannot
+# be reached.  A recent, well-tested release - NOT the oldest one that works: that is HA_VERSION_MIN.
 ARG HA_VERSION=2026.8.3
+# The oldest release this image installs at all; anything older is refused before a change is scheduled,
+# and no force lifts it.  2026.5.0 is the oldest measured to work (see README, "Python versions"): older
+# releases pin requirements that have no wheel for this image's Python anyway.
+ARG HA_VERSION_MIN=2026.5.0
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     HRI_CONFIG=/config \
     HRI_PORT=8087 \
     HA_VERSION_DEFAULT=${HA_VERSION} \
+    HA_VERSION_MIN=${HA_VERSION_MIN} \
     MALLOC_ARENA_MAX=2 \
     TZ=UTC
 
