@@ -462,7 +462,9 @@ it later crashes three times in a row (a changed setting or port, too little
 memory), the container keeps retrying it and **System** and the log say so. A
 boot counts as good once the integration has set up, or 10 minutes after Home
 Assistant started; stopping or restarting the container during a boot, also
-while Home Assistant is still being imported, does not count as a failure. What
+while Home Assistant is still being imported, does not count as a failure —
+only that boot's own failure is taken back, so the crashes before it still
+count and a version that never boots still reaches the fallback. What
 happened (a fallback, a failed install) stays on **System** until the next
 version change and is announced once as a notification. Before restarting,
 the page warns when the target is older than the minimum Home Assistant the

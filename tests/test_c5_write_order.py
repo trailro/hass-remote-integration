@@ -94,10 +94,10 @@ class HaJsonLostUpdateTest(unittest.TestCase):
                 t.join(10)
         return _read(self.path)
 
-    def test_executor_reset_does_not_drop_set_desired(self):
-        state = self._race(lambda: Installer._reset_boot_failures(SimpleNamespace(state_dir=os.path.dirname(self.path))))
+    def test_executor_undo_does_not_drop_set_desired(self):
+        state = self._race(lambda: Installer._undo_boot_failure(SimpleNamespace(hass=SimpleNamespace(data={}), state_dir=os.path.dirname(self.path))))
         self.assertEqual(state.get("desired"), "2026.9.2")
-        self.assertEqual(state["boot_failures"], 0)
+        self.assertEqual(state["boot_failures"], 1)  # this boot's increment, not the earlier crash
 
     def test_run_boot_ok_does_not_drop_set_desired(self):
         with mock.patch.object(run, "CONFIG_DIR", self.dir):
@@ -131,7 +131,7 @@ class HaJsonLostUpdateTest(unittest.TestCase):
             fh.write('{"current": ')
         with self.assertRaises(ValueError):
             self.updater.set_desired("2026.9.2")
-        Installer._reset_boot_failures(SimpleNamespace(state_dir=os.path.dirname(self.path)))
+        Installer._undo_boot_failure(SimpleNamespace(hass=SimpleNamespace(data={}), state_dir=os.path.dirname(self.path)))
         with mock.patch.object(run, "CONFIG_DIR", self.dir):
             run._mark_boot_ok()
         with open(self.path, encoding="utf-8") as fh:

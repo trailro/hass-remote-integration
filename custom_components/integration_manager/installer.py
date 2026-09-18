@@ -1974,7 +1974,7 @@ class Installer:
             events.emit("restart", "process restart requested")
             # on the loop, like _save_state above: as an executor job it queued behind a pool an
             # integration had exhausted and never returned, so the stop below never started
-            self._reset_boot_failures()
+            self._undo_boot_failure()
             if not await writer.async_drain(10):  # the final write drains it too, but a stop stage could time out first
                 _LOGGER.warning("restart: JSON saves still pending after 10 s")
         except BaseException as err:
@@ -2003,18 +2003,37 @@ class Installer:
         except Exception as err:  # noqa: BLE001 - the restart goes ahead without the safety net
             _LOGGER.error("the stop watchdog could not be armed: %s", err)
 
-    def _reset_boot_failures(self) -> None:
+    def _undo_boot_failure(self) -> None:
         """A deliberate restart before HA reached STARTED must not count as
-        a crash for the entrypoint's fallback logic.  Under the per-file lock,
-        which the loop and the executor both take: one small JSON write."""
+        a crash for the entrypoint's fallback logic: take back THIS boot's
+        increment, the one entrypoint.py wrote before it started us, exactly
+        like run.py's stop path.  Zeroing the count instead wiped the crashes
+        of earlier boots, and a version that never boots could restart-loop
+        from the UI without the count ever reaching MAX_BOOT_FAILURES.
 
-        def reset(data: Any) -> dict[str, Any] | None:
+        run.py publishes its own undo, which also carries the "this boot is
+        settled" flag: without it the stop listener would take the same
+        increment back a second time, and a boot that was already marked good
+        would lose a failure that belongs to the boot after it.  Under the
+        per-file lock, which the loop and the executor both take: one small
+        JSON write."""
+        undo = self.hass.data.get("hri_undo_boot_failure")
+        if undo is not None:
+            undo()
+            return
+
+        def take_back(data: Any) -> dict[str, Any] | None:
+            # not the run.py process (a test, or HA started some other way): no stop listener to share with
             if isinstance(data, dict) and data.get("boot_failures"):
-                return {**data, "boot_failures": 0}
+                try:
+                    count = int(data["boot_failures"])
+                except (TypeError, ValueError):
+                    return None  # written by hand: entrypoint.py reads it as 0 anyway
+                return {**data, "boot_failures": max(0, count - 1)}
             return None  # unreadable, or nothing to take back: left alone
 
         try:
-            jsonio.update_json(os.path.join(self.state_dir, "ha.json"), reset)
+            jsonio.update_json(os.path.join(self.state_dir, "ha.json"), take_back)
         except OSError:
             pass
 

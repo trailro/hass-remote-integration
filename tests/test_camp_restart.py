@@ -95,7 +95,7 @@ class RestartOffTheExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hass.stopped, [True], "the restart answered ok and nothing stopped")
         self.assertEqual(wedged.jobs, [], "the restart still hands work to the exhausted pool")
         with open(os.path.join(ins.state_dir, "ha.json"), encoding="utf-8") as fh:
-            self.assertEqual(json.load(fh)["boot_failures"], 0)
+            self.assertEqual(json.load(fh)["boot_failures"], 2)  # this boot's increment only
 
     async def test_restart_arms_the_stop_watchdog_before_it_asks_ha_to_stop(self):
         armed = []
