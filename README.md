@@ -513,6 +513,16 @@ block. If you know better — you added a compiler with
 `HRI_APT_PACKAGES=build-essential`, say — the confirmation offers to schedule
 it anyway.
 
+Because of that floor, the list offers the **ten newest stable releases** plus
+everything this box already has — every venv on the volume, the running
+version, a scheduled one, the one a rollback goes back to — however old those
+are, so nothing you have can fall off it. *Show all versions* adds the rest,
+every release PyPI still offers. Each entry carries what is already known
+about it, with nothing resolved to find out: ✓ it installs here (checked
+within the hour, or its venv is on the volume), ✗ it is refused before
+anything is scheduled (older than the image's baseline, or a pin with no
+wheel), and no mark when nobody has checked.
+
 Home Assistant migrates its configuration forward only: a newer version
 rewrites `.storage` in its own format and never converts it back. A downgrade
 therefore asks what the older version starts with:
@@ -1693,6 +1703,18 @@ wait through), `gave_up`, `last` (`at`, `integration`, `reason`,
 `GET /api/ha` includes `apt`: what this boot did with `HRI_APT_PACKAGES`
 (`packages`, `refused`, `ok`, `note`, `error`, `at`), or `null` when the
 variable is not set.
+
+`GET /api/ha` answers the version list as `versions`: the `recent_n` newest
+stable releases (`recent` is still only those) plus every installed venv, the
+running version, a scheduled one and the previous one. `versions_total` is how
+many there are in all, and `?all=1` answers them as `all_versions` — it reads
+the release list already in memory, so unlike `?refresh=1` it costs no PyPI
+call and needs no `X-Requested-With: fetch`. `baseline` is the image's
+`HA_VERSION_DEFAULT`: anything older is refused, which the page works out for
+itself rather than being told once per version. `verdicts` maps a version to
+the `check` of `POST /api/ha/check` where that is known without resolving
+anything — a report still in the hour-long cache, or the Python a release
+needs.
 
 `POST /api/ha/check` (`{"version": …}`) answers `check`: whether that version's
 pinned requirements resolve from wheels on this image's Python, without
