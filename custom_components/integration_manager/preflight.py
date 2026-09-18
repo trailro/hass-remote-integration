@@ -243,6 +243,7 @@ _SYSTEM_DEPS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "ffmpeg-python": (("ffmpeg",), ()),
     "pytesseract": (("tesseract",), ()),
     "speechrecognition": (("flac",), ()),
+    "pydub": (("ffmpeg",), ()),  # shells out to ffmpeg/ffprobe (pydub.utils.get_encoder_name); imports fine, decodes nothing without it
     "pyturbojpeg": ((), ("libturbojpeg.so.0",)),
     "pyaudio": ((), ("libportaudio.so.2",)),
     "sounddevice": ((), ("libportaudio.so.2",)),
@@ -255,6 +256,16 @@ _SYSTEM_DEPS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "opencv-python": ((), ("libGL.so.1",)),
     "opencv-contrib-python": ((), ("libGL.so.1",)),
 }
+
+# Requirements that install, import and even work, but only against the host's Bluetooth stack: they talk
+# to BlueZ ("org.bluez") over the system D-Bus, and dbus-fast opens /run/dbus/system_bus_socket itself.
+# Verified one by one in the published wheels.  This is not a missing package - no Debian package puts an
+# adapter inside a container - so it is a different warning from _SYSTEM_DEPS: the container needs the
+# host's D-Bus socket mounted, the host's network namespace and the capabilities, which is a compose-file
+# matter and is documented under "Hardware access".  When the socket is there, the operator has already
+# done that work and the warning would be noise.
+_BLUETOOTH_DEPS = frozenset({"bleak", "bluetooth-adapters", "dbus-fast", "habluetooth"})
+_DBUS_SOCKETS = ("/run/dbus/system_bus_socket", "/var/run/dbus/system_bus_socket")
 
 # the image is what it is for the life of the process: each program and library is looked for once
 _PRESENT: dict[str, bool] = {}
@@ -280,6 +291,13 @@ def _library_present(soname: str) -> bool:
     return bool(stem) and bool(ctypes.util.find_library(stem))
 
 
+def _host_dbus_present() -> bool:
+    """Whether the host's D-Bus system socket is mounted into this container (cached like the rest)."""
+    if (hit := _PRESENT.get("dbus:system")) is None:
+        hit = _PRESENT["dbus:system"] = any(os.path.exists(p) for p in _DBUS_SOCKETS)
+    return hit
+
+
 def _present(kind: str, name: str) -> bool:
     if (hit := _PRESENT.get(f"{kind}:{name}")) is None:
         hit = _PRESENT[f"{kind}:{name}"] = (shutil.which(name) is not None) if kind == "bin" else _library_present(name)
@@ -288,20 +306,26 @@ def _present(kind: str, name: str) -> bool:
 
 def _system_dep_warnings(requirements: list[str]) -> list[str]:
     """Blocking (it looks at the filesystem): one line per requirement of _SYSTEM_DEPS whose program or
-    library this container does not have.  A package whose system dependency is there says nothing."""
+    library this container does not have, and one per requirement of _BLUETOOTH_DEPS while the host's
+    D-Bus socket is not mounted.  A package whose system dependency is there says nothing."""
     out: list[str] = []
     seen: dict[str, str] = {}  # the same package twice (a manifest requirement pip also resolved) warns once
     for req in requirements:
         name = _req_name(req) if req else ""
         seen.setdefault(_canon(name), name)
     for key, name in seen.items():
-        if not (entry := _SYSTEM_DEPS.get(key)):
-            continue
-        missing = [f"the program {b}" for b in entry[0] if not _present("bin", b)]
-        missing += [f"the library {lib}" for lib in entry[1] if not _present("lib", lib)]
-        if missing:
-            out.append(f"{name} is a wrapper over {' and '.join(missing)}, which this image does not have: "
-                       "it installs, but whatever the integration does with it fails at runtime")
+        if entry := _SYSTEM_DEPS.get(key):
+            missing = [f"the program {b}" for b in entry[0] if not _present("bin", b)]
+            missing += [f"the library {lib}" for lib in entry[1] if not _present("lib", lib)]
+            if missing:
+                out.append(f"{name} is a wrapper over {' and '.join(missing)}, which this image does not have: "
+                           "it installs, but whatever the integration does with it fails at runtime")
+        if key in _BLUETOOTH_DEPS and not _host_dbus_present():
+            out.append(f"{name} needs the host's Bluetooth stack, which a container cannot provide by itself: "
+                       "a running bluetoothd reached over the host's D-Bus system socket, the host's network "
+                       "namespace and the capabilities that go with it. No package installs that - the adapter "
+                       "is on the host. It installs and imports, and finds no adapter. See the README, "
+                       "\"Hardware access\"")
     return out
 
 
