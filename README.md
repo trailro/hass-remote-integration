@@ -365,6 +365,15 @@ update. One downloaded before 0.18.0 does not pass `HRI_APT_PACKAGES` on, so
 setting it in `.env` does nothing at all: download the compose file again (the
 command in *Quick start*) when you update.
 
+The image carries a healthcheck, so `docker ps` says `healthy` once the manager
+API answers and `unhealthy` when it stops answering, and
+`depends_on: condition: service_healthy` works. Unlike the two settings above
+this one needs no new compose file: a service that does not define
+`healthcheck:` itself inherits the image's, whatever the compose file's age. It
+asks `GET /api/status` on `HRI_PORT` every 30 s with the image's own Python, and
+holds off for the first 20 minutes, which is where the first install of Home
+Assistant fits (see *Troubleshooting*).
+
 The top bar shows the version that runs and the commit its image was built
 from (`v0.18.0 · 1a2b3c4`), linking to that release. When GitHub has newer
 releases than the one running (checked with the other update checks), a banner
@@ -1421,7 +1430,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `HRI_PORT` | `8087` | Port of the UI and API; a changed port is picked up at the next boot, and one pinned in `.storage/http` by an older setup or a restored backup is dropped; a value that is not a port number (1-65535) stops the container at boot with a line in the log |
+| `HRI_PORT` | `8087` | Port of the UI and API; a changed port is picked up at the next boot, and one pinned in `.storage/http` by an older setup or a restored backup is dropped; a value that is not a port number (1-65535) stops the container at boot with a line in the log. The image's healthcheck reads it too, so a changed port needs nothing else |
 | `HRI_NAME` | `hass-remote-integration` | Container and volume name |
 | `HRI_VERSION` | `latest` | Image tag Compose pulls, for example `0.18.0` |
 | `HRI_REGISTRY` | `ghcr.io/trailro` | Where Compose pulls the image from: `ghcr.io/trailro` (GitHub Container Registry) or `docker.io/trailro26` (Docker Hub); the same image either way. A `docker-compose.yml` from 0.16.0 or older ignores it and pulls from GitHub Container Registry: download the file again to use it |
@@ -1634,6 +1643,19 @@ progress (50): try again later`.
   all for 15 minutes is taken for hung and fails: the container starts the Home
   Assistant version it already had, or, on a first start, exits and Docker
   starts it again.
+- **`docker ps` says the container is unhealthy, or stays `starting`.** The
+  healthcheck asks the manager for `GET /api/status` on `HRI_PORT` from inside
+  the container. `starting` is the first 20 minutes, which covers the first
+  install described above: while the entrypoint answers `503` the container is
+  not healthy, and the first answer of the manager itself makes it healthy at
+  once. `unhealthy` after that means the manager stopped answering for three
+  probes in a row (about 90 s); `docker inspect --format '{{json
+  .State.Health}}' <name>` shows what the probe got, and `docker logs <name>`
+  why. A password changes nothing: the `401` of `/api/status` is the manager
+  answering. To see the probe's own error, run it by hand:
+  `docker exec <name> python -c "import http.client, os;
+  c = http.client.HTTPConnection('127.0.0.1', int(os.environ['HRI_PORT']));
+  c.request('GET', '/api/status'); print(c.getresponse().status)"`.
 - **The page says Home Assistant is not started: a restore failed and could not
   be put back.** The configuration is half restored and the page names the
   backup that holds the configuration from before. Free space or fix the error
