@@ -114,13 +114,16 @@ class VersionListTest(_Updater, unittest.IsolatedAsyncioTestCase):
 
     async def test_the_fields_the_page_and_the_builder_already_read_still_carry_what_they_did(self):
         make_venv(self.cfg, OLD)
-        self._ha_json(desired=BASELINE, previous=OLD)
+        # a scheduled change is pending only while it differs from the version running, and which version
+        # that is depends on the image these tests run in
+        desired = BASELINE if BASELINE != CURRENT else NEWER[-1]
+        self._ha_json(desired=desired, previous=OLD)
         out = await self.status()
         self.assertEqual(out["recent"], STABLE[-RECENT_N:])  # still only the newest stable releases
         self.assertEqual(out["installed_venvs"], [OLD])
         self.assertEqual(out["latest_stable"], NEWER[-1])
         self.assertEqual(out["current"], CURRENT)
-        self.assertEqual(out["desired"], BASELINE)
+        self.assertEqual(out["desired"], desired)
         self.assertEqual(out["previous"], OLD)
         self.assertTrue(out["pending"])
 

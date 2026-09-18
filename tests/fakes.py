@@ -12,7 +12,11 @@ def entrypoint_for(test, cfg, **env):
     come back after the test.  entrypoint reads HRI_CONFIG and HRI_PORT at import, and a test that set them and
     popped them afterwards took the container's own values away from every test after it (auth.COOKIE, computed
     from the real HRI_PORT, no longer matched what a later test read from the environment)."""
-    patch = mock.patch.dict(os.environ, {"HRI_CONFIG": cfg, **env})
+    # The image these tests run in carries HA_VERSION_LATEST, HA_VERSION_DEFAULT and HA_VERSION_MIN, and CI
+    # boots that image on several Home Assistant versions: a test that reads them from the environment asks a
+    # different question in every job.  Neutral values here; a test about one of them passes its own.
+    versions = {"HA_VERSION_LATEST": "1", "HA_VERSION_DEFAULT": "2026.8.3", "HA_VERSION_MIN": ""}
+    patch = mock.patch.dict(os.environ, {"HRI_CONFIG": cfg, **versions, **env})
     patch.start()
     test.addCleanup(patch.stop)
     previous = sys.modules.pop("entrypoint", None)
