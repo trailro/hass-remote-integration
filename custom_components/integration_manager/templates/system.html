@@ -16,7 +16,8 @@
  </table>
  <div class="row" style="margin-top:10px">
   <button id="haupdate" class="primary" disabled>Update to …</button>
-  <select id="haver"></select><button id="hapick">Install selected version</button>
+  <select id="haver" title="&#10003; this image can install it (already checked, or its venv is on the volume) · &#10007; refused before anything is scheduled (older than this image's baseline, or a pin with no wheel)"></select><button id="hapick">Install selected version</button>
+  <label class="mut" style="margin:0;display:inline-flex;gap:6px;align-items:center" title="everything PyPI still offers, oldest included; what this box has installed, runs or has scheduled is in the list either way"><input type="checkbox" id="haall"> show all versions</label>
   <button id="harollback" disabled>Roll back HA</button>
   <button id="harefresh" title="PyPI is checked when this page loads and at most every 10 minutes; this forces a check now">Refresh</button>
   <span id="hanote" class="warn"></span>
@@ -25,6 +26,7 @@
   <button id="hacheckbtn" title="Resolve the selected version's pinned requirements against this image's Python, without installing anything">Check selected version</button>
   <span id="hacheck" class="mut"></span>
  </div>
+ <div class="mut" style="margin-top:4px"><span id="halistnote"></span></div>
  <div id="haplan" class="mut" style="margin-top:8px" hidden></div>
  <div class="mut" style="margin-top:6px">Every version change takes a backup of the current configuration first, then restarts the process. A version that is not installed yet goes into a new venv on the volume (a few minutes, this page shows the progress); the previous venv is kept for rollback, and the container falls back to it if the install or the boot fails. The integration's requirements are reinstalled into the new venv automatically. The image carries one Python and no compiler, and an older Home Assistant pins requirements that were released before that Python: the check above resolves those pins first and a version that cannot install is refused before anything is scheduled. Home Assistant migrates its configuration forward only, so a downgrade lets you restore <code>.storage</code> from a backup made on that version or an older one, or start clean and rebuild the integration's configuration. The integration version and the manager state stay as they are.</div>
 </div>
