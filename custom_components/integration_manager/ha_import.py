@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import glob
 import json
 import logging
 import os
@@ -1001,39 +1002,120 @@ REBUILD_ATTEMPTS = 3  # a device offline at every start must not keep the plan f
 REBUILD_RETRY_S = 5  # an action holding the manager (a start, a stop, the boot reconcile): the rebuild waits for it
 
 
+# A staging in progress is a directory of its own in the state directory, next to EXTRACT_DIR but never under a
+# name another reader looks for: the boot (clean_import_leftovers, reset_storage_for_rebuild), load_summary and
+# an upload all address "import-extracted" itself, and "staging-" is the prefix backupkit already keeps out of
+# every backup (EXCLUDE_GLOBS, at any depth) and sweeps only its own "staging-restore-" share of.  The rename
+# that swaps one in is inside the state directory, so it never crosses a filesystem.
+_STAGE_NEW = "staging-import-new"  # the new extraction, until it is complete
+_STAGE_OLD = "staging-import-replaced"  # the extraction it takes the place of, until the swap is through
+_STAGE_GLOB = "staging-import-*"
+
+
+def _stage_path(config_dir: str, kind: str) -> str:
+    return os.path.join(config_dir, STATE_DIR, f"{kind}-{os.getpid()}-{time.strftime('%Y%m%d-%H%M%S')}")
+
+
+def _sweep_stage_leftovers(config_dir: str) -> None:
+    """Remove what a staging that was killed half-way left in the state
+    directory.  Called before a staging makes a directory of its own, so the
+    one in use is never a candidate, and the pattern names none of the
+    directories anything else here works with (EXTRACT_DIR, backupkit's
+    staging-restore-*)."""
+    for old in glob.glob(os.path.join(glob.escape(os.path.join(config_dir, STATE_DIR)), _STAGE_GLOB)):
+        try:
+            if os.path.isdir(old) and not os.path.islink(old):
+                shutil.rmtree(old)
+            else:
+                os.remove(old)
+        except OSError as err:  # said, not swallowed - and not fatal: a leftover must not stop a clean start being prepared
+            _LOGGER.warning("leftover of an interrupted import staging could not be removed (%s): %s", os.path.basename(old), err)
+
+
+def _publish_stage(config_dir: str, tmp_dir: str, plan: dict[str, Any]) -> None:
+    """Put a finished staging in EXTRACT_DIR's place and write the plan that
+    points at it.  POSIX cannot swap two directories in one step (a rename
+    onto a non-empty directory fails), so the old extraction is renamed
+    aside, the new one renamed in, the old one removed - and the plan file
+    is taken out in the gap and written back at the end, because the boot
+    acts on the pair: reset_storage_for_rebuild runs only with REBUILD_FILE
+    present *and* a summary of this type in EXTRACT_DIR, so no moment of
+    this may show one change's plan over another change's source.  A
+    failure at any step puts the old extraction and its plan back."""
+    out_dir = os.path.join(config_dir, EXTRACT_DIR)
+    plan_path = os.path.join(config_dir, REBUILD_FILE)
+    aside = _stage_path(config_dir, _STAGE_OLD)
+    try:
+        with open(plan_path, "rb") as fh:
+            old_plan = fh.read()
+    except OSError:
+        old_plan = None
+    moved = os.path.isdir(out_dir)
+    if moved:
+        os.rename(out_dir, aside)  # fails before anything is touched: the older clean start stays whole
+    try:
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(plan_path)  # the older plan has no source from here on; the new one follows its own
+        os.rename(tmp_dir, out_dir)
+        write_json(plan_path, plan)
+    except OSError:
+        if os.path.isdir(out_dir) and not os.path.exists(tmp_dir):
+            with contextlib.suppress(OSError):
+                os.rename(out_dir, tmp_dir)  # the plan could not be written: the new source goes back where it came from
+        if moved and not os.path.exists(out_dir):
+            with contextlib.suppress(OSError):
+                os.rename(aside, out_dir)
+            if old_plan is not None and not os.path.exists(plan_path):
+                with contextlib.suppress(OSError), open(plan_path, "wb") as fh:
+                    fh.write(old_plan)
+        raise
+    if moved:
+        try:
+            shutil.rmtree(aside)
+        except OSError as err:  # the staging is through: this is disk left behind, not a failure to report
+            _LOGGER.warning("the replaced import extraction could not be removed (%s): %s", os.path.basename(aside), err)
+
+
 def stage_rebuild(config_dir: str, backup_name: str, domain: str | None, ha_version: str, target: str) -> dict[str, Any]:
     """Prepare a clean start on an older Home Assistant.  The import source
     is the pre-change backup: the running integration's config entries,
     registries and store files, extracted the way an uploaded HA backup is.
     The plan file tells the entrypoint to empty ``.storage`` at the next
     boot; once HA has started, async_finish_rebuild imports the integration
-    again.  Blocking."""
-    out_dir = os.path.join(config_dir, EXTRACT_DIR)
-    shutil.rmtree(out_dir, ignore_errors=True)
-    os.makedirs(out_dir)
+    again.  Everything is extracted into a directory of its own and swapped
+    into EXTRACT_DIR only once it is complete, so a failure here (no space,
+    an archive that became unreadable) leaves an older change's clean start
+    exactly as it was.  Blocking."""
+    _sweep_stage_leftovers(config_dir)
+    tmp_dir = _stage_path(config_dir, _STAGE_NEW)
+    os.makedirs(tmp_dir)
     domains = {domain} if domain else set()
     try:
         with zipfile.ZipFile(os.path.join(config_dir, backupkit.BACKUP_DIR, backup_name)) as zf:
             for name in zf.namelist():
                 if name.endswith("/") or ".." in name.split("/") or not _wanted(name, domains):
                     continue
-                dest = os.path.join(out_dir, name)
+                dest = os.path.join(tmp_dir, name)
                 os.makedirs(os.path.dirname(dest), exist_ok=True)
                 with zf.open(name) as src, open(dest, "wb") as fh:
                     shutil.copyfileobj(src, fh)
-        summary = _summarize(out_dir, {"name": backup_name, "date": time.strftime("%Y-%m-%dT%H:%M:%S"), "type": REBUILD_TYPE,
+        summary = _summarize(tmp_dir, {"name": backup_name, "date": time.strftime("%Y-%m-%dT%H:%M:%S"), "type": REBUILD_TYPE,
                                        "homeassistant": {"version": ha_version}}, domains)
         try:
-            os.remove(os.path.join(out_dir, ".storage", "core.config_entries"))  # the summary keeps what the rebuild needs
+            os.remove(os.path.join(tmp_dir, ".storage", "core.config_entries"))  # the summary keeps what the rebuild needs
         except OSError:
             pass
-        with open(os.path.join(config_dir, SUMMARY_FILE), "w", encoding="utf-8") as fh:
+        # the summary travels with the extraction it describes: the swap publishes both in one rename
+        with open(os.path.join(tmp_dir, os.path.basename(SUMMARY_FILE)), "w", encoding="utf-8") as fh:
             json.dump(summary, fh)
-        write_json(os.path.join(config_dir, REBUILD_FILE), {
+        _publish_stage(config_dir, tmp_dir, {
             "stage": "reset", "from": ha_version, "to": target, "backup": backup_name, "domain": domain,
             "at": time.strftime("%Y-%m-%dT%H:%M:%S")})
     except Exception:
-        shutil.rmtree(out_dir, ignore_errors=True)
+        # only this staging's own directory: what EXTRACT_DIR holds is either the older clean start (nothing
+        # was swapped) or this one put back by _publish_stage.  The original error is what matters here, so a
+        # temp directory that resists is left to the next run's sweep rather than masking it
+        shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
     info = summary["domains"].get(domain or "", {})
     return {"domain": domain, "entries": len(info.get("entries", [])), "entities": info.get("entities", 0),
@@ -1051,9 +1133,7 @@ def drop_rebuild(config_dir: str) -> bool:
     summary = load_summary(config_dir)
     if summary and summary.get("type") == REBUILD_TYPE:
         clear_extracted(config_dir)
-    import glob as _glob
-
-    for old in _glob.glob(os.path.join(config_dir, ".storage.pre-rebuild-*")):  # the entrypoint's set-aside .storage
+    for old in glob.glob(os.path.join(config_dir, ".storage.pre-rebuild-*")):  # the entrypoint's set-aside .storage
         shutil.rmtree(old, ignore_errors=True)
     return had
 
