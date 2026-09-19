@@ -2521,13 +2521,28 @@ class Installer:
 
     @staticmethod
     def _hacs_min_ha(blob: bytes) -> str | None:
-        """Blocking: the minimum Home Assistant version a release declares in its hacs.json (repository root)."""
+        """Blocking: the minimum Home Assistant version a release declares in its hacs.json (repository root).
+        The preflight reads it before anything is unpacked, so the caps _unpack applies are applied here too:
+        without them a few hundred KB of archive whose hacs.json is one long compressed run would be
+        decompressed whole into memory - and only refused afterwards, by an _unpack that never ran."""
+        import backupkit
+
         try:
+            if backupkit.zip_has_more_members(io.BytesIO(blob), UNPACK_MAX_MEMBERS):  # before every header is read
+                _LOGGER.warning("hacs.json not read: the archive has more than %s members", UNPACK_MAX_MEMBERS)
+                return None
             with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+                if sum(i.file_size for i in zf.infolist()) > UNPACK_MAX_BYTES:  # the declared size, as in _unpack
+                    _LOGGER.warning("hacs.json not read: the archive unpacks to more than %s MB",
+                                    UNPACK_MAX_BYTES // 1048576)
+                    return None
                 names = zf.namelist()
                 tops = {n.split("/", 1)[0] for n in names if "/" in n}
                 path = f"{next(iter(tops))}/hacs.json" if len(tops) == 1 else "hacs.json"
                 if path not in names:
+                    return None
+                if zf.getinfo(path).file_size > METADATA_MAX_BYTES:  # the cap the same file gets over HTTP
+                    _LOGGER.warning("%s ignored: it declares more than %s MB", path, METADATA_MAX_BYTES // 1048576)
                     return None
                 data = json.loads(zf.read(path))
         except (zipfile.BadZipFile, KeyError, ValueError, StopIteration):

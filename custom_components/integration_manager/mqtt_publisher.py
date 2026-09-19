@@ -380,7 +380,9 @@ INT_BOUNDS = {
 
 
 def _bounded(name: str, value: Any) -> int:
-    """The setting as an int inside its range; raises for anything that is not a number."""
+    """The setting as an int inside its range; raises for anything that is not a number - including an
+    infinity, which json.load happily reads from ``1e999`` or ``Infinity`` and int() then refuses with
+    OverflowError rather than ValueError, so every caller has to catch that one too."""
     low, high = INT_BOUNDS[name]
     return min(high, max(low, int(value)))
 
@@ -649,7 +651,7 @@ class MqttPublisher:
                 value = _bounded(name, out[name])
                 if value == out[name]:
                     continue
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 pass
             default = MqttConfig.__dataclass_fields__[name].default
             _LOGGER.warning("MQTT: %s=%r in %s is not usable: using %s", name, out[name], self.path, default)
@@ -722,7 +724,7 @@ class MqttPublisher:
             elif k in INT_BOUNDS:
                 try:
                     v = int(v)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     raise ValueError(f"{k} must be an integer") from None
                 if k == "port" and not 1 <= v <= 65535:
                     raise ValueError("port out of range")

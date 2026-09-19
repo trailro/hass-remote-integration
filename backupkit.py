@@ -229,6 +229,23 @@ def iter_files(config_dir: str, log=None):
                         yield src, rel
 
 
+def _zip_date_time(mtime: float) -> tuple[int, int, int, int, int, int]:
+    """The modification time as a zip date, clamped into what the format can hold (1980-2107), the way
+    ``ZipInfo.from_file(strict_timestamps=False)`` does.  A file with an mtime outside that - epoch 0 from a
+    reproducible-build archive or a dev-mode source tree, a clock far in the future - would otherwise raise
+    out of the middle of the zip and leave no backup at all, and create() is what every install, version
+    change and restore takes its safety copy with."""
+    try:
+        parts = time.localtime(mtime)[:6]
+    except (OSError, OverflowError, ValueError):
+        return (1980, 1, 1, 0, 0, 0)
+    if parts[0] < 1980:
+        return (1980, 1, 1, 0, 0, 0)
+    if parts[0] > 2107:
+        return (2107, 12, 31, 23, 59, 59)
+    return parts  # type: ignore[return-value]
+
+
 def _write_member(zf: zipfile.ZipFile, path: str, rel: str, log) -> bool:
     """zf.write, except that what is opened is checked, not what was listed: a file replaced meanwhile by a named pipe
     or a link is skipped, and opening never blocks.  False: nothing was written."""
@@ -246,7 +263,7 @@ def _write_member(zf: zipfile.ZipFile, path: str, rel: str, log) -> bool:
         if not stat.S_ISREG(st.st_mode):
             log(f"backup: {rel} skipped: not a regular file (a named pipe, socket or device)")
             return False
-        info = zipfile.ZipInfo(rel, time.localtime(st.st_mtime)[:6])
+        info = zipfile.ZipInfo(rel, _zip_date_time(st.st_mtime))
         info.external_attr = (st.st_mode & 0xFFFF) << 16
         info.compress_type = zf.compression
         info.file_size = st.st_size
