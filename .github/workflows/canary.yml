@@ -1,0 +1,108 @@
+# What this catches that CI cannot: CI runs when somebody opens a pull request, and Home Assistant ships
+# on its own schedule.  Between two quiet weeks a release can break the manager and nothing would say so
+# until a user ran into it.  This boots the image against the newest stable Home Assistant and against the
+# newest pre-release, weekly, and turns the result into something to act on - an issue when a version
+# breaks us, a pull request when a newer stable passes and is worth installing on a fresh volume.
+name: Canary
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"  # Monday morning; GitHub runs scheduled workflows late when it is busy
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: canary
+  cancel-in-progress: false
+
+jobs:
+  versions:
+    name: Ask PyPI what to test
+    runs-on: ubuntu-latest
+    outputs:
+      stable: ${{ steps.pick.outputs.stable }}
+      prerelease: ${{ steps.pick.outputs.prerelease }}
+      default: ${{ steps.pick.outputs.default }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - id: pick
+        name: The newest stable, the newest pre-release and what the image installs today
+        run: python3 .github/canary_versions.py >> "$GITHUB_OUTPUT"
+
+  boot:
+    name: ${{ matrix.name }}
+    needs: versions
+    if: needs.versions.outputs.stable != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kind: stable
+            name: Newest stable Home Assistant
+          - kind: prerelease
+            name: Newest Home Assistant pre-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      HRI_NAME: hri-canary
+      HRI_PORT: "8087"
+      # a pre-release only when PyPI has one newer than the stable release: an old beta says nothing
+      VERSION: ${{ matrix.kind == 'stable' && needs.versions.outputs.stable || needs.versions.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003  # v4.4.0
+      - name: Nothing to test
+        if: env.VERSION == ''
+        run: echo "no ${{ matrix.kind }} to test this week" >> "$GITHUB_STEP_SUMMARY"
+      - name: Build the image
+        if: env.VERSION != ''
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: .
+          load: true
+          tags: hass-remote-integration:local
+          build-args: HRI_BUILD=${{ github.sha }}
+      - name: Boot on a fresh volume
+        if: env.VERSION != ''
+        env:
+          HRI_ENV: HA_VERSION_LATEST=0 HA_VERSION_DEFAULT=${{ env.VERSION }}
+        run: sh verify.sh start
+      - name: The manager answers, on the version it was given
+        if: env.VERSION != ''
+        run: |
+          got=$(curl -fsS http://127.0.0.1:8087/api/status | python3 -c "import json, sys; print(json.load(sys.stdin)['ha_version'])")
+          echo "Home Assistant $got"
+          test "$(docker inspect -f '{{.RestartCount}}' hri-canary)" = "0"
+          test "$got" = "$VERSION"
+      - name: Discovery payloads against the MQTT schemas
+        if: env.VERSION != ''
+        run: sh verify.sh test
+      - name: Unit tests
+        if: env.VERSION != ''
+        run: sh verify.sh unit
+      - name: Container log
+        if: always() && env.VERSION != ''
+        run: docker logs hri-canary 2>&1 | tail -n 200
+
+  report:
+    name: Say what happened
+    needs: [versions, boot]
+    if: always() && needs.versions.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # the branch a version bump is proposed on
+      issues: write          # a Home Assistant release that breaks the manager
+      pull-requests: write   # a newer stable that passes
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: An issue when it broke, a pull request when a newer stable passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ needs.boot.result }}
+          STABLE: ${{ needs.versions.outputs.stable }}
+          PRERELEASE: ${{ needs.versions.outputs.prerelease }}
+          DEFAULT: ${{ needs.versions.outputs.default }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: sh .github/canary_report.sh
