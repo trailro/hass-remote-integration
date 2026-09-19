@@ -6,7 +6,7 @@ FROM python:3.14-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae
 # can update or roll back HA with a restart, and image rebuilds are cheap.
 # What a fresh volume installs when it is not told to take the newest, and the fallback when PyPI cannot
 # be reached.  A recent, well-tested release - NOT the oldest one that works: that is HA_VERSION_MIN.
-ARG HA_VERSION=2026.8.3
+ARG HA_VERSION=2026.9.3
 # The oldest release this image installs at all; anything older is refused before a change is scheduled,
 # and no force lifts it.  2026.5.0 is the oldest measured to work (see README, "Python versions"): older
 # releases pin requirements that have no wheel for this image's Python anyway.
