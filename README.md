@@ -1270,7 +1270,12 @@ hass_<domain>/manager/result                        outcome of a manager action,
   included. The value sent to a `text` entity in password mode, on any of its
   command topics or with `text.set_value`, shows as `***` in the command history, the
   status and the log, also inside a service error that quotes it (the result
-  sent back to the caller keeps it). The two bounds of a thermostat range change arrive as two
+  sent back to the caller keeps it). What a service *says back* is masked too:
+  an exception is free-form text, so the command history, `GET
+  /api/mqtt/commands`, the status document and the log line run it through the
+  same rules the Logs page uses — a password, a `?token=` URL or an
+  `Authorization: Bearer …` in an integration's error message comes out `***`,
+  while an ordinary failure stays readable word for word. The two bounds of a thermostat range change arrive as two
   commands and become one service call: the first waits up to 1 s for the
   second. An alarm panel with a code asks for it on the main HA and sends it
   with the action. A JSON payload on a vacuum's `send_command` topic needs a
@@ -1280,7 +1285,10 @@ hass_<domain>/manager/result                        outcome of a manager action,
   sent as the command name. The state topic of a switch, light, fan, siren or
   humidifier takes only `ON`/`OFF`, `TRUE`/`FALSE` or `1`/`0` (any case,
   surrounding spaces ignored); any other payload is refused rather than read
-  as *off*, with the reason under *recent commands* and in the log. The action
+  as *off*, with the reason under *recent commands* and in the log. A fan's
+  oscillation topic takes `oscillate_on` and `oscillate_off` and nothing else:
+  any other payload is refused with the accepted list rather than read as "stop
+  oscillating". The action
   tokens of a cover, valve, lock, alarm panel, vacuum or lawn mower match in any
   case; an unknown one is refused with the tokens that are accepted. Tilting a
   cover open or closed on the main HA arrives as tilt position 100 or 0, which
@@ -1888,7 +1896,7 @@ points:
 | Configuration | `POST /api/flow/start`, `GET /api/flow/progress`, `POST/DELETE /api/flow/<id>`, `POST/DELETE /api/options/<flow_id>`, `GET/POST /api/yaml/<domain>`, `GET /api/entries`, `POST /api/entries/<entry_id>/{options,reload,delete}` (an unknown entry id, there or in a `reconfigure` flow start, answers 404 with a message) |
 | Patches | `GET /api/patches/<domain>`, `POST /api/patches/<domain>/upload`, `POST /api/patches/<domain>/<name>/{apply,delete}`, `GET /api/patch_editor/<domain>?name=`, `POST /api/patch_editor/<domain>/{check,save}` |
 | MQTT | `GET/POST /api/mqtt/config`, `GET/POST /api/mqtt/rules`, `POST /api/mqtt/{reconnect,republish}`, `GET /api/mqtt/discovery`, `GET /api/mqtt/commands` |
-| Entities | `GET /api/entities`, `POST /api/entities/<entity_id>/{rename,name,disable,enable,delete,mqtt_exclude,mqtt_include,mqtt_name}`, `GET /api/devices`, `POST /api/devices/<device_id>/{name,delete}`, `GET /api/services`, `POST /api/services/call` |
+| Entities | `GET /api/entities` (an entity's attributes are the published ones whether or not it is published: an `access_token` and a picture URL carrying `token=` are left out of the row as well, so excluding an entity from MQTT never shows more than publishing it), `POST /api/entities/<entity_id>/{rename,name,disable,enable,delete,mqtt_exclude,mqtt_include,mqtt_name}`, `GET /api/devices`, `POST /api/devices/<device_id>/{name,delete}`, `GET /api/services`, `POST /api/services/call` |
 | System | `GET /api/ha`, `POST /api/ha/{update,rollback,check}`, `POST /api/restart`, `GET/POST /api/settings` |
 | Backups | `GET /api/backups`, `POST /api/backups/create`, `POST /api/backups/upload`, `GET /api/backups/<name>/download`, `POST /api/backups/<name>/{restore,delete}`, `POST /api/backups/restore/cancel` (answers `cancelled`; a restore that belongs to a scheduled Home Assistant version change is refused with `for_version`, and a full rollback's restore with `rollback`, the backup it restores) |
 | Import | `POST /api/import/upload`, `GET/POST /api/import/inspect`, `POST /api/import/{apply,apply_all,clear}` |
@@ -2054,7 +2062,11 @@ progress (50): try again later`.
   older Python, not a different build argument.
 - **"restart required" does not go away.** Click *Restart process* on the
   Overview; some changes (a new version of a loaded integration, YAML) only take
-  effect at a restart.
+  effect at a restart. A reference that moved counts as a new version:
+  preparing `main`, a branch or a dev build again gives the same name different
+  code, which the running process cannot pick up on its own — the start says a
+  restart is required, and the smoke test waits for it rather than judging the
+  code that is still loaded.
 - **Restart process does nothing.** A restart is refused while the manager is
   busy: an install, start, stop or uninstall, an import, a clean-start rebuild
   after a Home Assistant downgrade, a full rollback, a
