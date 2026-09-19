@@ -23,6 +23,16 @@ opened file.  A listed ``my.log`` swapped for a symlink to ``secrets.yaml``
 between the listing and the request was read by the first two and refused by
 the third.  All three now share one opener.
 
+R4: the same rule leaked a fourth time, in shapes nobody had described yet (a
+``)`` inside a quoted password, a truncated tuple, a triple-quoted value, a
+plural name, a percent-encoded ``=``), so where a value ends is now decided
+against the value: after a name the rule knows it runs to the end of the line
+unless the text says where it ends.  The cases of the first three rounds are
+kept, with the expected text of the ones the new rule masks further - each of
+those says so in its docstring - and ``ConservativeValueExtentTest``,
+``OrdinaryLogLinesTest`` and ``ValueExtentCostTest`` below hold the fourth
+round's own.
+
 Every test here fails on the tree before the fix unless its docstring says it
 pins behaviour that already held.
 """
@@ -57,13 +67,15 @@ class WrappedSecretValueTest(unittest.TestCase):
         return out
 
     def test_a_bytes_repr_before_the_quote(self):
-        self.assertEqual(self.assertMasked(f"password=b'{SECRET}'"), "password=b'***'")
-        self.assertEqual(self.assertMasked(f'api_key=b"{SECRET}"'), 'api_key=b"***"')
-        self.assertMasked(f"{{'password': b'{SECRET}'}}")
+        """R4 reads the wrapper as part of the value: it is masked with it."""
+        self.assertEqual(self.assertMasked(f"password=b'{SECRET}'"), "password=***")
+        self.assertEqual(self.assertMasked(f'api_key=b"{SECRET}"'), "api_key=***")
+        self.assertEqual(self.assertMasked(f"{{'password': b'{SECRET}'}}"), "{'password': ***}")
 
     def test_a_wrapper_call_before_the_quote(self):
-        self.assertEqual(self.assertMasked(f"password=SecretStr('{SECRET}')"), "password=SecretStr('***')")
-        self.assertEqual(self.assertMasked(f'password: SecretStr("{SECRET}")'), 'password: SecretStr("***")')
+        """R4: the wrapper goes with the value instead of being kept around it."""
+        self.assertEqual(self.assertMasked(f"password=SecretStr('{SECRET}')"), "password=***")
+        self.assertEqual(self.assertMasked(f'password: SecretStr("{SECRET}")'), "password: ***")
         self.assertMasked(f"{{'token': SecretStr('{SECRET}')}}")
 
     def test_a_parenthesised_value(self):
@@ -89,8 +101,11 @@ class WrappedSecretValueTest(unittest.TestCase):
                 self.assertEqual(out, f"{name}: ***")
 
     def test_a_wrapped_value_inside_an_escaped_json_string(self):
+        """The value is masked to the end of the string it is written inside: R4
+        keeps the quote that closes that string and nothing between it and the
+        name, where R3 kept the wrapper and the escaped quotes around it."""
         out = self.assertMasked(f'log: "{{\\"password\\": b\\"{SECRET}\\"}}"')
-        self.assertIn('b\\"***\\"', out)
+        self.assertEqual(out, 'log: "{\\"password\\": ***"')
 
     def test_the_plain_forms_still_mask(self):
         """Pins behaviour that already held."""
@@ -268,29 +283,38 @@ class NestedWrapperTest(unittest.TestCase):
         return out
 
     def test_two_wrappers_around_one_value(self):
-        self.assertMasked(f"password=SecretStr(b'{SECRET}')", "password=SecretStr(b'***')")
-        self.assertMasked(f'password=SecretStr(rb"{SECRET}")', 'password=SecretStr(rb"***")')
+        """R4 no longer counts the layers: whatever the value came in goes with it."""
+        self.assertMasked(f"password=SecretStr(b'{SECRET}')", "password=***")
+        self.assertMasked(f'password=SecretStr(rb"{SECRET}")', "password=***")
 
     def test_a_dotted_wrapper_name(self):
-        self.assertMasked(f"password=pydantic.SecretStr('{SECRET}')", "password=pydantic.SecretStr('***')")
+        self.assertMasked(f"password=pydantic.SecretStr('{SECRET}')", "password=***")
 
     def test_a_keyword_argument_inside_the_wrapper(self):
-        self.assertMasked(f"password=SecretStr(value='{SECRET}')", "password=SecretStr(value='***')")
+        """The spaces around the ``=`` are the fourth round's own case: the
+        wrapper rule read ``value=`` and not ``value = ``, and printed the
+        secret after it."""
+        self.assertMasked(f"password=SecretStr(value='{SECRET}')", "password=***")
+        self.assertMasked(f"password=SecretStr(value = '{SECRET}')", "password=***")
 
     def test_a_repr_that_names_its_type_inside_the_brackets(self):
-        self.assertMasked(f"password=<SecretStr '{SECRET}'>", "password=<SecretStr '***'>")
+        self.assertMasked(f"password=<SecretStr '{SECRET}'>", "password=***")
 
     def test_a_value_inside_a_list(self):
-        self.assertMasked("{'password': ['" + SECRET + "']}", "{'password': ['***']}")
-        self.assertMasked('{"api_key": ["' + SECRET + '"]}', '{"api_key": ["***"]}')
+        self.assertMasked("{'password': ['" + SECRET + "']}", "{'password': ***}")
+        self.assertMasked('{"api_key": ["' + SECRET + '"]}', '{"api_key": ***}')
 
-    def test_a_tuple_is_masked_through_its_closing_bracket(self):
-        self.assertMasked(f"auth=('user', '{SECRET}')", "auth=('***')")
+    def test_a_tuple_goes_whole(self):
+        """R3 masked through the closing bracket and kept the brackets; R4 masks
+        the tuple whether or not the line still holds its closing bracket - the
+        truncated form printed the password next to the mask."""
+        self.assertMasked(f"auth=('user', '{SECRET}')", "auth=***")
+        self.assertMasked(f"auth=('user', '{SECRET}'", "auth=***")
 
     def test_a_quoted_value_after_a_known_auth_scheme(self):
         for scheme in ("Bearer", "Basic", "Token", "bearer"):
             with self.subTest(scheme=scheme):
-                self.assertMasked(f"token: {scheme} '{TOKEN}'", f"token: {scheme} '***'", secret=TOKEN)
+                self.assertMasked(f"token: {scheme} '{TOKEN}'", "token: ***", secret=TOKEN)
 
     def test_an_auth_scheme_the_bearer_rule_does_not_know(self):
         for scheme in ("Digest", "Negotiate", "NTLM"):
@@ -426,3 +450,177 @@ class DictCodeNamesTest(unittest.TestCase):
         for name in ("zipcode", "barcode"):
             with self.subTest(name=name):
                 self.assertEqual(diagnostics.scrub({name: "12345"}), {name: "12345"})
+
+
+class ConservativeValueExtentTest(unittest.TestCase):
+    """R4: where a value ends is decided against the value, not for it.
+
+    Three rounds each closed the case the reviewer brought and left the class
+    open, because the rule described the shapes a value can take and masked
+    what it recognised - a wrapper, a bracket, an auth scheme - so the shape
+    nobody had described yet was printed next to the mask.  The fourth round
+    inverts it: after a name the rule knows, the value is the rest of the line
+    unless the text itself says where it ends (a delimiter that was open before
+    the name, the next name=value pair, the quote a quoted value opened with).
+
+    The leaks below are the ones the fourth reviewer reproduced on the tree
+    before this, each of them a shape the third round's wrapper prefix did not
+    describe.
+    """
+
+    def assertMasked(self, text, expected=None, secret=SECRET):
+        out = _scrub(text)
+        self.assertNotIn(secret, out, f"{text!r} -> {out!r}")
+        self.assertIn("***", out, f"{text!r} -> {out!r}")
+        if expected is not None:
+            self.assertEqual(out, expected)
+        return out
+
+    def test_a_closing_bracket_inside_the_value_ends_nothing(self):
+        """aiohttp's own repr of BasicAuth, with a ")" in the password: the run
+        to the closing bracket stopped at that one and printed the rest."""
+        self.assertMasked(f"auth=BasicAuth(login='bob', password='hunt){SECRET}', encoding='latin1')", "auth=***")
+
+    def test_a_value_whose_bracket_never_closes(self):
+        """A line the logger cut: with no closing bracket there was no match at
+        all, and the tuple was printed whole."""
+        self.assertMasked(f"auth=('bob', '{SECRET}'", "auth=***")
+
+    def test_a_triple_quoted_value(self):
+        self.assertMasked(f'password="""{SECRET}"""', 'password="""***"""')
+        self.assertMasked(f"password='''{SECRET}'''", "password='''***'''")
+
+    def test_a_plural_name_is_the_same_name(self):
+        for name in ("passwords", "tokens", "api_keys", "secrets", "credentials", "pin_codes", "otps",
+                     "sigs", "psks", "passphrases", "access_tokens", "security_keys", "session_ids"):
+            with self.subTest(name=name):
+                self.assertMasked(f"{name}=['{SECRET}']", f"{name}=***")
+                self.assertMasked(f"{name}: ['{SECRET}']", f"{name}: ***")
+
+    def test_a_percent_encoded_separator(self):
+        """?password%3Dx: a query string whose "=" is encoded had no separator
+        any rule read, so the value went into the zip whole."""
+        self.assertMasked(f"GET /x?password%3D{SECRET}", "GET /x?password%3D***")
+        self.assertMasked(f"?token%3d{SECRET}", "?token%3d***")
+        self.assertMasked(f"?api_key%3A{SECRET}", "?api_key%3A***")
+        self.assertMasked(f"password %3D {SECRET}", "password %3D ***")
+
+    def test_a_wrapper_the_rule_never_described(self):
+        """Spaces around a keyword argument, and a wrapper whose first argument
+        is not the secret: both printed the value before this round."""
+        self.assertMasked(f"password=SecretStr(value = '{SECRET}')", "password=***")
+        self.assertMasked(f"password=Secret(1, '{SECRET}')", "password=***")
+
+    def test_an_authorization_header_goes_whole(self):
+        """Digest writes its value as name=value pairs, so the stop at the next
+        pair would end the value inside the header: it does not apply here."""
+        self.assertMasked(f'Authorization: Digest username="bob", realm="r", response="{SECRET}"',
+                          "Authorization: ***")
+        self.assertMasked(f"Authorization: Custom-Scheme {SECRET} realm=x", "Authorization: ***")
+
+    def test_a_header_still_ends_at_a_url_or_at_another_name(self):
+        """Neither prints anything: a credential in the URL is masked by its own
+        rule, and the name that follows has its own value masked."""
+        out = self.assertMasked(f"Authorization: Bearer {TOKEN} mqtt://user:{SECRET}@host:1883", secret=TOKEN)
+        self.assertEqual(out, "Authorization: *** mqtt://user:***@host:1883")
+        self.assertEqual(_scrub(f"auth header Authorization: Bearer {TOKEN} access_token={SECRET}"),
+                         "auth header Authorization: *** access_token=***")
+
+    def test_what_the_rule_still_leaves_readable(self):
+        """The three stops, and the names that report a result."""
+        self.assertEqual(_scrub(f'{{"password": "{SECRET}", "user": "bob"}}'),
+                         '{"password": "***", "user": "bob"}')  # the quote the value opened with
+        self.assertEqual(_scrub(f'raise RuntimeError("refresh failed with access_token={SECRET}")'),
+                         'raise RuntimeError("refresh failed with access_token=***")')  # a quote opened before the name
+        self.assertEqual(_scrub(f"token={SECRET} next=1"), "token=*** next=1")  # the next name=value pair
+        self.assertEqual(_scrub(f"{{'password': '{SECRET}', 'port': 1883}}"), "{'password': '***', 'port': 1883}")
+        self.assertEqual(_scrub("status_code: 404, reason: Not Found"), "status_code: 404, reason: Not Found")
+
+    def test_a_value_that_is_masked_already_is_not_masked_again(self):
+        """logbuffer masks a query value before the record is written; masking
+        the mask again would take the rest of the line with it."""
+        self.assertEqual(_scrub('"GET /x?token=***&page=2 HTTP/1.1" 200'), '"GET /x?token=***&page=2 HTTP/1.1" 200')
+
+    def test_an_empty_value_invents_nothing(self):
+        self.assertEqual(_scrub("password="), "password=")
+        self.assertEqual(_scrub("Cookie: "), "Cookie: ")
+
+
+class OrdinaryLogLinesTest(unittest.TestCase):
+    """The other half of the trade: a bundle nobody can read is a bundle nobody
+    can debug from.  A line that holds a word like ``token`` or ``key`` as
+    prose, and a line whose names are not secrets, comes out as it went in."""
+
+    LINES = (
+        "2026-09-19 10:21:33 INFO [custom_components.demo] Setting up entry demo (0.31 s)",
+        "GET /api/states 200 in 0.012 s",
+        "Connection to 192.168.1.5:1883 established",
+        "Refreshing access token for entry abc, expires in 3600 s",
+        "the token expired at 10:00 and the refresh token is gone",
+        "A key was rotated by the user at 10:00",
+        "status_code: 404, reason: Not Found",
+        "http_code: 500",
+        "exit_code=1 duration=3.2s",
+        "Retrying (attempt 2 of 5) after ConnectionResetError",
+        "Entity sensor.demo_temperature changed to 21.5 (was 21.0)",
+        "Unable to authenticate: invalid credentials for user bob",
+        "Setting up MQTT: broker=192.168.1.9 port=1883 keepalive=60",
+        "Config entry 'Demo' for demo integration not ready yet: timeout",
+        "zigbee2mqtt: device 0x00124b00 linkquality 84, battery 97",
+        "author=Jane", "authority: local", "oauth=ok", "spin=3", "oauth_scope=read",
+        "spinning: 5", "design=ok", "insignia: red", "assigns=3",
+        "http://host:8123/api/states", "translation_key: sensor_state",
+    )
+
+    def test_every_line_comes_out_as_it_went_in(self):
+        for line in self.LINES:
+            with self.subTest(line=line):
+                self.assertEqual(_scrub(line), line)
+                self.assertEqual(diagnostics.scrub_text(line), line)
+
+
+class ValueExtentCostTest(unittest.TestCase):
+    """The scan that replaced the value patterns reads the text once.
+
+    The rules run on every line a Logs page search reads, on an executor thread
+    holding the diagnostics lock, so a line that is all names, all separators
+    or all quotes must cost what its length costs and not its square.  Growth,
+    not a stopwatch: twice the input for roughly twice the time is what
+    separates a linear scan from one that re-reads what it has read, and a
+    threshold tight enough to catch the square is one a busy runner fails for
+    being busy."""
+
+    FLOOR_S = 0.25
+
+    @staticmethod
+    def _time(line):
+        best = None
+        for _ in range(3):
+            start = time.perf_counter()
+            diagnostics._scrub_one_line_rules(line)
+            taken = time.perf_counter() - start
+            best = taken if best is None else min(best, taken)
+        return best
+
+    def assertLinear(self, make):
+        small, large = self._time(make(20000)), self._time(make(40000))
+        self.assertLess(large, max(3 * small, self.FLOOR_S),
+                        f"{small:.3f}s on half the input, {large:.3f}s on all of it")
+
+    def test_a_line_that_is_all_names(self):
+        self.assertLinear(lambda n: "password=" * n)
+
+    def test_a_line_that_is_all_separators_after_one_name(self):
+        self.assertLinear(lambda n: "password=" + " , ; " * n)
+
+    def test_a_line_that_is_all_quotes(self):
+        self.assertLinear(lambda n: "password=" + "'x'" * n)
+
+    def test_a_line_that_is_all_brackets(self):
+        self.assertLinear(lambda n: "password=" + "([{}])" * n)
+
+    def test_a_value_inside_a_string_that_never_closes(self):
+        self.assertLinear(lambda n: 'log: "{\\"password\\": ' + "a\\" * n)
+
+    def test_a_header_value_of_pairs(self):
+        self.assertLinear(lambda n: "Cookie: " + "a=b; " * n)

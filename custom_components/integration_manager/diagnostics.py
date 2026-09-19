@@ -48,55 +48,33 @@ _SECRET_KEY = re.compile(
     rf"|^(?!{_PLAIN_KEYS}$).*key$"  # any *key: Z-Wave (lr_)s2_*_key, security_key, api-key, ...
     r"|(^|[_-])(irk|ltk|csrk|pwd|pw|sig|session_?id)$|(^|[_-])otp([_-]|$)"  # BLE bonding keys, one-time codes
     rf"|(^|[_-])(pass|{_WORDS})$)", re.I)
-# a quoted value, to its closing quote: an escaped quote inside it (\" or \') does not end it, and a value whose quote
-# never closes (a line the logger cut) is masked to the end of the text.  A name and value that are themselves inside a
-# JSON string have their quotes escaped (\"password\": \"x\"): that value ends at the same run of backslashes and the
-# same quote it opened with.  Every repeat is possessive and its branches start on different characters, so the match
-# never backtracks: the one-line rules run on every line a search reads, whatever the line holds, so the runs
-# that are not driven by a quote (_VALUE_CLOSE and _URL_CRED below) carry a bound instead
-_QUOTED = (r"\"(?:[^\"\\]++|\\[\s\S])*+\"?|'(?:[^'\\]++|\\[\s\S])*+'?"
-           r"|(?P<esc_run>\\++)(?P<esc_quote>[\"'])(?:[^\\]++|(?!(?P=esc_run)(?P=esc_quote))\\++[\"']?)*+(?:(?P=esc_run)(?P=esc_quote))?")
-# a quoted value is often wrapped, and in more than one layer: a string repr (b'x', rb"x"), a constructor
-# (SecretStr('x'), pydantic.SecretStr(value='x')), a container ({'password': ['x']}, ('user', 'x')), a repr
-# (<SecretStr 'x'>), an auth scheme (Bearer 'x').  Without this the value alternative below took the unquoted
-# branch, which stops at the first quote, and masked the wrapper instead of the secret ("password=b'hunter2'"
-# -> "password=***'hunter2'").  One layer is an optional dotted name and an opening bracket, then optionally a
-# keyword name or the type name of a repr inside it; after the layers come an optional auth scheme and one of
-# Python's one- or two-letter string prefixes.  A bare identifier is never a layer of its own, because a secret
-# that merely abuts a quote looks exactly like one (`RuntimeError("... access_token=SECRET")` ends the value at
-# the closing quote of the message, and taking SECRET for a prefix printed it and masked the quote after it) -
-# an identifier only counts inside a bracket that opened before it.  Every layer eats a bracket, so the repeat
-# is bounded by the brackets on the line and nothing is read twice, and the whole prefix ends in a lookahead for
-# the quote, so a value that is not quoted after all costs one failed test and no retries
-_VALUE_SCHEMES = r"Bearer|Basic|Token|Digest|Negotiate|NTLM|OAuth|Hawk|ApiKey|SSWS"
-_VALUE_WRAP = (r"(?:[A-Za-z_][\w.]*+)?+(?P<open>[(\[{<])[ \t]*+"
-               r"(?:[A-Za-z_]\w*+(?:[ \t]*+=(?!=)|[ \t]++))?+")
-_VALUE_PREFIX = (rf"(?P<pre>(?:{_VALUE_WRAP})*+(?:(?:{_VALUE_SCHEMES})[ \t]++)?+"
-                 r"(?:[bBrRuUfF]{1,2})?+(?=\\*+['\"]))?+")
-# a value that came inside a bracket is masked through to that bracket's close, so the rest of a tuple or a
-# list goes with it: "auth=('user', 'hunter2')" masked 'user' and printed the password next to it.  The run is
-# bounded and possessive, and the tail only runs at all when the prefix did open a bracket, so the plain
-# "name": "value" of a JSON line keeps the comma and everything after it
-_VALUE_CLOSE = r"(?(open)(?:[^)\]}>\r\n]{0,256}+(?P<close>[)\]}>]))?+)"
-# an auth scheme belongs to the value it introduces ("token: Bearer abc..."): without this the value ended at
-# the space after the scheme, so the scheme was masked and the token printed, and _BEARER never saw the line.
-# This is the unquoted branch; the quoted one takes its scheme from _VALUE_PREFIX, because a possessive scheme
-# here ate "Bearer " and then failed on the quote after it, and the whole line came out unmasked
-_VALUE_SCHEME = rf"(?:(?:{_VALUE_SCHEMES})\s++)?+"
+# The name-and-value rule masks conservatively: after a name it knows, the value is everything to the end of the
+# line unless the text itself says where it ends.  Three rounds of review each found a new leak in the rule this
+# replaces, because that rule described the shapes a value can take (a quote, a wrapper, a bracket, an auth
+# scheme) and masked what it recognised - the shape nobody had described yet always won.  The default is now the
+# other way round: too much is masked, and only two things bring the value to an end early (below), so a value
+# nobody has thought of goes with the rest of the line instead of being printed next to the mask.
+#
+# A name the rule knows, singular or plural ("passwords=[...]", "tokens: [...]", which the old rule printed
+# because only the singular was a name), then the separator: "=", ":", their percent-encoded spellings
+# ("?password%3Dx", which no rule read as a separator), and any of those with spaces around them.
 _SECRET_TEXT = re.compile(
-    rf"((?:{_ENDINGS}|hmac|webhook_id|cloudhook_url|signature|(?<![A-Za-z0-9]){_NOT_RESULT_CODE}code|(?<![A-Za-z0-9])(?:{_WORDS})"
-    rf"|\bpwd|\w_pw\b|\bsession_?id|\b(?:irk|ltk|csrk|sig)\b|\b(?!{_PLAIN_KEYS}\b)\w*key"
-    r"|(?:api|access|private|local|encryption|device|client|master|app|shared|signing|session|auth|link|network|aes|ssl)[_-]?key)"
-    r"(?:\\*+['\"])?\s*[=:]\s*)"
-    rf"({_VALUE_PREFIX}(?:{_QUOTED}){_VALUE_CLOSE}|{_VALUE_SCHEME}[^'\",\s}}]+)", re.I)
-# every name _SECRET_TEXT knows ends in a letter, then the = or :, so a text without this has nothing it masks; the
-# rule is the costly one (a Logs page search masks every record it passes), and most log lines fail this test
-_SECRET_TEXT_HINT = re.compile(r"[a-z](?:\\*+['\"])?\s*[=:]", re.I)
-# the whole value of an Authorization header, scheme included (Digest, a custom scheme, a bare token)
-_AUTH_TEXT = re.compile(rf"(authorization(?:\\*+['\"])?\s*[=:]\s*)"
-                        rf"({_VALUE_PREFIX}(?:{_QUOTED}){_VALUE_CLOSE}|(?:[A-Za-z-]+\s+)?[^'\",\s}}]+)", re.I)
-# Cookie / Set-Cookie: every cookie of the header, to the end of the line
-_COOKIE_TEXT = re.compile(rf"(\b(?:set-)?cookie(?:\\*+['\"])?\s*[=:]\s*)({_QUOTED}|[^\r\n]+)", re.I)
+    rf"(?:{_ENDINGS}|hmac|authorization|webhook_id|cloudhook_url|signature|(?<![A-Za-z0-9]){_NOT_RESULT_CODE}code|(?<![A-Za-z0-9])(?:{_WORDS})"
+    rf"|\bpwd|\w_pws?+\b|\bsession_?id|\b(?:irk|ltk|csrk|sig)s?+\b|\b(?!{_PLAIN_KEYS}\b)\w*key"
+    r"|(?:api|access|private|local|encryption|device|client|master|app|shared|signing|session|auth|link|network|aes|ssl)[_-]?key"
+    r"|(?<![A-Za-z0-9])(?:set-)?cookie)"
+    r"s?+(?:\\*+['\"])?+\s*+(?:[=:]|%3[DA])\s*+", re.I)
+# every name _SECRET_TEXT knows ends in a letter, then the separator, so a text without this has nothing it masks;
+# the rule is the costly one (a Logs page search masks every record it passes), and most log lines fail this test
+_SECRET_TEXT_HINT = re.compile(r"[a-z](?:\\*+['\"])?\s*(?:[=:]|%3[da])", re.I)
+# The two headers whose value is itself written as name=value pairs: an Authorization header
+# (Digest username="u", nonce=..., response=...) and a Cookie header (a=b; c=d).  For every other name the next
+# top-level name= ends the value - here it would end it in the middle of the secret (Digest ... response=...), so
+# their value runs to the end of the line whatever it holds.  Two things still end it, because neither prints
+# anything: a URL (a log line that appends one - a credential in it is masked by _URL_CRED) and another name of
+# this rule (whose own value is masked in turn)
+_AUTH_TEXT = re.compile(r"authorization", re.I)
+_COOKIE_TEXT = re.compile(r"(?<![A-Za-z0-9])(?:set-)?cookie", re.I)
 # a whole PEM block.  A truncated one (a cut log tail): the rest of the BEGIN line, and the lines under it that are
 # nothing but base64; the first line that is not ends it before its first character (a log line under a BEGIN line
 # that never got its END marker is not body, and shows the same whatever else the window holds)
@@ -161,23 +139,196 @@ def scrub(value: Any) -> Any:
     return value
 
 
-def _mask_value(match: re.Match[str]) -> str:
-    """The name, and the value as ``***`` inside the quotes it opened with.
+def _mask_value(text: str) -> str:
+    """``text`` with the value of every name ``_SECRET_TEXT`` knows masked.
 
-    A wrapper the value came in (``b'x'``, ``SecretStr('x')``) is kept in
-    front of the masked quotes, and the bracket it opened is put back after
-    them, so the line keeps its shape and only the secret goes; a rule without
-    the ``pre`` group has no wrapper to keep."""
-    groups = match.groupdict()
-    pre, close = groups.get("pre") or "", groups.get("close") or ""
-    value = match.group(2)[len(pre):]
-    if groups.get("esc_run"):
-        quote = match.group("esc_run") + match.group("esc_quote")
-    elif value[:1] in ('"', "'"):
-        quote = value[0]
-    else:
-        return match.group(1) + "***"
-    return match.group(1) + pre + quote + "***" + quote + close
+    The value starts after the separator and ends, by default, at the end of
+    the line: masking too much is a bundle that is harder to read, masking too
+    little is a secret in a public issue, and three review rounds of describing
+    what a value looks like ended each time with a shape nobody had described.
+    Two things end it earlier, and both are things that cannot be part of it:
+
+    * a delimiter that closes one opened **before** the name - the quote of the
+      message a token is written inside (``RuntimeError("... token=x")``), the
+      brace of the JSON object a field is in.  The openers still open at the
+      name are tracked from the start of the line, so a ``)`` or a ``}`` that
+      belongs to the value itself does not end anything;
+    * the next name=value pair at the top level of the value (``token=x
+      next=1``), which an Authorization or a Cookie header is exempt from
+      because its own value is written as name=value pairs - there the value
+      ends at a URL, or at another name this rule knows, and at nothing else.
+
+    A value that starts with a quote is the one shape that is still read: it
+    ends at the quote that closes it, so a JSON line keeps its next field.
+    Every spelling of a quote counts - ``"``, ``'``, the triple quotes, and a
+    quote escaped inside a JSON string (``\\"x\\"``), which ends at the same
+    run of backslashes and the same quote it opened with.  A quote that never
+    closes (a line the logger cut) takes the rest of the line with it.  Inside
+    quotes nothing else ends the value: a ``)`` in ``password='hunt)er2'``
+    closes nothing.
+
+    Linear: the text is read once.  Every character is stepped over by exactly
+    one of the scans (the openers before a name, the extent of its value), a
+    failed test for a name=value pair stops on the character that fails it, and
+    the search for the next name resumes past the value already masked."""
+    match = _SECRET_TEXT.search(text)
+    if match is None:
+        return text
+    size, stack = len(text), []
+
+    def track(start, stop):
+        """The openers of ``text[:stop]`` that are still open, from ``start``."""
+        at = start
+        while at < stop:
+            char = text[at]
+            if stack and stack[-1] in "\"'":  # inside a string: only its own quote, or the end of the line, ends it
+                if char == "\\":
+                    at += 1
+                elif char == stack[-1] or char in "\r\n":
+                    stack.pop()
+            elif char in "\r\n":
+                del stack[:]  # a line of its own: nothing above it is still open
+            elif char in "\"'([{":
+                stack.append(char)
+            elif char in ")]}" and stack and stack[-1] == "([{"[")]}".index(char)]:
+                stack.pop()
+            at += 1
+
+    def string(start, stop):
+        """Past the quoted run that starts at ``start``, or ``stop``."""
+        at = start + 1
+        while at < stop:
+            if text[at] == "\\":
+                at += 2
+            elif text[at] == text[start]:
+                return at + 1
+            else:
+                at += 1
+        return stop
+
+    def opened(start, stop):
+        """The quote a value starts with, as it is written, or ``""``."""
+        at = start
+        while at < stop and text[at] == "\\":
+            at += 1
+        if at >= stop or text[at] not in "\"'":
+            return ""
+        if at == start and text[start:start + 3] == text[start] * 3:
+            return text[start] * 3
+        return text[start:at + 1]
+
+    def closes(start, stop, quote):
+        """Past the quote that closes the value opened at ``start``, or ``stop``."""
+        run = len(quote) - 1  # the backslashes the quote was escaped with; 0 for a plain or a triple quote
+        at = start + len(quote)
+        if not run:
+            while at < stop:  # a backslash escapes whatever follows it, the closing quote among it
+                if text[at] == "\\":
+                    at += 2
+                elif text.startswith(quote, at):
+                    return at + len(quote)
+                else:
+                    at += 1
+            return stop
+        while at < stop:
+            if text[at] != "\\":
+                at += 1  # a quote of its own, inside a value whose own quote is escaped, is text
+                continue
+            end = at
+            while end < stop and text[end] == "\\":
+                end += 1
+            if end - at == run and text.startswith(quote[-1], end):
+                return end + 1  # the same run and the same quote it opened with
+            if end < stop and text[end] in "\"'":
+                end += 1  # a longer or a shorter run is a quote escaped inside the value
+            at = end
+        return stop
+
+    def pair(start, stop):
+        """Past the separator of the name=value pair that begins at ``start``, or 0."""
+        at = start
+        while at < stop and text[at] == "\\":
+            at += 1
+        if at < stop and text[at] in "\"'":
+            at += 1
+        if at >= stop or not (text[at].isalpha() or text[at] == "_"):
+            return 0
+        while at < stop and (text[at].isalnum() or text[at] in "_.-"):
+            at += 1
+        while at < stop and text[at] == "\\":
+            at += 1
+        if at < stop and text[at] in "\"'":
+            at += 1
+        while at < stop and text[at] in " \t":
+            at += 1
+        if at < stop and text[at] in "=:":
+            return at + 1
+        return at + 3 if text[at:at + 3].upper() in ("%3D", "%3A") else 0
+
+    def url(start, stop):
+        """``True`` where a URL begins: a scheme and its "//"."""
+        at = start
+        if at >= stop or not text[at].isalpha():
+            return False
+        while at < stop and (text[at].isalnum() or text[at] in "+.-"):
+            at += 1
+        return text[at:at + 3] == "://"
+
+    def extent(start, stop, header):
+        """The end of a value that does not start with a quote."""
+        depth, at = 0, start
+        while at < stop:
+            char = text[at]
+            if char == "\\" and stack and stack[-1] in "\"'":
+                at += 2  # inside a string, an escaped quote is not the end of it (\"x\" in a JSON string)
+                continue
+            if char in "\"'":
+                if not depth and stack and stack[-1] == char:
+                    return at  # the string the name itself is written inside ends here
+                at = string(at, stop)
+                continue
+            if char in "([{":
+                depth += 1
+            elif char in ")]}":
+                if depth:
+                    depth -= 1
+                elif stack and stack[-1] == "([{"[")]}".index(char)]:
+                    return at  # a bracket that opened before the name closes here
+            elif not depth and char in " \t,;":
+                end = at
+                while end < stop and text[end] in " \t,;":
+                    end += 1
+                after = pair(end, stop)
+                if url(end, stop) if header else after:
+                    return at
+                if header and after and _SECRET_TEXT.search(text, end, after):
+                    return at  # a name this rule knows ends a header too: its own value is masked as well
+                at = end
+                continue
+            at += 1
+        return stop
+
+    out, at, line = [], 0, -1
+    while match is not None:
+        track(at, match.end())
+        out.append(text[at:match.end()])
+        start = at = match.end()
+        if start >= line:  # the end of the line this value is on, read once per line rather than once per name
+            line = min([end for end in (text.find("\n", start), text.find("\r", start)) if end >= 0] or [size])
+        quote = opened(start, line)
+        if quote:
+            at = closes(start, line, quote)
+            out.append(quote + "***" + quote)
+        elif text.startswith("***", start) and (start + 3 >= line or text[start + 3] in " \t,;&\"')]}>"):
+            at = start + 3  # masked already (logbuffer masks a query value before the record is written)
+            out.append("***")
+        else:
+            at = extent(start, line, bool(_AUTH_TEXT.search(match.group()) or _COOKIE_TEXT.search(match.group())))
+            if at > start:
+                out.append("***")  # a name with nothing after it keeps its empty value
+        match = _SECRET_TEXT.search(text, at)
+    out.append(text[at:])
+    return "".join(out)
 
 
 def _scrub_one_line_rules(value: str) -> str:
@@ -186,10 +337,8 @@ def _scrub_one_line_rules(value: str) -> str:
     # the log search text and credentials in a URL: process.log no longer receives them (logbuffer masks them
     # before a record is written), but lines written by an older version still hold them
     value = logbuffer.mask_query_secrets(value)
-    value = _COOKIE_TEXT.sub(_mask_value, value)
     if _SECRET_TEXT_HINT.search(value):
-        value = _SECRET_TEXT.sub(_mask_value, value)
-    value = _AUTH_TEXT.sub(_mask_value, value)
+        value = _mask_value(value)
     # a token, not "Basic information": anything but a plain word (base64 without padding is often letters only)
     value = _BEARER.sub(lambda m: m.group(0) if re.fullmatch(r"[A-Z]?[a-z]+", m.group(2)) else f"{m.group(1)} ***", value)
     if "@" in value:  # no "@" in the text, no credential run to find: the whole rule is skipped
