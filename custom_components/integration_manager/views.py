@@ -10,6 +10,7 @@ default, ``HRI_PASSWORD`` when the operator sets one - plus the Host guard in
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from typing import Any
 
@@ -194,6 +195,15 @@ def _manual_restore_pending(config_dir: str) -> bool:
     return backupkit.pending(config_dir) and not backupkit.pending_for_version(config_dir)
 
 
+def _drop_change_restore(config_dir: str) -> bool:
+    """The restore an older version change scheduled, and only that: on the rebuild branch the clean start
+    cancel_config_change would drop as well is the one stage_rebuild has just written."""
+    if backupkit.pending(config_dir) and backupkit.pending_for_version(config_dir):
+        backupkit.cancel_restore(config_dir)
+        return True
+    return False
+
+
 async def async_change_ha_version(installer: Installer, updater: HaUpdater, target: str, mode: str, source: str,
                                   restore_backup: str | None = None, parts: list[str] | None = None) -> dict[str, Any]:
     """The one way to schedule a Home Assistant version change (System page,
@@ -251,13 +261,28 @@ async def async_change_ha_version(installer: Installer, updater: HaUpdater, targ
                 if _IMPORT_LOCK.locked():  # started during the backup; checked and taken with no await in between
                     raise ValueError("an import or upload from a Home Assistant backup is running: wait for it to finish")
                 async with _IMPORT_LOCK:
-                    await hass.async_add_executor_job(updater.cancel_config_change)  # an older change's preparations
+                    # the reading that can fail comes first: an unusable backup is refused before an older change's
+                    # clean start (the same extract dir, summary and plan file) is touched.  stage_rebuild writes
+                    # exactly what cancel_config_change clears, so it replaces an older clean start itself and that
+                    # cancel must run neither before it (dropped for a staging that may fail) nor after it
+                    await hass.async_add_executor_job(backupkit.validate, os.path.join(cfg, backupkit.BACKUP_DIR, backup["name"]))
                     rebuild = await hass.async_add_executor_job(ha_import.stage_rebuild, cfg, backup["name"], installer.running, HA_VERSION, target)
-            else:
-                await hass.async_add_executor_job(updater.cancel_config_change)  # an older change's preparations
             state = await hass.async_add_executor_job(updater.set_desired, target, {"to": target, "mode": mode, "backup": backup["name"],
                                                                                    "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                                                                                    **({"parts": restore_parts} if restore is not None else {})})
+            # an older change's preparations go only now, once this change has one of its own and is recorded: a
+            # keep prepares nothing but ha.json, and a rebuild's plan is written above.  Dropped before that, a
+            # failure here (a full volume) would leave the box with neither change and say nothing about it.
+            # A restart in the gap (two executor jobs apart): a leftover for another version is dropped at the boot
+            # (entrypoint.apply_config_changes for a restore, reset_storage_for_rebuild for a clean start).  One
+            # for this target still applies there: after a rebuild it takes the clean start's place and the boot
+            # keeps the running version rather than call the change applied; after a keep it is a restore that
+            # target can read, or a clean start that backs the configuration up first, so nothing is lost - it is
+            # only more than a keep asked for.
+            if mode == "keep":
+                await hass.async_add_executor_job(updater.cancel_config_change)
+            elif mode == "rebuild":
+                await hass.async_add_executor_job(_drop_change_restore, cfg)
             await hass.async_add_executor_job(backupkit.prune, cfg, installer.settings.backup_keep,
                                               installer.protected_backups() | {backup["name"]})
         finally:
