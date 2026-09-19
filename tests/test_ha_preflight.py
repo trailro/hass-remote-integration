@@ -211,20 +211,17 @@ class UpdaterTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Home Assistant version", text)  # both end with the same way out
 
 
-def _pypi_reachable() -> bool:
-    import socket
-
-    try:
-        socket.create_connection(("pypi.org", 443), timeout=3).close()
-        return True
-    except OSError:
-        return False
+# The only two tests in this file that really call pip, and the only ones in the suite that need a network.
+# Off unless asked for: collecting the file connects to nothing, a normal run stays hermetic and fast, and an
+# offline box cannot read "skipped" as "checked" - the run that checks the scripted answers above against a
+# real pip is a deliberate one.
+RUN_AGAINST_PYPI = os.environ.get("HRI_TEST_PYPI", "0") != "0"
 
 
-@unittest.skipUnless(_pypi_reachable(), "PyPI is not reachable (offline)")
+@unittest.skipUnless(RUN_AGAINST_PYPI, "talks to PyPI: run with HRI_TEST_PYPI=1 to check the scripted pip answers against a real pip")
 class AgainstPypiTest(unittest.TestCase):
-    """The only test here that really calls pip.  Slow (it talks to PyPI), skipped offline; it is what keeps the
-    rest honest: the scripted answers above are what these two runs produce on this image's Python."""
+    """The two runs that really call pip.  Slow (they talk to PyPI) and opt-in (HRI_TEST_PYPI=1); they are what
+    keep the rest honest: the scripted answers above are what these two runs produce on this image's Python."""
 
     def setUp(self):
         preflight._HA_REPORTS.clear()

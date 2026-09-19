@@ -102,7 +102,7 @@ def _publisher(loop, calls, protocol=mqtt.MQTTv311):
     pub._tls_checked_at, pub._tls_error = 0.0, ""
     pub._topics = {"text.note": f"{BASE}/x/text/note"}
     pub._range_pending = {}
-    pub._pending_clears = {}
+    pub._pending_clears = set()  # a set in MqttPublisher.__init__, and .add()ed to: a dict here would not carry a clear
     pub._services_published = set()
     pub.hass.states.get.return_value = mock.Mock(attributes={})
     pub.async_republish_all = lambda: asyncio.sleep(0)  # a CONNACK starts one: not what these tests are about
