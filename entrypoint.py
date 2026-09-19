@@ -793,7 +793,9 @@ def restore_after_failed_change(state: dict, failed: str, fallback: str) -> bool
         recovery = {"backup": change["backup"], "from": failed, "parts": change.get("parts") or ["storage"]}
     elif not (isinstance(recovery, dict) and recovery.get("from") == failed and recovery.get("backup")):
         return True  # nothing of a switch reached the storage: a plain fallback
-    recovery = {**recovery, "for": fallback}
+    # "at": when this fallback's restore was scheduled.  A restore recorded before it belongs to something
+    # else, so apply_config_changes cannot read it as this one having applied at an earlier boot.
+    recovery = {**recovery, "for": fallback, "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
     state["recovery"] = recovery
     try:
         backupkit.schedule_restore(CONFIG_DIR, str(recovery["backup"]), recovery.get("parts") or ["storage"], for_version=fallback, force=True)
@@ -886,9 +888,19 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
         restored = True
     change = state.get("change")
     recovery = state.get("recovery")
+    last = state.get("last_restore") if isinstance(state.get("last_restore"), dict) else {}
     # a fallback's recovery; a switch the user scheduled to this version is not one (and a leftover must not stop it)
     if isinstance(recovery, dict) and recovery.get("for") == wanted and not (isinstance(change, dict) and change.get("to") == wanted):
-        if restored and (state.get("last_restore") or {}).get("ok"):
+        # the restore applied at an earlier boot that was killed after its outcome was recorded (which happens
+        # before the schedule is removed) and before the state without "recovery" was saved: this boot finds
+        # nothing scheduled any more, but the configuration on the volume is already the one that came back.
+        # Starting "from" on it would migrate exactly that configuration forward, and start the version the
+        # fallback ran away from.  Its backup and its timestamp tell that restore from one that belongs to
+        # something else; a recovery written before "at" existed carries none and is judged by the backup.
+        applied_before = (not restored and bool(last.get("ok")) and last.get("for_version") == wanted
+                          and last.get("backup") == recovery.get("backup")
+                          and str(last.get("at") or "") >= str(recovery.get("at") or ""))
+        if (restored and bool(last.get("ok"))) or applied_before:
             state.pop("recovery", None)
         else:
             back = recovery.get("from")
@@ -900,7 +912,6 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
                 return back
             log(f"restoring the configuration for the fallback to {wanted} failed and {back} is not installed; booting {wanted}")
             state.pop("recovery", None)
-    last = state.get("last_restore") if isinstance(state.get("last_restore"), dict) else {}
     reset = reset_storage_for_rebuild(wanted, restored, restored and bool(last.get("ok")) and "storage" in (last.get("parts") or []))
     if not isinstance(change, dict):
         return wanted
