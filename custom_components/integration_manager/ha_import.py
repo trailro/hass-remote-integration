@@ -375,6 +375,16 @@ def _domains_of(entity_id: str) -> list[str]:
     return [entity_id.split(".", 1)[0]]
 
 
+def _enable_wanted(want: dict[str, Any], entry: er.RegistryEntry) -> bool:
+    """The other instance had this entity on, and here it is off because its
+    integration ships it off (``entity_registry_enabled_default = False``:
+    signal strength, diagnostics, a device's spare channels).  That is the
+    one flag an operator clears by hand, so it is the one an import clears
+    for them.  A CONFIG_ENTRY / DEVICE / HASS flag is not the operator's
+    choice and is not ours to undo; USER is what the map asks for in words."""
+    return not want.get("disabled_by") and entry.disabled_by is er.RegistryEntryDisabler.INTEGRATION
+
+
 class RegistryAligner:
     """Applies the stored import maps (one per domain): now for existing
     registry entries, and live for entities/devices the integration creates
@@ -521,7 +531,11 @@ class RegistryAligner:
                     continue
                 same_id = entry.entity_id == want["entity_id"]
                 same_name = not want.get("name") or entry.name == want["name"]
-                same_disabled = (want.get("disabled_by") == "user") == (entry.disabled_by == er.RegistryEntryDisabler.USER)
+                # an entity still off by its integration's default, where the map
+                # has it on, is NOT satisfied: dropping it here used to throw the
+                # only record that it should be on away at every start
+                same_disabled = (want.get("disabled_by") == "user") == (entry.disabled_by == er.RegistryEntryDisabler.USER) \
+                    and not _enable_wanted(want, entry)
                 same_icon = not want.get("icon") or entry.icon == want["icon"]
                 same_hidden = (want.get("hidden_by") == "user") == (entry.hidden_by == er.RegistryEntryHider.USER)
                 if same_id and same_name and same_disabled and same_icon and same_hidden:
@@ -558,9 +572,27 @@ class RegistryAligner:
         entry = er.async_get(self.hass).async_get(event.data["entity_id"])  # the check is by registry platform
         m = self.maps.get(entry.platform) if entry else None
         if m and m["entities"]:
+            # ... except for an entity its integration ships disabled where the
+            # map has it enabled: it is never added to the state machine, so no
+            # first state is coming and there is no id to leave behind either.
+            # Clearing the flag here is what reaches it at all; HA's own
+            # EntityRegistryDisabledHandler then reloads the config entry and
+            # the entity comes up enabled, with the id and name the map asked for.
+            if self._wants_enabling(entry) and self.align_entity(entry.entity_id):
+                self._pending.discard(entry.entity_id)
+                self._request_save()
+                return
             self._pending.add(event.data["entity_id"])
         elif not any(mm["entities"] for mm in self.maps.values()):
             self._pending.clear()
+
+    def _wants_enabling(self, entry: er.RegistryEntry) -> bool:
+        """This registry entry is off by its integration's default and the map
+        has it on, so the first-state path can never reach it."""
+        m = self.maps.get(entry.platform)
+        key = _ekey_lookup(m["entities"], entry.domain, entry.unique_id) if m else None
+        want = m["entities"].get(key) if key else None
+        return want is not None and _enable_wanted(want, entry)
 
     @callback
     def _on_state(self, event: Event) -> None:
@@ -599,6 +631,8 @@ class RegistryAligner:
             kwargs["icon"] = want["icon"]
         if want.get("disabled_by") == "user":
             kwargs["disabled_by"] = er.RegistryEntryDisabler.USER
+        elif _enable_wanted(want, entry):
+            kwargs["disabled_by"] = None  # the operator had turned it on over there
         if want.get("hidden_by") == "user":
             kwargs["hidden_by"] = er.RegistryEntryHider.USER
         if kwargs:
@@ -641,9 +675,12 @@ class RegistryAligner:
 
     def align_existing(self) -> dict[str, int]:
         self.prune_satisfied()
-        # only entities that are live (have a state): see _on_entity
+        # only entities that are live (have a state): see _on_entity - plus the
+        # ones that have none because their integration ships them off and the
+        # map has them on, which is exactly what this has to turn back on
         n_e = sum(1 for e in list(er.async_get(self.hass).entities.values())
-                  if self.hass.states.get(e.entity_id) is not None and self.align_entity(e.entity_id))
+                  if (self.hass.states.get(e.entity_id) is not None or self._wants_enabling(e))
+                  and self.align_entity(e.entity_id))
         dreg = dr.async_get(self.hass)
         n_d = sum(1 for d in registry_devices(dreg) if self.align_device(d.id))
         self._save()
