@@ -1151,7 +1151,16 @@ hass_<domain>/manager/result                        outcome of a manager action,
   `exclude_integrations` (default `["integration_manager"]`; set with `POST
   /api/mqtt/config`, as a list or comma-separated text; their services are also
   left out of the catalog and not callable over MQTT), entities excluded by a
-  rule, and `zone` entities: `zone.home` is the container's own home location,
+  rule, and `zone` entities: `zone.home` is the container's own home location
+  (which is also why a `device_tracker` with coordinates is mirrored as
+  coordinates rather than as an answer — the main Home Assistant's MQTT tracker
+  takes whatever arrives on the state topic as a *location name*, and an entity
+  that has one never looks at a zone, so this container's verdict used to be
+  the last word there while its own `zone.home` sits at 0,0 and made every
+  phone `not_home`. The state topic now carries the reset payload whenever the
+  document has a latitude and a longitude, so the main instance places the
+  device in **its** zones; a tracker without coordinates — a router, a
+  Bluetooth one — still sends its own `home`/`not_home`, which is all it has),
   which every Home Assistant creates by itself (one published by 0.17.0 or
   older is removed from the main HA five minutes after the start, like any
   excluded entity). `entities_total` in `GET
@@ -1287,7 +1296,10 @@ hass_<domain>/manager/result                        outcome of a manager action,
   while an ordinary failure stays readable word for word. The two bounds of a thermostat range change arrive as two
   commands and become one service call: the first waits up to 1 s for the
   second. An alarm panel with a code asks for it on the main HA and sends it
-  with the action. A JSON payload on a vacuum's `send_command` topic needs a
+  with the action, and so does a lock: its commands carry
+  `{"action": …, "code": …}`, so a code-protected lock can be operated from
+  there at all — the source used to receive the bare action, without the code
+  the operator had typed, and refuse it. A JSON payload on a vacuum's `send_command` topic needs a
   `command` string; its other keys are the command's parameters (`{"command":
   "spot_area", "rooms": [1]}`, the shape the main HA sends; a lone `params`
   object, as 0.17.0 took it, is used as the parameters); any other payload is
@@ -1327,17 +1339,34 @@ hass_<domain>/manager/result                        outcome of a manager action,
   keeps the container's own publications away from it, so an empty payload
   there is always somebody else's command.
 - **What the main HA cannot show**: its MQTT platforms have no place for some
-  of what an entity has here. A water heater's away mode (on/off is mirrored),
+  of what an entity has here. A water heater's away mode and its high/low
+  target (the rest is mirrored), a light's `transition` and `flash` (the basic
+  MQTT light schema has no place for them),
   installing an update with a backup, the title of a notify message (the
   message arrives), who changed an alarm panel (`changed_by`), and the
   `device_class`, `supported_features` and `entity_picture` attributes of an
   entity mirrored as a sensor (a media player's `tv`) stay in the container.
+  An entity's name on the main Home Assistant is composed by Home Assistant
+  itself from the device's name and the entity's own, so the component carries
+  only what the entity adds: the one entity named after its device carries no
+  name at all, and the others carry theirs without the device's name in front.
+  Before this, a "Hall Lamp" on a "Hall Lamp" device read "Hall Lamp Hall Lamp"
+  there. Entity ids are unaffected — `default_entity_id` still pins them — but
+  the *friendly name* of an entity already mirrored changes when this release
+  republishes it.
   A text value shows on the main HA without its leading and trailing spaces
   (Home Assistant strips what a template renders; a value sent from there
   keeps them). A vacuum command sent from the main HA carries its parameters
   only as a mapping (the main HA drops a list). A category set with an MQTT rule
   reaches an entity the main HA already has only after the main HA restarts,
-  like `enabled_by_default`. Covers, vacuums and water heaters show the
+  like `enabled_by_default`. A component is republished when its *shape*
+  changes, not only its value: an entity that was `unavailable` when its
+  config went out — with no attributes to read — used to keep a cover without
+  its position, a fan without its speed or an alarm without its code box until
+  the next full republish, up to an hour later. What the source declares in
+  `supported_features` decides the shape now, its registry entry fills in what
+  the state cannot carry, and a component that comes out different is
+  announced again. Covers, vacuums and water heaters show the
   features the entity supports here, and a fan offers the same speed steps.
 - **Service calls**: publish a JSON object to `call/<domain>/<service>` (service
   data plus optional `entity_id`, and an optional `_id`); the result comes back
