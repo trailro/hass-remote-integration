@@ -27,7 +27,7 @@ import logbuffer
 
 from . import events, notifications
 from .installer import Installer
-from .logfiles_page import _entry_paths, _log_files
+from .logfiles_page import _entry_paths, _log_files, open_log_file
 from .memdiag import snapshot as memory_snapshot
 from .mqtt_publisher import SECRET_NAME_ENDINGS, SECRET_NAME_WORDS
 
@@ -45,20 +45,34 @@ _SECRET_KEY = re.compile(
 # never closes (a line the logger cut) is masked to the end of the text.  A name and value that are themselves inside a
 # JSON string have their quotes escaped (\"password\": \"x\"): that value ends at the same run of backslashes and the
 # same quote it opened with.  Every repeat is possessive and its branches start on different characters, so the match
-# never backtracks: the rules run on every line a search reads, whatever the line holds
+# never backtracks (of the rules here only _URL_CRED below needs a bound): the one-line rules run on every line
+# a search reads, whatever the line holds
 _QUOTED = (r"\"(?:[^\"\\]++|\\[\s\S])*+\"?|'(?:[^'\\]++|\\[\s\S])*+'?"
            r"|(?P<esc_run>\\++)(?P<esc_quote>[\"'])(?:[^\\]++|(?!(?P=esc_run)(?P=esc_quote))\\++[\"']?)*+(?:(?P=esc_run)(?P=esc_quote))?")
+# a quoted value is often wrapped: a string repr (b'x', rb"x"), a wrapper's constructor (SecretStr('x')), a
+# parenthesised literal.  Without this the value alternative below took the unquoted branch, which stops at
+# the first quote, and masked the wrapper instead of the secret ("password=b'hunter2'" -> "password=***'hunter2'").
+# Only these two shapes count as a wrapper: something ending in "(", and one of Python's one- or two-letter
+# string prefixes.  A bare identifier does not, because a secret that merely abuts a quote looks exactly like
+# one (`RuntimeError("... access_token=SECRET")` ends the value at the closing quote of the message, and
+# taking SECRET for a prefix printed it and masked the quote after it).  Both branches end in a lookahead for
+# the quote, so a value that is not quoted after all costs two failed tests and no retries
+_VALUE_PREFIX = r"(?P<pre>(?:(?:[A-Za-z_]\w*+)?+\(|[bBrRuUfF]{1,2})(?=\\*+['\"]))?+"
+# an auth scheme belongs to the value it introduces ("token: Bearer abc..."): without this the value ended at
+# the space after the scheme, so the scheme was masked and the token printed, and _BEARER never saw the line
+_VALUE_SCHEME = r"(?:(?:Bearer|Basic|Token)\s++)?+"
 _SECRET_TEXT = re.compile(
-    rf"((?:{_ENDINGS}|hmac|webhook_id|cloudhook_url|pin_code|signature|\bcode|(?<![A-Za-z0-9])(?:{_WORDS})"
+    rf"((?:{_ENDINGS}|hmac|webhook_id|cloudhook_url|pin_code|signature|(?<![A-Za-z0-9])code|(?<![A-Za-z0-9])(?:{_WORDS})"
     rf"|\bpwd|\w_pw\b|\bsession_?id|\b(?:irk|ltk|csrk|sig)\b|\b(?!{_PLAIN_KEYS}\b)\w*key"
     r"|(?:api|access|private|local|encryption|device|client|master|app|shared|signing|session|auth|link|network|aes|ssl)[_-]?key)"
     r"(?:\\*+['\"])?\s*[=:]\s*)"
-    rf"({_QUOTED}|[^'\",\s}}]+)", re.I)
+    rf"({_VALUE_PREFIX}(?:{_QUOTED})|{_VALUE_SCHEME}[^'\",\s}}]+)", re.I)
 # every name _SECRET_TEXT knows ends in a letter, then the = or :, so a text without this has nothing it masks; the
 # rule is the costly one (a Logs page search masks every record it passes), and most log lines fail this test
 _SECRET_TEXT_HINT = re.compile(r"[a-z](?:\\*+['\"])?\s*[=:]", re.I)
 # the whole value of an Authorization header, scheme included (Digest, a custom scheme, a bare token)
-_AUTH_TEXT = re.compile(rf"(authorization(?:\\*+['\"])?\s*[=:]\s*)({_QUOTED}|(?:[A-Za-z-]+\s+)?[^'\",\s}}]+)", re.I)
+_AUTH_TEXT = re.compile(rf"(authorization(?:\\*+['\"])?\s*[=:]\s*)"
+                        rf"({_VALUE_PREFIX}(?:{_QUOTED})|(?:[A-Za-z-]+\s+)?[^'\",\s}}]+)", re.I)
 # Cookie / Set-Cookie: every cookie of the header, to the end of the line
 _COOKIE_TEXT = re.compile(rf"(\b(?:set-)?cookie(?:\\*+['\"])?\s*[=:]\s*)({_QUOTED}|[^\r\n]+)", re.I)
 # a whole PEM block.  A truncated one (a cut log tail): the rest of the BEGIN line, and the lines under it that are
@@ -77,10 +91,17 @@ _PEM_BODY_LINE = re.compile(r"[A-Za-z0-9+/]+={0,2}")
 # inside a block that is known to be open, the body can carry the logger's prefix (an integration
 # that logs a key one line per record); a run that long is not a topic or a path
 _PEM_BODY_TAIL = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{40,}={0,2}\Z")
-_BEARER = re.compile(r"\b(Bearer|Basic)\s+([A-Za-z0-9._~+/=-]{8,})")
+# case-insensitive: a logger that lower-cases its headers writes "authorization: bearer ..."
+_BEARER = re.compile(r"\b(Bearer|Basic)\s+([A-Za-z0-9._~+/=-]{8,})", re.I)
 # user:password@host: the password may hold "/" or "@" (urlsplit cuts the authority at the first "/"), so it
-# runs to the "@" that a host-like part follows
-_URL_CRED = re.compile(r"(\b[a-z][a-z0-9+.-]*://[^/\s:@]*:)\S+?@(?=[A-Za-z0-9._~%\[\]:-]*(?:[/?#\s\"'<>,;)]|$))", re.I)
+# runs to the "@" that a host-like part follows.  That run is the one rule here that is not linear: unbounded,
+# it walked to the end of the line from every "scheme://x:" in it, which on a long line with no whitespace
+# (log content is device-influenced: a compact JSON body on one line) is quadratic - measured 1.3 s on 56 kB
+# and a minute on a megabyte, on an executor thread holding the diagnostics lock.  It is bounded here instead:
+# a credential longer than this is not one, and the caller skips the rule outright on a text with no "@" in it
+_URL_CRED_MAX = 256
+_URL_CRED = re.compile(rf"(\b[a-z][a-z0-9+.-]*://[^/\s:@]*:)\S{{1,{_URL_CRED_MAX}}}?@"
+                       r"(?=[A-Za-z0-9._~%\[\]:-]*(?:[/?#\s\"'<>,;)]|$))", re.I)
 _GH_TOKEN = re.compile(r"\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
 LOG_FILE_TAIL = 500
 DIAG_CACHE_S = 10  # a link any page can hit: one build at a time, repeats within this window get the same zip
@@ -101,14 +122,20 @@ def scrub(value: Any) -> Any:
 
 
 def _mask_value(match: re.Match[str]) -> str:
-    """The name, and the value as ``***`` inside the quotes it opened with."""
+    """The name, and the value as ``***`` inside the quotes it opened with.
+
+    A wrapper the value came in (``b'x'``, ``SecretStr('x')``) is kept in
+    front of the masked quotes, so the line keeps its shape and only the
+    secret goes; a rule without the ``pre`` group has no wrapper to keep."""
+    pre = match.groupdict().get("pre") or ""
+    value = match.group(2)[len(pre):]
     if match.group("esc_run"):
         quote = match.group("esc_run") + match.group("esc_quote")
-    elif match.group(2)[:1] in ('"', "'"):
-        quote = match.group(2)[0]
+    elif value[:1] in ('"', "'"):
+        quote = value[0]
     else:
         return match.group(1) + "***"
-    return match.group(1) + quote + "***" + quote
+    return match.group(1) + pre + quote + "***" + quote
 
 
 def _scrub_one_line_rules(value: str) -> str:
@@ -123,7 +150,9 @@ def _scrub_one_line_rules(value: str) -> str:
     value = _AUTH_TEXT.sub(_mask_value, value)
     # a token, not "Basic information": anything but a plain word (base64 without padding is often letters only)
     value = _BEARER.sub(lambda m: m.group(0) if re.fullmatch(r"[A-Z]?[a-z]+", m.group(2)) else f"{m.group(1)} ***", value)
-    return _GH_TOKEN.sub("***", _URL_CRED.sub(r"\1***@", value))
+    if "@" in value:  # no "@" in the text, no credential run to find: the whole rule is skipped
+        value = _URL_CRED.sub(r"\1***@", value)
+    return _GH_TOKEN.sub("***", value)
 
 
 def _mask_pem_in_place(match: re.Match[str]) -> str:
@@ -304,7 +333,9 @@ class DiagnosticsView(ManagerView):
             return "(the running integration writes no log file)"
         name, path = found[0]["name"], found[0]["path"]  # the name as the Log files page gives it, relative to the resolved dir
         try:
-            with open(path, "rb") as fh:
+            # the same opener the tail and the download use: a listed name that became a symlink
+            # (or grew a second hard link) since the listing is refused, not read into the zip
+            with open_log_file(path) as fh:
                 fh.seek(0, os.SEEK_END)
                 size = fh.tell()
                 fh.seek(max(0, size - 200_000))

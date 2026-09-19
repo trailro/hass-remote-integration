@@ -311,6 +311,29 @@ def _file_id(name: str) -> str:
     return hmac.new(_FILE_ID_KEY, name.encode("utf-8", "surrogateescape"), hashlib.sha256).hexdigest()[:32]
 
 
+def open_log_file(path: str) -> Any:
+    """A listed log file opened for reading, checked at the file that is
+    actually opened and not at the name.
+
+    Raises OSError (a view answers 404, the zip writes the reason in place of
+    the tail) when the file is gone, is a link, or has more than one name.
+    The listing skips a symlink and a file with more than one hard link (see
+    _log_files), but it was taken before this request: a name that became a
+    link in between is refused here, so a listed ``my.log`` pointing at
+    ``secrets.yaml`` cannot hand that file out.  Every reader of a listed path
+    goes through here - the tail, the download and the diagnostics zip - so
+    the check cannot be had by one and missed by another."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+            raise OSError(errno.EPERM, "not a plain file with a single name")
+        return open(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def _tail(path: str, lines: int, needle: str) -> tuple[list[str], int]:
     """Last `lines` lines matching `needle`, reading the file backwards in
     blocks so a 7-day log is never loaded whole.
@@ -351,7 +374,7 @@ def _tail(path: str, lines: int, needle: str) -> tuple[list[str], int]:
             text = _scrub_one_line_rules(text)  # before the search, whether or not the raw line holds the needle
         return needle in text.lower()
 
-    with open(path, "rb") as fh:
+    with open_log_file(path) as fh:
         fh.seek(0, os.SEEK_END)
         pos = fh.tell()
         buf = b""
@@ -444,19 +467,8 @@ class _MaskedDownload:
 
     def open(self) -> None:
         """Raises OSError (the view answers 404) when the file is gone, is a
-        link, or has more than one name."""
-        fd = os.open(self.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        try:
-            st = os.fstat(fd)
-            if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
-                # the listing skips a symlink and a file with more than one hard link (see _log_files), but it
-                # was taken before this request: the file that is actually opened is checked again here, so a
-                # name that became a link meanwhile cannot hand out secrets.yaml
-                raise OSError(errno.EPERM, "not a plain file with a single name")
-            self._fh = open(fd, "rb")
-        except BaseException:
-            os.close(fd)
-            raise
+        link, or has more than one name (open_log_file does the checking)."""
+        self._fh = open_log_file(self.path)
         size = self._fh.seek(0, os.SEEK_END)
         start = max(0, size - MAX_SCAN_BYTES)
         self._fh.seek(start)
