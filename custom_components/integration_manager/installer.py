@@ -1875,11 +1875,12 @@ class Installer:
         ps = self.state.pending_start
         return bool(ps) and (not ps.get("ha") or ps["ha"] == homeassistant.const.__version__)
 
-    async def async_run_pending_start(self) -> None:
+    async def async_run_pending_start(self) -> dict[str, Any] | None:
         """Boot: a start deferred to this (new) Home Assistant venv by the
         environment builder.  run.py already put the domain's YAML into the
         boot config and sets the domain up after us, so a YAML integration
-        is complete at this boot."""
+        is complete at this boot.  Returns what that start answered, or None
+        when there was none to run or it is kept blocked for another version."""
         ps = self.state.pending_start
         if not ps:
             return
