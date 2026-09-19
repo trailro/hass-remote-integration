@@ -38,10 +38,24 @@ from plain HTTP traffic. These are:
   search for key material returns nothing by design, but redaction of material
   that carries no marker and no name in front of it is best effort — a report
   needs a case where something the scrubber does name comes out unmasked. A
-  named value is masked whatever it is wrapped in: a bytes or raw-string repr
-  (`password=b'x'`), a constructor (`password=SecretStr('x')`), a parenthesised
-  literal, and an auth scheme that introduces it (`token: Bearer <token>`, in
-  any case). The wrapper is kept so the line keeps its shape;
+  named value is masked through the wrappers around it: a string repr
+  (`password=b'x'`), a constructor with an optional module and keyword
+  (`password=pydantic.SecretStr(value='x')`), a container — masked through to
+  its closing bracket, so the rest of a tuple goes with it
+  (`auth=('user', 'x')`) — a repr that names its type (`password=<SecretStr
+  'x'>`), and an auth scheme in front of a quoted or unquoted token
+  (`token: Bearer 'x'`, `token: Digest x`, in any case). The wrapper is kept so
+  the line keeps its shape. Two things are deliberately not masked: a wrapper
+  with **no name in front of it** (every rule is name + separator + value, and
+  reading a bare identifier as a wrapper once made the scrubber print a token it
+  had been masking), and a URL password over 1024 characters that also contains
+  `/`, which is not legal in a userinfo (RFC 3986). A name ending in `code` is a
+  secret (`user_code`, `device_code`); the codes that report a result are not
+  (`status_code`, `error_code`, `exit_code`, `return_code`, `reason_code`,
+  `http_code`, `response_code`). `rtsp://admin:p@ss/w0rd@host` still shows
+  `@ss/w0rd`: the rule stops at the first `@` a host follows, because
+  `http://u:p@host/users/@me` is the same text and its path has to stay
+  readable — percent-encode an `@` in a URL password;
 - the text of a log search (in any spelling of its path), or a credential in a
   request URL, written to
   `process.log` or the container log; a log search answer (rows, `cursor`,

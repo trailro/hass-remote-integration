@@ -508,7 +508,12 @@ case: the container installs the version the image was built and tested with
 (`HA_VERSION_DEFAULT`, or `HA_VERSION_MIN` when the floor is higher) instead,
 records it as the desired version so the next boot does not ask PyPI for the
 broken one again, and says on **System** which version could not be installed.
-Only when that one fails too does the boot end. A
+Only when that one fails too does the boot end. This is for a volume nothing
+has ever run on — no version in `ha.json` and no `.storage`. On a volume that
+has run something, a failed install ends the boot with the reason instead:
+Home Assistant migrates storage forward only, so quietly starting an older
+version on a newer configuration is the one thing the container must not do,
+and the version you had stays recorded. A
 boot counts as good once the integration has set up, or 10 minutes after Home
 Assistant started; stopping or restarting the container during a boot, also
 while Home Assistant is still being imported, does not count as a failure —
@@ -872,7 +877,8 @@ setup)`); a restart cannot configure it, so the watchdog leaves that one alone.
 
 It never fights the rest of the manager. Nothing is restarted while an
 install, start, stop, backup, import, restore or full rollback is running,
-while no integration runs or Home Assistant itself is not running yet,
+while a preflight (of an integration version or of a Home Assistant version)
+or a manager action from MQTT is running, while no integration runs or Home Assistant itself is not running yet,
 while a restore, a rebuild, a Home Assistant version change, a deferred start
 or a full rollback is waiting for the next restart, while a smoke test is
 pending or a config entry is still setting up, nor in the first 15 minutes
@@ -1300,7 +1306,9 @@ hass_<domain>/manager/result                        outcome of a manager action,
   cleared and drops that one echo, which would otherwise have blanked a text
   entity or sent an empty notification. A second empty payload on the same
   topic, or one arriving more than 30 s later, is a command again and is
-  treated as one.
+  treated as one. On MQTT 5 nothing is remembered at all: the subscription
+  keeps the container's own publications away from it, so an empty payload
+  there is always somebody else's command.
 - **What the main HA cannot show**: its MQTT platforms have no place for some
   of what an entity has here. A water heater's away mode (on/off is mirrored),
   installing an update with a backup, the title of a notify message (the
@@ -1424,6 +1432,14 @@ hass_<domain>/manager/result                        outcome of a manager action,
   entities with their customisations until the integration starts again.
   *Stop* also clears the retained service catalog, so the main Home Assistant
   is not left with services it cannot call; the next start publishes it again.
+  The publisher connects while the boot is still reconciling, so it starts with
+  the identity of whatever ran when the container came up. When the boot itself
+  starts an integration — the Environment builder's deferred start, or one
+  adopted from its config entries after a restore — the identity is handed over
+  as soon as that start is done, before Home Assistant sets the integration up
+  and its first entity is published. Nothing goes out under the previous
+  `hass_<domain>`, and MQTT no longer stays disconnected with "no integration
+  is running" after a boot that started the first one.
   While no integration runs there is no identity: `GET /api/mqtt/status`
   shows `base_topic` and the other topics as `null`, and so do `base_topic` in
   its `health` and in the `mqtt` part of a `POST /api/run/{start,stop}` answer.

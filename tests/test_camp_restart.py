@@ -121,9 +121,12 @@ class RestartOffTheExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hass.stopped, [True])
 
     async def test_a_restart_that_fails_before_stopping_still_frees_busy(self):
+        """A state write that fails no longer ends the restart (a full disk is when it is needed most),
+        so the failure this pins comes from the drain instead - anything raised before the stop must
+        still hand `busy` back, or every later install, start and restart is refused."""
         hass = _hass()
         ins = _installer(self, hass)
-        ins._save_state = mock.Mock(side_effect=OSError("read-only file system"))
+        ins._undo_boot_failure = mock.Mock(side_effect=OSError("read-only file system"))
 
         with self.assertLogs(inst_mod._LOGGER, "ERROR"):
             res = await ins.restart()
@@ -131,6 +134,18 @@ class RestartOffTheExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(res["ok"])
         self.assertFalse(ins.busy)
         self.assertEqual(hass.stopped, [])
+
+    async def test_a_state_write_that_fails_does_not_stop_the_restart(self):
+        hass = _hass()
+        ins = _installer(self, hass)
+        ins._save_state = mock.Mock(side_effect=OSError("read-only file system"))
+
+        with self.assertLogs(inst_mod._LOGGER, "WARNING"):
+            res = await ins.restart()
+        await asyncio.sleep(0)  # the stop is a task, like every other restart here
+
+        self.assertTrue(res["ok"])
+        self.assertEqual(hass.stopped, [True])
 
     async def test_busy_stays_set_once_the_stop_is_under_way(self):
         hass = _hass()

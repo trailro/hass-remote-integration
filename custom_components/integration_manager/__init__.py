@@ -148,7 +148,8 @@ def boot_step(what: str, step: Callable[[], Any]) -> None:
         _LOGGER.error("state.json not written (%s): %s is kept in memory only; the manager comes up anyway", err, what)
 
 
-async def async_hand_identity_over(installer: Installer, publisher: Any, before: str | None) -> None:
+async def async_hand_identity_over(installer: Installer, publisher: Any, before: str | None,
+                                   started: dict[str, Any] | None = None) -> None:
     """An integration that starts while the boot reconcile runs - the Environment
     builder's deferred start, or one adopted from its enabled config entries - is the one
     start path that does not go through a view, so nothing hands the publisher the new
@@ -159,13 +160,13 @@ async def async_hand_identity_over(installer: Installer, publisher: Any, before:
     Assistant creates them with the wrong unique ids, and the identity sweep at the next
     restart deletes and recreates them, losing whatever was customised there.
 
-    No result to pass on: async_run_pending_start returns nothing, so the stale-document
-    clean-up a version switch does (res["pre_update_backup"]) is not asked for here; the
-    reconnect below is what carries the identity."""
+    ``started`` is what the deferred start answered, when there was one: a version switch
+    passes ``pre_update_backup`` through it, which is how the documents of entities the new
+    version dropped are cleared.  Without it the identity still moves, but those stay."""
     if installer.instance_key == before:
         return
     try:
-        await publisher.async_after_start({})
+        await publisher.async_after_start(started or {})
     except Exception:  # noqa: BLE001 - a broker that is down must not cost the boot its UI
         _LOGGER.exception("MQTT: the identity of the integration started at boot was not applied")
 
@@ -176,15 +177,16 @@ async def async_boot_reconcile(installer: Installer, publisher: Any) -> None:
     pip can take longer than Home Assistant's setup timeout for this component, which
     would fail the whole boot; run.py waits for it before it sets up the integration."""
     identity = installer.instance_key
+    started: dict[str, Any] | None = None
     try:
         await installer.async_reconcile()
-        await installer.async_run_pending_start()
+        started = await installer.async_run_pending_start()
     except Exception as err:  # noqa: BLE001 - the UI must come up so the user can fix it
         _LOGGER.exception("boot reconcile failed")
         installer.state.last_error = f"boot reconcile failed: {type(err).__name__}: {err}"
         boot_step("the boot reconcile error", installer._save_state)  # noqa: SLF001
     # not in a `finally`: a cancelled boot (Home Assistant stopping) has no identity to hand over
-    await async_hand_identity_over(installer, publisher, identity)
+    await async_hand_identity_over(installer, publisher, identity, started)
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
