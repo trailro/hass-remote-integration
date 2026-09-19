@@ -428,9 +428,15 @@ def build_component(
     features = attrs.get("supported_features")
 
     def supports(bits: int) -> bool:
-        """What the source's supported_features says; a source that reports none
-        (a registry entry from an integration that never loaded) announces all."""
-        return not isinstance(features, int) or bool(features & bits)
+        """_declares, plus the benefit of the doubt when the source declares nothing at all.
+
+        The two differ only there, and deliberately: _declares decides the component's *shape* - a topic
+        invented for a feature nobody declared is a control that fails on the main Home Assistant - while
+        this decides which features of a control to announce.  A registry entry from an integration that
+        never loaded has no state and no features, and announcing none of them would leave a stub the
+        operator cannot use at all.
+        """
+        return _declares(attrs, bits) or not isinstance(features, int)
 
     if domain not in NATIVE:
         return _mirror_as_sensor(entry, state, doc_topic, prefix, device_name)
@@ -700,10 +706,13 @@ def build_component(
             comp["payload_stop"] = "STOP"
         if dc := _device_class(entry, attrs, domain, compat):
             comp["device_class"] = dc
-        # Declared feature first, so an unavailable valve keeps its position topics; a source that
-        # declares nothing is read from the value it has.  A position-reporting valve carries no
-        # open/close payloads at all: the main HA refuses the component for the keys themselves.
-        if _declares(attrs, 4) or attrs.get("current_position") is not None:  # ValveEntityFeature.SET_POSITION
+        # ValveEntityFeature.SET_POSITION.  Declared: announce it whatever the current value is, so an
+        # unavailable valve does not lose its position topics.  Declared *without* it while a position is
+        # reported: announce nothing - `reports_position` is what puts a slider on the main Home Assistant,
+        # and a valve that only tells its position would refuse it.  Declaring nothing at all is the one
+        # case the value decides (see `supports`).  A position valve carries no open/close payloads: the
+        # main HA refuses the component for the keys themselves.
+        if supports(4) and (_declares(attrs, 4) or attrs.get("current_position") is not None):
             for k in ("payload_open", "payload_close"):
                 comp.pop(k, None)
             comp.update(
