@@ -138,7 +138,7 @@ Put your settings in a `.env` file next to `docker-compose.yml`:
 ```bash
 TZ=Europe/Berlin          # your time zone
 HRI_PORT=8087             # port of the UI
-# HRI_VERSION=0.22.1      # optional: pin a release (default: latest)
+# HRI_VERSION=0.22.2      # optional: pin a release (default: latest)
 # HRI_REGISTRY=docker.io/trailro26  # optional: pull from Docker Hub (default: ghcr.io/trailro)
 # HRI_PASSWORD=...        # optional: require a password for the UI and API
 # HRI_APT_PACKAGES=ffmpeg  # optional: Debian packages installed at boot (what pip cannot install)
@@ -340,8 +340,13 @@ container announces over MQTT with what your main HA has made of it.
    (for example, only one side sends commands to the devices).
 2. On **Cutover**, give your main HA's URL and a long-lived access token
    (optional). They are used to compare, and by *Enable discovery* to check
-   that the main HA no longer has config entries or entity ids of the
-   integration. The URL must not contain `user:password@`: the token
+   that the main HA no longer has the integration's config entries, and that
+   nothing there already holds an entity id this container is about to
+   announce. The mirrors this container published are the one exception; an id
+   held by anything else — an unrelated MQTT entity, or a leftover of an
+   earlier identity of this container — blocks the enable and is named, because
+   that entity would otherwise arrive there with a `_2` id.
+   The URL must not contain `user:password@`: the token
    authenticates. The page matches the entities this container announces over
    MQTT with the MQTT entities your main HA created from that discovery, by
    unique id, and lists what is missing on either side and what differs in
@@ -1346,7 +1351,11 @@ hass_<domain>/manager/result                        outcome of a manager action,
   cover refuses: the main HA offers the slider anyway, because its MQTT cover
   takes every tilt feature from the tilt topic. A command
   larger than 256 KB, or nested deeper than 64 levels, is refused unread, with
-  the reason in the same two places. A command, service call or manager action
+  the reason in the same two places. A command for an entity this container
+  does not publish is refused with the reason, and that is checked again right
+  before the service call rather than only as the command arrives: an entity
+  excluded while its command was on its way is not acted on.
+  A command, service call or manager action
   published with `retain` is never carried out, because a physical effect must
   not replay at every reconnect; the retained message is cleared from the broker
   as it arrives, and the log names the topic (it does not appear under *recent
@@ -1569,7 +1578,11 @@ hass_<domain>/manager/result                        outcome of a manager action,
 - Before connecting, the container checks that no *foreign* retained data sits
   under its base topic, and refuses to connect if there is (override with
   `force_base_topic`). A discovery prefix that is the base topic, or lies under
-  it, is refused when the MQTT settings are saved.
+  it, is refused when the MQTT settings are saved. Reading the broker's
+  retained messages — for this check and for the cleanup sweeps — stops at
+  64 MB, so a broker holding a very large retained store cannot grow this
+  container's memory; the log says how much was left unread. A sweep that read
+  less removes less, never something else.
 - **TLS**: tick `tls` on the MQTT page (brokers usually take TLS on port
   8883). The broker's certificate is verified against the system CAs, or
   against `ca_certs`, a CA file inside `/config` (for example
@@ -1993,7 +2006,7 @@ points:
 | System | `GET /api/ha`, `POST /api/ha/{update,rollback,check}`, `POST /api/restart`, `GET/POST /api/settings` |
 | Backups | `GET /api/backups`, `POST /api/backups/create`, `POST /api/backups/upload`, `GET /api/backups/<name>/download`, `POST /api/backups/<name>/{restore,delete}`, `POST /api/backups/restore/cancel` (answers `cancelled`; a restore that belongs to a scheduled Home Assistant version change is refused with `for_version`, and a full rollback's restore with `rollback`, the backup it restores) |
 | Import | `POST /api/import/upload`, `GET/POST /api/import/inspect`, `POST /api/import/{apply,apply_all,clear}` |
-| Cutover | `GET /api/parity`, `POST /api/parity/{test,remove_orphans}`, `POST /api/cutover/{status,enable,undo}`; `enable` takes `force`, which skips the checks on the main Home Assistant (MQTT loaded, the integration's config entries, entity ids still registered there) but not the container's own (an integration running, health, MQTT connected), and the answer and the timeline say `forced`; `undo` answers `cleared_discovery_configs` and `manager_device_kept`; a check on the main HA that cannot run (unreachable, its registry unreadable) blocks the enable rather than passing. Removing an orphan while discovery is off is refused, except for the manager device while `manager_discovery` announces it. A matched row carries `state_comparable`: `button`, `scene`, `notify` and `event` are not compared by state (the command-only platforms have no state topic on the main HA, and an event entity's state is a "last triggered" timestamp each side keeps for itself), so those never count as differing; their availability, renames and disabled flag are still reported. An orphan of the manager device is removed by its component key rather than the unique id the removal form used to carry — a unique id that belongs to no component of that device is now refused instead of reported as removed |
+| Cutover | `GET /api/parity`, `POST /api/parity/{test,remove_orphans}`, `POST /api/cutover/{status,enable,undo}`; `enable` takes `force`, which skips the checks on the main Home Assistant (MQTT loaded, the integration's config entries, entity ids held there by anything but this container's own mirrors) but not the container's own (an integration running, health, MQTT connected), and the answer and the timeline say `forced`; `undo` answers `cleared_discovery_configs` and `manager_device_kept`; a check on the main HA that cannot run (unreachable, its registry unreadable) blocks the enable rather than passing. Removing an orphan while discovery is off is refused, except for the manager device while `manager_discovery` announces it. A matched row carries `state_comparable`: `button`, `scene`, `notify` and `event` are not compared by state (the command-only platforms have no state topic on the main HA, and an event entity's state is a "last triggered" timestamp each side keeps for itself), so those never count as differing; their availability, renames and disabled flag are still reported. An orphan of the manager device is removed by its component key rather than the unique id the removal form used to carry — a unique id that belongs to no component of that device is now refused instead of reported as removed |
 | Logs | `GET /api/logs?level=&prefix=&q=&since_id=&limit=` (`limit` 1 to 2000, `since_id` 0 to 2^63-1, otherwise `400`; the answer carries `cursor`, the next `since_id`), `GET /api/logs/loggers`, `POST /api/logs/level` (`{"logger": …, "level": …}`), `GET /api/log_files` (an `id` per file, which changes at every start), `GET /api/log_files/tail?id=&file=&lines=&q=` (`file` is the masked name, answered `409` when several files share it; a real name is not accepted), `GET /api/log_files/download?id=&file=` (the same file selection; the file masked and streamed as an attachment under its masked name, at most its last 32 MB, `X-Log-Truncated` when it was cut), `GET/POST /api/settings` (`log_format`) |
 | Diagnostics | `GET /api/diagnostics` (zip, secrets removed), `GET /api/diag/memory[?refs=<type>]` (one probe at a time: a second one meanwhile answers `429`) |
 
