@@ -2090,8 +2090,17 @@ class Installer:
                 "announced": str(rec.get("announced") or "")}
 
     def _watchdog_save(self, rec: dict[str, Any]) -> None:
+        """The ledger is kept whatever the disk does.  restart() already restarts on a state.json it could
+        not write - the operator usually frees the disk BY restarting - but this write comes first, and an
+        OSError out of it ended the tick a minute before the restart, every minute, so the restart the
+        comment there promises never happened.  What is not written stays in memory and is saved again at
+        the next change; the boot after a restart starts from the file, which is one restart behind."""
         self.state.watchdog = rec
-        self._save_state()
+        try:
+            self._save_state()
+        except OSError as err:
+            _LOGGER.warning("health watchdog: state.json not written (%s): the record is kept in memory only, "
+                            "and a restart it decides on still happens", err)
 
     def watchdog_window_s(self) -> int:
         """How long the verdict must have been ``error`` before the next restart:

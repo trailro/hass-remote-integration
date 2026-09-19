@@ -1008,15 +1008,40 @@ def _prepare() -> str:
     # (the ffmpeg binary), find what the operator asked for already there
     ensure_apt_packages(state)
     wanted = state.get("desired") or state.get("current")
+    fresh = not wanted and nothing_has_run_here(state)
+    if not wanted and not fresh:
+        # ha.json is missing (deleted, a volume restored without it) or was dropped as unreadable, and
+        # .storage says a Home Assistant has run here.  The venvs on the volume say which one; only if
+        # none of them can run on this image's Python is a version chosen below - and never the image's
+        # own default, which is older than what the operator runs, on a .storage HA migrates forward only.
+        wanted = _recovered_current()
+        if wanted:
+            log(f"no version recorded, but this volume has run: continuing with {wanted} from the volume, pruning disabled this boot")
+            state["_corrupt"] = True  # what the volume held is a guess: no venv is removed on this boot
     if not wanted:
-        # Fresh volume: start from the newest stable HA, not the version the
-        # image happened to be built with (HA_VERSION_LATEST=0 disables that).
+        # No version to run and none on the volume: start from the newest stable HA, not the version the
+        # image happened to be built with (HA_VERSION_LATEST=0 disables that).  The image's own default
+        # is the last resort of a FRESH volume only - it is older than what an operator runs, and Home
+        # Assistant migrates .storage forward only.
         _phase("asking PyPI for the newest Home Assistant")
-        wanted = (latest_stable() if os.environ.get("HA_VERSION_LATEST", "1") != "0" else None) or DEFAULT_VERSION
+        wanted = latest_stable() if os.environ.get("HA_VERSION_LATEST", "1") != "0" else None
+        if not wanted and fresh:
+            wanted = DEFAULT_VERSION
+        if not wanted:
+            # A used volume, nothing on it this Python can run, and PyPI could not be asked (unreachable,
+            # or HA_VERSION_LATEST=0): the image's default is the one answer that must not be given here.
+            log("no Home Assistant version is recorded for this volume, none of its venvs runs on this image's "
+                "Python, and the newest release could not be looked up: not installing this image's own "
+                f"{DEFAULT_VERSION} over an existing configuration; exiting")
+            state["last_error"] = ("no Home Assistant version is recorded for this volume and the newest release could not "
+                                   "be looked up; this image's own older version is not installed over the existing "
+                                   "configuration (see the container log)")
+            save_state(state)
+            sys.exit(1)
         if MIN_VERSION and ha_vkey(wanted) < ha_vkey(MIN_VERSION):
             log(f"Home Assistant {wanted} is older than this image's floor {MIN_VERSION}: installing {MIN_VERSION} instead")
             wanted = MIN_VERSION
-        log(f"fresh volume: installing Home Assistant {wanted}")
+        log(f"{'fresh volume' if fresh else 'no version recorded for this volume'}: installing Home Assistant {wanted}")
     current = state.get("current")
     # last_error stays until a new version change is asked for (ha_updater.set_desired clears it): a
     # fallback or a failed install must still be visible after the next ordinary restart
