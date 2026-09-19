@@ -37,7 +37,12 @@ setInterval(mqtt,15000); mqtt().catch(e=>log('mqtt: '+e)); mqttConfigLoad().catc
 // ----- health rules -----
 async function healthRules(){
   const r=await (await fetch('api/settings')).json(); if(document.activeElement!==$('#hstale')&&document.activeElement!==$('#hunav')){$('#hstale').value=r.health_stale_s; $('#hunav').value=r.health_unavailable_pct;}
-  const t=$('#hrules'); if(t.contains(document.activeElement)) return; t.querySelectorAll('tr:not(:first-child)').forEach(e=>e.remove());
+  // an inline edit must not be rebuilt under the cursor -- but only a focused field is one: the Save button of a
+  // row is inside #hrules too and keeps the focus in Chrome and Edge, which would stop the repaint that follows
+  // a save (nothing asks for one here yet, which is the only reason this never showed, as it did on the tables)
+  const t=$('#hrules'); const focused=document.activeElement;
+  if(focused&&typeof focused.matches==='function'&&focused.matches('input,textarea,select')&&t.contains(focused)) return;
+  t.querySelectorAll('tr:not(:first-child)').forEach(e=>e.remove());
   const st=await (await fetch('api/status',{headers:{'X-Requested-With':'fetch'}})).json(); const INSTALLED=st.installed||{}, RUN=st.running;
   for(const d of Object.keys(INSTALLED)){ const own=(r.health||{})[d]||{}; const tr=document.createElement('tr');
     tr.innerHTML=`<td><b>${esc(d)}</b>${RUN&&RUN.domain===d?' <span class="tag ok">running</span>':''}</td><td><select data-h="mode" data-d="${esc(d)}"><option value="">periodic (default)</option><option value="periodic" ${own.mode==='periodic'?'selected':''}>periodic</option><option value="event" ${own.mode==='event'?'selected':''}>event</option></select></td>
