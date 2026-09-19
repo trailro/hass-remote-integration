@@ -16,7 +16,7 @@ from homeassistant.core import valid_entity_id
 from homeassistant.helpers import entity_registry as er
 
 from . import discovery as disc
-from .mqtt_publisher import platform_of, MqttPublisher, _json_default
+from .mqtt_publisher import platform_of, MqttPublisher, _json_default, _published_attributes
 from .http_util import ManagerView, with_body
 
 ENTITIES_HTML = load_template("entities")
@@ -41,7 +41,10 @@ def entity_rows(hass: HomeAssistant, publisher: MqttPublisher) -> list[dict[str,
                     "object_id": object_id,
                     "integration": platform_of(hass, state.entity_id) or "unregistered",
                     "state": state.state,
-                    "attributes": dict(state.attributes),
+                    # the same attributes the document would carry: an excluded entity is published less, never
+                    # shown more.  dict(state.attributes) here handed /api/entities the access_token and the
+                    # token-bearing picture URLs that _published_attributes keeps out of every other row
+                    "attributes": _published_attributes(state.attributes),
                     "name": ((entry.name or entry.original_name) if entry else None) or state.attributes.get("friendly_name"),
                     "name_override": entry.name if entry else None,
                     "unique_id": entry.unique_id if entry else None,
