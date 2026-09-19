@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -162,13 +164,46 @@ async def async_hand_identity_over(installer: Installer, publisher: Any, before:
 
     ``started`` is what the deferred start answered, when there was one: a version switch
     passes ``pre_update_backup`` through it, which is how the documents of entities the new
-    version dropped are cleared.  Without it the identity still moves, but those stay."""
-    if installer.instance_key == before:
+    version dropped are cleared.  Without it the identity still moves, but those stay.
+
+    A deferred start that only changes the VERSION of the integration already running keeps
+    the identity (hass_<domain> does not carry the version), so "nothing moved" is not the
+    same as "nothing to do": the new version's entity set is what decides whether documents
+    are stale, and those of entities it dropped would be left retained on the main Home
+    Assistant for good.  Such a start is carried through on ``pre_update_backup`` alone."""
+    started = started or {}
+    version_switch = bool(started.get("pre_update_backup"))
+    if installer.instance_key == before and not version_switch:
         return
     try:
-        await publisher.async_after_start(started or {})
+        await publisher.async_after_start(started)
+        if version_switch and not started.get("stale_docs_cleared"):
+            # async_after_start reconnects first, and paho's connect_async only starts the handshake:
+            # the sweep inside it found the publisher not connected yet and answered 0 without looking.
+            # Give the CONNACK the moment it needs, then ask again.
+            if await _async_wait_connected(publisher):
+                started["stale_docs_cleared"] = await publisher.async_clear_stale_docs()
     except Exception:  # noqa: BLE001 - a broker that is down must not cost the boot its UI
         _LOGGER.exception("MQTT: the identity of the integration started at boot was not applied")
+
+
+CONNACK_WAIT_S = 10.0  # a remote broker over TLS; a broker that is simply down never answers and is not waited for
+CONNACK_POLL_S = 0.1
+
+
+async def _async_wait_connected(publisher: Any, timeout: float = CONNACK_WAIT_S) -> bool:
+    """True once the publisher reports itself connected, False if it does not within ``timeout``.
+    Nothing is waited for when MQTT is off or the connection was refused outright, and nothing is
+    retried on False: there is no broker holding documents to clear."""
+    if not getattr(getattr(publisher, "config", None), "enabled", False):
+        return False
+    deadline = time.monotonic() + timeout
+    while True:
+        if publisher.stats.get("connected"):
+            return True
+        if publisher.stats.get("connect_error") or time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(CONNACK_POLL_S)
 
 
 async def async_boot_reconcile(installer: Installer, publisher: Any) -> None:

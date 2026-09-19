@@ -45,7 +45,58 @@ from . import patches
 from .installer import _req_name, bad_requirement, read_capped
 
 _LOGGER = logging.getLogger(__name__)
-LOCK = asyncio.Lock()  # one pip resolution at a time (UI, builder, MQTT update)
+
+# Longer than any preflight that is still working: the Home Assistant check is the slowest one at
+# (MAX_HA_MISSING + 1) pip runs of PIP_TIMEOUT_S = 45 min.  Past this, the holder is hung, not slow.
+LOCK_MAX_HOLD_S = 3600
+
+
+class _TimedLock(asyncio.Lock):
+    """An asyncio.Lock that knows how long it has been held, and answers ``locked()`` False once that
+    passes ``LOCK_MAX_HOLD_S``.
+
+    Mutual exclusion is untouched - ``acquire`` still waits for the holder, however long it takes.  What
+    changes is the answer to "is a preflight running?", which is not a lock at all but a courtesy: the
+    health watchdog stands down while one runs, because a restart would throw away minutes of pip work
+    and leave the operator's start unanswered.  Without an age limit that courtesy had no end - a
+    preflight whose task was cancelled between acquire and release, or a pip that never returns, held the
+    watchdog off for the rest of the process, which is exactly when the watchdog is needed.  Same rule as
+    ManagerDevice._action_held applies to a manager action past ACTION_MAX_S.
+    """
+
+    def __init__(self, what: str = "a preflight") -> None:
+        super().__init__()
+        self._what = what
+        self._taken_at = 0.0
+        self._hang_logged = False
+
+    async def acquire(self) -> bool:
+        got = await super().acquire()
+        self._taken_at = time.monotonic()
+        self._hang_logged = False
+        return got
+
+    def release(self) -> None:
+        self._taken_at = 0.0
+        super().release()
+
+    def held_s(self) -> float | None:
+        """Seconds the holder has held it, None when nobody holds it."""
+        return time.monotonic() - self._taken_at if super().locked() else None
+
+    def locked(self) -> bool:
+        """Held by something that is still working.  A holder past LOCK_MAX_HOLD_S is not one of those."""
+        held = self.held_s()
+        if held is not None and held >= LOCK_MAX_HOLD_S:
+            if not self._hang_logged:
+                self._hang_logged = True
+                _LOGGER.error("%s has held its lock for over %s s: it no longer holds the health watchdog off",
+                              self._what, LOCK_MAX_HOLD_S)
+            return False
+        return held is not None
+
+
+LOCK = _TimedLock("an integration preflight")  # one pip resolution at a time (UI, builder, MQTT update)
 
 PIP_TIMEOUT_S = 300
 STDERR_TAIL_LINES = 12  # of a failed pip run, what the report carries for the UI to show verbatim
@@ -1029,7 +1080,7 @@ HA_CACHE_S = 3600  # the answer for (version, Python) changes only when PyPI gro
 MAX_HA_REPORTS = 32
 MAX_HA_MISSING = 8  # pins named one per pip run: enough to describe a version, few enough to bound the check
 _HA_REPORTS: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
-_HA_LOCK = asyncio.Lock()  # one check at a time; LOCK belongs to the integration preflight and can be held for minutes
+_HA_LOCK = _TimedLock("a Home Assistant preflight")  # one check at a time; LOCK belongs to the integration preflight and can be held for minutes
 
 _PIP_NO_DEPS = ("-m", "pip", "install", "--dry-run", "--quiet", "--report", "-", "--ignore-installed", "--no-deps", "--only-binary=:all:")
 _NO_WHEEL_RE = re.compile(r"Could not find a version that satisfies the requirement (\S+)")
@@ -1040,6 +1091,18 @@ _NO_WHEEL_RE = re.compile(r"Could not find a version that satisfies the requirem
 _PIP_UNREACHABLE_RE = re.compile(r"Retrying \(Retry\(|connection broken by|Failed to establish a new connection|"
                                  r"Temporary failure in name resolution|Name or service not known|ProxyError|"
                                  r"SSLError|Read timed out|Connection refused")
+# ... but a retry line is not the same as never getting through.  pip prints one per failed attempt and goes
+# on; with two indexes configured, or one flaky request out of many, the run that ends with an answer carries
+# the warning too.  Only an index that answered can list the versions it has, so a "(from versions: ...)" that
+# is not "none" proves the question was asked and answered - and then the missing wheel is real, not the
+# network.  Both halves captured from pip 25 in this image, not from memory:
+#   --extra-index-url http://127.0.0.1:1/simple requests==99.99.99
+#     WARNING: Retrying (Retry(total=0, ...)) after connection broken by 'NewConnectionError(...
+#     ERROR: Could not find a version that satisfies the requirement requests==99.99.99 (from versions: 2.0.0, ... 2.34.2)
+#   PIP_INDEX_URL=https://127.0.0.1:1/simple requests==2.32.5
+#     WARNING: Retrying (Retry(total=0, ...)) after connection broken by 'NewConnectionError(...
+#     ERROR: Could not find a version that satisfies the requirement requests==2.32.5 (from versions: none)
+_PIP_ANSWERED_RE = re.compile(r"\(from versions: (?!none\))[^)\s]")
 _HA_VERSION_RE = re.compile(r"\d{4}\.\d{1,2}\.\d+(b\d+)?\Z")
 
 
@@ -1047,6 +1110,13 @@ def _pip_no_deps(python: str, requirements: list[str]) -> subprocess.CompletedPr
     """Blocking: resolve ``requirements`` one by one (no dependency graph),
     wheels only, installing nothing."""
     return _run_pip([python, *_PIP_NO_DEPS, *requirements])
+
+
+def _pip_unreachable(err: str) -> bool:
+    """Did this pip run fail because it never reached an index?  A retry line alone does not say so: a run
+    that retried once and then got its answer prints both, and reading that as "could not check" leaves an
+    update scheduled with no check behind it.  A version list the index returned settles it."""
+    return bool(_PIP_UNREACHABLE_RE.search(err)) and not _PIP_ANSWERED_RE.search(err)
 
 
 def _req_key(req: str) -> str:
@@ -1062,7 +1132,7 @@ def _ha_pins(python: str, version: str) -> tuple[list[str] | None, str]:
         return None, f"pip did not finish within {PIP_TIMEOUT_S}s"
     if proc.returncode != 0:
         err = proc.stderr.strip()
-        if _PIP_UNREACHABLE_RE.search(err):
+        if _pip_unreachable(err):
             return None, f"PyPI could not be reached: {_pip_reason(err)}"
         if (m := _NO_WHEEL_RE.search(err)) and _req_key(m.group(1)) == "homeassistant":
             return [], f"no such Home Assistant release on PyPI: {m.group(1)}"
@@ -1113,7 +1183,7 @@ def _ha_wheel_check(python: str, version: str) -> dict[str, Any]:
         if proc.returncode == 0:
             break
         err = proc.stderr.strip()
-        if _PIP_UNREACHABLE_RE.search(err):
+        if _pip_unreachable(err):
             out.update(checked=False, notes=[f"could not check Home Assistant {version}: PyPI could not be reached "
                                              f"({_pip_reason(err)})"])
             break

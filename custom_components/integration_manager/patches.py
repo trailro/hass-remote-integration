@@ -184,9 +184,11 @@ def _run(config_dir: str, domain: str, site_packages: str, component_dir: str, r
             if not applies:
                 # "skipped" used to be the whole answer, which is true of a patch that targets the
                 # integration's own files: a version change redeploys those, so a patch scoped out of the
-                # new version is simply gone.  A patch that edits an installed library is not: pip
-                # reinstalls nothing when the pin did not change, so the library stays patched while this
-                # page says the patch is not applied.  Ask before saying it.
+                # new version is simply gone - and if the new version happens to ship the same change
+                # itself, finding the hunks there says upstream fixed it, not that the patch is left
+                # behind.  A patch that edits an installed library is the other case: pip reinstalls
+                # nothing when the pin did not change, so the library stays patched while this page says
+                # the patch is not applied.  Only those are asked about.
                 left = _left_applied(name, path, text, ctx, domain, running_tag, site_packages, component_dir)
                 out.append({"name": name, "status": "skipped, still applied" if left else "skipped",
                             "detail": (why + "; the files it patched still carry it - reinstall that distribution "
@@ -209,13 +211,37 @@ def _run(config_dir: str, domain: str, site_packages: str, component_dir: str, r
     return out
 
 
+def _reaches_site_packages(name: str, text: str, ctx: PatchContext) -> bool:
+    """Does this patch touch a file outside the integration's own tree?
+
+    A unified diff says so: its paths are resolved the same way applying them resolves them, and one that
+    lands in site-packages is a file nothing redeploys.  A ``.py`` module does not declare what it edits,
+    so its ``# applies-to: <pip requirement>`` header is taken as the statement that it patches that
+    installed distribution - which is what such a module is for, and what makes the header worth writing.
+    Never raises: a diff that does not parse touches nothing that can be shown to be outside.
+    """
+    if name.endswith(".py"):
+        return bool(_APPLIES_RE.search(text))
+    site = ctx.site_packages.rstrip(os.sep) + os.sep
+    try:
+        files = parse_unified(text)
+    except Exception:  # noqa: BLE001
+        return False
+    return any((target := _resolve(fp.path, ctx)) is not None and target.startswith(site) for fp in files)
+
+
 def _left_applied(name: str, path: str, text: str, ctx: PatchContext, domain: str, running_tag: str | None,
                   site_packages: str, component_dir: str) -> bool:
     """Is a patch that no longer applies to this version still sitting in the files?
 
+    Only asked of a patch that reaches outside the integration: its own files come back with the version
+    change, so hunks still found in them are the new version's own code, not a leftover.
+
     Read-only, and never raises: a patch whose status cannot be computed (its module is broken, its
     target is gone) is reported as skipped, the way it was before.
     """
+    if not _reaches_site_packages(name, text, ctx):
+        return False
     try:
         if name.endswith(".py"):
             key = (path, domain, running_tag, site_packages, _mtime(path), _mtime(component_dir), _mtime(site_packages))

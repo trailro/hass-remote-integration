@@ -79,3 +79,47 @@ class ScopedPatchLeftBehindTest(unittest.TestCase):
         patches.apply_all(self.root, "demo", self.site, self.comp, "1.0.0")
         self._write(own, "a = 1\nb = 2\nc = 4\n")  # the version change put the file back
         self.assertEqual(self.rows("1.1.0")[0]["status"], "skipped")
+
+    # ----- R3-15 (fourth review): the same patch, and upstream shipped the fix ---------------------
+
+    def _own_file_patch(self, deployed):
+        """A patch of the integration's own mod.py, scoped to 1.0.0, against a 1.1.0 that ships `deployed`."""
+        self._write(os.path.join(self.comp, "mod.py"), deployed)
+        patch_dir = os.path.join(self.root, "integration_manager", "patches", "demo")
+        os.remove(os.path.join(patch_dir, "limit.patch"))
+        self._write(os.path.join(patch_dir, "own.patch"),
+                    "# integration-version: 1.0.0\n--- a/mod.py\n+++ b/mod.py\n@@ -1,3 +1,3 @@\n a = 1\n-b = 2\n+b = 3\n c = 4\n")
+        return self.rows("1.1.0")[0]
+
+    def test_an_upstream_fix_in_the_new_version_is_not_reported_as_left_behind(self):
+        """The new version of the integration simply contains the change: finding the hunks in its own
+        file says upstream fixed it, not that the deploy left the patch in.  Before the fix this said
+        "skipped, still applied" and the reconcile raised "Patches of demo no longer fit" every time."""
+        row = self._own_file_patch("a = 1\nb = 3\nc = 4\n")
+        self.assertEqual(row["status"], "skipped")
+        self.assertNotIn("reinstall that distribution", row["detail"])
+
+    def test_the_reconcile_says_nothing_about_it(self):
+        from custom_components.integration_manager.installer import Installer
+
+        self._own_file_patch("a = 1\nb = 3\nc = 4\n")
+        self.assertEqual(Installer._patch_summary(None, self.rows("1.1.0")), "applied",
+                         "nothing is wrong with it: before the fix, 'own.patch: skipped, still applied'")
+
+    def test_the_new_version_without_the_fix_is_still_just_skipped(self):
+        self.assertEqual(self._own_file_patch("a = 1\nb = 2\nc = 4\n")["status"], "skipped")
+
+    def test_a_library_patch_is_still_the_one_that_is_flagged(self):
+        """The distinction, not a blanket "never report": pip reinstalls nothing when the pin did not
+        change, so a patched site-packages file stays patched and the page must say so."""
+        patches.apply_all(self.root, "demo", self.site, self.comp, "1.0.0")
+        self.assertEqual(self.rows("1.1.0")[0]["status"], "skipped, still applied")
+
+    def test_a_patch_that_reaches_both_is_reported(self):
+        own = os.path.join(self.comp, "mod.py")
+        self._write(own, "a = 1\nb = 2\nc = 4\n")
+        patch_dir = os.path.join(self.root, "integration_manager", "patches", "demo")
+        self._write(os.path.join(patch_dir, "limit.patch"), SCOPED +
+                    "--- a/mod.py\n+++ b/mod.py\n@@ -1,3 +1,3 @@\n a = 1\n-b = 2\n+b = 3\n c = 4\n")
+        patches.apply_all(self.root, "demo", self.site, self.comp, "1.0.0")
+        self.assertEqual(self.rows("1.1.0")[0]["status"], "skipped, still applied")
