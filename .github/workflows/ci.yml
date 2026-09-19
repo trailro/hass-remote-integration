@@ -108,6 +108,9 @@ jobs:
       - name: Discovery payloads against the MQTT schemas
         run: sh verify.sh test
       - name: Unit tests
+        # one job of the matrix also checks the scripted pip answers against a real pip: once per run, not four times
+        env:
+          HRI_TEST_PYPI: ${{ matrix.arch == 'amd64' && matrix.ha == 'newest' && '1' || '0' }}
         run: sh verify.sh unit
       - name: Container log
         if: always()

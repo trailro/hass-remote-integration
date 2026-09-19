@@ -96,7 +96,8 @@ unit() {
   for f in tests jsonio.py backupkit.py logbuffer.py entrypoint.py run.py docker-compose.yml Dockerfile README.md; do docker cp -q "$f" "$NAME:$dir/" || return 1; done
   docker cp -q custom_components/integration_manager "$NAME:$dir/custom_components/" || return 1
   docker cp -q .github "$NAME:$dir/" || return 1  # the workflow guard tests (tests/test_r4_web.py) read it
-  docker exec -w "$dir" -e PYTHONPATH="$dir" -e PYTHONDONTWRITEBYTECODE=1 "$NAME" /config/venv-current/bin/python -m unittest discover -s tests -t .
+  # HRI_TEST_PYPI=1 adds the two tests that run a real pip against PyPI (off by default: the suite stays offline)
+  docker exec -w "$dir" -e PYTHONPATH="$dir" -e PYTHONDONTWRITEBYTECODE=1 -e HRI_TEST_PYPI="${HRI_TEST_PYPI:-0}" "$NAME" /config/venv-current/bin/python -m unittest discover -s tests -t .
 }
 
 case "${1:-}" in
