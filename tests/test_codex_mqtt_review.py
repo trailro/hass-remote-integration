@@ -81,6 +81,7 @@ class FirstEventTest(unittest.TestCase):
     def _occurrences(self, seq):
         pub = object.__new__(mp.MqttPublisher)
         pub._last_event = {}
+        pub.config, pub._connected = mp.MqttConfig(), False  # only the replay logic is under test: no discovery here
         published = []
         pub._publish_state = lambda state, is_event=False, force=True: published.append((state.state, is_event))
         for old, new in seq:
