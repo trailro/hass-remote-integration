@@ -347,6 +347,14 @@ class MqttConfig:
     # (entities you are still renaming or deleting stay there as zombies).
     discovery_enabled: bool = False
     discovery_prefix: str = "homeassistant"
+    # The Home Assistant version that consumes this discovery, e.g. "2026.4".
+    # Empty (the default) means "assume it is current": nothing is filtered and
+    # the payload is exactly what it always was.  Set, it makes discovery leave
+    # out what that version cannot parse - a platform or a device class it does
+    # not know fails its validation and costs the WHOLE device its entities
+    # there.  Discovery is one-way and the birth message carries no version, so
+    # the container cannot find this out: the operator declares it.
+    main_ha_version: str = ""
     # The manager as a device on the consuming HA (health, updates, resources)
     # even while entity discovery is off, e.g. in shadow mode; manager_commands
     # lets that HA install updates, restart and back up through it.
@@ -524,12 +532,18 @@ class MqttPublisher:
             "discovery_components": 0,
             "discovery_mirrored": 0,
             "discovery_disabled": 0,
+            "discovery_collisions": 0,
+            "discovery_default_id_duplicates": 0,
+            # left out because main_ha_version is older than what the entity carries
+            "discovery_compat_device_classes_dropped": 0,
+            "discovery_compat_platforms_mirrored": 0,
             "services_published": 0,
             "commands": 0,
             "last_command": None,
             "calls": 0,
             "last_call": None,
         }
+        self._compat_warned: set[str] = set()  # each device class / platform left out for main_ha_version is logged once
         # discovery_id -> {entity_id: component}; what we last published per device
         self._discovery_map: dict[str, dict[str, dict[str, Any]]] = {}
         self._services_published: set[str] = set()
@@ -640,6 +654,10 @@ class MqttPublisher:
             default = MqttConfig.__dataclass_fields__[name].default
             _LOGGER.warning("MQTT: %s=%r in %s is not usable: using %s", name, out[name], self.path, default)
             out[name] = default
+        if out.get("main_ha_version") and disc.parse_ha_version(out["main_ha_version"]) is None:
+            _LOGGER.warning("MQTT: main_ha_version=%r in %s is not a Home Assistant version: assuming the main "
+                            "Home Assistant is current (nothing is left out of discovery)", out["main_ha_version"], self.path)
+            out["main_ha_version"] = ""
         if out.get("ca_certs"):
             # a restored or hand-edited file is held to the directory a save allows (a file missing for now stays:
             # the connection names it, and the next save must not drop the setting); without it a private broker
@@ -695,6 +713,12 @@ class MqttPublisher:
                 if not isinstance(v, str):
                     raise ValueError("ca_certs must be a string")
                 v = self._ca_certs_path(v.strip())
+            elif k == "main_ha_version":
+                if not isinstance(v, str):
+                    raise ValueError("main_ha_version must be a string")
+                v = v.strip()
+                if v and disc.parse_ha_version(v) is None:
+                    raise ValueError("main_ha_version must be a Home Assistant version like 2026.8, or empty")
             elif k in INT_BOUNDS:
                 try:
                     v = int(v)
@@ -961,6 +985,8 @@ class MqttPublisher:
         # no retained "offline" on a status topic we just cleared
         await self.hass.async_add_executor_job(self._disconnect, not moved)
         self._moving = False
+        if new.main_ha_version != self.config.main_ha_version:
+            self._compat_warned.clear()  # a new declared version must say again what it leaves out
         self.config = new
         if getattr(self, "_republish_interval", None) != new.republish_interval_s:
             self._arm_republish_timer()
@@ -2270,7 +2296,10 @@ class MqttPublisher:
         without a state (disabled) are included as enabled_by_default=false."""
         ent_reg = er.async_get(self.hass)
         groups: dict[str, tuple[dict[str, Any], dict[str, dict[str, Any]]]] = {}
-        counts = {"mirrored": 0, "disabled": 0, "collisions": 0, "default_id_duplicates": 0}
+        counts = {"mirrored": 0, "disabled": 0, "collisions": 0, "default_id_duplicates": 0,
+                  "compat_device_classes": 0, "compat_platforms": 0}
+        # None unless main_ha_version is set: then the payload is byte-for-byte what it was before the setting existed
+        compat = disc.compat_for(self.config.main_ha_version)
         seen: set[str] = set()
         keys: dict[tuple[str, str], str] = {}  # (discovery id, component key) -> the entity that has it
         defaults: dict[str, str] = {}  # default_entity_id -> the first entity that asks for it
@@ -2309,7 +2338,7 @@ class MqttPublisher:
                 continue
             doc_topic = self._topic_for(state.entity_id, integration)
             try:
-                comp = self.rules.apply_component(disc.build_component(self.hass, state, doc_topic, self._cmd_base(), self.prefix), rule)
+                comp = self.rules.apply_component(disc.build_component(self.hass, state, doc_topic, self._cmd_base(), self.prefix, compat), rule)
             except Exception as err:  # noqa: BLE001 - one bad attribute must not drop discovery of every device
                 _LOGGER.warning("MQTT discovery: %s skipped: %s", state.entity_id, err)
                 continue
@@ -2328,7 +2357,7 @@ class MqttPublisher:
                 continue
             doc_topic = self._topic_for(entry.entity_id, entry.platform)
             try:
-                comp = self.rules.apply_component(disc.build_component_from_entry(self.hass, entry, doc_topic, self._cmd_base(), self.prefix), rule)
+                comp = self.rules.apply_component(disc.build_component_from_entry(self.hass, entry, doc_topic, self._cmd_base(), self.prefix, compat), rule)
             except Exception as err:  # noqa: BLE001 - one bad attribute must not drop discovery of every device
                 _LOGGER.warning("MQTT discovery: %s skipped: %s", entry.entity_id, err)
                 continue
@@ -2338,11 +2367,33 @@ class MqttPublisher:
                 counts["mirrored"] += 1
             disc_id, block = disc.device_block(self.hass, entry.device_id, entry.platform, self.prefix)
             add(disc_id, block, entry.entity_id, comp)
+        if compat is not None:
+            counts["compat_device_classes"] = compat.device_class_drops
+            counts["compat_platforms"] = compat.platform_drops
+            self._warn_compat(compat)
         return groups, counts
+
+    def _warn_compat(self, compat: disc.Compat) -> None:
+        """Once per thing left out: the setting is silent otherwise, and an
+        operator who declared the wrong version would never see why an entity
+        lost its device class or arrived as a sensor."""
+        for key, n in sorted(compat.dropped_device_classes.items()):
+            if key in self._compat_warned:
+                continue
+            self._compat_warned.add(key)
+            _LOGGER.info("MQTT discovery: device class %s is left out of %s entity/entities: Home Assistant %s "
+                         "(main_ha_version) does not know it", key, n, self.config.main_ha_version)
+        for domain, n in sorted(compat.mirrored_platforms.items()):
+            if domain in self._compat_warned:
+                continue
+            self._compat_warned.add(domain)
+            _LOGGER.info("MQTT discovery: %s %s entity/entities are announced as sensors: Home Assistant %s "
+                         "(main_ha_version) has no MQTT %s platform", n, domain, self.config.main_ha_version, domain)
 
     def _rule_components(self, pattern: str) -> list[tuple[str, dict[str, Any]]]:
         """(entity_id, component as announced without rules) of the entities a rule pattern matches now."""
         ent_reg = er.async_get(self.hass)
+        compat = disc.compat_for(self.config.main_ha_version)
         out, seen = [], set()
         for state in self.hass.states.async_all():
             seen.add(state.entity_id)
@@ -2353,7 +2404,7 @@ class MqttPublisher:
                 continue
             try:
                 out.append((state.entity_id, disc.build_component(self.hass, state, self._topic_for(state.entity_id, integration),
-                                                                  self._cmd_base(), self.prefix)))
+                                                                  self._cmd_base(), self.prefix, compat)))
             except Exception:  # noqa: BLE001 - not announced at all (see _group_by_device): nothing to fit
                 continue
         for entry in list(ent_reg.entities.values()):
@@ -2361,7 +2412,7 @@ class MqttPublisher:
                 continue
             try:
                 out.append((entry.entity_id, disc.build_component_from_entry(self.hass, entry, self._topic_for(entry.entity_id, entry.platform),
-                                                                             self._cmd_base(), self.prefix)))
+                                                                             self._cmd_base(), self.prefix, compat)))
             except Exception:  # noqa: BLE001
                 continue
         return out
@@ -2475,6 +2526,8 @@ class MqttPublisher:
         self.stats["discovery_collisions"] = counts.get("collisions", 0)
         self.stats["discovery_default_id_duplicates"] = counts.get("default_id_duplicates", 0)
         self.stats["discovery_disabled"] = counts["disabled"]
+        self.stats["discovery_compat_device_classes_dropped"] = counts.get("compat_device_classes", 0)
+        self.stats["discovery_compat_platforms_mirrored"] = counts.get("compat_platforms", 0)
 
     def _clear_stale_docs(self) -> int:
         """Blocking: retained entity documents of ours under <base>/ that this
@@ -3232,6 +3285,7 @@ class MqttPublisher:
             ),
             "discovery_enabled": self.config.discovery_enabled,
             "discovery_prefix": self.config.discovery_prefix,
+            "main_ha_version": self.config.main_ha_version,
             "manager_discovery": self.config.manager_discovery,
             "manager_commands": self.config.manager_commands,
             "manager_topic": self._manager_topic() if named else None,

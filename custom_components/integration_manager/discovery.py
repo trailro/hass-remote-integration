@@ -22,7 +22,10 @@ calls (any integration) arrive on ``<base>/call/<domain>/<service>``.
 
 from __future__ import annotations
 
+import logging
 import math
+import os
+import re
 
 import json
 from typing import Any
@@ -30,6 +33,8 @@ from typing import Any
 from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+
+_LOGGER = logging.getLogger(__name__)
 
 ORIGIN = {
     "name": "hass-remote-integration",
@@ -51,6 +56,124 @@ NATIVE = {
 
 # Platforms that never get a state topic (command-only).
 _COMMAND_ONLY = {"button", "scene", "notify"}
+
+
+# ----- what the main Home Assistant understands -------------------------
+# The main HA validates a discovery payload strictly: it ignores a key it does
+# not know, but an unknown platform or an unknown device class fails validation
+# and it then throws away the WHOLE device payload - every entity of that
+# device is gone there, and only its own log says why.  Discovery is one-way
+# and its birth message carries no version, so the operator declares the main
+# HA's version (MqttConfig.main_ha_version) and what that version cannot parse
+# is left out here.  ha_compat.json says when each platform and each device
+# class appeared; tools/gen_ha_compat.py generates it from the wheels.
+
+COMPAT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ha_compat.json")
+
+# 2026.8, 2026.8.3, 2026.9.0b0: a Home Assistant calendar version, patch and pre-release suffix optional.
+_VERSION_RE = re.compile(r"^(\d{4})\.(\d{1,2})(?:\.\d+(?:[ab]\d+)?)?$")
+
+_COMPAT_TABLE: dict[str, Any] | None = None
+
+
+def parse_ha_version(value: Any) -> tuple[int, int] | None:
+    """(year, month) of a Home Assistant version string, None for anything
+    that is not one: the table is keyed by release, patches never differ."""
+    if not isinstance(value, str):
+        return None
+    match = _VERSION_RE.match(value.strip())
+    return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+def compat_table() -> dict[str, Any]:
+    """ha_compat.json, read once.  A missing or damaged file means no table,
+    which means no filtering: the payload is what it has always been."""
+    global _COMPAT_TABLE
+    if _COMPAT_TABLE is None:
+        try:
+            with open(COMPAT_FILE, encoding="utf-8") as handle:
+                table = json.load(handle)
+            if not isinstance(table, dict) or "platforms" not in table:
+                raise ValueError("no platform table")
+        except (OSError, ValueError) as err:
+            _LOGGER.warning("MQTT discovery: %s is unusable (%s): nothing is filtered for an older main Home Assistant",
+                            COMPAT_FILE, err)
+            table = {"generated": {}, "platforms": {}, "device_classes": {}, "removed": {}}
+        _COMPAT_TABLE = table
+    return _COMPAT_TABLE
+
+
+class Compat:
+    """One discovery pass against one declared main Home Assistant: answers
+    what that version knows, and counts what was left out because of it."""
+
+    def __init__(self, release: tuple[int, int], table: dict[str, Any]) -> None:
+        self.release = release
+        self._platforms = table.get("platforms") or {}
+        self._device_classes = table.get("device_classes") or {}
+        removed = table.get("removed") or {}
+        self._platforms_removed = removed.get("platforms") or {}
+        self._device_classes_removed = removed.get("device_classes") or {}
+        # "sensor.radon" / "date" -> how many entities it cost this pass
+        self.dropped_device_classes: dict[str, int] = {}
+        self.mirrored_platforms: dict[str, int] = {}
+
+    @property
+    def device_class_drops(self) -> int:
+        return sum(self.dropped_device_classes.values())
+
+    @property
+    def platform_drops(self) -> int:
+        return sum(self.mirrored_platforms.values())
+
+    def _known(self, first: Any, removed: Any) -> bool:
+        since = parse_ha_version(first)
+        if since is None or self.release < since:
+            return False
+        gone = parse_ha_version(removed)
+        return gone is None or self.release < gone
+
+    def knows_platform(self, domain: str) -> bool:
+        return self._known(self._platforms.get(domain), self._platforms_removed.get(domain))
+
+    def knows_device_class(self, domain: str, value: str) -> bool:
+        """A domain the table has nothing for is left alone (no data is not
+        "unknown"); inside a domain it has, a name that is not there is one no
+        scanned Home Assistant up to the declared version has ever had."""
+        known = self._device_classes.get(domain)
+        if known is None:
+            return True
+        return self._known(known.get(value), (self._device_classes_removed.get(domain) or {}).get(value))
+
+    def note_platform(self, domain: str) -> None:
+        self.mirrored_platforms[domain] = self.mirrored_platforms.get(domain, 0) + 1
+
+    def note_device_class(self, domain: str, value: str) -> None:
+        key = f"{domain}.{value}"
+        self.dropped_device_classes[key] = self.dropped_device_classes.get(key, 0) + 1
+
+
+def compat_for(version: Any) -> Compat | None:
+    """The filter for a declared main Home Assistant version, or None when
+    nothing has to be filtered - no version declared (the default: assume the
+    main HA is current), a value that is not a version, or a version at or
+    above the newest release the table was generated from, which knows
+    everything the table knows about.  None means the payload is built exactly
+    as it was before this setting existed."""
+    release = parse_ha_version(version)
+    if release is None:
+        return None
+    table = compat_table()
+    newest = parse_ha_version((table.get("generated") or {}).get("newest"))
+    if newest is None or release >= newest:
+        return None
+    oldest = parse_ha_version((table.get("generated") or {}).get("oldest"))
+    if oldest is not None and release < oldest:
+        # Below the table's floor there is no data.  Device-based discovery
+        # needs 2024.11 anyway, so such a main HA receives nothing at all;
+        # the floor of the table is the closest honest answer.
+        release = oldest
+    return Compat(release, table)
 
 
 def _tpl(expr: str) -> str:
@@ -153,23 +276,40 @@ def _common(entry: er.RegistryEntry | None, state: State, doc_topic: str, prefix
     return comp
 
 
-def _device_class(entry: er.RegistryEntry | None, attrs: dict[str, Any]) -> str | None:
+def _device_class(entry: er.RegistryEntry | None, attrs: dict[str, Any],
+                  domain: str | None = None, compat: Compat | None = None) -> str | None:
+    """The source entity's device class, or None when the declared main Home
+    Assistant does not know it: the entity is still announced, without a class,
+    instead of the unknown value costing the whole device its payload."""
     if entry and (entry.device_class or entry.original_device_class):
-        return entry.device_class or entry.original_device_class
-    return attrs.get("device_class")
+        value = entry.device_class or entry.original_device_class
+    else:
+        value = attrs.get("device_class")
+    if value and compat is not None and domain and not compat.knows_device_class(domain, value):
+        compat.note_device_class(domain, value)
+        return None
+    return value
 
 
 def build_component(
-    hass: HomeAssistant, state: State, doc_topic: str, cmd_base: str, prefix: str
+    hass: HomeAssistant, state: State, doc_topic: str, cmd_base: str, prefix: str, compat: Compat | None = None
 ) -> dict[str, Any]:
     """Return the discovery component for one entity (never None: unmapped
-    domains fall back to a read-only sensor mirror)."""
+    domains fall back to a read-only sensor mirror).  `compat` is the declared
+    main Home Assistant (:func:`compat_for`); None filters nothing."""
     domain, object_id = state.entity_id.split(".", 1)
     entry = er.async_get(hass).async_get(state.entity_id)
     attrs = dict(state.attributes)
     cmd = f"{cmd_base}/{domain}/{object_id}"
 
     if domain not in NATIVE:
+        return _mirror_as_sensor(entry, state, doc_topic, prefix)
+    if compat is not None and not compat.knows_platform(domain):
+        # date/time/datetime got their MQTT platforms in 2026.5: on an older
+        # main HA the platform name alone invalidates the device payload.  The
+        # sensor mirror is what that path is for - the entity still arrives,
+        # read-only.
+        compat.note_platform(domain)
         return _mirror_as_sensor(entry, state, doc_topic, prefix)
 
     comp = _common(entry, state, doc_topic, prefix)
@@ -186,14 +326,14 @@ def build_component(
                 comp[key] = attrs[key]
         if entry and entry.unit_of_measurement:
             comp["unit_of_measurement"] = entry.unit_of_measurement
-        if dc := _device_class(entry, attrs):
+        if dc := _device_class(entry, attrs, domain, compat):
             comp["device_class"] = dc
         if dc == "enum" and attrs.get("options"):
             comp["options"] = list(attrs["options"])
 
     elif domain == "binary_sensor":
         comp.update({"value_template": _STATE_TPL, "payload_on": "on", "payload_off": "off"})
-        if dc := _device_class(entry, attrs):
+        if dc := _device_class(entry, attrs, domain, compat):
             comp["device_class"] = dc
 
     elif domain == "climate":
@@ -289,7 +429,7 @@ def build_component(
             {"value_template": _STATE_TPL, "payload_on": "on", "payload_off": "off",
              "state_on": "on", "state_off": "off", "command_topic": f"{cmd}/state"}
         )
-        if dc := _device_class(entry, attrs):
+        if dc := _device_class(entry, attrs, domain, compat):
             comp["device_class"] = dc
 
     elif domain == "select":
@@ -304,7 +444,7 @@ def build_component(
             comp["unit_of_measurement"] = attrs["unit_of_measurement"]
         if attrs.get("mode") in ("box", "slider", "auto"):
             comp["mode"] = attrs["mode"]
-        if dc := _device_class(entry, attrs):
+        if dc := _device_class(entry, attrs, domain, compat):
             comp["device_class"] = dc
 
     elif domain == "light":
@@ -356,7 +496,7 @@ def build_component(
         if supports(1 | 2 | 8):
             comp["command_topic"] = f"{cmd}/command"
             comp.update({key: payload if supports(bit) else None for key, (payload, bit) in moves.items()})
-        if dc := _device_class(entry, attrs):
+        if dc := _device_class(entry, attrs, domain, compat):
             comp["device_class"] = dc
         if attrs.get("current_position") is not None:
             comp.update({"position_topic": doc_topic, "position_template": _attr_or_empty('current_position')})
@@ -378,7 +518,7 @@ def build_component(
             {"value_template": _STATE_TPL, "command_topic": f"{cmd}/command",
              "payload_open": "OPEN", "payload_close": "CLOSE", "payload_stop": "STOP"}
         )
-        if dc := _device_class(entry, attrs):
+        if dc := _device_class(entry, attrs, domain, compat):
             comp["device_class"] = dc
         if attrs.get("current_position") is not None:
             # a position-reporting valve may not carry open/close payloads
@@ -432,7 +572,7 @@ def build_component(
 
     elif domain == "button":
         comp.update({"command_topic": f"{cmd}/press", "payload_press": "PRESS"})
-        if dc := _device_class(entry, attrs):
+        if dc := _device_class(entry, attrs, domain, compat):
             comp["device_class"] = dc
 
     elif domain == "scene":
@@ -449,7 +589,7 @@ def build_component(
             {"event_types": list(attrs.get("event_types") or ["unknown"]),
              "value_template": _tpl("{'event_type': value_json.attributes.get('event_type')} | to_json")}
         )
-        if dc := _device_class(entry, attrs):
+        if dc := _device_class(entry, attrs, domain, compat):
             comp["device_class"] = dc
 
     elif domain == "text":
@@ -487,7 +627,7 @@ def build_component(
                 "max_humidity": _num(attrs.get("max_humidity"), 100),
             }
         )
-        if dc := _device_class(entry, attrs):
+        if dc := _device_class(entry, attrs, domain, compat):
             comp["device_class"] = dc
         if attrs.get("available_modes"):
             comp.update(
@@ -523,7 +663,7 @@ def build_component(
                 "payload_install": "install",
             }
         )
-        if dc := _device_class(entry, attrs):
+        if dc := _device_class(entry, attrs, domain, compat):
             comp["device_class"] = dc
 
     elif domain == "device_tracker":
@@ -614,7 +754,8 @@ def _mirror_as_sensor(entry: er.RegistryEntry | None, state: State, doc_topic: s
 
 
 def build_component_from_entry(
-    hass: HomeAssistant, entry: er.RegistryEntry, doc_topic: str, cmd_base: str, prefix: str
+    hass: HomeAssistant, entry: er.RegistryEntry, doc_topic: str, cmd_base: str, prefix: str,
+    compat: Compat | None = None,
 ) -> dict[str, Any]:
     """Component for a registry entry that has no state (disabled, or not
     yet added by its integration): built from the registry's capabilities
@@ -625,7 +766,7 @@ def build_component_from_entry(
     if entry.unit_of_measurement:
         attrs["unit_of_measurement"] = entry.unit_of_measurement
     state = State(entry.entity_id, "unknown", attrs, validate_entity_id=False)
-    comp = build_component(hass, state, doc_topic, cmd_base, prefix)
+    comp = build_component(hass, state, doc_topic, cmd_base, prefix, compat)
     # "no state yet" is not "disabled": the registry loads before the
     # integration adds its entities, and the consumer only honours
     # enabled_by_default at first creation.
