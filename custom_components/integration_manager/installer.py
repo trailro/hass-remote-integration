@@ -271,6 +271,9 @@ def track_delayed_stores() -> None:
 
 
 class Installer:
+    # set by ManagerDevice.__init__ (manager_device.py); None while there is none, which the watchdog allows for
+    manager: Any = None
+
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
         self.config_dir = hass.config.config_dir
@@ -2033,9 +2036,9 @@ class Installer:
         def take_back(data: Any) -> dict[str, Any] | None:
             # not the run.py process (a test, or HA started some other way): no stop listener to share with
             if isinstance(data, dict) and data.get("boot_failures"):
-                try:
+                try:  # json.load spells Infinity and NaN, and int() converts neither
                     count = int(data["boot_failures"])
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     return None  # written by hand: entrypoint.py reads it as 0 anyway
                 return {**data, "boot_failures": max(0, count - 1)}
             return None  # unreadable, or nothing to take back: left alone
@@ -2058,13 +2061,17 @@ class Installer:
     def watchdog_record(self) -> dict[str, Any]:
         """The persisted watchdog record, normalised (state.json can be edited by hand)."""
         rec = self.state.watchdog if isinstance(self.state.watchdog, dict) else {}
-        cut = time.time() - self.WATCHDOG_DAY_S
+        now = time.time()
+        cut = now - self.WATCHDOG_DAY_S
         runs = [float(t) for t in (rec.get("restarts") or []) if isinstance(t, (int, float)) and not isinstance(t, bool)]
-        try:
+        try:  # json.load spells Infinity and NaN, and int() converts neither
             attempts = max(0, int(rec.get("attempts") or 0))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             attempts = 0
-        return {"restarts": sorted(t for t in runs if t > cut), "attempts": attempts,
+        # A restart stamped past the end of the window it is counted in was written by a clock that was ahead (an
+        # NTP correction since): it is no more "a restart in the last 24 h" than one from last week, and left in
+        # it blocked every automatic restart until real time caught up.  NaN fails both comparisons and goes too.
+        return {"restarts": sorted(t for t in runs if cut < t <= now + self.WATCHDOG_DAY_S), "attempts": attempts,
                 "last": rec.get("last") if isinstance(rec.get("last"), dict) else None,
                 "gave_up": str(rec.get("gave_up") or ""),
                 "announced": str(rec.get("announced") or "")}
@@ -2090,7 +2097,11 @@ class Installer:
             return (f"{len(rec['restarts'])} automatic restarts in the last 24 h is the maximum "
                     f"({cfg['max_per_day']}/day)"), True
         if rec["restarts"]:
-            wait = cfg["min_interval_min"] * 60 - (now - rec["restarts"][-1])
+            # the same clamp as ManagerDevice._limit_wait: a timestamp further ahead than one interval cannot be
+            # right (a clock that was off, corrected since) and limits nothing, and the wait never exceeds the
+            # interval - an hour ahead must not answer "43261 min to go" and block every restart until then
+            interval, last = cfg["min_interval_min"] * 60, rec["restarts"][-1]
+            wait = min(interval, interval - (now - last)) if interval and last <= now + interval else 0
             if wait > 0:
                 return f"the last automatic restart was less than {cfg['min_interval_min']} min ago ({int(wait / 60) + 1} min to go)", False
         if rec["gave_up"]:

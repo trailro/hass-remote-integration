@@ -140,6 +140,7 @@ class Scheduler:
         on a tick that is not going to act anyway).  ``busy`` covers an install,
         start, stop, import, restore, backup, full rollback -- and a restart that
         is already taking the process down, which sets it and never clears it."""
+        from . import preflight
         from .views import _ha_change_lock_taken
         from .import_views import _IMPORT_LOCK
 
@@ -157,6 +158,17 @@ class Scheduler:
             return "a Home Assistant version change, a restore or a full rollback is being prepared"
         if _IMPORT_LOCK.locked():
             return "an import or upload from a Home Assistant backup is running"
+        # A preflight sets no `busy` and takes minutes (a pip resolution), and an integration in error is exactly
+        # when an operator starts another version: the restart it asked for would vanish, unanswered.
+        if preflight.LOCK.locked():
+            return "a preflight of an integration version is running"
+        if preflight._HA_LOCK.locked():  # noqa: SLF001
+            return "a Home Assistant preflight is running"
+        manager = getattr(inst, "manager", None)
+        # a manager action from MQTT owes the consumer a manager/result; one hung past ACTION_MAX_S does not
+        # (_action_held says so), and a stuck process is what the watchdog is for
+        if manager is not None and manager._action_held() is not None:  # noqa: SLF001
+            return f"a manager action is running ({manager._running})"  # noqa: SLF001
         if inst.smoke.get("pending") or inst.state.pending_smoke:
             return "a smoke test is pending: its verdict decides, not the watchdog"
         if inst.state.pending_start:
