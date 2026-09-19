@@ -264,6 +264,37 @@ def publisher_components(main_ha_version):
     return {eid: comp for _block, comps in groups.values() for eid, comp in comps.items()}
 
 
+class EntitiesPageAgreesTest(unittest.TestCase):
+    """The Entities page marks a date/time/datetime entity as needing a newer main Home Assistant, and the
+    mark is gated on the row saying `native`.  With a version declared, those entities are published as
+    sensor mirrors instead - so the page has to say `mirror` there, or it would tell the operator to exclude
+    an entity the setting has already taken care of."""
+
+    def rows(self, main_ha_version):
+        from custom_components.integration_manager import entities_page
+
+        tmp = tempfile.mkdtemp()
+        pub = make_publisher(main_ha_version, tmp)
+        hass = SimpleNamespace(states=SimpleNamespace(async_all=lambda: list(STATES.values())),
+                               data={}, config=SimpleNamespace(config_dir=tmp))
+        registry = Registry(*STATES)
+        with mock.patch.object(er, "async_get", return_value=registry), \
+                mock.patch.object(mp, "platform_of", return_value="demo"), \
+                mock.patch.object(entities_page, "platform_of", return_value="demo"):
+            return {r["entity_id"]: r for r in entities_page.entity_rows(hass, pub)}
+
+    def test_a_date_entity_reads_native_when_no_version_is_declared(self):
+        self.assertEqual(self.rows("")["date.next_service"]["discovery"], "native")
+
+    def test_it_reads_mirror_once_a_version_without_that_platform_is_declared(self):
+        self.assertEqual(self.rows("2026.4")["date.next_service"]["discovery"], "mirror")
+
+    def test_an_always_mappable_domain_is_unaffected(self):
+        for version in ("", "2026.4"):
+            with self.subTest(version=version):
+                self.assertEqual(self.rows(version)["sensor.meter"]["discovery"], "native")
+
+
 class CountersTest(unittest.TestCase):
     """The setting must be visible: GET /api/mqtt/status counts what it left out, next to the other discovery counts."""
 

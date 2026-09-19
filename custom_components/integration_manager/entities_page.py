@@ -25,6 +25,7 @@ ENTITIES_HTML = load_template("entities")
 def entity_rows(hass: HomeAssistant, publisher: MqttPublisher) -> list[dict[str, Any]]:
     """Every entity with a state (the publisher's document, plus topic and
     discovery flag) and every registry entry without one (disabled)."""
+    compat = disc.compat_for(publisher.config.main_ha_version)  # None unless a main HA version is declared
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     for state in hass.states.async_all():
@@ -60,7 +61,11 @@ def entity_rows(hass: HomeAssistant, publisher: MqttPublisher) -> list[dict[str,
         if not doc.get("name"):  # zone climates carry the name only as friendly_name
             doc["name"] = state.attributes.get("friendly_name")
         doc["mqtt_topic"] = topic
-        doc["discovery"] = "native" if doc["domain"] in disc.NATIVE else "mirror"
+        # the same decision the publisher makes, main_ha_version included: a domain whose MQTT platform the
+        # declared main Home Assistant does not have is published as a sensor mirror, and the page has to say
+        # so - otherwise it marks an entity as needing a newer main HA that the setting has already handled
+        doc["discovery"] = ("native" if doc["domain"] in disc.NATIVE
+                            and (compat is None or compat.knows_platform(doc["domain"])) else "mirror")
         doc.setdefault("mqtt_rule", {})
         rows.append(doc)
 
