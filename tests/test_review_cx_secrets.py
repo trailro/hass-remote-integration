@@ -135,6 +135,33 @@ class EntityCommandErrorTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("neither an on nor an off payload", pub.recent_commands()[0]["error"])
 
 
+class RawLogRecordTest(unittest.TestCase):
+    """The history and the pages are masked; the container's own stdout was not.
+
+    `docker logs` is what somebody pastes into an issue when the UI is the thing that is broken, so the
+    log record itself carries the masked text now, not only what the Logs page renders.
+    """
+
+    def test_the_log_line_of_a_failed_call_is_masked(self):
+        line = mp._scrubbed("ValueError: authentication failed: password=SNTL-7f3a9c41")
+        self.assertNotIn("SNTL-7f3a9c41", line)
+        self.assertIn("ValueError", line)
+
+    def test_a_bearer_token_in_an_exception_is_masked_too(self):
+        self.assertNotIn("SNTL-7f3a9c41", mp._scrubbed("RuntimeError: Authorization: Bearer SNTL-7f3a9c41"))
+
+    def test_an_ordinary_failure_is_left_alone(self):
+        for text in ("ValueError: unknown service light.foo", "TimeoutError: timeout after 60s",
+                     "RuntimeError: cancelled by the service handler"):
+            with self.subTest(text=text):
+                self.assertEqual(mp._scrubbed(text), text)
+
+    def test_a_scrubber_that_fails_never_costs_a_log_line(self):
+        with mock.patch("custom_components.integration_manager.diagnostics.scrub_text",
+                        side_effect=RuntimeError("boom")):
+            self.assertEqual(mp._scrubbed("plain text"), "plain text")
+
+
 class HistoryResultTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_result_is_still_dropped(self):

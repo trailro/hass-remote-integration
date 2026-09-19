@@ -34,7 +34,9 @@ from plain HTTP traffic. These are:
 - secrets (MQTT password, GitHub token, the main Home Assistant's token,
   backup encryption keys) exposed through the API, the logs, the timeline, the
   diagnostics zip, the UI or what is published over MQTT (an entity's
-  `access_token`, or a URL carrying a token in a document); the log searches run on the masked text and a
+  `access_token`, or a URL carrying a token in a document, in what `GET /api/entities` answers for a
+  published or an excluded entity alike, and in the error an integration's own exception puts in the
+  command history or the log); the log searches run on the masked text and a
   search for key material returns nothing by design, but redaction of material
   that carries no marker and no name in front of it is best effort — a report
   needs a case where something the scrubber does name comes out unmasked. A

@@ -332,6 +332,22 @@ def _call_key(domain: str, service: str, call_id: Any) -> str:
     return f"{domain}.{service}:{json.dumps(call_id, sort_keys=True, default=str)}"
 
 
+def _scrubbed(text: str) -> str:
+    """A service's own exception text, masked the way a log line is.
+
+    `recent_commands` masks what the UI and the API show, and the Logs page and the diagnostics zip
+    scrub what they display - but the record that reaches the container's own stdout goes through none
+    of them, and `docker logs` output is what ends up in an issue.  Deferred import: diagnostics imports
+    this module.
+    """
+    try:
+        from .diagnostics import scrub_text
+
+        return scrub_text(text)
+    except Exception:  # noqa: BLE001 - a log line must never be the reason something fails
+        return text
+
+
 def _call_id_problem(call_id: Any) -> str | None:
     """Why this _id is refused, None when it fits.  It is held for DEDUP_WINDOW_S in the dedup map, kept in the
     command history and echoed in every result and every /api/mqtt/commands poll, so its size is capped once,
@@ -1827,7 +1843,9 @@ class MqttPublisher:
                 error = f"{type(err).__name__}: {err}"
                 if secret:
                     error = error.replace(secret, "***")  # text's own ValueError quotes the value
-                _LOGGER.error("MQTT command %s -> %s.%s failed: %s", msg.topic, svc_domain, service, error)
+                # what a third party's exception says is free-form text: the Logs page and the diagnostics
+                # zip scrub it on the way out, but `docker logs` does not, and that is what people paste
+                _LOGGER.error("MQTT command %s -> %s.%s failed: %s", msg.topic, svc_domain, service, _scrubbed(error))
                 finish("late-error" if late else "error", error)
 
         self.hass.loop.call_soon_threadsafe(lambda: self.hass.async_create_task(_call()))
@@ -2232,7 +2250,8 @@ class MqttPublisher:
                 _LOGGER.warning("MQTT call %s.%s was cancelled by the handler", domain, service)
             except Exception as err:  # noqa: BLE001 - reported to the caller
                 result = {**base, "ok": False, "error": f"{type(err).__name__}: {err}"}
-                _LOGGER.warning("MQTT call %s.%s failed: %s", domain, service, str(err).replace(secret, "***") if secret else err)
+                _LOGGER.warning("MQTT call %s.%s failed: %s", domain, service,
+                                _scrubbed(str(err).replace(secret, "***") if secret else str(err)))
             if late:
                 result["late"] = True
             self._publish_result(domain, service, result)
