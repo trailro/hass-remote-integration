@@ -71,6 +71,7 @@ class ProtocolTest(unittest.TestCase):
         client = pub._new_client(BASE)
         client.publish = mock.Mock()
         client.subscribe = mock.Mock(return_value=(0, 1))
+        pub._client = client  # _connect records it before paho's thread starts, and the callbacks answer for it
         pub._on_connect(client, None, None, 0, SimpleNamespace(ReceiveMaximum=5))
         self.assertEqual(replaced, [client])
         client.publish.assert_not_called()
@@ -79,6 +80,7 @@ class ProtocolTest(unittest.TestCase):
         again = pub._new_client(BASE)
         self.assertEqual(again.max_inflight_messages, 5)
         again.publish, again.subscribe = mock.Mock(), mock.Mock(return_value=(0, 1))
+        pub._client = again  # the replacement is the current one now
         pub._on_connect(again, None, None, 0, SimpleNamespace(ReceiveMaximum=5))  # the window fits now
         self.assertEqual(replaced, [client])
         self.assertTrue(pub._connected)
@@ -87,6 +89,7 @@ class ProtocolTest(unittest.TestCase):
         pub = self._pub()
         client = pub._new_client(BASE)
         client.publish, client.subscribe = mock.Mock(), mock.Mock(return_value=(0, 1))
+        pub._client = client  # _connect records it before paho's thread starts, and the callbacks answer for it
         pub._on_connect(client, None, None, 0, SimpleNamespace())
         (topics,), _ = client.subscribe.call_args
         self.assertEqual({t for t, _o in topics}, {f"{BASE}/cmd/#", f"{BASE}/call/#", f"{BASE}/manager/cmd/+"})
@@ -100,6 +103,7 @@ class ProtocolTest(unittest.TestCase):
         pub = self._pub()
         client = pub._new_client(BASE)
         client.publish, client.subscribe = mock.Mock(), mock.Mock(return_value=(0, 1))
+        pub._client = client  # _connect records it before paho's thread starts, and the callbacks answer for it
         pub._on_connect(client, None, None, 0, SimpleNamespace(MaximumPacketSize=2048))
         pub._client = camp.FakeClient()
         self.assertFalse(pub._publish(f"{BASE}/demo/sensor/big", "x" * 3000))

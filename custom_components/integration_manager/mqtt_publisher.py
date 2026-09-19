@@ -557,6 +557,7 @@ class MqttPublisher:
         self._live_base: str | None = None      # base topic the current connection uses
         self._live_prefix: str | None = None
         self._client: mqtt.Client | None = None
+        self._last_refusal = ""  # the last CONNACK refusal logged: paho retries for ever, the reason rarely changes
         self._connected = False
         self._lock = threading.Lock()
         self._conn_lock = asyncio.Lock()  # reconnects never overlap: two paho clients with one client id kick each other off forever
@@ -1356,9 +1357,16 @@ class MqttPublisher:
 
     def _recorded_elsewhere(self, last: dict[str, Any]) -> bool:
         """The names recorded last went to a broker the settings no longer name.  A record written before brokers
-        were named (no ``broker`` key) belongs to the configured one: that is what _defer_cleanup assumes too."""
+        were named (no ``broker`` key) belongs to the configured one: that is what _defer_cleanup assumes too.
+
+        Host and port only: a different user, or TLS turned on, is the same broker holding the same retained
+        data, and treating it as another one deferred a removal to a broker that was never going to be named
+        again - a pending entry nothing could ever clear.  They stay part of the pending key, which is about
+        reaching a broker, not about which one it is.
+        """
         try:
-            return self._pending_key("", last["broker"])[1:] != self._pending_key("", self._broker_identity())[1:]
+            here = self._broker_identity()
+            return (str(last["broker"]["host"]), int(last["broker"]["port"])) != (str(here["host"]), int(here["port"]))
         except (KeyError, TypeError, ValueError):
             return False
 
@@ -1484,13 +1492,26 @@ class MqttPublisher:
         self._forget_errors()  # after _stop_client: its network thread is gone and reports nothing more
         self.hass.loop.call_soon_threadsafe(self._last_hash.clear)  # a new connection re-asserts every retained document
 
+    def _stale_client(self, client) -> bool:
+        """Did an older paho client call this?
+
+        A client we replaced keeps its own network thread until its socket gives up - a TLS listener that
+        never answers can hold one for minutes - and our callbacks are still bound to it.  _on_subscribe has
+        always checked; the three connection callbacks did not, so a dying thread could report itself
+        disconnected over a healthy connection and leave the publisher believing it has no broker.
+        """
+        return self._client is not None and client is not self._client
+
     def _forget_errors(self) -> None:
         """A deliberate end (settings saved, identity changed, stop): what went wrong belonged to a connection that no longer
         exists, and a refusal by the next one (another broker, perhaps) is news.  paho's own reconnects do not come here."""
         self.stats["connect_error"] = self.stats["subscribe_error"] = ""
+        self._last_refusal = ""
         self._last_subscribe_error = ""
 
     def _on_connect(self, client, userdata, flags, reason_code, properties=None) -> None:
+        if self._stale_client(client):
+            return
         if reason_code != 0:
             self._connected = False
             self.stats["connected"] = False
@@ -1499,7 +1520,10 @@ class MqttPublisher:
                 self._replace_client_soon(client)
                 return
             self.stats["connect_error"] = f"reason_code={reason_code}"
-            _LOGGER.error("MQTT connect refused: %s", reason_code)
+            reason = str(reason_code)
+            if reason != self._last_refusal:  # one line per reason, like a disconnection: paho retries for ever,
+                self._last_refusal = reason   # and a wrong password would otherwise write ~1440 ERRORs a day
+                _LOGGER.error("MQTT connect refused: %s", reason_code)
             return
         if self._stopping:
             return  # no "online" and no republish while Home Assistant stops
@@ -1618,6 +1642,8 @@ class MqttPublisher:
 
     def _on_connect_fail(self, client, userdata) -> None:
         """Paho thread: the broker could not be reached (paho keeps retrying)."""
+        if self._stale_client(client):
+            return
         where = f"{self.config.host}:{self.config.port}"
         message = f"cannot reach the broker at {where} (retrying)"
         if self.config.tls:
@@ -1655,6 +1681,8 @@ class MqttPublisher:
             return ""  # not a TLS problem: the broker is unreachable, which the generic message says
 
     def _on_disconnect(self, client, userdata, flags, reason_code, properties=None) -> None:
+        if self._stale_client(client):
+            return
         lived = time.monotonic() - self._connected_at if self._connected_at else None
         self._connected = False
         self._connected_at = 0.0
