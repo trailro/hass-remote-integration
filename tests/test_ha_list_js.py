@@ -73,7 +73,7 @@ class SystemPageVersionListTest(unittest.TestCase):
         baseline = self.out["baseline"]
         self.assertEqual(baseline["sent"], 0)  # arithmetic, not a pip run
         self.assertFalse(baseline["verdict"]["ok"])
-        self.assertIn("older than this image's baseline 2026.8.3", baseline["painted"])
+        self.assertIn("older than this image's floor 2026.8.3", baseline["painted"])
 
 
 if __name__ == "__main__":

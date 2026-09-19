@@ -487,7 +487,11 @@ boot three times in a row before it ever booted, the container falls back to
 the previous one (the new version's venv is removed only once the previous one
 has booted). A version that has booted once is never left automatically: when
 it later crashes three times in a row (a changed setting or port, too little
-memory), the container keeps retrying it and **System** and the log say so. A
+memory), the container keeps retrying it and **System** and the log say so. On
+a fresh volume there is nothing to fall back to: the first version keeps being
+retried, and **System** says that it crashed and that this volume has no other
+version to go back to — rather than claiming it booted fine before, which it
+never did. A
 boot counts as good once the integration has set up, or 10 minutes after Home
 Assistant started; stopping or restarting the container during a boot, also
 while Home Assistant is still being imported, does not count as a failure —
@@ -509,9 +513,10 @@ the image's floor, `HA_VERSION_MIN` (2026.5.0 in this image): anything older is
 refused outright, and no force lifts it. That is not the same number as the
 version a fresh volume installs (`HA_VERSION_DEFAULT`, 2026.8.3) — the floor is
 the oldest release the manager was measured on, the default is a recent one to
-start from. The second rule applies above the floor: an older release pins requirements published before this image's
-Python existed, PyPI has no wheel for them and the image has no compiler, so
-the manager resolves the chosen version's pins itself — nothing is installed,
+start from. The second rule applies above the floor: an older release pins
+requirements published before this image's Python existed, PyPI has no wheel
+for them and the image has no compiler, so the manager resolves the chosen
+version's pins itself — nothing is installed,
 the answer is cached for an hour — and refuses a version whose requirements
 cannot install, naming the package. A check can take minutes on an old version,
 and only one runs at a time. On **System**, *Check selected version* (and
@@ -521,7 +526,10 @@ up), the page says *could not check* and nothing is refused: a check that did
 not run is not a reason to block. If you know better — you added a compiler
 with `HRI_APT_PACKAGES=build-essential`, say — the confirmation offers to
 schedule the version anyway. That covers the pin check only; a version below
-the floor stays refused. *Python versions* has the details of both.
+the floor stays refused. In this image the two coincide: the floor was set to
+where the pin check starts failing, so the pin check only begins to matter once
+the image moves to a newer Python, or a build lowers `HA_VERSION_MIN`. *Python
+versions* has the details of both.
 
 Because of those floors, the list offers the **ten newest stable releases**
 plus everything this box already has — every venv on the volume, the running
@@ -580,14 +588,17 @@ three have to support that Python:
   discovery schemas and the unit tests run against it — so neither number is a
   claim nobody checks. A weekly job does the same against whatever Home
   Assistant is newest that week and against its newest pre-release, so a
-  release that breaks the manager is found here rather than by you. The floor is where this manager was measured, not a
-  guess: 2026.5.0,
-  2026.6.0 and 2026.7.0 were each run end to end (the manager, its UI and API,
-  MQTT discovery to a main Home Assistant, all 13 manager and 31 domain
-  discovery components, a preflight, a backup and a command round trip), as
-  was a downgrade from 2026.8.3 to 2026.6.0 on the same volume. Below 2026.5.0
-  nothing was measured, because Home Assistant's own pins stop resolving there
-  (see below).
+  release that breaks the manager is found here rather than by you. The floor
+  is where this manager was measured, not a guess — in September 2026, on this
+  image's CPython 3.14.7 on `aarch64`: 2026.5.0, 2026.6.0 and 2026.7.0 were
+  each run end to end (the manager, its UI and API, MQTT discovery to a main
+  Home Assistant, all 13 manager and 31 domain discovery components, a
+  preflight, a backup and a command round trip), as was a downgrade from
+  2026.8.3 to 2026.6.0 on the same volume. Below 2026.5.0 nothing was measured,
+  because Home Assistant's own pins stop resolving there (see below). A build
+  or an override that sets the default below the floor installs the floor
+  instead, and says so in the log: a fresh volume must not start on a version
+  the UI then refuses to return to.
 - **Home Assistant.** A version whose PyPI `requires_python` does not accept
   the image's Python is refused before the restart; it is still shown in the
   list, marked ✗ with the reason. While PyPI cannot be reached a version is
@@ -1371,13 +1382,14 @@ hass_<domain>/manager/result                        outcome of a manager action,
 ### What the main Home Assistant needs
 
 Discovery uses the device-based MQTT format, and some of what it publishes only
-newer Home Assistant understands. Measured against real instances of each
-release, with the container publishing an integration of 14 entities:
+newer Home Assistant understands. Measured in September 2026 on `aarch64`,
+against real instances of each release, with the container publishing an
+integration of 14 entities:
 
 | Main Home Assistant | What happens |
 |---|---|
-| **2025.10 and newer** | Everything works. Entities get the ids they have in the container, nothing is logged. |
-| 2024.11 – 2025.9 | Every entity is created and works, but `default_entity_id` is silently dropped, so ids are generated from the device name (`sensor.hri_probe_no_device_probe_demo` instead of `sensor.probe_demo`). Nothing says so in any log. Anything on the main instance that names the original id — an automation, a script, a dashboard card — points at nothing. |
+| **2025.10 and newer** | Everything works, with the two exceptions below. Entities get the ids they have in the container, nothing is logged. |
+| 2024.11 – 2025.9 | Every entity is created and works (subject to the two exceptions below), but `default_entity_id` is silently dropped, so ids are generated from the device name (`sensor.hri_probe_no_device_probe_demo` instead of `sensor.probe_demo`). Nothing says so in any log. Anything on the main instance that names the original id — an automation, a script, a dashboard card — points at nothing. |
 | Below 2024.11 | Nothing arrives at all: those releases do not subscribe to `<prefix>/device/+/config`, so no entity is created and no error appears anywhere. |
 
 Two details on top of that:
@@ -1596,7 +1608,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | `HRI_VERSION` | `latest` | Image tag Compose pulls, for example `0.21.0` |
 | `HRI_REGISTRY` | `ghcr.io/trailro` | Where Compose pulls the image from: `ghcr.io/trailro` (GitHub Container Registry) or `docker.io/trailro26` (Docker Hub); the same image either way. A `docker-compose.yml` from 0.16.0 or older ignores it and pulls from GitHub Container Registry: download the file again to use it |
 | `TZ` | `UTC` | Time zone; an unknown zone falls back to UTC, with an error in the log |
-| `HA_VERSION_LATEST` | `1` | `0` installs the image's baseline HA on a fresh volume instead of the newest |
+| `HA_VERSION_LATEST` | `1` | `0` installs the image's default Home Assistant (`HA_VERSION_DEFAULT`, 2026.8.3 here) on a fresh volume instead of the newest |
 | `HRI_APT_PACKAGES` | unset | Debian packages the container installs at boot, before Home Assistant starts, for what pip cannot install (the `ffmpeg` binary, BlueZ): names separated by spaces or commas, for example `ffmpeg libpcap0.8t64`. Only Debian package names are accepted (`libc6:arm64` too); anything else — an option, a URL, a path, a shell metacharacter — is refused with a line in the log and nothing is installed for it, and the value never reaches a shell. Packages that are already installed are not installed again, so a restart costs nothing; they live in the container, not on the volume, so recreating the container or updating the image installs them again. A failure (no network, an unknown package) is recorded on **System** and does not stop the boot. The output is in `integration_manager/apt-install.log`. A `docker-compose.yml` from 0.17.2 or older does not pass it to the container: download the file again to use it |
 | `HRI_DEV_SRC` | `./dev-src` | Dev mode: directory mounted at `/dev-src` |
 | `HRI_DEBUGPY` | unset | Dev mode: debugger port |
@@ -1797,7 +1809,7 @@ the question could not be answered (pip timed out, PyPI was unreachable, the
 resolver gave up); `ok` then stays `true`, since nothing was found against the
 version. The version running now answers `checked: false` with a note and runs
 no pip, and so does a version already installed for this Python ("nothing to
-resolve"); a version the baseline, `requires_python` or PyPI itself refuses
+resolve"); a version the floor, `requires_python` or PyPI itself refuses
 answers `ok: false` with that refusal as the blocker rather than an error. The
 request itself answers `ok: true` in all of those: the verdict is `check.ok`.
 The answer is cached per version and image Python for an hour, and only one
@@ -1806,7 +1818,7 @@ check runs at a time.
 `POST /api/ha/update` runs the same check and, without `force: true`, refuses a
 version it blocks with `needs_force`, the report in `check` and the blockers in
 `error` — before it takes a backup or writes anything. `force` skips that check
-and nothing else: a version older than the image's baseline, one this image's
+and nothing else: a version older than the image's floor (`HA_VERSION_MIN`), one this image's
 Python cannot run (`requires_python`), or one PyPI does not list is refused
 with no `needs_force`, because force cannot rebuild the image. A forced update
 puts *scheduled with the dependency check skipped (force)* on the timeline,
@@ -1948,11 +1960,20 @@ sh verify.sh unit      # unit tests (tests/, stdlib unittest) in the container's
 
 `verify.sh` reads `HRI_NAME`, `HRI_PORT`, `HRI_IMAGE`, `HRI_NETWORK`, `HRI_PASSWORD`
 (or `HRI_PASSWORD_FILE`, which wins) and `TZ` from the environment or from `.env`.
-`start` exits non-zero when the API does not come up (a timeout or a restart loop).
+`start` exits non-zero when the API does not come up (a timeout or a restart
+loop). `HRI_ENV="K=V K2=V2"` passes more variables to the container, which is
+how CI boots a version other than the newest (`HA_VERSION_LATEST=0
+HA_VERSION_DEFAULT=<version>`).
 
 CI runs on every push to `main` and every pull request: syntax checks, then,
 natively on both `amd64` and `arm64`, an image build, a boot on a fresh volume,
-the discovery schema test and the unit tests. Publishing
+the discovery schema test and the unit tests — and on `amd64` the same boot
+again on the image's default Home Assistant and on its floor, each checked to
+have installed the version it was given rather than having fallen back to
+another. A weekly workflow repeats all of it against the newest stable Home
+Assistant and the newest pre-release, opening an issue when one of them breaks
+the manager and a pull request moving `HA_VERSION_DEFAULT` when a newer stable
+passes. Publishing
 a release builds the `amd64` and `arm64` image and pushes it to
 `ghcr.io/trailro/hass-remote-integration` and to Docker Hub as
 `trailro26/hass-remote-integration` (`<version>`, `<major>.<minor>` and, for the

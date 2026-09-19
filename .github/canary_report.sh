@@ -3,7 +3,7 @@
 # issue (one per pair of versions, commented on rather than repeated).  A pass on a stable release newer
 # than the one the image installs is something to approve, so it becomes a pull request that moves
 # HA_VERSION_DEFAULT there - never HA_VERSION_MIN, which is a measured floor and not a moving target.
-# Reads RESULT (the boot job's conclusion), STABLE, PRERELEASE, DEFAULT, RUN and GH_TOKEN.
+# Reads RESULT (the boot job's conclusion), STABLE, PRERELEASE, DEFAULT, RUN, GH_SERVER, GH_REPO and GH_TOKEN.
 set -eu
 
 tmp=$(mktemp -d)
@@ -79,4 +79,30 @@ somebody measures again.
 EOF
 git commit -qaF "$tmp/commit.txt"
 git push -q origin "$branch"
-gh pr create --head "$branch" --base main --title "install Home Assistant $STABLE on a fresh volume" --body-file "$tmp/pr.md"
+if gh pr create --head "$branch" --base main --title "install Home Assistant $STABLE on a fresh volume" --body-file "$tmp/pr.md"; then
+  exit 0
+fi
+
+# "GitHub Actions is not permitted to create or approve pull requests" is a repository setting, off by
+# default (Settings - Actions - General).  The branch is pushed either way, so say where it is instead of
+# failing the run: a canary that reports nothing because of a permission is worse than one that reports
+# by hand.
+echo "could not open the pull request; falling back to an issue" >&2
+{
+  echo "The canary booted the image on Home Assistant **$STABLE** and it passed, but it could not open the pull request itself:"
+  echo
+  echo "> GitHub Actions is not permitted to create or approve pull requests"
+  echo
+  echo "That is a repository setting (Settings - Actions - General - \"Allow GitHub Actions to create and approve pull requests\")."
+  echo "The branch is pushed and ready: [\`$branch\`]($GH_SERVER/$GH_REPO/compare/main...$branch?expand=1)."
+  echo
+  cat "$tmp/pr.md"
+} > "$tmp/issue.md"
+title="[canary] Home Assistant $STABLE is ready to become the default"
+number=$(gh issue list --state open --search "canary in:title" --json number,title \
+  --jq "map(select(.title == \"$title\")) | .[0].number // empty")
+if [ -n "$number" ]; then
+  gh issue comment "$number" --body-file "$tmp/issue.md"
+else
+  gh issue create --title "$title" --body-file "$tmp/issue.md"
+fi

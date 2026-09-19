@@ -45,10 +45,10 @@ class InstalledVenvWithReleaseListTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await up.validate(DELISTED)
 
-    async def test_the_baseline_still_applies_to_an_installed_venv(self):
+    async def test_the_floor_still_applies_to_an_installed_venv(self):
         make_venv(self.cfg, "2026.7.1")
         with mock.patch.dict(os.environ, {"HA_VERSION_MIN": "2026.8.0"}):  # stated, not read from the image
             with self.assertRaises(ValueError) as ctx:
                 await self.updater(_Session(self.payload())).validate("2026.7.1")
-        self.assertIn("baseline", str(ctx.exception))
+        self.assertIn("floor", str(ctx.exception))
 
