@@ -1,7 +1,10 @@
 """HTTP views for the manager UI (served by HA's own aiohttp on :8087).
 
-LAN-only admin surface: ``requires_auth = False`` deliberately, the
-same way the onboarding views do it.  Add a token later if needed.
+``requires_auth = False`` deliberately, the way the onboarding views do it:
+this Home Assistant has no users, so its own authentication has nobody to
+check against.  The manager's own gate is ``auth.py`` - no password by
+default, ``HRI_PASSWORD`` when the operator sets one - plus the Host guard in
+``hostguard.py``.  See SECURITY.md.
 """
 
 from __future__ import annotations

@@ -78,7 +78,14 @@ somebody measures again.
 [The canary run]($RUN).
 EOF
 git commit -qaF "$tmp/commit.txt"
-git push -q origin "$branch"
+if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+  # week two with the same newest release: the branch is already there, carrying the same one-line change.
+  # Pushing again would be rejected as non-fast-forward and, under set -e, would end the run before the
+  # report below - so the canary would go quiet exactly when it has something to say.
+  echo "the branch for $STABLE is already on the remote; not pushing again"
+else
+  git push -q origin "$branch"
+fi
 if gh pr create --head "$branch" --base main --title "install Home Assistant $STABLE on a fresh volume" --body-file "$tmp/pr.md"; then
   exit 0
 fi

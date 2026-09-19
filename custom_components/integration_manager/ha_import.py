@@ -555,8 +555,7 @@ class RegistryAligner:
         # registry rename properly (remove + re-add under the new id).
         if event.data.get("action") != "create":
             return
-        platform = event.data["entity_id"].split(".", 1)[0]  # cheap pre-filter; the real check is by registry platform
-        entry = er.async_get(self.hass).async_get(event.data["entity_id"])
+        entry = er.async_get(self.hass).async_get(event.data["entity_id"])  # the check is by registry platform
         m = self.maps.get(entry.platform) if entry else None
         if m and m["entities"]:
             self._pending.add(event.data["entity_id"])

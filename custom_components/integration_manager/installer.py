@@ -1103,9 +1103,15 @@ class Installer:
             before_switch = {"previous_tag": rec.get("previous_tag"), "pre_update_backup": rec.get("pre_update_backup"),
                              "restart_required": self.state.restart_required}
             if switching:
-                rec["previous_tag"] = rec.get("running_tag")
-                if backup:
-                    rec["pre_update_backup"] = backup
+                # running_tag is what the files say, not what this process imported: when a switch before
+                # this one never got its restart, that tag never ran, and recording it as the rollback
+                # target would send a failed smoke test to code nobody has seen boot.  Keep the version
+                # that did run - and the backup taken before it was left.
+                ran = self._loaded_tags.get(domain)
+                if ran is None or ran == rec.get("running_tag"):
+                    rec["previous_tag"] = rec.get("running_tag")
+                    if backup:
+                        rec["pre_update_backup"] = backup
             rec["running_tag"] = tag
             self.state.domain = domain
             if before and (before["entities"] or before["services"]):

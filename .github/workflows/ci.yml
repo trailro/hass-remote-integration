@@ -31,7 +31,9 @@ jobs:
       - name: Page behaviour under node
         # runs the page's own field()/collect() under node: the container the unit tests
         # run in has none, so these skip there and are covered here instead
-        run: python -m unittest tests.test_camp_config_js tests.test_log_pages_js tests.test_r11_pages_js tests.test_r12_web_js tests.test_r13_pages_js -v
+        # discover, not a hand-written list: four of these modules were added later and never ran here,
+        # so they were green on a developer's machine and unwatched in CI
+        run: python -m unittest discover -s tests -t . -p "test_*_js.py" -v
       - name: Shell
         run: sh -n verify.sh
       - name: Compose files
