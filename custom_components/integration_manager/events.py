@@ -55,6 +55,10 @@ class Events:
                     self._size = os.path.getsize(self.path)
                 except OSError:
                     self._size = 0
+                if self._size and not self._ends_with_newline():
+                    # a crash cut the last line short: this event starts on a line of its own instead of joining
+                    # it, which would cost both records (the torn bytes stay, skipped like any line that is no JSON)
+                    data = b"\n" + data
             if self._size + len(data) > MAX_BYTES:
                 os.replace(self.path, self.path + ".1")
                 self._size = 0
@@ -63,6 +67,14 @@ class Events:
             self._size += len(data)
         except OSError as err:
             _LOGGER.warning("event not recorded: %s", err)
+
+    def _ends_with_newline(self) -> bool:
+        try:
+            with open(self.path, "rb") as fh:
+                fh.seek(-1, os.SEEK_END)
+                return fh.read(1) == b"\n"
+        except OSError:
+            return True  # unreadable: nothing to repair that can be seen, and the event must still be written
 
     def drain(self, timeout: float) -> bool:
         return drain(timeout)
@@ -82,6 +94,8 @@ class Events:
                     rec = json.loads(line)
                 except ValueError:
                     continue
+                if not isinstance(rec, dict):
+                    continue  # JSON, but no event: a hand-edited file, or a torn line that parses anyway
                 if kinds and rec.get("kind") not in kinds:
                     continue
                 out.append(rec)
