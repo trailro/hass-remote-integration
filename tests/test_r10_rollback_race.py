@@ -275,7 +275,8 @@ class FullRollbackVersusScheduledChangesTest(unittest.TestCase):
 
     def _restore_by_hand_reserves_busy(self):
         """The restore by hand checks and schedules with busy reserved (ac6febf); before that it held nothing, and
-        a rollback run while it was about to commit was replaced by it, whatever the rollback held."""
+        a rollback run while it was about to commit was replaced by it, whatever the rollback held.  Probed, not
+        read off the source: what the next test asserts is that the commit really is covered."""
         async def probe():
             commit = self.pauses.add(lambda fn, args: fn is backupkit.schedule_restore and args[1] == "manual.zip")
             manual = asyncio.ensure_future(self.restore_by_hand())
@@ -291,8 +292,11 @@ class FullRollbackVersusScheduledChangesTest(unittest.TestCase):
         return held
 
     def test_a_rollback_while_a_restore_by_hand_is_about_to_commit(self):
-        if not self._restore_by_hand_reserves_busy():
-            self.skipTest("the restore by hand does not reserve busy yet (ac6febf)")
+        # asserted, not skipped over: the reservation is what makes the rest of this test meaningful, so losing it
+        # must fail here rather than quietly take the test out of the run
+        self.assertTrue(self._restore_by_hand_reserves_busy(),
+                        "the restore by hand commits without reserving busy: a full rollback started while it is "
+                        "about to write its schedule replaces the restore that already answered ok")
 
         async def run():
             commit = self.pauses.add(lambda fn, args: fn is backupkit.schedule_restore and args[1] == "manual.zip")
