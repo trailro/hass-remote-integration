@@ -581,9 +581,14 @@ three have to support that Python:
   (2026.9.3 here) is what a fresh volume installs when it is not told to take
   the newest, and the fallback when PyPI cannot be reached. Anything older
   than the floor is refused outright, before any of the checks below and with
-  no force path. A venv of an older version already on the volume can still be
-  switched to, and a rollback to the recorded previous version is not blocked
-  by it. Both are booted in CI on every change — the newest stable Home
+  no force path, and a venv of that version already sitting on the volume is
+  not an exception: selecting it is refused too, because nothing has measured
+  this manager below the floor and the list must not offer what the manager
+  will not schedule. What the floor never blocks is recovery — the container
+  goes on booting the version it already runs (the entrypoint validates
+  nothing), and a rollback to the recorded previous version goes through. The
+  floor is a limit on what gets installed, not a trap for a box that is
+  already running. Both are booted in CI on every change — the newest stable Home
   Assistant, the default and the floor, each on a fresh volume with the
   discovery schemas and the unit tests run against it — so neither number is a
   claim nobody checks. A weekly job does the same against whatever Home
@@ -1912,12 +1917,13 @@ progress (50): try again later`.
   version that says *could not check* is not refused: the resolution could not
   answer (PyPI unreachable, or pip gave up on the dependency graph), and the
   install may well work.
-- **A Home Assistant version is refused as "older than this image's
-  baseline".** The image is built with a floor (`HA_VERSION_MIN`, 2026.5.0
-  here) and refuses everything below it outright. This is not the pin check,
-  and *Schedule anyway* is not offered. A venv of an older version already on
-  the volume can still be switched to, and a rollback to the previous version
-  is not blocked by it. Below that floor Home Assistant's own pinned
+- **A Home Assistant version is refused as "older than this image's floor".**
+  The image is built with a floor (`HA_VERSION_MIN`, 2026.5.0 here) and
+  refuses everything below it outright. This is not the pin check, and
+  *Schedule anyway* is not offered. A venv of that version already on the
+  volume changes nothing: it is refused as well. The container keeps booting
+  the version it runs, and a rollback to the previous version still works.
+  Below that floor Home Assistant's own pinned
   requirements have no wheel for this image's Python, so a lower floor would
   only move the refusal to the pin check: what is needed is an image with an
   older Python, not a different build argument.
