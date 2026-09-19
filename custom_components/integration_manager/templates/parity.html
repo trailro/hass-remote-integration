@@ -7,7 +7,7 @@
 <div class="mut"><span id="flash" class="warn"></span></div>
 
 <div class="card"><h2>Parent Home Assistant</h2>
- <div class="mut" style="margin-bottom:8px">The HA that consumes what this container publishes. Reached over its websocket API with a long-lived access token (Profile → Security → Long-lived access tokens); the token is stored write-only in <code>integration_manager/settings.json</code> (mode 600) and used only to read its entity/device registries and states, and to remove orphans of ours when you ask.</div>
+ <div class="mut" style="margin-bottom:8px">The HA that consumes what this container publishes. Reached over its websocket API with a long-lived access token (Profile → Security → Long-lived access tokens); the token is stored write-only in <code>integration_manager/settings.json</code> (mode 600) and used only to read: its entity/device registries and states, which is also how orphans of ours are found. Removing one is done over MQTT, not through this token.</div>
  <div class="row"><input id="purl" placeholder="http://homeassistant.local:8123" style="min-width:280px"><input id="ptoken" type="password" placeholder="long-lived access token (leave empty to keep)" style="min-width:320px" autocomplete="off"><button id="psave" class="primary">Save</button><button id="ptest">Test</button><span id="pmsg" class="mut"></span></div>
 </div>
 
