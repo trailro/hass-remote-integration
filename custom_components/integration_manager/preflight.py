@@ -1033,6 +1033,13 @@ _HA_LOCK = asyncio.Lock()  # one check at a time; LOCK belongs to the integratio
 
 _PIP_NO_DEPS = ("-m", "pip", "install", "--dry-run", "--quiet", "--report", "-", "--ignore-installed", "--no-deps", "--only-binary=:all:")
 _NO_WHEEL_RE = re.compile(r"Could not find a version that satisfies the requirement (\S+)")
+# Offline, pip says exactly what it says when a wheel is genuinely missing - "Could not find a version
+# that satisfies the requirement X (from versions: none)" - and only the retry line above it tells the two
+# apart.  Without this, a container with no route to PyPI reports the release as missing from PyPI, or its
+# pins as having no wheel, and caches that answer for an hour.  Captured from pip itself, not from memory.
+_PIP_UNREACHABLE_RE = re.compile(r"Retrying \(Retry\(|connection broken by|Failed to establish a new connection|"
+                                 r"Temporary failure in name resolution|Name or service not known|ProxyError|"
+                                 r"SSLError|Read timed out|Connection refused")
 _HA_VERSION_RE = re.compile(r"\d{4}\.\d{1,2}\.\d+(b\d+)?\Z")
 
 
@@ -1055,6 +1062,8 @@ def _ha_pins(python: str, version: str) -> tuple[list[str] | None, str]:
         return None, f"pip did not finish within {PIP_TIMEOUT_S}s"
     if proc.returncode != 0:
         err = proc.stderr.strip()
+        if _PIP_UNREACHABLE_RE.search(err):
+            return None, f"PyPI could not be reached: {_pip_reason(err)}"
         if (m := _NO_WHEEL_RE.search(err)) and _req_key(m.group(1)) == "homeassistant":
             return [], f"no such Home Assistant release on PyPI: {m.group(1)}"
         return None, _pip_reason(err)
@@ -1104,6 +1113,10 @@ def _ha_wheel_check(python: str, version: str) -> dict[str, Any]:
         if proc.returncode == 0:
             break
         err = proc.stderr.strip()
+        if _PIP_UNREACHABLE_RE.search(err):
+            out.update(checked=False, notes=[f"could not check Home Assistant {version}: PyPI could not be reached "
+                                             f"({_pip_reason(err)})"])
+            break
         m = _NO_WHEEL_RE.search(err)
         if not m:
             # "resolution-too-deep", a network failure, an index that answered 503: pip did not say a wheel is
@@ -1115,8 +1128,11 @@ def _ha_wheel_check(python: str, version: str) -> dict[str, Any]:
         key = _req_key(req)
         left = [r for r in left if _req_key(r) != key]
     else:
-        out["warnings"].append(f"Home Assistant {version} pins more than {MAX_HA_MISSING} requirements without a wheel for "
-                               f"Python {py}: only the first {MAX_HA_MISSING} are named")
+        # "at least", not "more than": the loop stops at the cap, so eight missing pins and eighty look the
+        # same from here, and finding out which would cost another pip run for a verdict that is already
+        # decided.
+        out["warnings"].append(f"Home Assistant {version} pins at least {MAX_HA_MISSING} requirements without a wheel "
+                               f"for Python {py}: only the first {MAX_HA_MISSING} are named")
 
     if missing:
         out["ok"] = False
@@ -1135,6 +1151,11 @@ def _ha_wheel_check(python: str, version: str) -> dict[str, Any]:
 
 
 def ha_remember(version: str, report: dict[str, Any]) -> None:
+    if not report.get("checked", True):
+        # "could not check" is a statement about this moment - PyPI unreachable, pip gave up - not about the
+        # version.  Keeping it for an hour would answer the next attempt with the same non-answer, and an
+        # update scheduled in that hour would go out with no check behind it at all.
+        return
     now = time.monotonic()
     for key in [k for k, (at, _) in _HA_REPORTS.items() if now - at >= HA_CACHE_S]:
         del _HA_REPORTS[key]

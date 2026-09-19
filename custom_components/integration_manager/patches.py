@@ -182,7 +182,16 @@ def _run(config_dir: str, domain: str, site_packages: str, component_dir: str, r
             scope = version_scope(text)
             applies, why = _applies(text, running_tag)
             if not applies:
-                out.append({"name": name, "status": "skipped", "detail": why, "scope": scope, "bundled": bundled})
+                # "skipped" used to be the whole answer, which is true of a patch that targets the
+                # integration's own files: a version change redeploys those, so a patch scoped out of the
+                # new version is simply gone.  A patch that edits an installed library is not: pip
+                # reinstalls nothing when the pin did not change, so the library stays patched while this
+                # page says the patch is not applied.  Ask before saying it.
+                left = _left_applied(name, path, text, ctx, domain, running_tag, site_packages, component_dir)
+                out.append({"name": name, "status": "skipped, still applied" if left else "skipped",
+                            "detail": (why + "; the files it patched still carry it - reinstall that distribution "
+                                       "(or switch back and delete the patch) to undo it") if left else why,
+                            "scope": scope, "bundled": bundled})
                 continue
             if name.endswith(".py") and apply:
                 st = str(_load_module(path).apply(ctx))
@@ -198,6 +207,25 @@ def _run(config_dir: str, domain: str, site_packages: str, component_dir: str, r
                 _LOGGER.exception("patch %s failed", name)
             out.append({"name": name, "status": f"{'failed' if apply else 'error'}: {type(err).__name__}: {err}", "detail": "", "bundled": bundled})
     return out
+
+
+def _left_applied(name: str, path: str, text: str, ctx: PatchContext, domain: str, running_tag: str | None,
+                  site_packages: str, component_dir: str) -> bool:
+    """Is a patch that no longer applies to this version still sitting in the files?
+
+    Read-only, and never raises: a patch whose status cannot be computed (its module is broken, its
+    target is gone) is reported as skipped, the way it was before.
+    """
+    try:
+        if name.endswith(".py"):
+            key = (path, domain, running_tag, site_packages, _mtime(path), _mtime(component_dir), _mtime(site_packages))
+            if (st := _PY_STATUS.get(key)) is None:
+                st = _PY_STATUS[key] = str(_load_module(path).status(ctx))
+        else:
+            st = _diff_status(text, ctx)
+    except Exception:  # noqa: BLE001
+        return False
+    return st == "applied"
 
 
 def status(config_dir: str, domain: str, site_packages: str, component_dir: str, running_tag: str | None = None) -> list[dict[str, Any]]:

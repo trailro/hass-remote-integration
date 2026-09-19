@@ -125,7 +125,7 @@ class VerdictTest(unittest.TestCase):
         rep, calls = _check([_proc(out=_report([f"pkg{i}==1.0" for i in range(30)])), *errs])
         self.assertEqual(len(rep["missing"]), preflight.MAX_HA_MISSING)
         self.assertEqual(len(calls), preflight.MAX_HA_MISSING + 1)
-        self.assertIn(f"more than {preflight.MAX_HA_MISSING}", rep["warnings"][0])
+        self.assertIn(f"at least {preflight.MAX_HA_MISSING}", rep["warnings"][0])  # eight and eighty look alike from here
 
     def test_a_conditional_pin_is_noted_not_checked(self):
         rep, _ = _check([_proc(out=_report(PINS)), _proc()])
