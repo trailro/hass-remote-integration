@@ -117,6 +117,12 @@ def mask_query_secrets(text: str) -> str:
     return _URL_QUERY.sub(_mask_query, text)
 
 
+def _no_lone_surrogates(text: str) -> str:
+    """The text with anything UTF-8 refuses written as the escape it stands for (``\\udcff``), so a value that
+    came out of surrogateescape can be stored, read back and answered as text."""
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 class FileLogHandler(logging.Handler):
     def __init__(self, path: str, max_bytes: int = MAX_BYTES, keep: int = KEEP) -> None:
         super().__init__(level=logging.DEBUG)
@@ -197,10 +203,19 @@ class FileLogHandler(logging.Handler):
         }
         with self.lock:
             rec["id"] = next(self._ids)  # under the lock: ids grow in file order, also when a direct write at exit meets the listener
-            data = json.dumps(rec, ensure_ascii=False, default=str) + "\n"
-            size = len(data.encode("utf-8"))  # max_bytes and _size are bytes; a non-ASCII message has more of them than characters
             self.loggers[record.name] = self.loggers.get(record.name, 0) + 1
             try:
+                data = json.dumps(rec, ensure_ascii=False, default=str) + "\n"
+                try:
+                    size = len(data.encode("utf-8"))  # max_bytes and _size are bytes; a non-ASCII message has more of them than characters
+                except UnicodeEncodeError:
+                    # a lone surrogate, the way Python carries bytes that are no UTF-8 (surrogateescape): an OSError
+                    # about a file whose name another system wrote brings one into a message.  Escaped in the values,
+                    # not in the finished line: "\\udcff" there is JSON for the surrogate itself, and the record
+                    # would come back out of the file as one - to the writer here, and to orjson answering /api/logs
+                    rec = {k: _no_lone_surrogates(v) if isinstance(v, str) else v for k, v in rec.items()}
+                    data = json.dumps(rec, ensure_ascii=False, default=str) + "\n"
+                    size = len(data.encode("utf-8"))
                 if self._size + size > self.max_bytes:
                     self._rotate()
                 if self._fh.closed:
@@ -403,12 +418,29 @@ class _QueueListener(logging.handlers.QueueListener):
         if isinstance(record, threading.Event):
             record.set()  # a flush marker: everything queued before it is written
             return
-        super().handle(record)
+        self._handle(record)
         if self.source is not None and (dropped := self.source.dropped):
             self.source.dropped -= dropped
             note = logging.LogRecord(__name__, logging.WARNING, __file__, 0,
                                      "%s log records were dropped: the log queue was full (a blocked stderr?)", (dropped,), None)
-            super().handle(note)
+            self._handle(note)
+
+    def _handle(self, record: Any) -> None:
+        """One record through the handlers, the stock loop with a guard around each of them: whatever a handler
+        raises stops at that handler and that record.  An exception reaching the monitor loop ends this thread,
+        and with it every line the process logs afterwards - the queue then fills and drops silently until a
+        restart; and one handler's failure must not cost the others the record.  Nothing is reported about it:
+        reporting logs, which is what just failed."""
+        try:
+            record = self.prepare(record)
+        except Exception:  # noqa: BLE001
+            return
+        for handler in self.handlers:
+            try:
+                if not self.respect_handler_level or record.levelno >= handler.level:
+                    handler.handle(record)
+            except Exception:  # noqa: BLE001
+                pass
 
     def stop(self, timeout: float | None = None) -> bool:  # the stock stop joins without a timeout
         thread = self._thread

@@ -403,6 +403,10 @@ class SettingsView(ManagerView):
 
     def __init__(self, installer: Installer) -> None:
         self.installer = installer
+        # one save at a time: the rollback below puts back what the settings held before this request, which is only
+        # this request's change to undo while no other one is between its own update and its own save.  Held over the
+        # change and the write, not over the GitHub check above it: that is a call to another host, up to 20s of it.
+        self._saving = asyncio.Lock()
 
     async def get(self, request: web.Request) -> web.Response:
         return self.json(self.installer.settings.public())
@@ -505,17 +509,25 @@ class SettingsView(ManagerView):
                 except Exception as err:  # noqa: BLE001
                     return self.json({"ok": False, "error": f"could not reach GitHub: {type(err).__name__}: {err}"})
             new["github_token"] = token
-        before = dict(st.data)  # a failed write must not leave the UI showing a value the file does not have
-        st.data.update(new)
-        try:
-            await st.async_save()
-        except OSError as err:  # a full volume, like restart / backup create / restore answer it
-            st.data.clear()
-            st.data.update(before)
-            return self.json({"ok": False, "error": f"settings.json could not be written: {type(err).__name__}: {err}"})
-        self.installer._releases_cache.clear()
-        if getattr(self.installer, "scheduler", None) is not None:
-            self.installer.scheduler.rearm()
+        async with self._saving:
+            before = dict(st.data)  # a failed write must not leave the UI showing a value the file does not have
+            st.data.update(new)
+            failed = None
+            try:
+                await st.async_save()
+            except OSError as err:  # a full volume, like restart / backup create / restore answer it
+                st.data.clear()
+                st.data.update(before)
+                failed = f"settings.json could not be written: {type(err).__name__}: {err}"
+            finally:
+                # whatever settings.json holds now, the scheduler is armed for it: the write is shielded, so a client
+                # that hangs up cancels this handler and not the save, and the daily backup would else keep the old
+                # hour - saved, shown by the UI, and not the one it runs at - until the next restart
+                self.installer._releases_cache.clear()
+                if getattr(self.installer, "scheduler", None) is not None:
+                    self.installer.scheduler.rearm()
+        if failed is not None:
+            return self.json({"ok": False, "error": failed})
         return self.json({"ok": True, "note": note, **st.public()})
 
 
