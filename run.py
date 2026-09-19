@@ -29,7 +29,7 @@ def _early_stop(signum: int, _frame) -> None:
                 return None
             try:
                 count = int(state.get("boot_failures") or 0)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):  # json.load reads 1e999 as an infinity, which int() refuses
                 return None
             return {**state, "boot_failures": max(0, count - 1)}
 
@@ -379,7 +379,16 @@ def _undo_boot_failure() -> None:
     _boot_settled = True
 
     def undo(state: dict) -> dict:
-        state["boot_failures"] = max(0, int(state.get("boot_failures") or 0) - 1)
+        raw = state.get("boot_failures")
+        try:
+            count = int(raw or 0)
+        except (TypeError, ValueError, OverflowError):
+            # json.load reads 1e999 and Infinity as a float infinity, which int() refuses with OverflowError,
+            # not ValueError.  Raised here it came out of the STOP listener and out of the boot signal
+            # handler, which then never asked Home Assistant to stop: count 0, the way the entrypoint does.
+            _LOGGER.warning("ha.json: boot_failures=%r is not a count; counting 0 failed boots", raw)
+            count = 0
+        state["boot_failures"] = max(0, count - 1)
         return state
 
     _update_ha_json(undo)
