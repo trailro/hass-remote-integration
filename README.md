@@ -511,7 +511,7 @@ Assistant versions.
 rules refuse an older version, both before anything is scheduled. The first is
 the image's floor, `HA_VERSION_MIN` (2026.5.0 in this image): anything older is
 refused outright, and no force lifts it. That is not the same number as the
-version a fresh volume installs (`HA_VERSION_DEFAULT`, 2026.8.3) — the floor is
+version a fresh volume installs (`HA_VERSION_DEFAULT`, 2026.9.3) — the floor is
 the oldest release the manager was measured on, the default is a recent one to
 start from. The second rule applies above the floor: an older release pins
 requirements published before this image's Python existed, PyPI has no wheel
@@ -578,7 +578,7 @@ three have to support that Python:
 - **The image's floor.** The image is built with two Home Assistant versions,
   both build-time `ARG`s: `HA_VERSION_MIN` (2026.5.0 here) is the oldest
   release it installs at all, and `HA_VERSION` → `HA_VERSION_DEFAULT`
-  (2026.8.3 here) is what a fresh volume installs when it is not told to take
+  (2026.9.3 here) is what a fresh volume installs when it is not told to take
   the newest, and the fallback when PyPI cannot be reached. Anything older
   than the floor is refused outright, before any of the checks below and with
   no force path. A venv of an older version already on the volume can still be
@@ -1608,7 +1608,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | `HRI_VERSION` | `latest` | Image tag Compose pulls, for example `0.21.0` |
 | `HRI_REGISTRY` | `ghcr.io/trailro` | Where Compose pulls the image from: `ghcr.io/trailro` (GitHub Container Registry) or `docker.io/trailro26` (Docker Hub); the same image either way. A `docker-compose.yml` from 0.16.0 or older ignores it and pulls from GitHub Container Registry: download the file again to use it |
 | `TZ` | `UTC` | Time zone; an unknown zone falls back to UTC, with an error in the log |
-| `HA_VERSION_LATEST` | `1` | `0` installs the image's default Home Assistant (`HA_VERSION_DEFAULT`, 2026.8.3 here) on a fresh volume instead of the newest |
+| `HA_VERSION_LATEST` | `1` | `0` installs the image's default Home Assistant (`HA_VERSION_DEFAULT`, 2026.9.3 here) on a fresh volume instead of the newest |
 | `HRI_APT_PACKAGES` | unset | Debian packages the container installs at boot, before Home Assistant starts, for what pip cannot install (the `ffmpeg` binary, BlueZ): names separated by spaces or commas, for example `ffmpeg libpcap0.8t64`. Only Debian package names are accepted (`libc6:arm64` too); anything else — an option, a URL, a path, a shell metacharacter — is refused with a line in the log and nothing is installed for it, and the value never reaches a shell. Packages that are already installed are not installed again, so a restart costs nothing; they live in the container, not on the volume, so recreating the container or updating the image installs them again. A failure (no network, an unknown package) is recorded on **System** and does not stop the boot. The output is in `integration_manager/apt-install.log`. A `docker-compose.yml` from 0.17.2 or older does not pass it to the container: download the file again to use it |
 | `HRI_DEV_SRC` | `./dev-src` | Dev mode: directory mounted at `/dev-src` |
 | `HRI_DEBUGPY` | unset | Dev mode: debugger port |
