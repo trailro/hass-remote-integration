@@ -60,4 +60,43 @@ const out = {};
   }
 }
 
+{  // F14 again, on this page: the per-integration health rules table refused to repaint while anything inside it
+   // had the focus -- and each row's own Save button is inside it, so it keeps the focus in Chrome and Edge
+  const src = read('mqtt.js');
+  const code = src.slice(src.indexOf('async function healthRules()'), src.indexOf("$('#hsave').onclick="));
+  // the header row the page keeps: tr:not(:first-child) is every row after it
+  class Table extends El {
+    querySelectorAll(sel) {
+      if (sel === 'tr:not(:first-child)') return this.elementChildren.filter(c => c.tag === 'tr').slice(1);
+      return super.querySelectorAll(sel);
+    }
+  }
+  const run = async (focus) => {
+    const els = {};
+    const $ = q => (els[q] ??= Object.assign(q === '#hrules' ? new Table('table') : new El(q === '#hmsg' ? 'div' : 'input'), { id: q.slice(1) }));
+    const t = $('#hrules');
+    t.appendChild(Object.assign(new El('tr'), { className: 'head' }));   // the header the page never removes
+    t.contains = n => { for (let e = n; e; e = e.parentNode) if (e === t) return true; return false; };
+    const doc = { ...document, activeElement: null };
+    let installed = { demo: {} };
+    const fetch = async url => ({ json: async () => url === 'api/settings'
+      ? { health_stale_s: 900, health_unavailable_pct: 50, health: {} }
+      : { installed, running: null } });
+    const healthRules = new Function('$', 'document', 'esc', 'fetch', 'post',
+      code + '\nreturn healthRules;')($, doc, pageEsc(path.join(STATIC, 'mqtt.js')), fetch, async () => ({ ok: true }));
+    await healthRules();
+    const rows = () => t.querySelectorAll('tr:not(:first-child)').map(r => r.querySelectorAll('b')[0].textContent);
+    const before = rows();
+    doc.activeElement = focus ? t.querySelector(focus) : null;
+    installed = { demo: {}, other: {} };                                 // a second integration installed meanwhile
+    await healthRules();
+    return { before, after: rows() };
+  };
+  out.health_rules = {
+    nothing_focused: await run(null),
+    save_focused: await run('button[data-hs]'),      // the Save button of a row: inside the table
+    input_focused: await run('input[data-h=stale_s]'),
+  };
+}
+
 console.log(JSON.stringify(out));

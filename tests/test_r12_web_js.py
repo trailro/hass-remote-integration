@@ -10,6 +10,10 @@ C1 (this review): two lines of the MQTT page escaped their text and then assigne
 it to .textContent, which parses no HTML, so a service call carrying quotes or an
 ampersand was shown with &quot; and &amp; in it.
 
+F14 on this page: healthRules() refused to repaint the per-integration health
+rules table while anything inside it had the focus, and each row's own Save
+button is inside it -- the same guard the Entities and Devices tables had.
+
 Needs node, which the container the unit tests run in does not have: it skips there and runs wherever node is
 installed (a developer machine, CI).  Every test fails on the tree before the fix."""
 
@@ -65,3 +69,11 @@ class PagesTest(unittest.TestCase):
         for line in text.values():
             self.assertNotIn("&quot;", line)
             self.assertNotIn("&amp;", line)
+
+    def test_the_health_rules_table_repaints_with_a_save_button_focused(self):
+        """F14 on this page: only a focused field may hold the repaint back, never a row's Save button."""
+        rules = self.out["health_rules"]
+        self.assertEqual(rules["nothing_focused"], {"before": ["demo"], "after": ["demo", "other"]})
+        self.assertEqual(rules["save_focused"], rules["nothing_focused"])
+        # and a threshold actually being typed in is still not rebuilt under the cursor
+        self.assertEqual(rules["input_focused"], {"before": ["demo"], "after": ["demo"]})
