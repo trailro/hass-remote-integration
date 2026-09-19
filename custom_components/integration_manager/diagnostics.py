@@ -62,7 +62,9 @@ _VALUE_PREFIX = r"(?P<pre>(?:(?:[A-Za-z_]\w*+)?+\(|[bBrRuUfF]{1,2})(?=\\*+['\"])
 # the space after the scheme, so the scheme was masked and the token printed, and _BEARER never saw the line
 _VALUE_SCHEME = r"(?:(?:Bearer|Basic|Token)\s++)?+"
 _SECRET_TEXT = re.compile(
-    rf"((?:{_ENDINGS}|hmac|webhook_id|cloudhook_url|pin_code|signature|(?<![A-Za-z0-9])code|(?<![A-Za-z0-9])(?:{_WORDS})"
+    # "code" is an OAuth secret (code, user_code, device_code); status_code and its siblings are not, and a
+    # diagnostics bundle with every HTTP status masked is a bundle nobody can debug from
+    rf"((?:{_ENDINGS}|hmac|webhook_id|cloudhook_url|pin_code|signature|(?<![A-Za-z0-9])(?<!status_)(?<!error_)(?<!exit_)(?<!return_)(?<!reason_)code|(?<![A-Za-z0-9])(?:{_WORDS})"
     rf"|\bpwd|\w_pw\b|\bsession_?id|\b(?:irk|ltk|csrk|sig)\b|\b(?!{_PLAIN_KEYS}\b)\w*key"
     r"|(?:api|access|private|local|encryption|device|client|master|app|shared|signing|session|auth|link|network|aes|ssl)[_-]?key)"
     r"(?:\\*+['\"])?\s*[=:]\s*)"
