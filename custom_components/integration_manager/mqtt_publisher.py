@@ -1955,9 +1955,20 @@ class MqttPublisher:
         task.add_done_callback(ended)
 
     def recent_commands(self, limit: int = 30) -> list[dict[str, Any]]:
+        """The public history: the Commands page, /api/mqtt/commands, the MQTT status document and the
+        diagnostics zip read it, and nothing else reads a record's error.  "error" is the one field a third
+        party writes freely - a service raising ValueError("authentication failed: password=...") puts its own
+        words in it, and _remember masks only what the caller sent - so it is scrubbed here rather than in
+        _finish: this is the single place every reader comes through, it already drops "result" (which carries
+        the same text), and it runs on the loop, not on paho's network thread.  The log scrubber, not the
+        payload one: free text is what it is for, and it is the rule that knows auth schemes
+        ("Authorization: Bearer ..."), which the payload rule's name=value form does not reach."""
+        from .diagnostics import scrub_text  # deferred: diagnostics imports this module
+
         iso = lambda t: time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t)) if t else None
         rows = list(self.history)[-limit:]
-        return [{**r, "received": iso(r["received"]), "finished": iso(r["finished"]), "result": None} for r in reversed(rows)]
+        return [{**r, "received": iso(r["received"]), "finished": iso(r["finished"]),
+                 "error": scrub_text(r["error"]) if r["error"] else r["error"], "result": None} for r in reversed(rows)]
 
     def _service_reach(self, domain: str | None, service: str | None) -> set[str] | None:
         """Entity domains an entity service can act on, None when it is not one (or cannot be recognised as
