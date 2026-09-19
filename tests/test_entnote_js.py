@@ -2,6 +2,11 @@
 node (tests/js/entnote.mjs): date, time and datetime carry it, a domain that has always had an MQTT platform does
 not, an entity_id that merely contains the word does not, and an entity kept off MQTT is painted as before.
 
+F14, in the same harness: the Entities and Devices tables refused to repaint while anything inside them had the
+focus.  The button the operator had just clicked is inside them and keeps the focus in Chrome and Edge, so the
+reload that follows a successful action -- and every poll after it -- returned before painting: the page said
+"ok" over the old row, a second rename posted to an id that no longer existed, and a deleted device stayed listed.
+
 Needs node, which the container the unit tests run in does not have: it skips there and runs wherever node is
 installed (a developer machine, CI)."""
 
@@ -68,6 +73,56 @@ class EntitiesPageNewHomeAssistantMarkTest(unittest.TestCase):
     def test_a_domain_with_no_mqtt_platform_at_all_still_reads_mirror(self):
         mirrored = self.out["rows"]["weather.home"]
         self.assertEqual([(t["class"], t["text"]) for t in mirrored["tags"]], [("tag warn", "mirror")])
+
+
+@unittest.skipUnless(shutil.which("node") and os.path.isfile(HARNESS), "node (or the harness) is not available here")
+class TableRepaintsAfterAnActionTest(unittest.TestCase):
+    """F14: what the two tables show after a successful action, by what holds the focus when they repaint."""
+
+    PAGES = ("entities", "devices")
+
+    @classmethod
+    def setUpClass(cls):
+        out = subprocess.run([shutil.which("node"), HARNESS, STATIC], capture_output=True, text=True, timeout=60)
+        if out.returncode != 0:
+            raise AssertionError(f"the harness failed: {out.stderr.strip()}")
+        cls.focus = json.loads(out.stdout)["focus"]
+
+    def case(self, page, name):
+        return self.focus[page][name]
+
+    def test_the_table_the_operator_did_not_touch_repaints(self):
+        for page in self.PAGES:
+            with self.subTest(page=page):
+                case = self.case(page, "nothing_focused")
+                self.assertNotEqual(case["before"], case["after"])
+
+    def test_the_button_just_clicked_does_not_stop_the_repaint(self):
+        # it is inside the table and keeps the focus in Chrome and Edge: this is the finding
+        for page in self.PAGES:
+            with self.subTest(page=page):
+                self.assertEqual(self.case(page, "button_focused"), self.case(page, "nothing_focused"))
+
+    def test_a_rename_that_still_shows_the_old_row_is_gone(self):
+        # the Entities page renamed the entity: the row must carry the new id, not the one the server dropped
+        case = self.case("entities", "button_focused")
+        self.assertEqual(case["before"], ["sensor.kitchen_humidity"])
+        self.assertEqual(case["after"], ["sensor.humidity_kitchen"])
+
+    def test_a_deleted_device_leaves_the_list(self):
+        self.assertEqual(self.case("devices", "button_focused"), {"before": ["Old oven"], "after": []})
+
+    def test_a_field_being_typed_in_is_still_protected(self):
+        # the point of the guard: an inline edit in progress is not rebuilt under the cursor
+        for page in self.PAGES:
+            with self.subTest(page=page):
+                case = self.case(page, "input_focused")
+                self.assertEqual(case["after"], case["before"])
+
+    def test_a_field_outside_the_table_stops_nothing(self):
+        for page in self.PAGES:
+            with self.subTest(page=page):
+                self.assertEqual(self.case(page, "search_focused"), self.case(page, "nothing_focused"))
 
 
 if __name__ == "__main__":

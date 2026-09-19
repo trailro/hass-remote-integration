@@ -8,7 +8,11 @@ function ordered(list){ // via-device tree: parents first, children indented
  return out;
 }
 function render(){
- if($('#tb').contains(document.activeElement)) return;  // an inline edit is in progress
+ // an inline edit must not be rebuilt under the cursor -- but only a focused field is one: the button the operator
+ // just clicked is inside #tb too and keeps the focus in Chrome and Edge, which stopped the repaint that every
+ // successful action asks for, so the page said "ok" over the old row (and over a device it had just deleted)
+ const focused=document.activeElement;
+ if(focused&&typeof focused.matches==='function'&&focused.matches('input,textarea,select')&&$('#tb').contains(focused)) return;
  const q=$('#q').value.trim().toLowerCase(), integ=$('#integ').value;
  let list=rows.filter(r=>(!integ||r.integrations.includes(integ))&&(!modelOn.size||modelOn.has(r.model||'—'))
    &&(!q||[r.name,r.model,r.manufacturer,r.identifier,r.entities.map(e=>e.entity_id).join(' ')].join(' ').toLowerCase().includes(q)));

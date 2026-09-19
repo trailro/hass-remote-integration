@@ -8,7 +8,11 @@ function stateCls(st){return st==='unavailable'?'bad':(st==='unknown'||st==null)
 const MQTT_SINCE_2026_5=new Set(['date','time','datetime']);  // these MQTT platforms landed in HA 2026.5
 const needsNewHA=r=>r.discovery==='native'&&MQTT_SINCE_2026_5.has(r.entity_id.split('.')[0]);
 function render(){
- if($('#tb').contains(document.activeElement)) return;  // an inline edit is in progress: do not rebuild under the cursor
+ // an inline edit must not be rebuilt under the cursor -- but only a focused field is one: the button the operator
+ // just clicked is inside #tb too and keeps the focus in Chrome and Edge, which stopped the repaint that every
+ // successful action asks for, so the page said "ok" over the old row (and over a device it had just deleted)
+ const focused=document.activeElement;
+ if(focused&&typeof focused.matches==='function'&&focused.matches('input,textarea,select')&&$('#tb').contains(focused)) return;
  const q=$('#q').value.trim().toLowerCase(), integ=$('#integ').value,
        sf=$('#stateFilter').value, onlyD=$('#onlyDisc').checked;
  const stateOk=r=>sf===''||(sf==='enabled'?!r.disabled:sf==='value'?(r.state!=null&&r.state!=='unknown'&&r.state!=='unavailable'):sf==='nostate'?r.state==null:r.state===sf);
