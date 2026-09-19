@@ -33,6 +33,7 @@ class El {
     }
   }
   insertAdjacentHTML(_where, html) { this.addRows(html); }
+  querySelector(sel) { return sel === 'select' && /<select/.test(this.html || '') ? (this._sel ??= new Select()) : null; }
 }
 class Select extends El {
   get value() { return this._value ?? ''; }
@@ -42,17 +43,18 @@ class Select extends El {
 function page(file, ids, answer) {
   const els = {};
   const $ = s => (els[s] ??= s === '#file' ? new Select() : new El());
-  const requests = [];
-  const document = { querySelector: $, querySelectorAll: () => [], createElement: () => new El() };
+  const requests = [], logs = [], rows = [];
+  const document = { querySelector: $, querySelectorAll: () => [], createElement: () => { const e = new El(); rows.push(e); return e; } };
   const fetch = async (url) => {
     requests.push(url);
     const { status = 200, body } = await answer(new URL(url, 'http://hri'));
-    return { ok: status < 400, status, json: async () => body };
+    // no body at all: an answer that is not JSON, which r.json() rejects on, as a browser's does
+    return { ok: status < 400, status, json: async () => { if (body === undefined) throw new SyntaxError('Unexpected token < in JSON at position 0'); return body; } };
   };
   const src = fs.readFileSync(path.join(STATIC, file), 'utf8');
   const api = new Function('$', 'document', 'esc', 'fetch', 'setInterval', 'log', 'post',
-    src + `\nreturn {${ids.join(',')}};`)($, document, esc, fetch, () => 0, () => {}, async () => ({}));
-  return { api, $, requests };
+    src + `\nreturn {${ids.join(',')}};`)($, document, esc, fetch, () => 0, m => logs.push(String(m)), async () => ({}));
+  return { api, $, requests, logs, rows };
 }
 
 const settle = () => new Promise(r => setTimeout(r, 0));
@@ -165,6 +167,31 @@ const out = {};
   out.logfiles_restart = {
     unique: await run([file('a', 'first.log'), file('b', 'second.log')], 'b'),
     shared: await run([file('a', 'logs/session-token=***'), file('b', 'logs/session-token=***'), file('c', 'other.log')], 'b'),
+  };
+}
+
+// ----- logs.js: a level the server refuses ------------------------------------------------------
+// LogLevelView answers through json_message, which sends {"message": ...}; the page read only .error, so
+// every refusal -- the root logger, an unknown level, the 50-logger cap -- reached the operator as "error: 400"
+{
+  const GROUPS = [{ name: 'custom_components', loggers: ['custom_components.demo'], levels: { 'custom_components.demo': 'INFO' }, counts: {} }];
+  const run = async (refusal) => {
+    const p = page('logs.js', ['loadGroups'], url => {
+      if (url.pathname === '/api/logs/loggers') return { body: GROUPS };
+      if (url.pathname === '/api/logs/level') return refusal;
+      return { body: { capacity: '2 MB', path: '', records: [], truncated: false, cursor: 0 } };
+    });
+    await p.api.loadGroups();
+    p.logs.length = 0;
+    await p.rows.at(-1).querySelector('select').onchange({ target: { value: 'DEBUG' } });
+    return p.logs;
+  };
+  out.log_level_refused = {
+    message: await run({ status: 400, body: { message: 'the root logger is not yours to change: pick a logger below it' } }),
+    error: await run({ status: 400, body: { error: 'unknown level FINE' } }),
+    cap: await run({ status: 400, body: { message: 'already 50 loggers with a level of their own: reset one first' } }),
+    not_json: await run({ status: 502 }),
+    accepted: await run({ status: 200, body: { ok: true } }),
   };
 }
 

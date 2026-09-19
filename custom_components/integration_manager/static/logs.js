@@ -36,9 +36,10 @@ async function loadGroups(){
   tr.innerHTML=`<td>${esc(g.name)}</td><td class="id">${esc(lg)}</td><td>${esc(lv)}</td><td class="mut">${g.counts[lg]||0}</td>
    <td><select data-lg="${esc(lg)}">${['(inherited)','DEBUG','INFO','WARNING','ERROR'].map(l=>`<option ${l===lv?'selected':''}>${l}</option>`).join('')}</select></td>`;
   tr.querySelector('select').onchange=async e=>{
-    // a refused level (the root logger) would otherwise revert with no explanation
+    // a refused level (the root logger, an unknown level, the 50-logger cap) would otherwise revert with no
+    // explanation -- and the refusal carries its reason in "message" (json_message), not in "error"
     const r=await fetch('/api/logs/level',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({logger:lg,level:e.target.value==='(inherited)'?null:e.target.value})});
-    if(!r.ok) log('error: '+((await r.json().catch(()=>({}))).error||r.status));
+    if(!r.ok){const j=await r.json().catch(()=>({})); log('error: '+(j.error||j.message||r.status));}
     loadGroups();};
   t.appendChild(tr);
  }

@@ -2,6 +2,11 @@
 answers in tests/js/log_pages.mjs (F13 and F16, the client half; the server
 half is tests/test_log_follow.py).
 
+F19, in the same harness: LogLevelView refuses a level through json_message,
+which sends {"message": ...}, while the page read only .error -- so the reason
+(the root logger, an unknown level, the 50-logger cap) never reached the
+operator, who saw "error: 400" and the select revert.
+
 Needs node, which the container the unit tests run in does not have: it skips
 there and runs wherever node is installed (a developer machine, CI).  Both
 tests fail on the tree before the fix."""
@@ -64,6 +69,22 @@ class LogPagesTest(unittest.TestCase):
         shared = self.out["logfiles_restart"]["shared"]
         self.assertEqual((shared["selected"], shared["shown"]), ("a-restarted", "contents of a"))
         self.assertIn("2 files show logs/session-token=***", shared["note"])
+
+
+    def test_a_refused_log_level_says_why(self):
+        """F19: only the status reached the page, although the point of the line is the explanation."""
+        refused = self.out["log_level_refused"]
+        self.assertEqual(refused["message"], ["error: the root logger is not yours to change: pick a logger below it"])
+        self.assertEqual(refused["cap"], ["error: already 50 loggers with a level of their own: reset one first"])
+
+    def test_a_refusal_that_does_carry_error_still_works(self):
+        self.assertEqual(self.out["log_level_refused"]["error"], ["error: unknown level FINE"])
+
+    def test_an_answer_that_is_not_json_falls_back_to_the_status(self):
+        self.assertEqual(self.out["log_level_refused"]["not_json"], ["error: 502"])
+
+    def test_an_accepted_level_says_nothing(self):
+        self.assertEqual(self.out["log_level_refused"]["accepted"], [])
 
 
 if __name__ == "__main__":  # pragma: no cover
