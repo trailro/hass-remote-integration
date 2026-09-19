@@ -138,7 +138,7 @@ Put your settings in a `.env` file next to `docker-compose.yml`:
 ```bash
 TZ=Europe/Berlin          # your time zone
 HRI_PORT=8087             # port of the UI
-# HRI_VERSION=0.22.0      # optional: pin a release (default: latest)
+# HRI_VERSION=0.22.1      # optional: pin a release (default: latest)
 # HRI_REGISTRY=docker.io/trailro26  # optional: pull from Docker Hub (default: ghcr.io/trailro)
 # HRI_PASSWORD=...        # optional: require a password for the UI and API
 # HRI_APT_PACKAGES=ffmpeg  # optional: Debian packages installed at boot (what pip cannot install)
@@ -439,7 +439,10 @@ switches, restarts if needed, smoke-tests, and rolls back on its own if the new
 version does not set up; a degraded version is kept and reported. *Full
 rollback* on the Integration page brings back the previous version together
 with the config as it was before the update; its restart is
-smoke-tested too, without a further automatic rollback. One full rollback runs at
+smoke-tested too, without a further automatic rollback. The previous version is
+the one that actually ran: a switch that never got its restart never loaded, so
+switching twice in a row leaves the Full rollback target, and the backup that
+goes with it, at the version the process is still running. One full rollback runs at
 a time: a second one (a double click, or a manual one while the automatic one
 runs) is refused. A full rollback is also refused while a Home Assistant version change, an
 install or a restore is being prepared, and while a switch with a configuration
@@ -517,7 +520,13 @@ has ever run on — no version in `ha.json` and no `.storage`. On a volume that
 has run something, a failed install ends the boot with the reason instead:
 Home Assistant migrates storage forward only, so quietly starting an older
 version on a newer configuration is the one thing the container must not do,
-and the version you had stays recorded. A
+and the version you had stays recorded. A volume that has run something but has
+no version recorded — `ha.json` deleted, or restored without it — is not treated
+as fresh either: the container continues with the newest version it finds a venv
+for on the volume, and prunes none of them that boot. If none of them runs on
+this image's Python and the newest release cannot be looked up (no network, or
+`HA_VERSION_LATEST=0`), the boot ends with the reason rather than installing the
+image's own older version over your configuration. A
 boot counts as good once the integration has set up, or 10 minutes after Home
 Assistant started; stopping or restarting the container during a boot, also
 while Home Assistant is still being imported, does not count as a failure —
@@ -542,8 +551,10 @@ the oldest release the manager was measured on, the default is a recent one to
 start from. The second rule applies above the floor: an older release pins
 requirements published before this image's Python existed, PyPI has no wheel
 for them and the image has no compiler, so the manager resolves the chosen
-version's pins itself — nothing is installed,
-the answer is cached for an hour — and refuses a version whose requirements
+version's pins itself — nothing is installed, and the answer is cached for an
+hour, except a *could not check*: that says PyPI could not be reached at that
+moment, not anything about the version, so the next attempt asks again — and
+refuses a version whose requirements
 cannot install, naming the package. A check can take minutes on an old version,
 and only one runs at a time. On **System**, *Check selected version* (and
 picking a version in the list) shows the same verdict for the selection. When
@@ -882,7 +893,10 @@ setup)`); a restart cannot configure it, so the watchdog leaves that one alone.
 It never fights the rest of the manager. Nothing is restarted while an
 install, start, stop, backup, import, restore or full rollback is running,
 while a preflight (of an integration version or of a Home Assistant version)
-or a manager action from MQTT is running, while no integration runs or Home Assistant itself is not running yet,
+or a manager action from MQTT is running — each only for as long as it can still
+be working: a preflight stops holding the watchdog off after an hour and a
+manager action after 30 minutes, because a process that hung is exactly what the
+watchdog is for — while no integration runs or Home Assistant itself is not running yet,
 while a restore, a rebuild, a Home Assistant version change, a deferred start
 or a full rollback is waiting for the next restart, while a smoke test is
 pending or a config entry is still setting up, nor in the first 15 minutes
@@ -1084,6 +1098,14 @@ gone, the module fails), the integration still starts without it and a
 notification on the Overview says which patch and why. It goes away once every
 patch applies again.
 
+A patch retired by its own headers is listed as `skipped` and is nothing to act
+on — unless it patched an installed library rather than the integration's own
+files. Those files are not redeployed by a version change, so the change is
+still in them: the row says `skipped, still applied` and what to do about it
+(reinstall that distribution, or switch back and delete the patch). The
+integration's own files come back with every version change, so a patch of those
+that no longer applies is simply gone.
+
 ---
 
 ## For integration authors: dev mode
@@ -1256,7 +1278,11 @@ hass_<domain>/manager/result                        outcome of a manager action,
   main Home Assistant is below the 2024.11 that device discovery needs anyway.
   `discovery_compat_platforms_mirrored` counts a subset of `discovery_mirrored`:
   a mirrored platform is a mirror like any other. A light, fan, siren or humidifier whose state is `unknown` stays
-  unknown on the main HA. A `text` entity whose state is `unknown` or
+  unknown on the main HA. A sensor whose state class is `total` carries its
+  `last_reset` as well: that is the one state class whose reset the main Home
+  Assistant cannot work out for itself, and without it a meter that starts a new
+  cycle is read there as a large negative delta and the energy dashboard loses
+  the cycle. A `text` entity whose state is `unknown` or
   `unavailable` here shows unavailable on the main HA rather than a value: its
   MQTT platform takes every payload as the text, so there is no payload that
   means *no value* there. A text whose value really is the word `None`, or
@@ -1342,7 +1368,11 @@ hass_<domain>/manager/result                        outcome of a manager action,
   of what an entity has here. A water heater's away mode and its high/low
   target (the rest is mirrored), a light's `transition` and `flash` (the basic
   MQTT light schema has no place for them),
-  installing an update with a backup, the title of a notify message (the
+  installing an update with a backup, an update entity's release-notes link when
+  it is not an `http://` or `https://` URL (an integration that serves its notes
+  from `/local` or `/api` reports a relative one, which the main HA's MQTT
+  update refuses — and it refuses the whole rendered payload with it, so the
+  entity would lose its versions as well), the title of a notify message (the
   message arrives), who changed an alarm panel (`changed_by`), and the
   `device_class`, `supported_features` and `entity_picture` attributes of an
   entity mirrored as a sensor (a media player's `tv`) stay in the container.
@@ -1366,8 +1396,13 @@ hass_<domain>/manager/result                        outcome of a manager action,
   the next full republish, up to an hour later. What the source declares in
   `supported_features` decides the shape now, its registry entry fills in what
   the state cannot carry, and a component that comes out different is
-  announced again. Covers, vacuums and water heaters show the
-  features the entity supports here, and a fan offers the same speed steps.
+  announced again. Covers, valves, vacuums, lawn mowers, water heaters, locks
+  and update entities show the features the entity supports here — a valve that
+  cannot be stopped gets no stop button, a lock that cannot be opened gets no
+  open button, an update entity that cannot install gets no install button — an
+  alarm panel offers only the modes it can arm, a thermostat gets a temperature
+  range, a target humidity and an on/off switch only where the source declares
+  them, and a fan offers the same speed steps.
 - **Service calls**: publish a JSON object to `call/<domain>/<service>` (service
   data plus optional `entity_id`, and an optional `_id`); the result comes back
   on `result/...`, with a `response` key for a service that returns response
@@ -1457,7 +1492,9 @@ hass_<domain>/manager/result                        outcome of a manager action,
   replaced; installing Home Assistant (upgrades only) takes a backup, keeps the
   configuration and restarts. The limits of *Back up now* and *Check for
   updates* survive a restart (if they cannot be saved, the action still runs
-  and the limit holds until the restart). A restart asked for over MQTT, on its own or
+  and the limit holds until the restart), and only a run spends one: an action
+  refused by what it called — an install was already running — did nothing, so
+  the next press is not made to wait for it. A restart asked for over MQTT, on its own or
   after an install, waits up to five minutes in all for a running manager action
   (an install, a backup, a check for updates) and for an install, start or
   backup started from the UI to finish; if one is still running then, or if the
@@ -1512,7 +1549,15 @@ hass_<domain>/manager/result                        outcome of a manager action,
   stop the container and delete `mqtt_cleanup_pending.json` (or remove its entry for
   that broker). An `mqtt_identity.json` written by 0.16.x or older names no
   broker: a cleanup deferred from it belongs to the broker the MQTT settings
-  name at the uninstall. Neither file is part of backups, so a restore never
+  name at the uninstall.
+  Pointing the MQTT settings at another broker is the same situation without an
+  uninstall: what the container published is still retained on the broker it
+  published to, and no client built here reaches it. That identity is recorded
+  as pending for that broker — the log and the timeline say so — instead of
+  being swept on the new one and forgotten, and it is cleared when the settings
+  name it again. Host and port decide: a different user, or TLS turned on, is
+  the same broker holding the same retained data.
+  Neither file is part of backups, so a restore never
   forgets a cleanup the broker still needs or brings back an old one. Starting the same integration again on that broker before then cancels
   it: its documents are live again.
   Entities that a restore, an
@@ -1708,10 +1753,20 @@ What is in place:
   and cloudhook URLs, `Authorization` values (`Bearer`, `Basic` and any other
   scheme), `Cookie`/`Set-Cookie` values and credentials in URLs (also a
   password holding `/` or `@`). Masking errs on the side of hiding too much.
-  A quoted value is masked up to its closing quote, past escaped quotes (`\"`,
-  `\'`), also as a JSON string inside another one (`\"password\": \"…\"`);
-  a value whose quote never closes (a line cut short) is masked to the end of
-  the line.
+  A value the masking finds a name for is masked to the end of its line —
+  wrapper, container and auth scheme and all — as a single `***`: the rule no
+  longer decides what a value looks like, because the shape nobody had described
+  was the one that got printed. Three things end it earlier, and none of them
+  can be part of it: a quote the value opened with (an escaped one, `\"` or
+  `\'`, and a triple quote count; one that never closes, a line cut short, takes
+  the rest of the line with it), a quote or bracket that opened before the name,
+  and the next `name=` pair — which `Authorization` and `Cookie` are exempt
+  from, because their own value is written as name=value pairs. A name counts
+  singular or plural, and the separator may be `=`, `:` or a percent-encoded
+  spelling of either. A name ending in `code` is a secret (`user_code`,
+  `device_code`), but the codes that report a result stay readable:
+  `status_code`, `error_code`, `exit_code`, `return_code`, `reason_code`,
+  `http_code` and `response_code`. SECURITY.md has the whole rule.
   The searches on the Logs and Log files pages run on the masked text, so
   looking for part of a key finds nothing: a row that appeared only while the
   search matched the key would let it be read out one character at a time.
@@ -2111,9 +2166,11 @@ progress (50): try again later`.
   restore being scheduled or cancelled, a backup, a patch being applied, a Home
   Assistant version change, the self-check right after boot, or a restart
   already under way. The page shows the error. Wait for it to finish
-  and restart again. A restart that fails before anything stops (the state
-  file cannot be written on a full volume, for example) is refused the same
-  way, with the reason. Once a restart is accepted, the process gives Home
+  and restart again. A full volume does not refuse it: the state file holds a
+  badge and a line of history, and freeing the disk is often what the restart is
+  for, so a write that fails is logged and the restart goes ahead. A restart
+  that fails for another reason before anything stops is refused the same way,
+  with the reason. Once a restart is accepted, the process gives Home
   Assistant about 205 s to stop and then exits anyway, so a stop that hangs
   still ends in a restart rather than in a container that is up and
   unreachable.

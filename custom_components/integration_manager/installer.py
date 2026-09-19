@@ -2888,8 +2888,9 @@ class Installer:
     def _notify_patches(self, domain: str, results: list[dict[str, Any]]) -> None:
         """Blocking-safe: a persistent notification while a patch does not fit
         the code it targets (upstream changed it, a file is gone, the module
-        failed), dismissed once every patch applies again.  A patch retired
-        by its headers ("skipped") is fine."""
+        failed), or is out of scope for this version but still in an installed
+        library, dismissed once every patch applies again.  A patch retired by
+        its headers ("skipped") is fine."""
         from homeassistant.components import persistent_notification as pn
 
         nid = f"integration_manager_patches_{domain}"
@@ -2898,8 +2899,11 @@ class Installer:
             pn.dismiss(self.hass, nid)
             return
         lines = "\n".join(f"- {r['name']}: {r['status']}" for r in bad)
-        pn.create(self.hass, f"{lines}\n\nThe integration runs without them. On the Integration page, Edit a patch and Check it "
-                  "against the running code to see what changed.", title=f"Patches of {domain} no longer fit", notification_id=nid)
+        pn.create(self.hass, f"{lines}\n\nA patch that does not fit is not applied: the integration runs without it, and Edit "
+                  "and Check it on the Integration page to see what changed. One that says \"skipped, still applied\" is the "
+                  "other way round — it is out of scope for this version, but the library it patched still carries it: "
+                  "reinstall that distribution, or switch back and delete the patch.",
+                  title=f"Patches of {domain} need attention", notification_id=nid)
 
     def dismiss_patch_notification(self, domain: str) -> None:
         from homeassistant.components import persistent_notification as pn
