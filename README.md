@@ -269,7 +269,11 @@ Choose whichever fits the integration, on the **Integration** page:
   standard HA backup (the uncompressed `.tar` Home Assistant writes, encrypted
   or not). The config entries of the installed integration come over with
   their data *and* options, and entity ids, names, icons and disabled flags
-  are aligned, so entities keep the same ids they had in your main HA. A
+  are aligned, so entities keep the same ids they had in your main HA. Both
+  directions: an entity you had turned off stays off here, and one its own
+  integration ships disabled (a signal strength, a diagnostic) that you had
+  turned on is turned on here as it is created — it has no state to wait for,
+  so it is aligned from the registry event itself. A
   config entry whose id is not plain letters and digits is skipped. A store
   file belongs to the longest domain of the backup it is named after:
   `foo_bar_tokens` comes with `foo_bar`, never with `foo`. An import is
@@ -918,7 +922,12 @@ the list holds the newest 200 lines (following live drops the oldest). Loggers l
 `quiet_loggers` start at WARNING; raise one at runtime while you investigate.
 A live follow keeps advancing even when a whole batch of new lines matched only
 inside masked values, or a level or logger filter matched nothing, and a
-follower that fell behind reads on at once while more lines are waiting. The
+follower that fell behind reads on at once while more lines are waiting. No
+single line can end the log: a message carrying text that is not valid UTF-8 —
+a file name from a volume another system wrote, which an `OSError` brings into
+the message — is stored with those characters escaped rather than taking the
+writer down with it, and a handler that raises costs that one line, not the
+rest of the session. The
 search runs once typing pauses.
 The root logger is not one of them: a level set there would silence or flood
 every logger at once, including the line that records the change, so it is
