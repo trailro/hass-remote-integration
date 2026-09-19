@@ -3266,12 +3266,43 @@ class MqttPublisher:
                 is_event = old is not None and last is not None and new.state != last
                 self._last_event[new.entity_id] = new.state
             self._publish_state(new, is_event=is_event)
+            self._refresh_discovery_if_reshaped(new)
         elif old is not None:
             entry = er.async_get(self.hass).async_get(old.entity_id)
             if entry is not None and entry.disabled and entry.disabled_by is not er.RegistryEntryDisabler.CONFIG_ENTRY:
                 self._publish_disabled(old.entity_id, old)  # disabling removes the state: see _on_registry
             else:
                 self._clear(old.entity_id)
+
+    def _refresh_discovery_if_reshaped(self, state: State) -> None:
+        """A discovery component is not only a set of topics, it is also what the entity's attributes say
+        it can do: a cover's position and tilt, a fan's speed, direction and oscillation, an alarm's code
+        format.  An entity that had no value for one of those when its config went out (it was
+        `unavailable`, or it had not reported yet) was announced without that control, and nothing here
+        looked again until the full republish - an hour away by default.  So: build the component the way
+        discovery would build it now, and when it is not the one that was announced, schedule the same
+        debounced refresh a registry change uses.  Unchanged configs are dropped by the content gate, so
+        an entity whose shape is stable costs one dict comparison per state change and no traffic."""
+        if not (self.config.discovery_enabled and self._connected) or self._moving:
+            return
+        announced = next((comps[state.entity_id] for comps in self._discovery_map.values()
+                          if state.entity_id in comps), None)
+        if announced is None:
+            return  # not announced by this process (excluded, or still to come): the republish decides
+        integration = platform_of(self.hass, state.entity_id) or "unregistered"
+        if self._integration_excluded(integration):
+            return
+        rule = self.rules.for_entity(state.entity_id)
+        if rule.get("exclude"):
+            return
+        try:
+            comp = self.rules.apply_component(
+                disc.build_component(self.hass, state, self._topic_for(state.entity_id, integration),
+                                     self._cmd_base(), self.prefix, disc.compat_for(self.config.main_ha_version)), rule)
+        except Exception:  # noqa: BLE001 - _group_by_device names it when it skips the entity
+            return
+        if comp != announced:
+            self._schedule_discovery_refresh()
 
     def _publish_disabled(self, entity_id: str, old: State | None) -> None:
         """An entity disabled here (by the user, its device or its integration) stays on the consumer with its

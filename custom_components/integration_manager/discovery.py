@@ -222,6 +222,15 @@ def _attr_or_empty(name: str) -> str:
 # payload (PAYLOAD_NONE) and per-entity availability marks the entity offline.
 _STATE_TPL = _tpl("'None' if value_json.state in ['unavailable', 'unknown'] else value_json.state")
 
+# A device_tracker state for the main Home Assistant: the reset payload ("None", which clears the
+# location name) whenever the document carries coordinates for it to place itself with, or when there
+# is nothing to say; otherwise the source's own home/not_home.  See the device_tracker branch of
+# build_component for why nothing else may be rendered here.
+_DEVICE_TRACKER_TPL = _tpl(
+    "'None' if (value_json.attributes.get('latitude') is number and value_json.attributes.get('longitude') is number)"
+    " or value_json.state in ['unavailable', 'unknown']"
+    " else ('home' if value_json.state == 'home' else 'not_home')")
+
 # Availability on the entity's own document: 'unavailable' at the source is offline on the consumer.
 _AVAILABILITY_TPL = _tpl("'offline' if value_json.state == 'unavailable' else 'online'")
 # Same, for a platform with no no-value payload: an unknown state has nothing honest to show either.
@@ -276,6 +285,32 @@ def _common(entry: er.RegistryEntry | None, state: State, doc_topic: str, prefix
     return comp
 
 
+def _declares(attrs: dict[str, Any], bits: int) -> bool:
+    """The source entity declares at least one of these ``supported_features`` bits.
+
+    A capability attribute is only in the state while the entity has a value for it - an entity that
+    is ``unavailable`` when its config goes out has no attributes at all - so a topic announced on the
+    strength of a value alone comes and goes with that value.  The feature bits do not: they say what
+    the entity can do whatever it is doing now.  Unknown features (no integer) are NOT a yes here: a
+    topic invented for a feature nobody declared is a control that fails on the main Home Assistant.
+    """
+    features = attrs.get("supported_features")
+    return isinstance(features, int) and bool(features & bits)
+
+
+def _valid_regex(value: Any) -> str | None:
+    """A code format the main Home Assistant can compile (its `code_format` is `cv.is_regex`), or None:
+    an invalid pattern fails the whole device payload there, and the lock is better off without a code
+    box than the device is without its entities."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        re.compile(value)
+    except re.error:
+        return None
+    return value
+
+
 def _device_class(entry: er.RegistryEntry | None, attrs: dict[str, Any],
                   domain: str | None = None, compat: Compat | None = None) -> str | None:
     """The source entity's device class, or None when the declared main Home
@@ -300,6 +335,16 @@ def build_component(
     domain, object_id = state.entity_id.split(".", 1)
     entry = er.async_get(hass).async_get(state.entity_id)
     attrs = dict(state.attributes)
+    if entry is not None:
+        # Discovery is shaped by the attributes, and an entity that is `unavailable` at this moment has
+        # none at all: a cover would lose its position, a fan its speed, a select its options, for as
+        # long as the retained config lives.  The registry keeps what does not depend on the moment -
+        # the capability attributes and the feature bits - so they stand in for what the state is not
+        # carrying right now.  A value the state DOES have always wins (setdefault).
+        for key, value in (entry.capabilities or {}).items():
+            attrs.setdefault(key, value)
+        if isinstance(getattr(entry, "supported_features", None), int):
+            attrs.setdefault("supported_features", entry.supported_features)
     cmd = f"{cmd_base}/{domain}/{object_id}"
 
     if domain not in NATIVE:
@@ -358,7 +403,11 @@ def build_component(
                 "temperature_unit": "C",
             }
         )
-        if attrs.get("target_temp_high") is not None or attrs.get("target_temp_low") is not None:
+        # TARGET_TEMPERATURE_RANGE (2), not the two values: a thermostat only carries them while it is in
+        # a range mode, so one published in `heat` never got the high/low topics and could not be put in
+        # `heat_cool` from the main HA at all.  The values still answer for a source with no feature bits.
+        if (_declares(attrs, 2) or attrs.get("target_temp_high") is not None
+                or attrs.get("target_temp_low") is not None):
             comp.update(
                 {
                     "temperature_high_state_topic": doc_topic,
@@ -498,11 +547,14 @@ def build_component(
             comp.update({key: payload if supports(bit) else None for key, (payload, bit) in moves.items()})
         if dc := _device_class(entry, attrs, domain, compat):
             comp["device_class"] = dc
-        if attrs.get("current_position") is not None:
+        # SET_POSITION (4) / the tilt bits announce the topics even while the source has no value for them
+        # (it is `unavailable`, or it has not reported yet): the value alone would take the position and
+        # tilt controls off the main HA until the next full republish, an hour away by default.
+        if attrs.get("current_position") is not None or _declares(attrs, 4):
             comp.update({"position_topic": doc_topic, "position_template": _attr_or_empty('current_position')})
             if supports(4):
                 comp["set_position_topic"] = f"{cmd}/position"
-        if attrs.get("current_tilt_position") is not None:
+        if attrs.get("current_tilt_position") is not None or _declares(attrs, 16 | 32 | 64 | 128):
             comp.update({"tilt_status_topic": doc_topic, "tilt_status_template": _attr_or_empty('current_tilt_position')})
             if supports(16 | 32 | 64 | 128):  # the main HA turns a tilt command topic into all four tilt features
                 comp["tilt_command_topic"] = f"{cmd}/tilt"
@@ -520,7 +572,7 @@ def build_component(
         )
         if dc := _device_class(entry, attrs, domain, compat):
             comp["device_class"] = dc
-        if attrs.get("current_position") is not None:
+        if attrs.get("current_position") is not None or _declares(attrs, 4):  # ValveEntityFeature.SET_POSITION
             # a position-reporting valve may not carry open/close payloads
             for k in ("payload_open", "payload_close"):
                 comp.pop(k, None)
@@ -531,7 +583,10 @@ def build_component(
 
     elif domain == "fan":
         comp.update({"state_value_template": _onoff("value_json.state"), "command_topic": f"{cmd}/state", "payload_on": "ON", "payload_off": "OFF"})
-        if attrs.get("percentage") is not None or attrs.get("percentage_step") is not None:
+        # FanEntityFeature: SET_SPEED (1), OSCILLATE (2), DIRECTION (4).  A fan that is off or
+        # unavailable carries no percentage, no oscillating and no direction, and the config it got
+        # announced with then had none of those controls on the main Home Assistant.
+        if attrs.get("percentage") is not None or attrs.get("percentage_step") is not None or _declares(attrs, 1):
             comp.update(
                 {"percentage_state_topic": doc_topic, "percentage_value_template": _attr('percentage'),
                  "percentage_command_topic": f"{cmd}/percentage"}
@@ -551,13 +606,13 @@ def build_component(
                 {"preset_modes": list(attrs["preset_modes"]), "preset_mode_state_topic": doc_topic,
                  "preset_mode_value_template": _attr('preset_mode'), "preset_mode_command_topic": f"{cmd}/preset_mode"}
             )
-        if attrs.get("oscillating") is not None:
+        if attrs.get("oscillating") is not None or _declares(attrs, 2):
             comp.update(
                 {"oscillation_state_topic": doc_topic,
                  "oscillation_value_template": _tpl("'oscillate_on' if value_json.attributes.get('oscillating') else 'oscillate_off'"),
                  "oscillation_command_topic": f"{cmd}/oscillate"}
             )
-        if attrs.get("direction") is not None:
+        if attrs.get("direction") is not None or _declares(attrs, 4):
             comp.update(
                 {"direction_state_topic": doc_topic, "direction_value_template": _attr('direction'),
                  "direction_command_topic": f"{cmd}/direction"}
@@ -565,10 +620,18 @@ def build_component(
 
     elif domain == "lock":
         comp.update(
+            # like the alarm panel: the code typed on the consuming side travels with the action and the
+            # source lock checks it.  Without the template MQTT lock sends the bare payload, the code the
+            # user typed stays there, and a code-protected lock refuses every command from the main HA.
             {"value_template": _STATE_TPL, "state_locked": "locked", "state_unlocked": "unlocked",
              "state_locking": "locking", "state_unlocking": "unlocking", "state_jammed": "jammed", "state_open": "open",
-             "command_topic": f"{cmd}/command", "payload_lock": "LOCK", "payload_unlock": "UNLOCK", "payload_open": "OPEN"}
+             "command_topic": f"{cmd}/command", "payload_lock": "LOCK", "payload_unlock": "UNLOCK", "payload_open": "OPEN",
+             "command_template": '{"action": "{{ value }}", "code": {{ code | to_json }}}'}
         )
+        # MQTT lock's code_format is the regex the main HA validates the typed code against (the alarm's
+        # is a `number`/`text` keyword instead); the source lock's `code_format` is that same regex.
+        if code_format := _valid_regex(attrs.get("code_format")):
+            comp["code_format"] = code_format
 
     elif domain == "button":
         comp.update({"command_topic": f"{cmd}/press", "payload_press": "PRESS"})
@@ -667,9 +730,21 @@ def build_component(
             comp["device_class"] = dc
 
     elif domain == "device_tracker":
-        # MQTT device_tracker reads latitude/longitude/gps_accuracy from the
-        # JSON attributes and the zone/home state from the state topic.
-        comp["value_template"] = _STATE_TPL
+        # MQTT device_tracker reads latitude/longitude/gps_accuracy from the JSON attributes, but what
+        # comes in on the STATE topic becomes `location_name`, and a tracker with a location name never
+        # looks at a zone (device_tracker/entity.py: `state` returns it before it evaluates anything).
+        # The home/not_home this container computes is not an answer about the main Home Assistant: it
+        # is headless, its `zone.home` sits at 0,0, so a phone standing in the user's kitchen was
+        # `not_home` there.  The zones that matter are the main instance's, so whenever the document
+        # carries real coordinates the state goes out as the reset payload and the main HA places the
+        # device in its own zones.  A router or bluetooth tracker has no coordinates and its
+        # home/not_home is the only truth there is: that one goes out as it stands.
+        # Only those three payloads may ever go out - for anything else MQTT device_tracker takes the
+        # RAW message as the location name, so a state like "Work" made the whole document the state.
+        comp.update(
+            {"value_template": _DEVICE_TRACKER_TPL,
+             "payload_home": "home", "payload_not_home": "not_home", "payload_reset": "None"}
+        )
         if attrs.get("source_type"):
             comp["source_type"] = attrs["source_type"]
 
@@ -939,6 +1014,26 @@ def _service_for(p: str, table: dict[str, Any]) -> Any:
     return table[token]
 
 
+def _action_and_code(p: str) -> tuple[str, Any]:
+    """An action payload of a code-protected platform (alarm panel, lock): the command template sends
+    {"action": ..., "code": ...}, and a bare action (an older config, or a script publishing by hand)
+    still works.  The payload may carry a code, so nothing of it is put in an error message."""
+    if not p.strip().startswith("{"):
+        return p, None
+    try:
+        body = json.loads(p)
+    except (ValueError, RecursionError):
+        body = {}
+    if not isinstance(body, dict):
+        return p, None
+    return str(body.get("action") or ""), body.get("code")
+
+
+def _with_code(t: dict[str, Any], code: Any) -> dict[str, Any]:
+    """Service data with the code the user typed on the consuming side, when there is one."""
+    return {**t, "code": str(code)} if code not in (None, "") else t
+
+
 _TARGET_KEYS = ("entity_id", "device_id", "area_id", "floor_id", "label_id")
 
 
@@ -1019,7 +1114,8 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
             "direction": lambda: ("fan", "set_direction", {**t, "direction": p}),
         })
     if domain == "lock" and field == "command":
-        return "lock", _service_for(p, {"LOCK": "lock", "UNLOCK": "unlock", "OPEN": "open"}), t
+        action, code = _action_and_code(p)
+        return "lock", _service_for(action, {"LOCK": "lock", "UNLOCK": "unlock", "OPEN": "open"}), _with_code(t, code)
     if domain == "button" and field == "press":
         return "button", "press", t
     if domain == "scene" and field == "activate":
@@ -1044,20 +1140,13 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
             "mode": lambda: ("humidifier", "set_mode", {**t, "mode": p}),
         })
     if domain == "alarm_control_panel" and field == "command":
-        action, code = p, None
-        if p.strip().startswith("{"):  # {"action": ..., "code": ...} from the command template; a bare action still works
-            try:
-                body = json.loads(p)
-            except (ValueError, RecursionError):
-                body = {}
-            if isinstance(body, dict):
-                action, code = str(body.get("action") or ""), body.get("code")
+        action, code = _action_and_code(p)
         svc = _service_for(action, {
             "ARM_HOME": "alarm_arm_home", "ARM_AWAY": "alarm_arm_away", "ARM_NIGHT": "alarm_arm_night",
             "ARM_VACATION": "alarm_arm_vacation", "ARM_CUSTOM_BYPASS": "alarm_arm_custom_bypass",
             "DISARM": "alarm_disarm", "TRIGGER": "alarm_trigger",
         })
-        return "alarm_control_panel", svc, ({**t, "code": str(code)} if code not in (None, "") else t)
+        return "alarm_control_panel", svc, _with_code(t, code)
     if domain == "update" and field == "install":
         return "update", "install", t
     if domain == "vacuum":

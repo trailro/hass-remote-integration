@@ -85,6 +85,17 @@ class Consumer:
             ent._state_attrs = {}
         ent._setup_from_config(self.config)
         ent._prepare_subscribe_topics()
+        if hasattr(ent, "_process_update_extra_state_attributes"):
+            # MQTT device_tracker takes its coordinates from the json_attributes topic, not the state
+            # topic, and that subscription belongs to MqttAttributesMixin - a mixin this harness does not
+            # run __init__ for.  Its template and its callback are the platform's own; only the
+            # subscription bookkeeping (which wants a live MQTT client) is left out.
+            from homeassistant.components.mqtt.models import MqttValueTemplate
+
+            ent._attributes_extra_blocked = getattr(type(ent), "_attributes_extra_blocked", frozenset())
+            ent._attr_tpl = None
+            if tpl := self.config.get("json_attributes_template"):
+                ent._attr_tpl = MqttValueTemplate(tpl, entity=ent).async_render_with_possible_json_value
         self.entity = ent
         self.published: list[tuple[str, str]] = []
 
@@ -109,6 +120,9 @@ class Consumer:
         root.addHandler(logs)
         try:
             payload = json.dumps(document(state))
+            if hasattr(self.entity, "_process_update_extra_state_attributes"):
+                self.entity._attributes_message_received(
+                    ReceiveMessage(self.doc_topic, payload, 0, False, self.doc_topic, 0.0))
             for sub in self.entity._subscriptions.values():
                 if sub["topic"] != self.doc_topic:
                     continue
@@ -431,3 +445,125 @@ class WaterHeaterPowerTest(_HassCase):
         self.assertEqual(int(without.entity.supported_features), 1 | 2)  # away mode (4) has no MQTT counterpart
         with self.assertRaises(ValueError):
             disc.command_to_service("water_heater", "tank", "power", "TOGGLE")
+
+
+def tracker_state(consumer) -> str | None:
+    """What the main Home Assistant shows for this tracker.  Its own `TrackerEntity.state`, after its own
+    zone evaluation: `_async_write_ha_state` is the method that places the device in a zone, so only the
+    write to the state machine underneath it (which wants a live entity platform) is stubbed out."""
+    from homeassistant.helpers.entity import Entity
+
+    ent = consumer.entity
+    with mock.patch.object(Entity, "_async_write_ha_state", lambda self: None), \
+         mock.patch.object(type(ent), "available", True):
+        ent._async_write_ha_state()
+        return ent.state
+
+
+class DeviceTrackerZoneTest(_HassCase):
+    """R3-04: the zones that decide where a tracked device is are the MAIN Home Assistant's.  This
+    container is headless and its own `zone.home` sits at 0,0, so the home/not_home it computes says
+    nothing about the user's house - and MQTT device_tracker reads the state topic BEFORE it looks at
+    any zone, so whatever went out there was the answer."""
+
+    HOME = (44.4300, 26.1000)
+    OFFICE = (45.0000, 25.0000)
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        from homeassistant.components import zone
+
+        for entity_id, name, (lat, lon) in (("zone.home", "Home", self.HOME), ("zone.office", "Office", self.OFFICE)):
+            self.hass.states.async_set(entity_id, "0", {"latitude": lat, "longitude": lon, "radius": 100,
+                                                        "passive": False, "friendly_name": name})
+        self.hass.data[zone.DATA_ZONE_ENTITY_IDS] = {"zone.home", "zone.office"}
+
+    def gps(self, state, lat, lon):
+        return State("device_tracker.phone", state, {"source_type": "gps", "latitude": lat, "longitude": lon,
+                                                     "gps_accuracy": 10})
+
+    async def test_a_gps_tracker_is_placed_by_the_main_ha(self):
+        at_home = self.gps("not_home", *self.HOME)  # not_home HERE: this container's zone.home is at 0,0
+        consumer = Consumer(self.hass, at_home)
+        self.assertQuiet(consumer, at_home)
+        self.assertEqual((consumer.entity.latitude, consumer.entity.longitude), self.HOME)
+        self.assertIsNone(consumer.entity.location_name)  # was "not_home", and that beat every zone there
+        self.assertEqual(tracker_state(consumer), "home")
+
+        at_office = self.gps("not_home", *self.OFFICE)
+        self.assertQuiet(consumer, at_office)
+        self.assertEqual(tracker_state(consumer), "Office")  # the MAIN HA's zone name, not one of ours
+
+        nowhere = self.gps("not_home", 10.0, 10.0)
+        self.assertQuiet(consumer, nowhere)
+        self.assertEqual(tracker_state(consumer), "not_home")
+
+    async def test_a_zone_name_never_becomes_the_state(self):
+        """MQTT device_tracker takes the RAW message for a payload that is none of its three, so a state
+        that is a zone name made the whole entity document the location name (255+ characters of JSON)."""
+        in_a_zone = self.gps("Work", *self.OFFICE)
+        consumer = Consumer(self.hass, in_a_zone)
+        self.assertQuiet(consumer, in_a_zone)
+        self.assertNotIn("{", str(consumer.entity.location_name))
+        self.assertEqual(tracker_state(consumer), "Office")
+
+    async def test_a_tracker_without_coordinates_keeps_home_and_not_home(self):
+        """A router or bluetooth tracker has no coordinates: its home/not_home is the only truth there is."""
+        for source_type in ("router", "bluetooth", "bluetooth_le"):
+            for state in ("home", "not_home"):
+                with self.subTest(source_type=source_type, state=state):
+                    src = State("device_tracker.laptop", state, {"source_type": source_type})
+                    consumer = Consumer(self.hass, src)
+                    self.assertEqual(consumer.component["source_type"], source_type)
+                    self.assertQuiet(consumer, src)
+                    self.assertEqual(consumer.entity.location_name, state)
+                    self.assertEqual(tracker_state(consumer), state)
+
+    async def test_a_gps_tracker_without_coordinates_still_says_home(self):
+        src = State("device_tracker.phone", "home", {"source_type": "gps"})
+        consumer = Consumer(self.hass, src)
+        self.assertQuiet(consumer, src)
+        self.assertEqual(tracker_state(consumer), "home")
+        for st in ("unavailable", "unknown"):
+            with self.subTest(state=st):
+                self.assertQuiet(consumer, State("device_tracker.phone", st, {}))
+                self.assertIsNone(consumer.entity.location_name)
+
+
+class LockCodeTest(_HassCase):
+    """R3-05: a code-protected lock could not be operated from the main Home Assistant - discovery sent no
+    code format and no command template, so the code the user typed there never left it."""
+
+    SERVICES = ("lock",)
+    ATTRS = {"code_format": r"^\d{4}$", "supported_features": 1}
+
+    async def test_the_typed_code_reaches_the_source(self):
+        src = State("lock.front", "locked", self.ATTRS)
+        consumer = Consumer(self.hass, src)
+        self.assertEqual(consumer.entity.code_format, r"^\d{4}$")  # was None: no code box on the main HA
+        self.assertQuiet(consumer, src)
+        await consumer.entity.async_unlock(code="1234")
+        await consumer.entity.async_lock(code="1234")
+        await consumer.entity.async_open(code="1234")
+        self.assertEqual(await self.run_here(consumer), [
+            ("lock", "unlock", {"entity_id": "lock.front", "code": "1234"}),
+            ("lock", "lock", {"entity_id": "lock.front", "code": "1234"}),
+            ("lock", "open", {"entity_id": "lock.front", "code": "1234"})])
+
+    async def test_a_lock_without_a_code(self):
+        src = State("lock.shed", "unlocked", {"supported_features": 1})
+        consumer = Consumer(self.hass, src)
+        self.assertIsNone(consumer.entity.code_format)
+        self.assertQuiet(consumer, src)
+        await consumer.entity.async_lock()
+        self.assertEqual(await self.run_here(consumer), [("lock", "lock", {"entity_id": "lock.shed"})])
+
+    async def test_an_uncompilable_code_format_is_left_out(self):
+        """`code_format` is a regex on the main HA and one it cannot compile fails the whole device
+        payload there: every entity of that device would be gone, not just the lock."""
+        src = State("lock.odd", "locked", {"code_format": "[unclosed", "supported_features": 1})
+        consumer = Consumer(self.hass, src)
+        self.assertNotIn("code_format", consumer.component)
+        self.assertQuiet(consumer, src)
+        await consumer.entity.async_unlock()
+        self.assertEqual(await self.run_here(consumer), [("lock", "unlock", {"entity_id": "lock.odd"})])

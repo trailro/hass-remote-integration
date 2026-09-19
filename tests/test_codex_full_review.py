@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from custom_components.integration_manager import build_views
 from custom_components.integration_manager.diagnostics import scrub
 from custom_components.integration_manager.installer import Installer
-from custom_components.integration_manager.mqtt_publisher import MqttPublisher
+from custom_components.integration_manager.mqtt_publisher import MqttConfig, MqttPublisher
 
 
 def _state(entity_id, state):
@@ -18,6 +18,7 @@ class EventReplayTest(unittest.TestCase):
     def test_availability_flap_does_not_replay(self):
         pub = object.__new__(MqttPublisher)
         pub._last_event = {}
+        pub.config, pub._connected = MqttConfig(), False  # only the replay logic is under test: no discovery here
         emitted = []
         pub._publish_state = lambda st, is_event=False, force=True: emitted.append((st.state, is_event))
         seq = [(None, "T1"), ("T1", "unavailable"), ("unavailable", "T1"), ("T1", "T2"), ("T2", "unavailable"),
