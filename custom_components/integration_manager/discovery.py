@@ -750,6 +750,12 @@ def _mirror_as_sensor(entry: er.RegistryEntry | None, state: State, doc_topic: s
         }
     )
     comp.pop("icon", None)
+    if comp.get("entity_category") == "config":
+        # A date/time/datetime entity usually carries the config category, and the main Home Assistant refuses a
+        # SENSOR that has it ("cannot be added as the entity category is set to config"): the entity would never
+        # appear there and would show as permanently missing in parity.  The mirror is read-only whatever the
+        # source is, which is what diagnostic says.
+        comp["entity_category"] = "diagnostic"
     return comp
 
 
@@ -877,6 +883,21 @@ def manager_device(key: str, prefix: str, topics: dict[str, str], integration: s
     block = {"identifiers": [f"{key}_manager"], "name": f"hass-remote-integration ({key})", "manufacturer": "hass-remote-integration",
              "model": f"integration manager, running {integ}", "sw_version": version}
     return f"{key}_manager", block, comps
+
+
+def manager_entity_id(key: str, unique_id_suffix: str) -> str | None:
+    """The entity id of the manager component whose unique id is ``<prefix><unique_id_suffix>``, or None when
+    no component of the manager device has that unique id.
+
+    The manager's components are named after what they do, not after their entity id (unique id
+    ``manager_restart`` is ``button.<key>_restart``, ``health_online`` is
+    ``binary_sensor.<key>_integration``), so a caller holding only the unique id - parity, which reads it off
+    the main Home Assistant - cannot derive the component key: it is looked up in the device itself.  Every
+    component is built, commands and an integration included, so one announced by an earlier configuration is
+    found too."""
+    _id, _block, comps = manager_device(key, "", dict.fromkeys(("status", "health", "manager", "cmd"), "t"),
+                                        "x", "", True)
+    return next((entity_id for entity_id, comp in comps.items() if comp["unique_id"] == unique_id_suffix), None)
 
 
 def _json_or_text(payload: str) -> Any:

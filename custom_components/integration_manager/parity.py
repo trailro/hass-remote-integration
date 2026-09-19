@@ -91,6 +91,13 @@ class ParentHA:
         return out
 
 
+# Platforms whose state can never match: button, scene and notify are command-only on the main Home Assistant
+# (no state topic at all) and event carries a "last triggered" timestamp, so each side holds its own local
+# timestamp or "unknown".  Comparing those strings put false "state differs" rows on the one page meant to give
+# confidence before a cutover.
+STATE_NOT_COMPARABLE = frozenset({"button", "scene", "notify", "event"})
+
+
 def _parent_client(hass: HomeAssistant, installer: Installer) -> ParentHA:
     st = installer.settings
     return ParentHA(hass, str(st.data.get("parent_ha_url") or ""), str(st.data.get("parent_ha_token") or ""))
@@ -159,13 +166,14 @@ async def compute_parity(hass: HomeAssistant, installer: Installer, publisher: M
             continue
         ps = p_state.get(pe["entity_id"])
         parent_state = ps["state"] if ps else None
+        comparable = (o.get("platform") or o["entity_id"].split(".", 1)[0]) not in STATE_NOT_COMPARABLE
         matched.append({
             "unique_id": uid, "entity_id": o["entity_id"], "parent_entity_id": pe["entity_id"],
             "renamed": pe["entity_id"] != o["announced_entity_id"], "parent_name": pe.get("name"), "parent_original_name": pe.get("original_name"),
             "parent_disabled_by": pe.get("disabled_by"), "parent_area": pe.get("area_id"),
             "parent_device": (p_dev.get(pe.get("device_id") or "") or {}).get("name_by_user") or (p_dev.get(pe.get("device_id") or "") or {}).get("name"),
-            "state": ours_state, "parent_state": parent_state,
-            "state_differs": ours_state is not None and parent_state is not None and parent_state != ours_state,
+            "state": ours_state, "parent_state": parent_state, "state_comparable": comparable,
+            "state_differs": comparable and ours_state is not None and parent_state is not None and parent_state != ours_state,
             "parent_unavailable": parent_state == "unavailable" and ours_state not in (None, "unavailable"),
         })
     orphans = []
