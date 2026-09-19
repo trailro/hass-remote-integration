@@ -148,6 +148,12 @@ CALL_MAX_DEPTH = 64
 # which is why every client speaks MQTT 5 and drops to 3.1.1 only for a broker that refuses it.
 MANAGER_RESULT_WAIT_S = 5  # the executor may be wedged: the action must not wait on the broker forever
 STOP_JOIN_S = 5  # how long stopping a client waits for its network thread before closing the socket under it
+# A retained scan holds everything the broker sends under the scanned prefix in memory at once, and what sits there
+# is not this process's to choose: a broker with a very large retained store (or one publishing large retained
+# payloads under it) would otherwise grow this container for as long as the scan's time budget lasts.  Past this,
+# further topics are left unread - the same outcome a scan cut short by _collect_quiet's maximum already has, and a
+# sweep that reads less removes less, never the wrong thing.  Our own documents are a few KB each.
+RETAINED_SCAN_MAX_BYTES = 64 * 1024 * 1024
 PUBLISH_MAX_BYTES = 1024 * 1024
 # paho 2.1 ignores the receive maximum an MQTT 5 broker announces and keeps up to this many QoS 1 messages
 # unacknowledged; a broker announcing less (HiveMQ: 10) may close the connection over it
@@ -1083,12 +1089,23 @@ class MqttPublisher:
 
     def _retained_scan(self, suffix: str, topics: list[tuple[str, int]], min_s: float = 2.0) -> dict[str, bytes]:
         """Blocking: a throwaway client that collects every retained message
-        under `topics` until the burst goes quiet; returns {topic: payload}.
-        The network thread is always stopped, whatever happens."""
+        under `topics` until the burst goes quiet, or until it holds
+        RETAINED_SCAN_MAX_BYTES; returns {topic: payload}.  The network
+        thread is always stopped, whatever happens."""
         found: dict[str, bytes] = {}
+        budget = [0, 0]  # bytes held, messages left unread once the budget was spent (paho's thread only)
+
+        def keep(_cl, _u, m) -> None:
+            if not m.retain or not m.payload:
+                return
+            if budget[0] >= RETAINED_SCAN_MAX_BYTES:
+                budget[1] += 1
+                return  # nothing new is added, so _collect_quiet sees the burst go quiet and ends the scan
+            budget[0] += len(m.payload) + len(m.topic)
+            found[m.topic] = m.payload
+
         deadline = time.monotonic() + 5
-        c = self._throwaway_client(suffix, "scan", deadline,
-                                   lambda cl, u, m: found.__setitem__(m.topic, m.payload) if m.retain and m.payload else None)
+        c = self._throwaway_client(suffix, "scan", deadline, keep)
         try:
             granted: list[Any] = []
             c.on_subscribe = lambda cl, u, mid, codes, props=None: granted.append(codes)
@@ -1100,6 +1117,10 @@ class MqttPublisher:
             self._collect_quiet(c, found, min_s=min_s)
         finally:
             self._stop_client(c)
+        if budget[1]:
+            _LOGGER.warning("MQTT: the %s scan stopped at %s retained topics (%s bytes, its maximum): at least %s further "
+                            "retained messages under %s were left unread",
+                            suffix, len(found), budget[0], budget[1], ", ".join(t for t, _q in topics))
         return found
 
     def _throwaway_client(self, suffix: str, what: str, deadline: float, on_message: Any = None) -> mqtt.Client:
@@ -1848,6 +1869,12 @@ class MqttPublisher:
                 if low > high:
                     finish("rejected", f"low {data['target_temp_low']} is above high {data['target_temp_high']}: send both bounds of the range")
                     return
+            if f"{domain}.{object_id}" not in self._topics:
+                # _topics was read on paho's thread, before this task was handed to the loop; an exclusion
+                # adopted in between (_drop_newly_excluded) empties it, and the operator who excluded the
+                # integration must not see one more command reach it.  A generic call reads it here too.
+                finish("rejected", "not an entity this container publishes")
+                return
             if self._in_flight >= CALLS_IN_FLIGHT_MAX:
                 finish("rejected", f"too many calls in progress ({CALLS_IN_FLIGHT_MAX}): try again later")
                 return
