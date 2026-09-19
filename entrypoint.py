@@ -275,7 +275,9 @@ def status_host_ok(host: str) -> bool:
     h = h.removesuffix(".")
     if not h:
         return False
-    if h in ("localhost", socket.gethostname().lower()) or h in extra:
+    # rstrip("."): gethostname() may come back fully qualified with the trailing dot, and hostguard
+    # compares its own name without it - the container would be refused here and accepted there
+    if h in ("localhost", socket.gethostname().lower().rstrip(".")) or h in extra:
         return True
     try:
         ipaddress.ip_address(h)
