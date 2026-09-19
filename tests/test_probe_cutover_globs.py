@@ -167,6 +167,23 @@ class CutoverBlockerScopeTest(unittest.TestCase):
             [_entry("sensor.zone_1", PREFIX + "sensor.zone_1")],
         ), [])
 
+    def test_our_own_mirror_of_another_entity_renamed_onto_that_id_blocks_it(self):
+        """The exception is our mirror of THAT entity, not any mirror of ours: an operator tidying entity ids on
+        the main HA who renames the mirror of one entity onto the id another is announced under still sends that
+        other one to <id>_2, and the holder being ours does not make the collision go away."""
+        (problem,) = self._blockers(
+            {"sensor.zone_1": PREFIX + "sensor.zone_1", "sensor.zone_2": PREFIX + "sensor.zone_2"},
+            [_entry("sensor.zone_1", PREFIX + "sensor.zone_2")],   # our mirror of zone_2, renamed onto zone_1's id
+        )
+        self.assertIn("sensor.zone_1", problem)
+        self.assertIn("renamed", problem)
+
+    def test_a_mirror_of_ours_renamed_somewhere_we_announce_nothing_is_not_a_blocker(self):
+        self.assertEqual(self._blockers(
+            {"sensor.zone_1": PREFIX + "sensor.zone_1"},
+            [_entry("sensor.kitchen_spare", PREFIX + "sensor.zone_1")],
+        ), [])
+
     def test_the_integration_still_holding_the_id_is_still_a_blocker(self):
         (problem,) = self._blockers(
             {"sensor.zone_1": PREFIX + "sensor.zone_1"},

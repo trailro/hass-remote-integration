@@ -325,13 +325,20 @@ class CutoverView(ManagerView):
         # identity of this container.  Only our own mirror of that very entity is not in the way, so the exception
         # is by unique id - not "every mqtt entity", which let the two foreign cases through silently.
         ours = {c.get("unique_id") for dev in preview for c in dev["components"].values() if c.get("unique_id")}
-        held = {e.get("entity_id"): e.get("platform") for e in registry
-                if not (e.get("platform") == "mqtt" and e.get("unique_id") in ours)}
-        announced = sorted({c.get("default_entity_id") for dev in preview for c in dev["components"].values()
-                            if c.get("default_entity_id")})
-        taken = [eid for eid in announced if eid in held]
+        # the exception is our mirror of *that* entity, not any mirror of ours: a mirror renamed on the main HA
+        # onto the id another entity is announced under collides with it exactly like a stranger would
+        announced_uid = {c["default_entity_id"]: c.get("unique_id") for dev in preview for c in dev["components"].values()
+                         if c.get("default_entity_id")}
+        held: dict[str, str] = {}
+        for e in registry:
+            eid, uid, platform = e.get("entity_id"), e.get("unique_id"), e.get("platform")
+            if platform == "mqtt" and uid is not None and uid == announced_uid.get(eid):
+                continue  # already where we would put it
+            held[eid] = ("a mirror of this container renamed onto that id" if platform == "mqtt" and uid in ours
+                         else platform or "unknown")
+        taken = [eid for eid in sorted(announced_uid) if eid in held]
         if taken:
-            shown = ", ".join(f"{eid} ({held[eid] or 'unknown'})" for eid in taken[:3])
+            shown = ", ".join(f"{eid} ({held[eid]})" for eid in taken[:3])
             out.append(f"{len(taken)} entity id{'s' if len(taken) > 1 else ''} the container announces {'are' if len(taken) > 1 else 'is'} still registered "
                        f"on the main Home Assistant ({shown}{'…' if len(taken) > 3 else ''}): the MQTT entities would get _2 ids; "
                        "remove whatever holds them there first")

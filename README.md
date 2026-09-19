@@ -342,10 +342,13 @@ container announces over MQTT with what your main HA has made of it.
    (optional). They are used to compare, and by *Enable discovery* to check
    that the main HA no longer has the integration's config entries, and that
    nothing there already holds an entity id this container is about to
-   announce. The mirrors this container published are the one exception; an id
-   held by anything else — an unrelated MQTT entity, or a leftover of an
-   earlier identity of this container — blocks the enable and is named, because
-   that entity would otherwise arrive there with a `_2` id.
+   announce. The exception is this container's own mirror of that very entity,
+   sitting where the mirror would go anyway; an id held by anything else blocks
+   the enable and is named, together with what holds it — an unrelated MQTT
+   entity, a leftover of an earlier identity of this container, or a mirror of
+   this container you renamed onto that id, which collides with the entity the
+   id belongs to exactly as a stranger would. The entity would otherwise arrive
+   there with a `_2` id.
    The URL must not contain `user:password@`: the token
    authenticates. The page matches the entities this container announces over
    MQTT with the MQTT entities your main HA created from that discovery, by
