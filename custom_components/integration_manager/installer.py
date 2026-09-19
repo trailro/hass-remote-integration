@@ -1132,7 +1132,13 @@ class Installer:
             code_hash = await self.hass.async_add_executor_job(self._tree_hash, domain)
             # an uninstall + install of the tag this process imported deploys files again, byte for byte the same code
             same_code = loaded == tag and code_hash is not None and self._code_hash.get(domain) == code_hash
-            needs_restart = imported and not same_code and (deployed or (loaded is not None and loaded != tag))
+            # a mutable reference (main, a branch, a local build) that got new code: install() refreshed the running
+            # copy itself, so _ensure_deployed has nothing left to do and the tag did not change - what did change is
+            # the content on disk.  Only known when this process recorded a hash: an adopted integration (boot, or one
+            # Home Assistant set up before the manager knew of it) has none, and its deployed files are what runs.
+            known_hash = self._code_hash.get(domain)
+            code_changed = known_hash is not None and code_hash is not None and known_hash != code_hash
+            needs_restart = imported and not same_code and (deployed or code_changed or (loaded is not None and loaded != tag))
             if not needs_restart and not await self._loadable(domain):
                 # HA scanned custom_components at boot; a domain deployed since is
                 # invisible to its loader until a restart

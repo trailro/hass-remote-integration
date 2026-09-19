@@ -272,7 +272,8 @@ class BuildPrepareView(ManagerView):
             return self.json({"ok": False, "error": f"install: {res.get('error')}", "steps": steps})
         if res.get("replaced") and self.publisher is not None:
             await self.publisher.async_reconnect()  # the MQTT identity follows the new integration
-        restart_required = False
+        # a reinstall of the running copy refreshed the files under the process: its old code keeps running until a restart
+        restart_required = bool(res.get("redeployed"))
         if ha and not ha_changes and ha_state.get("pending"):
             # the running version was chosen explicitly: an older intention to
             # move to another version at the next restart contradicts it
