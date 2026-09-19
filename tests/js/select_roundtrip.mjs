@@ -18,6 +18,12 @@ export const roundTrips = {
   typed_with_comma: { value: ['alpha'], type: ['Smith, John', '  padded  '], sent: ['alpha', 'Smith, John', '  padded  '] },
   typed_blank_is_nothing: { value: ['alpha'], type: ['   '], sent: ['alpha'] },
   typed_after_custom: { value: ['Smith, John'], type: ['Doe, Jane'], sent: ['Smith, John', 'Doe, Jane'] },
+  // F4: "null" and "undefined" are strings HA takes like any other.  The config flow page stringified the value
+  // before deciding whether there was one, so it threw these two away as if the default had been missing.
+  word_null: { value: ['null'] },
+  word_undefined: { value: ['undefined'] },
+  words_after_a_listed_one: { value: ['alpha', 'null', 'undefined'] },
+  typed_words: { value: ['alpha'], type: ['null', 'undefined'], sent: ['alpha', 'null', 'undefined'] },
 };
 
 // a list of custom items, one input each: type into the first empty one, else add a row with the page's own

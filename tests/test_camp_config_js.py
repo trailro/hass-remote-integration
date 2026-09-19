@@ -18,6 +18,7 @@ import unittest
 # installed (a developer machine with node, where the execution part is the point)
 CONFIG_JS_PATH = os.path.join(os.path.dirname(__file__), os.pardir, "custom_components", "integration_manager", "static", "config.js")
 SERVICES_JS_PATH = os.path.join(os.path.dirname(CONFIG_JS_PATH), "services.js")
+HRI_JS_PATH = os.path.join(os.path.dirname(CONFIG_JS_PATH), "hri.js")
 HARNESS = os.path.join(os.path.dirname(__file__), "js", "config_form.mjs")
 SERVICES_HARNESS = os.path.join(os.path.dirname(__file__), "js", "services_form.mjs")
 REQUESTS_HARNESS = os.path.join(os.path.dirname(__file__), "js", "r9_pages.mjs")
@@ -120,6 +121,39 @@ class SubmittedValuesTest(unittest.TestCase):
         self.assertEqual(self.sent["dropdown_single_number"], {"choice": 2})  # the option the schema offered, not "2"
         self.assertEqual(self.sent["list_single_quotes"], {"choice": 'say "hi" & <bye>'})
 
+    def test_the_words_null_and_undefined_are_values_like_any_other(self):
+        # F4: the default was turned into a string before the page decided whether there was one, so a genuine
+        # "null" or "undefined" could not be told from a missing default and an untouched form dropped it
+        self.assertEqual(self.sent["word_single_custom_null"], {"choice": "null"})
+        self.assertEqual(self.sent["word_single_custom_undefined"], {"choice": "undefined"})
+        self.assertEqual(self.sent["word_single_list_custom_null"], {"choice": "null"})
+        self.assertEqual(self.sent["word_single_list_custom_undefined"], {"choice": "undefined"})
+        for key in ("word_multi_custom", "word_multi_list_custom"):
+            with self.subTest(shape=key):
+                self.assertEqual(self.sent[key], {"choices": ["a", "null", "undefined"]})
+        self.assertEqual(self.sent["word_single_custom_typed"], {"choice": "null"})
+        self.assertEqual(self.sent["word_multi_custom_typed"], {"choices": ["undefined"]})
+
+    def test_a_select_without_custom_value_answers_the_two_words_as_before(self):
+        # an option the schema lists is chosen whatever it is called; one it does not list is nothing to choose
+        self.assertEqual(self.sent["word_single_listed_no_custom"], {"choice": "null"})
+        self.assertEqual(self.sent["word_single_list_listed_no_custom"], {"choice": "undefined"})
+        self.assertEqual(self.sent["word_multi_listed_no_custom"], {"choices": ["null", "undefined"]})
+        self.assertEqual(self.sent["word_single_unlisted_no_custom"], {})
+
+    def test_a_default_that_is_not_there_chooses_nothing(self):
+        # the other side of F4: no default at all became the string "undefined" (a null one, "null"), which
+        # picked the option literally called that and sent it back as if the operator had chosen it
+        self.assertEqual(self.sent["missing_single_custom"], {})
+        self.assertEqual(self.sent["missing_multi_custom"], {"choices": []})
+        self.assertEqual(self.sent["missing_multi_custom_null_default"], {"choices": []})
+        self.assertEqual(self.sent["missing_multi_custom_null_in_list"], {"choices": ["a"]})
+        for key in ("missing_single_word_option", "missing_single_word_option_null_default", "missing_single_list_word_option"):
+            with self.subTest(case=key):
+                self.assertEqual(self.sent[key], {})
+        self.assertEqual(self.sent["missing_multi_word_option"], {"choices": []})
+        self.assertEqual(self.sent["missing_suggested_value_falls_back_to_the_default"], {"choice": "b"})
+
     def test_no_scenario_failed_to_run(self):
         self.assertEqual({k: v["error"] for k, v in self.sent.items() if isinstance(v, dict) and "error" in v}, {})
 
@@ -157,6 +191,26 @@ class ServicesCallFormTest(unittest.TestCase):
                 self.assertEqual(self.sent[key], {"words": expected})
         self.assertEqual(self.sent["text_multiple_password"], {"type": "password"})
 
+    def test_the_words_null_and_undefined_are_values_like_any_other(self):
+        # this page never dropped them (F4 is the config flow page's), and must not start to
+        self.assertEqual(self.sent["word_single_custom_null"], {"who": "null"})
+        self.assertEqual(self.sent["word_single_custom_undefined"], {"who": "undefined"})
+        self.assertEqual(self.sent["word_multi_custom"], {"who": ["a", "null", "undefined"]})
+        self.assertEqual(self.sent["word_single_listed_no_custom"], {"who": "null"})
+        self.assertEqual(self.sent["word_multi_listed_no_custom"], {"who": ["null", "undefined"]})
+        self.assertEqual(self.sent["word_single_unlisted_no_custom"], {})
+
+    def test_an_example_that_is_not_there_does_not_become_the_word_null(self):
+        # the mirror of F4, and this page's own half of it: the catalog's example (or default) was stringified
+        # before the page decided whether there was one, so a null example was offered -- and sent -- as "null"
+        self.assertEqual(self.sent["missing_multi_custom_null_example"], {})
+        self.assertEqual(self.sent["missing_multi_custom_null_default"], {})
+        self.assertEqual(self.sent["missing_multi_custom_null_in_list"], {"who": ["a"]})
+        self.assertEqual(self.sent["missing_single_word_option"], {})  # picked the option called "null"
+        self.assertEqual(self.sent["missing_multi_word_option"], {})
+        self.assertEqual(self.sent["missing_single_custom"], {})
+        self.assertEqual(self.sent["missing_multi_custom"], {})
+
     def test_an_empty_text_list_is_not_sent_and_a_required_one_is_reported(self):
         # as a multi select on this page: nothing given, nothing sent
         self.assertEqual(self.sent["text_multiple_empty"], {})
@@ -185,7 +239,7 @@ class CustomMultiSelectRoundTripTest(unittest.TestCase):
         cls.pages = {"config.js": run_harness(HARNESS, CONFIG_JS_PATH), "services.js": run_harness(SERVICES_HARNESS, SERVICES_JS_PATH)}
 
     def test_every_fixture_sends_the_list_as_it_is(self):
-        self.assertGreaterEqual(len(self.fixtures), 9)
+        self.assertGreaterEqual(len(self.fixtures), 13)
         for page, sent in self.pages.items():
             for key, fx in self.fixtures.items():
                 with self.subTest(page=page, fixture=key):
@@ -199,13 +253,30 @@ class CustomMultiSelectRoundTripTest(unittest.TestCase):
 class CustomValueParityTest(unittest.TestCase):
     """The two pages that draw a select from a selector answer custom_value the same way.
 
-    They do not share code: the services page builds HTML strings, the config flow page builds
-    elements, and the only file both load (static/hri.js) is not this change's to edit.  What is
-    shared is the contract, and this test is where it is written down."""
+    They mostly do not share code: the services page builds HTML strings and the config flow page
+    builds elements.  What they do share is the one question both got wrong in opposite directions --
+    whether the default (or example) they are drawn with is a value at all -- which is valueList() in
+    static/hri.js, the file every page loads.  The rest is a contract, and this test is where it is
+    written down."""
 
     def setUp(self):
         with open(SERVICES_JS_PATH, encoding="utf-8") as fh:
             self.services_js = fh.read()
+        with open(HRI_JS_PATH, encoding="utf-8") as fh:
+            self.hri_js = fh.read()
+
+    def test_both_pages_decide_a_value_is_there_before_stringifying_it(self):
+        # C2: the rule lived twice and the two copies had drifted (F4).  It lives in hri.js now, and neither
+        # page may map a default over String() before asking whether there is one.
+        self.assertIn("const valueList=d=>(Array.isArray(d)?d:[d]).filter(v=>v!==undefined&&v!==null).map(String);", self.hri_js)
+        for name, src in (("config.js", CONFIG_JS), ("services.js", self.services_js)):
+            with self.subTest(page=name):
+                self.assertIn("valueList(", src)
+                self.assertNotIn("dflt.map(String)", src)
+                self.assertNotIn("[].concat(ex===''?[]:ex).map(String)", src)
+                # the two words are never spelled out as values to skip: that is what threw away a real one
+                self.assertNotIn("v!=='undefined'", src)
+                self.assertNotIn("v!=='null'", src)
 
     def test_both_pages_type_several_custom_values_one_box_each(self):
         # F18: never one box split on commas (what the two pages send is compared in CustomMultiSelectRoundTripTest)

@@ -24,6 +24,12 @@ async function fetchDownload(b,path,label,fallback){b.disabled=true; try{
 // git tags (v0.10.0) and the manager's own. Sorted as strings, 2026.10.1 lands under 2026.8.4 and v0.10.0 under v0.9.0.
 const vparts=s=>{const m=String(s).match(/^v?(\d+)\.(\d+)\.(\d+)(?:b(\d+))?$/); return m?[+m[1],+m[2],+m[3],m[4]===undefined?1:0,+(m[4]||0)]:String(s).replace(/^v/,'').split('.').map(Number);};
 const vcmp=(a,b)=>{const x=vparts(a),y=vparts(b);for(let i=0;i<Math.max(x.length,y.length);i++){const d=(x[i]||0)-(y[i]||0);if(d)return d;}return 0;};  // a beta sorts before its release
+// The values a select is drawn with -- a config flow field's default, a service field's example -- as strings, to
+// compare with the HTML value of an option.  Whether a value is there is decided BEFORE it is turned into a
+// string, so a genuine value of "null" or "undefined" stays a value like any other, and a value that is not
+// there never becomes the word a browser would print for it.  Used by the Config flow and Services pages, which
+// both keep values their options do not list (custom_value) and have to tell those two cases apart.
+const valueList=d=>(Array.isArray(d)?d:[d]).filter(v=>v!==undefined&&v!==null).map(String);
 function chipBar(sel,counts,on,after){ $(sel).innerHTML=Object.keys(counts).sort().map(k=>`<span class="tag ${on.has(k)?'on':''}" data-k="${esc(k)}">${esc(k)} ${counts[k]}</span>`).join('');
  document.querySelectorAll(sel+' .tag').forEach(t=>t.onclick=()=>{const k=t.dataset.k;on.has(k)?on.delete(k):on.add(k);after();}); }
 

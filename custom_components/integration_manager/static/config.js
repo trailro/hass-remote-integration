@@ -207,16 +207,20 @@ function field(f,t,p){
     // values is a set of checkboxes, and sends a list, exactly like the dropdown it is drawn differently from
     const multi=(kind==='select'&&sel.select&&sel.select.multiple)||f.type==='multi_select';
     const custom=!!(kind==='select'&&sel.select&&sel.select.custom_value);
-    const dv=Array.isArray(dflt)?dflt.map(String):[String(dflt)];
+    const dv=valueList(dflt);  // hri.js: a default that is not there drops out before it is stringified
     // a default the options do not list is a custom value already chosen: with custom_value it is kept, so an
     // untouched form sends it back instead of quietly dropping it -- a choice of its own for a single value,
-    // a box of its own among the typed values of a multiple one (as the services page draws it)
+    // a box of its own among the typed values of a multiple one (as the services page draws it).  Only an empty
+    // string is nothing chosen here; "null" and "undefined" are values HA takes, and valueList already left out
+    // the missing default they used to be mistaken for
     const extra=[];
     if(custom){ const known=new Set(opts.map(o=>String(o.value)));
-      for(const v of dv) if(v!==''&&v!=='undefined'&&v!=='null'&&!known.has(v)){ known.add(v); if(multi) extra.push(v); else opts.push({value:v,label:v}); } }
+      for(const v of dv) if(v!==''&&!known.has(v)){ known.add(v); if(multi) extra.push(v); else opts.push({value:v,label:v}); } }
     const vmap={}; opts.forEach(o=>{vmap[String(o.value)]=o.value;}); wrap._values=vmap;  // the HTML value is a string; send what the schema offered
     if(mode==='list'){ wrap.dataset.kind=multi?'checklist':'radio'; el=document.createElement('div'); el.className='radio'; const group=++RADIO_GROUPS;
-      opts.forEach(o=>{const l=document.createElement('label'); const on=multi?dv.includes(String(o.value)):String(dflt)===String(o.value);
+      // one default or several, the same membership test as the dropdown below: String(dflt) made a missing
+      // default read as the option literally valued "null" or "undefined"
+      opts.forEach(o=>{const l=document.createElement('label'); const on=dv.includes(String(o.value));
         l.innerHTML=`<input type="${multi?'checkbox':'radio'}" name="r${group}" value="${esc(o.value)}" ${on?'checked':''}> ${esc(o.label)}`; el.appendChild(l);});
     }else{ el=document.createElement('select'); wrap.dataset.kind=multi?'multiselect':'select';
       if(multi){ el.multiple=true; el.size=Math.min(opts.length,8); } else if(!f.required) el.appendChild(new Option('—',''));
