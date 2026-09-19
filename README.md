@@ -90,7 +90,8 @@ automations, no recorder. It runs exactly one integration and publishes it.
 - Your main Home Assistant with the MQTT integration, if you want the entities
   to appear there — **2025.10 or newer**, and 2026.5 or newer if the integration
   you mirror has a `date`, `time` or `datetime` entity (see *What the main Home
-  Assistant needs*). The Home Assistant inside the container is a different
+  Assistant needs*), or set `main_ha_version` to the version you actually run
+  and the container leaves out what it cannot parse. The Home Assistant inside the container is a different
   thing entirely, and the container installs it itself.
 - Access to the hardware your integration needs: a USB/serial device passed
   into the container, or a network bridge (see [Hardware access](#hardware-access)).
@@ -685,6 +686,27 @@ three have to support that Python:
   preflight (the manifest's own requirements first), and a version that declares
   no requirements of its own is not checked at all. When PyPI cannot be reached
   it says nothing rather than guessing.
+- **Names Home Assistant has removed.** The same walk over the release's
+  imports also looks for names Home Assistant itself dropped, which is the more
+  common way an integration stops loading after a core update:
+  `CLOUD_NEVER_EXPOSED_ENTITIES` (gone in 2026.6),
+  `helpers.trigger.async_track_same_state` (2026.7), the `helpers.service` trio
+  that moved to `helpers.target` (2026.8), `device_registry.DEVICE_INFO_TYPES`
+  and vacuum's `ATTR_BATTERY_LEVEL` (2026.9), and the rest of the table in
+  `preflight.py` (`_REMOVED_HA_SYMBOLS`, one line per name, each read out of
+  the published wheel rather than a release note). It is a warning, never a
+  blocker: it names the file and the line, the version that removed the name,
+  and where the name moved when it moved, so `from
+  homeassistant.helpers.service import async_extract_referenced_entity_ids`
+  reports `removed in 2026.8.0, now
+  homeassistant.helpers.target.async_extract_referenced_entity_ids`. A name is
+  only reported when the version that removed it is at or below the Home
+  Assistant this container will run — on an older target the import still
+  works and the check says nothing — and an import inside a `try` whose
+  `except` catches `ImportError` is ignored here too, the way it is for a
+  removed standard module. The table only knows the names in it, so silence is
+  not a promise: the smoke test after the switch is still what catches an
+  integration that does not set up.
 - **The integration's own code.** The preflight compiles every `.py` file with
   the image's Python (a syntax error is a blocker naming the file and line, and
   so is a file over 5 MB or one too deeply nested for the parser),
@@ -1157,7 +1179,24 @@ hass_<domain>/manager/result                        outcome of a manager action,
   mirrored `camera.front` becomes `sensor.camera_front`, next to a real
   `sensor.camera_front`), both are announced, the main HA gives one a `_2`
   suffix, and the log names them; `discovery_default_id_duplicates` counts
-  them. A light, fan, siren or humidifier whose state is `unknown` stays
+  them. `main_ha_version` says which Home Assistant consumes this discovery,
+  for example `2026.4`. Empty (the default) means "assume it is current":
+  nothing is left out and the payload is exactly what it would be without the
+  setting. Set, discovery leaves out what that version cannot parse — a device
+  class it does not know is dropped from the component (the entity still
+  arrives, without that class) and a domain whose MQTT platform it does not
+  have is mirrored as a read-only sensor, the way an unmappable domain always
+  was. This matters because the main Home Assistant ignores a key it does not
+  know but rejects the **whole device's** payload over an unknown platform or
+  an unknown device class: one `radon` sensor takes every other entity of its
+  device with it. `discovery_compat_device_classes_dropped` and
+  `discovery_compat_platforms_mirrored` in `GET /api/mqtt/status` count what
+  the setting left out in the last pass, the MQTT page shows both, and each
+  distinct drop is logged once. What each version knows comes from
+  `ha_compat.json`, generated from the published Home Assistant wheels by
+  `tools/gen_ha_compat.py` (2025.1 to 2026.9 at the moment); a version at or
+  above the newest release in that table filters nothing, and neither does one
+  the table has nothing to say about. A light, fan, siren or humidifier whose state is `unknown` stays
   unknown on the main HA. A `text` entity whose state is `unknown` or
   `unavailable` here shows unavailable on the main HA rather than a value: its
   MQTT platform takes every payload as the text, so there is no payload that
@@ -1389,7 +1428,8 @@ hass_<domain>/manager/result                        outcome of a manager action,
 ### What the main Home Assistant needs
 
 Discovery uses the device-based MQTT format, and some of what it publishes only
-newer Home Assistant understands. Measured in September 2026 on `aarch64`,
+newer Home Assistant understands; `main_ha_version` makes the container publish
+only what the version you name does. Measured in September 2026 on `aarch64`,
 against real instances of each release, with the container publishing an
 integration of 14 entities:
 
@@ -1401,14 +1441,22 @@ integration of 14 entities:
 
 Two details on top of that:
 
-- **`date`, `time` and `datetime` entities need 2026.5 or newer.** Home
-  Assistant gained MQTT platforms for those three domains in 2026.5. An older
+- **`date`, `time` and `datetime` entities need 2026.5 or newer**, and a
+  device class needs the release that introduced it (`radon`: 2026.8). An older
   main instance rejects the *whole device's* discovery payload over one of
   them — not just that entity — with `value must be one of [...] @
   data['components'][...]['platform']` in its log, so the device's other
-  entities disappear with it. Until the main instance is updated, exclude those
-  entities from MQTT (the Entities page, or a rule) and the rest of the device
-  comes back.
+  entities disappear with it. Set `main_ha_version` on the MQTT page to the
+  version that instance runs and discovery leaves those values out by itself:
+  the three domains arrive as read-only sensors, an unknown device class is
+  dropped, and everything else is unchanged. Without the setting the old way
+  still works — exclude those entities from MQTT (the Entities page, or a rule)
+  and the rest of the device comes back. The container cannot see which release
+  the main instance runs, so it cannot decide this for you; what it can do is
+  point at the entities it applies to, and every published `date`, `time` and
+  `datetime` entity carries a red `HA 2026.5+` tag on the **Entities** page,
+  next to its `disc` tag. The tag goes away when the entity is excluded, which
+  is also the fix.
 - **Colour temperature on mirrored lights needs 2025.2 or newer**
   (`color_temp_kelvin`).
 
@@ -1693,7 +1741,11 @@ intervals. The same ranges are applied when `mqtt.json` is read, so a hand
 edit cannot keep the manager from starting: a value out of range, or not a
 number, falls back to its default (1883, 0, 300, 60) with a warning in the log.
 So does a switch that is not `true`/`false`, a text setting that is not a
-string, and an `exclude_integrations` that is not a list of domains. An
+string, and an `exclude_integrations` that is not a list of domains. A
+`main_ha_version` that is not a Home Assistant version (`yesterday`, `v2026.8`,
+`2026`) is refused by the MQTT page with the reason; one that reached
+`mqtt.json` by hand falls back to empty with a warning in the log, so nothing
+is filtered rather than the wrong thing being filtered. An
 `mqtt.json` that cannot be parsed, or that is JSON but not an object (`[]`),
 gives the default settings, MQTT disabled, with a warning in the log and on the
 timeline, until the MQTT page saves them again. A `ca_certs` that resolves
@@ -1972,6 +2024,17 @@ sh verify.sh unit      # unit tests (tests/, stdlib unittest) in the container's
 loop). `HRI_ENV="K=V K2=V2"` passes more variables to the container, which is
 how CI boots a version other than the newest (`HA_VERSION_LATEST=0
 HA_VERSION_DEFAULT=<version>`).
+
+`custom_components/integration_manager/ha_compat.json` says, for every MQTT
+platform and every device class, the oldest Home Assistant that has it. It is
+generated, not written: `python3 tools/gen_ha_compat.py` downloads one Home
+Assistant wheel per minor release (2025.1 and newer — below 2024.11 no
+discovery arrives at all), reads the platforms out of `mqtt/const.py` and the
+device classes out of each domain's `const.py`, and writes the table with a
+stamp of what it scanned and when. It needs network access and a few minutes.
+Re-run it when a new Home Assistant release is out; until then a main Home
+Assistant at or above the newest release in the table is treated as knowing
+everything, which is what it was before the table existed.
 
 CI runs on every push to `main` and every pull request: syntax checks, then,
 natively on both `amd64` and `arm64`, an image build, a boot on a fresh volume,
