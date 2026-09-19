@@ -1884,13 +1884,14 @@ class Installer:
                 self.state.last_error = f"deferred start of {ps['domain']} {ps.get('tag')} NOT run: {why}"
                 self._save_state()
                 events.emit("error", self.state.last_error, domain=ps["domain"], tag=ps.get("tag"))
-            return  # kept, blocked: cancel it or fix the HA version
+            return None  # kept, blocked: cancel it or fix the HA version
         self.state.pending_start = None
         self._save_state()
         res = await self.start(ps["domain"], ps.get("tag"), boot=True)
         events.emit("start" if res.get("ok") else "error",
                     f"deferred start of {ps['domain']} {ps.get('tag')} after the restart: " + ("ok" if res.get("ok") else str(res.get("error"))),
                     domain=ps["domain"], tag=ps.get("tag"))
+        return res  # the boot hands MQTT its identity from this, the way every other start path does
 
     def cancel_pending_start(self) -> dict[str, Any] | None:
         ps = self.state.pending_start
@@ -1981,7 +1982,13 @@ class Installer:
         try:
             self.state.restart_required = False
             self.state.last_action = "restart requested"
-            self._save_state()
+            try:
+                self._save_state()
+            except OSError as err:
+                # what this write holds is cosmetic - a badge and a line of history - and the operator
+                # restarting is often how they clear the disk that made it fail.  Refusing the restart here
+                # took the UI's, the MQTT action's and the watchdog's only way out.
+                _LOGGER.warning("restart: state.json not written (%s); restarting anyway", err)
             events.emit("restart", "process restart requested")
             # on the loop, like _save_state above: as an executor job it queued behind a pool an
             # integration had exhausted and never returned, so the stop below never started

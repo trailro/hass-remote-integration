@@ -50,19 +50,21 @@ class RestartFailureTest(unittest.IsolatedAsyncioTestCase):
         return inst
 
     async def test_enospc_on_save(self):
+        """A full disk used to refuse the restart.  What that write holds - the badge and a line of
+        history - is cosmetic, and restarting is often how the operator clears the disk that made it
+        fail, so the refusal took away the UI's, the MQTT action's and the watchdog's only way out.
+        The restart goes ahead now and says so in the log."""
         inst = self.installer()
         inst.state.restart_required = True
         inst.state.last_action = "installed x"
         with mock.patch.object(inst, "_save_state", side_effect=OSError(errno.ENOSPC, "No space left on device")), \
-                self.assertLogs("custom_components.integration_manager.installer", "ERROR"):
+                self.assertLogs("custom_components.integration_manager.installer", "WARNING") as logs:
             res = await inst.restart()
-        self.assertFalse(res["ok"])
-        self.assertIn("No space left", res["error"])
-        self.assertFalse(inst.busy)
-        self.assertEqual((inst.state.restart_required, inst.state.last_action), (True, "installed x"))
-        self.assertEqual(self.stops, [])
-        self.assertEqual(await inst.restart(), {"ok": True})  # not stuck: the next one goes through
-        self.assertEqual(len(self.stops), 1)
+        self.assertTrue(res["ok"])
+        self.assertIn("No space left", "\n".join(logs.output))
+        self.assertTrue(inst.busy, "the process is going down: nothing else may start")
+        self.assertEqual(len(self.stops), 1, "the stop went ahead without the state write")
+        self.assertFalse((await inst.restart())["ok"], "and a second one is refused while it goes down")
 
     async def test_failure_in_executor_step(self):
         inst = self.installer()
