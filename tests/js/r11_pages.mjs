@@ -45,8 +45,8 @@ const out = {};
 {
   const p = page();
   const code = between(read('config.js'), "$('#abort').onclick", 'async function entries()');
-  const flowNow = new Function('$', 'del', 'log', 'clearTimeout', 'let flow={id:"F1",kind:"config"}, PROGRESS_T=0;\n' + code + '\nreturn () => flow;')(
-    p.$, p.del, p.log, () => {});
+  const flowNow = new Function('$', 'del', 'log', 'clearTimeout', 'entries', 'let flow={id:"F1",kind:"config"}, PROGRESS_T=0;\n' + code + '\nreturn () => flow;')(
+    p.$, p.del, p.log, () => {}, async () => {});
   p.$('#stepcard').hidden = false;
   await p.$('#abort').onclick();
   out.abort = { logs: p.logs, sent: p.sent, flow: flowNow(), stepcard_hidden: p.$('#stepcard').hidden };
@@ -55,9 +55,9 @@ const out = {};
   const p = page(['#entries']);
   const fetch = async url => ({ json: async () => url === 'api/entries'
     ? [{ domain: 'demo', title: 'Demo', state: 'loaded', version: 1, entry_id: 'e1', supports_options: false }] : [] });
-  const entries = new Function('$', 'post', 'log', 'fetch', 'document', 'esc', 'confirm', 'render', 'DOM',
+  const entries = new Function('$', 'post', 'del', 'log', 'fetch', 'document', 'esc', 'confirm', 'render', 'releaseFlow', 'DOM',
     'let flow=null;\n' + between(read('config.js'), 'async function entries()', 'load().catch') + '\nreturn entries;')(
-    p.$, p.post, p.log, fetch, document, esc, () => true, () => {}, 'demo');
+    p.$, p.post, p.del, p.log, fetch, document, esc, () => true, () => {}, async () => {}, 'demo');
   await entries();
   const [del] = p.$('#entries').querySelectorAll('button[data-a=delete]'), [reload] = p.$('#entries').querySelectorAll('button[data-a=reload]');
   await del.onclick(); await settle();
@@ -85,4 +85,48 @@ const out = {};
   const state = kept();
   out.import_clear = { shown: p.$('#immsg').textContent, inspected_kept: state.IMS !== null && state.IMSEL !== null };
 }
+// ----- F13: a config flow Home Assistant is still holding ---------------------------------------
+// HA keeps a flow in progress until someone ends it, and refuses the next one for the same device with
+// already_in_progress.  Start overwrote the page's flow without aborting it (the probe reached 51 in
+// progress), and the list below hid every user-source flow, so an abandoned one could be neither
+// continued nor aborted: only a restart, or a DELETE typed by hand, cleared it.
+{
+  // the Start button, against a server that keeps every flow it is asked for
+  const flows = [];
+  const els = {}, logs = [], sent = [];
+  let opened = 0;
+  const $ = s => (els[s] ??= Object.assign(new El('div'), { id: s.slice(1) }));
+  const post = async (url) => { sent.push('POST ' + url); const id = 'F' + (++opened); flows.push(id); return { flow_id: id, type: 'form', step_id: 'user', data_schema: [] }; };
+  const del = async (url) => { sent.push('DELETE ' + url); const i = flows.findIndex(f => url.endsWith(f)); if (i < 0) return { ok: false, error: 'unknown flow' }; flows.splice(i, 1); return { ok: true }; };
+  const code = between(read('config.js'), "$('#start').onclick", 'async function entries()');
+  const held = new Function('$', 'post', 'del', 'log', 'render', 'clearErrors', 'collect', 'clearTimeout', 'entries', 'DOM',
+    'let flow=null, PROGRESS_T=0;\n' + code + '\nreturn () => flow;')(
+    $, post, del, m => logs.push(String(m)), () => {}, () => {}, () => ({}), () => {}, async () => {}, 'demo');
+  for (let i = 0; i < 3; i++) await $('#start').onclick();
+  out.flow_start = { sent, opened, in_progress: flows, held: held(), logs };
+}
+{
+  // the list under Config entries: what the page offers for each flow the server still holds
+  const p = page(['#entries']);
+  const progress = [
+    { flow_id: 'F1', handler: 'demo', step_id: 'user', source: 'user', entry_id: null },              // abandoned: the page was reloaded
+    { flow_id: 'F2', handler: 'demo', step_id: 'reauth_confirm', source: 'reauth', entry_id: 'e1' },
+    { flow_id: 'F3', handler: 'other', step_id: 'user', source: 'user', entry_id: null },             // another integration's
+  ];
+  const sent = [];
+  const fetch = async url => ({ json: async () => url === 'api/entries'
+    ? [{ domain: 'demo', title: 'Demo', state: 'loaded', version: 1, entry_id: 'e1', supports_options: false }] : progress });
+  const del = async url => { sent.push(url); const i = progress.findIndex(f => url.endsWith(f.flow_id)); if (i >= 0) progress.splice(i, 1); return { ok: true }; };
+  const post = async url => { sent.push(url); return { type: 'form', flow_id: 'F1', step_id: 'user', data_schema: [] }; };
+  const entries = new Function('$', 'post', 'del', 'log', 'fetch', 'document', 'esc', 'confirm', 'render', 'releaseFlow', 'DOM',
+    'let flow=null;\n' + between(read('config.js'), 'async function entries()', 'load().catch') + '\nreturn entries;')(
+    p.$, post, del, p.log, fetch, document, esc, () => true, () => {}, async () => {}, 'demo');
+  const offered = () => p.$('#flowsprogress').elementChildren.map(b => b.textContent);
+  await entries();
+  const listed = offered();
+  const abort = p.$('#flowsprogress').elementChildren.find(b => b.textContent.startsWith('Abort user'));
+  if (abort) { await abort.onclick(); await settle(); }   // nothing to click when user flows are not listed at all
+  out.flows_in_progress = { listed, sent, left: offered(), logs: p.logs };
+}
+
 console.log(JSON.stringify(out));
