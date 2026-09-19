@@ -46,4 +46,18 @@ const out = {};
     out.mqconn[name] = { text: el.textContent, bold: el.querySelectorAll('b').length };
   }
 }
+{  // C1: two lines of the MQTT page escape and then assign to .textContent, which parses no HTML
+  const lines = read('mqtt.js').split('\n');
+  const s = { commands: 4, last_command: 'call light.turn_on {"brightness": 255} & wait', cmd_base: 'hass_demo/cmd',
+              services_published: 12, base_topic: 'hass_demo', calls: 7,
+              last_call: 'light.turn_on {"entity_id": "light.hall"}', call_base: 'hass_demo/call' };
+  out.mqtt_text = {};
+  for (const id of ['#mqcmd', '#mqcall']) {
+    const line = lines.find(l => l.trimStart().startsWith(`$('${id}').textContent=`));
+    const el = new El('div');
+    new Function('$', 'esc', 's', line)(() => el, pageEsc(path.join(STATIC, 'mqtt.js')), s);
+    out.mqtt_text[id.slice(1)] = el.textContent;
+  }
+}
+
 console.log(JSON.stringify(out));
