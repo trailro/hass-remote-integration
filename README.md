@@ -253,6 +253,14 @@ Choose whichever fits the integration, on the **Integration** page:
   a fraction. One the page does not know falls back to a JSON textarea saying so.
   A value the page cannot convert (a fraction in a whole-number field, broken
   JSON) is refused with the reason under that field, and nothing is sent.
+  Home Assistant keeps a config flow in progress until someone ends it, and
+  refuses a second flow for the same device with `already_in_progress`. Every
+  flow of this integration that Home Assistant still holds — including one
+  started here and left behind, because the page was reloaded or closed
+  mid-step — is listed with a **Continue** and an **Abort** button, and
+  *Start config flow* ends the flow this page holds before asking for a new
+  one. Before, an abandoned flow was invisible here and refused every later
+  start until a restart.
 - **YAML config**: for integrations configured in `configuration.yaml`, paste
   what would go under `<domain>:`. It is validated on save and applied at boot.
   When a later release imports that YAML into a config entry, a notification
@@ -494,7 +502,13 @@ memory), the container keeps retrying it and **System** and the log say so. On
 a fresh volume there is nothing to fall back to: the first version keeps being
 retried, and **System** says that it crashed and that this volume has no other
 version to go back to — rather than claiming it booted fine before, which it
-never did. A
+never did. A first version that cannot even be installed — the newest release,
+published today, with no wheel for this image's Python yet — is a different
+case: the container installs the version the image was built and tested with
+(`HA_VERSION_DEFAULT`, or `HA_VERSION_MIN` when the floor is higher) instead,
+records it as the desired version so the next boot does not ask PyPI for the
+broken one again, and says on **System** which version could not be installed.
+Only when that one fails too does the boot end. A
 boot counts as good once the integration has set up, or 10 minutes after Home
 Assistant started; stopping or restarting the container during a boot, also
 while Home Assistant is still being imported, does not count as a failure —
@@ -1168,7 +1182,10 @@ hass_<domain>/manager/result                        outcome of a manager action,
 - **Discovery** (off by default): one retained config per device. Entities of
   every domain that has an MQTT platform become native entities with working
   commands; the rest (cameras, media players, weather, …) are mirrored as
-  read-only sensors with all attributes. Per-entity rules on the Entities page
+  read-only sensors with all attributes. A mirror is a sensor, so a `config`
+  entity category from the source entity — which `date`, `time` and `datetime`
+  entities usually carry — is published as `diagnostic`: the main Home
+  Assistant refuses a sensor that has it outright. Per-entity rules on the Entities page
   or as JSON (`GET/POST /api/mqtt/rules`, `{"rules": {"<entity id or glob>":
   {...}}}`) change only what is published: `exclude` (true/false), `name`,
   `enabled_by_default` (true/false), `entity_category` (`config` or
@@ -1176,6 +1193,13 @@ hass_<domain>/manager/result                        outcome of a manager action,
   refused, with the reason, when it is not one the main Home Assistant takes
   for an entity the rule matches, or when that entity's unit does not fit it
   (`W` with `temperature`): the main HA would refuse the whole device config.
+  `entity_category` is refused the same way when the main Home Assistant would
+  not take it for the platform the entity is published as — it refuses a
+  `sensor` or a `binary_sensor` whose category is `config` ("cannot be added as
+  the entity category is set to config"), and the entity would never appear
+  there while showing as permanently missing in parity. A glob that reaches
+  such an entity later is published without the category, and says so once in
+  the log.
   An entity a glob rule matches later that the class does not fit is announced
   without it, with a warning in the log, and the rest of the rule applies.
   An entity excluded while the container was down is removed from the main HA at the next connection. When
@@ -1269,7 +1293,14 @@ hass_<domain>/manager/result                        outcome of a manager action,
   speaks only MQTT 3.1.1 this holds for a retained command found when the
   container subscribes (at every connection); one published while the container
   is already connected reaches it without the retain flag, runs once, and its
-  retained copy is cleared at the next connection.
+  retained copy is cleared at the next connection. A 3.1.1 subscription cannot
+  ask the broker to keep the container's own publications away from it (there
+  is no `noLocal` before MQTT 5), so the empty payload that clears a retained
+  command comes straight back; the container remembers the topics it has just
+  cleared and drops that one echo, which would otherwise have blanked a text
+  entity or sent an empty notification. A second empty payload on the same
+  topic, or one arriving more than 30 s later, is a command again and is
+  treated as one.
 - **What the main HA cannot show**: its MQTT platforms have no place for some
   of what an entity has here. A water heater's away mode (on/off is mirrored),
   installing an update with a backup, the title of a notify message (the
@@ -1291,9 +1322,20 @@ hass_<domain>/manager/result                        outcome of a manager action,
   size is answered without its response data, with `ok: false` and the reason,
   so the caller still gets an answer. So is a call that fails inside the
   container: `ok: false` with `internal error (<exception type>)`, and the log
-  names where (never the message, which may quote the data). A repeated `_id` within five minutes is answered from memory
+  names where (never the message, which may quote the data). An `_id` is at most
+  128 bytes as JSON: a larger one is refused with an answer carrying the id cut
+  short, and the call does not run — the id is kept in the duplicate map, in the
+  command history and echoed in every result and every `/api/mqtt/commands`
+  poll, so it is capped in one place rather than truncated differently in three.
+  A repeated `_id` within five minutes is answered from memory
   and never executed twice (the latest 1000 `_id`s are kept); the comparison
-  keeps the type, so `1` and `"1"` are two different calls. While the service
+  keeps the type, so `1` and `"1"` are two different calls. A call refused
+  before it reached the service — an unknown service (an integration still
+  loading at boot answers that for a moment), a target that does not exist here,
+  or too many calls in progress — does not remember its `_id`, so the same call
+  sent again runs instead of being handed the refusal for five minutes. An
+  internal error is still remembered: a repeat gets that answer rather than
+  being sent down the same broken path again. While the service
   still runs, also after the call was answered with a timeout, a repeat is
   answered `ok: null` with `state: running` and `duplicate: true`; once it
   ends, a repeat gets its final result (flagged `late` when it ended after the
@@ -1679,7 +1721,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | `HRI_REGISTRY` | `ghcr.io/trailro` | Where Compose pulls the image from: `ghcr.io/trailro` (GitHub Container Registry) or `docker.io/trailro26` (Docker Hub); the same image either way. A `docker-compose.yml` from 0.16.0 or older ignores it and pulls from GitHub Container Registry: download the file again to use it |
 | `TZ` | `UTC` | Time zone; an unknown zone falls back to UTC, with an error in the log |
 | `HA_VERSION_LATEST` | `1` | `0` installs the image's default Home Assistant (`HA_VERSION_DEFAULT`, 2026.9.3 here) on a fresh volume instead of the newest |
-| `HRI_APT_PACKAGES` | unset | Debian packages the container installs at boot, before Home Assistant starts, for what pip cannot install (the `ffmpeg` binary, BlueZ): names separated by spaces or commas, for example `ffmpeg libpcap0.8t64`. Only Debian package names are accepted (`libc6:arm64` too); anything else — an option, a URL, a path, a shell metacharacter — is refused with a line in the log and nothing is installed for it, and the value never reaches a shell. Packages that are already installed are not installed again, so a restart costs nothing; they live in the container, not on the volume, so recreating the container or updating the image installs them again. A failure (no network, an unknown package) is recorded on **System** and does not stop the boot. The output is in `integration_manager/apt-install.log`. A `docker-compose.yml` from 0.17.2 or older does not pass it to the container: download the file again to use it |
+| `HRI_APT_PACKAGES` | unset | Debian packages the container installs at boot, before Home Assistant starts, for what pip cannot install (the `ffmpeg` binary, BlueZ): names separated by spaces or commas, for example `ffmpeg libpcap0.8t64`. Only Debian package names are accepted (`libc6:arm64` too); anything else — an option, a URL, a path, a shell metacharacter, or a name ending in `-` (`libturbojpeg0-`), which is apt's own *remove* operator and not part of any package name — is refused with a line in the log and nothing is installed for it, and the value never reaches a shell. A name ending in `+` (`g++`) is fine: that character really is part of Debian package names. Packages that are already installed are not installed again, so a restart costs nothing; they live in the container, not on the volume, so recreating the container or updating the image installs them again. A failure (no network, an unknown package) is recorded on **System** and does not stop the boot. The output is in `integration_manager/apt-install.log`. A `docker-compose.yml` from 0.17.2 or older does not pass it to the container: download the file again to use it |
 | `HRI_DEV_SRC` | `./dev-src` | Dev mode: directory mounted at `/dev-src` |
 | `HRI_DEBUGPY` | unset | Dev mode: debugger port |
 | `HRI_DEBUGPY_HOST` | `127.0.0.1` | Dev mode: address debugpy binds inside the container (the dev overlay sets `0.0.0.0`) |
@@ -1834,7 +1876,7 @@ points:
 | System | `GET /api/ha`, `POST /api/ha/{update,rollback,check}`, `POST /api/restart`, `GET/POST /api/settings` |
 | Backups | `GET /api/backups`, `POST /api/backups/create`, `POST /api/backups/upload`, `GET /api/backups/<name>/download`, `POST /api/backups/<name>/{restore,delete}`, `POST /api/backups/restore/cancel` (answers `cancelled`; a restore that belongs to a scheduled Home Assistant version change is refused with `for_version`, and a full rollback's restore with `rollback`, the backup it restores) |
 | Import | `POST /api/import/upload`, `GET/POST /api/import/inspect`, `POST /api/import/{apply,apply_all,clear}` |
-| Cutover | `GET /api/parity`, `POST /api/parity/{test,remove_orphans}`, `POST /api/cutover/{status,enable,undo}`; `enable` takes `force`, which skips the checks on the main Home Assistant (MQTT loaded, the integration's config entries, entity ids still registered there) but not the container's own (an integration running, health, MQTT connected), and the answer and the timeline say `forced`; `undo` answers `cleared_discovery_configs` and `manager_device_kept`; a check on the main HA that cannot run (unreachable, its registry unreadable) blocks the enable rather than passing. Removing an orphan while discovery is off is refused, except for the manager device while `manager_discovery` announces it |
+| Cutover | `GET /api/parity`, `POST /api/parity/{test,remove_orphans}`, `POST /api/cutover/{status,enable,undo}`; `enable` takes `force`, which skips the checks on the main Home Assistant (MQTT loaded, the integration's config entries, entity ids still registered there) but not the container's own (an integration running, health, MQTT connected), and the answer and the timeline say `forced`; `undo` answers `cleared_discovery_configs` and `manager_device_kept`; a check on the main HA that cannot run (unreachable, its registry unreadable) blocks the enable rather than passing. Removing an orphan while discovery is off is refused, except for the manager device while `manager_discovery` announces it. A matched row carries `state_comparable`: `button`, `scene`, `notify` and `event` are not compared by state (the command-only platforms have no state topic on the main HA, and an event entity's state is a "last triggered" timestamp each side keeps for itself), so those never count as differing; their availability, renames and disabled flag are still reported. An orphan of the manager device is removed by its component key rather than the unique id the removal form used to carry — a unique id that belongs to no component of that device is now refused instead of reported as removed |
 | Logs | `GET /api/logs?level=&prefix=&q=&since_id=&limit=` (`limit` 1 to 2000, `since_id` 0 to 2^63-1, otherwise `400`; the answer carries `cursor`, the next `since_id`), `GET /api/logs/loggers`, `POST /api/logs/level` (`{"logger": …, "level": …}`), `GET /api/log_files` (an `id` per file, which changes at every start), `GET /api/log_files/tail?id=&file=&lines=&q=` (`file` is the masked name, answered `409` when several files share it; a real name is not accepted), `GET /api/log_files/download?id=&file=` (the same file selection; the file masked and streamed as an attachment under its masked name, at most its last 32 MB, `X-Log-Truncated` when it was cut), `GET/POST /api/settings` (`log_format`) |
 | Diagnostics | `GET /api/diagnostics` (zip, secrets removed), `GET /api/diag/memory[?refs=<type>]` (one probe at a time: a second one meanwhile answers `429`) |
 

@@ -216,3 +216,21 @@ class LogFileOpenerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CodeNamesTest(unittest.TestCase):
+    """"code" is an OAuth secret; status_code is a number everybody needs to read.
+
+    Making `code` match after an underscore (so `user_code` masks) also caught `status_code`, and a
+    diagnostics bundle with every HTTP status masked is one nobody can debug from.
+    """
+
+    def test_an_oauth_code_is_masked_whatever_it_is_called(self):
+        for line in ("code: secret99", "user_code: 1234", "device_code: abcd", "auth_code=zz9"):
+            with self.subTest(line=line):
+                self.assertIn("***", diagnostics.scrub(line))
+
+    def test_a_status_or_result_number_stays_readable(self):
+        for line in ("status_code: 404", "error_code: 12", "exit_code=1", "return_code: 2", "reason_code: 5"):
+            with self.subTest(line=line):
+                self.assertEqual(diagnostics.scrub(line), line)

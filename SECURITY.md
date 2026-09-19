@@ -37,7 +37,11 @@ from plain HTTP traffic. These are:
   `access_token`, or a URL carrying a token in a document); the log searches run on the masked text and a
   search for key material returns nothing by design, but redaction of material
   that carries no marker and no name in front of it is best effort — a report
-  needs a case where something the scrubber does name comes out unmasked;
+  needs a case where something the scrubber does name comes out unmasked. A
+  named value is masked whatever it is wrapped in: a bytes or raw-string repr
+  (`password=b'x'`), a constructor (`password=SecretStr('x')`), a parenthesised
+  literal, and an auth scheme that introduces it (`token: Bearer <token>`, in
+  any case). The wrapper is kept so the line keeps its shape;
 - the text of a log search (in any spelling of its path), or a credential in a
   request URL, written to
   `process.log` or the container log; a log search answer (rows, `cursor`,
@@ -55,7 +59,10 @@ from plain HTTP traffic. These are:
 - path traversal or unsafe archive handling in backups, restores, imports,
   patches or log files, including a log file listing, tail or download that reaches a file
   other than a log through a symbolic or hard link, or a backup that reads a file
-  outside `/config` through a symbolic link;
+  outside `/config` through a symbolic link — the listing, the tail, the
+  download and the diagnostics zip share one opener, which opens with
+  `O_NOFOLLOW` and then checks the opened file is a regular file with a single
+  name, so a path swapped between the listing and the request is refused;
 - anything that lets a page on another origin make the manager do something.
 
 Problems in Home Assistant itself or in the integrations you run belong to
