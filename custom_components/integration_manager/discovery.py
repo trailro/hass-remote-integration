@@ -929,10 +929,10 @@ def _on_off(p: str) -> bool:
     raise ValueError(f"{p!r} is neither an on nor an off payload")
 
 
-def _service_for(p: str, table: dict[str, str]) -> str:
-    """The service a command token stands for, in any case and with surrounding spaces ignored, like the on/off
-    payloads.  The error names the accepted tokens but not the payload: it may carry a code (the log line quotes
-    the payload, masked)."""
+def _service_for(p: str, table: dict[str, Any]) -> Any:
+    """What a command token stands for - a service name, or the value a service takes - in any case and with
+    surrounding spaces ignored, like the on/off payloads.  The error names the accepted tokens but not the
+    payload: it may carry a code (the log line quotes the payload, masked)."""
     token = p.strip().upper()
     if token not in table:
         raise ValueError(f"unknown command, expected one of: {', '.join(t.lower() for t in table)}")
@@ -1011,7 +1011,11 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
         return _pick(field, {
             "percentage": lambda: ("fan", "set_percentage", {**t, "percentage": int(_finite(p))}),
             "preset_mode": lambda: ("fan", "set_preset_mode", {**t, "preset_mode": p}),
-            "oscillate": lambda: ("fan", "oscillate", {**t, "oscillating": p == "oscillate_on"}),
+            # not `p == "oscillate_on"`: that reads every other payload, a typo included, as "stop
+            # oscillating" and calls the service.  The token is checked like every other command token,
+            # so a malformed one is refused with the accepted list instead of moving the fan.
+            "oscillate": lambda: ("fan", "oscillate",
+                                  {**t, "oscillating": _service_for(p, {"OSCILLATE_ON": True, "OSCILLATE_OFF": False})}),
             "direction": lambda: ("fan", "set_direction", {**t, "direction": p}),
         })
     if domain == "lock" and field == "command":
