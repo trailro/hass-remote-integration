@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import logging
+from collections.abc import Callable
 from typing import Any
 
 import jsonio
@@ -133,28 +134,65 @@ def _restart_to_unload(installer: Installer, note: str) -> str:
     return note
 
 
+def boot_step(what: str, step: Callable[[], Any]) -> None:
+    """A boot step that writes state.json, on a disk that is full.  entrypoint.save_state
+    logs and boots anyway; the setup path here does the same, because the write failing
+    used to raise out of async_setup, and then this component was not set up at all: the
+    operator lost the very UI they free the disk with - right after a rollback or a
+    restore, which is when the disk is most likely to be full.  What was not written is
+    still in memory and is saved again at the next change; a boot after this one starts
+    from the file, which holds the state from before this step."""
+    try:
+        step()
+    except OSError as err:
+        _LOGGER.error("state.json not written (%s): %s is kept in memory only; the manager comes up anyway", err, what)
+
+
+async def async_hand_identity_over(installer: Installer, publisher: Any, before: str | None) -> None:
+    """An integration that starts while the boot reconcile runs - the Environment
+    builder's deferred start, or one adopted from its enabled config entries - is the one
+    start path that does not go through a view, so nothing hands the publisher the new
+    identity.  The publisher connects during that same reconcile, with the identity the
+    installer had then: without this it keeps it, and either never connects at all ("no
+    integration is running") while the UI already shows the integration started, or
+    publishes the new integration's entities under hass_<old domain> - the main Home
+    Assistant creates them with the wrong unique ids, and the identity sweep at the next
+    restart deletes and recreates them, losing whatever was customised there.
+
+    No result to pass on: async_run_pending_start returns nothing, so the stale-document
+    clean-up a version switch does (res["pre_update_backup"]) is not asked for here; the
+    reconnect below is what carries the identity."""
+    if installer.instance_key == before:
+        return
+    try:
+        await publisher.async_after_start({})
+    except Exception:  # noqa: BLE001 - a broker that is down must not cost the boot its UI
+        _LOGGER.exception("MQTT: the identity of the integration started at boot was not applied")
+
+
+async def async_boot_reconcile(installer: Installer, publisher: Any) -> None:
+    """Requirements live in the image's site-packages; after a rebuild they are gone while
+    /config still has the integration and the recorded tag.  Runs as a background task:
+    pip can take longer than Home Assistant's setup timeout for this component, which
+    would fail the whole boot; run.py waits for it before it sets up the integration."""
+    identity = installer.instance_key
+    try:
+        await installer.async_reconcile()
+        await installer.async_run_pending_start()
+    except Exception as err:  # noqa: BLE001 - the UI must come up so the user can fix it
+        _LOGGER.exception("boot reconcile failed")
+        installer.state.last_error = f"boot reconcile failed: {type(err).__name__}: {err}"
+        boot_step("the boot reconcile error", installer._save_state)  # noqa: SLF001
+    # not in a `finally`: a cancelled boot (Home Assistant stopping) has no identity to hand over
+    await async_hand_identity_over(installer, publisher, identity)
+
+
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     events.EVENTS = events.Events(hass.config.path("integration_manager", "events.jsonl"))
     track_delayed_stores()  # before the integration is set up: backups write its pending saves
     installer = await hass.async_add_executor_job(Installer, hass)  # reads state.json and settings.json, sweeps the version store
     hass.data[DOMAIN] = installer
     writer.async_register(hass)  # the ordered JSON writer (settings, MQTT config/rules) drains at the final write
-
-    # Requirements live in the image's site-packages; after a rebuild they
-    # are gone while /config still has the integration and the recorded tag.
-    # A background task: pip can take longer than HA's setup timeout for this
-    # component, which would fail the whole boot; run.py waits for it before
-    # it sets up the integration.
-    async def _boot_reconcile() -> None:
-        try:
-            await installer.async_reconcile()
-            await installer.async_run_pending_start()
-        except Exception as err:  # noqa: BLE001 - the UI must come up so the user can fix it
-            _LOGGER.exception("boot reconcile failed")
-            installer.state.last_error = f"boot reconcile failed: {type(err).__name__}: {err}"
-            installer._save_state()
-
-    hass.data["integration_manager_ready"] = hass.async_create_background_task(_boot_reconcile(), "integration_manager boot reconcile")
 
     # DNS rebinding guard: the JSON/CORS gates only stop cross-origin pages; a
     # page whose hostname is re-pointed at this LAN IP is same-origin.  Only
@@ -192,6 +230,12 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     installer.on_domain_removed = publisher.async_clear_identity
     await publisher.async_start()
 
+    # After the publisher exists, so a start this reconcile makes can hand it the new
+    # identity (async_hand_identity_over); run.py waits for this task before it sets the
+    # integration up, so the identity is right before the first entity is published.
+    hass.data["integration_manager_ready"] = hass.async_create_background_task(
+        async_boot_reconcile(installer, publisher), "integration_manager boot reconcile")
+
     scheduler = Scheduler(hass, installer)
     installer.scheduler = scheduler
     scheduler.start()
@@ -203,13 +247,14 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     last_restore = ha_state.get("last_restore") if isinstance(ha_state, dict) else None
     events.emit("boot", f"Home Assistant {ha_version}; running {installer.state.domain or 'nothing'} {installer.running_tag or ''}".strip()
                 + (f"; restart required" if installer.state.restart_required else ""), ha=ha_version)
-    installer.announce_smoke()  # a failed verdict whose automatic rollback restarted before it could be shown
+    # each on its own: a state write that fails must not skip the steps after it either
+    boot_step("the announced smoke verdict", installer.announce_smoke)  # a failed verdict whose automatic rollback restarted before it could be shown
     await async_announce_ha_error(hass, ha_state)
-    installer.release_rollback_backup(last_restore)
+    boot_step("the released rollback backup", lambda: installer.release_rollback_backup(last_restore))
     if isinstance(last_restore, dict) and last_restore.get("at") and _recent(last_restore["at"]) \
             and last_restore["at"] != installer.state.last_restore_reported:
         installer.state.last_restore_reported = last_restore["at"]  # a later boot within the window must not report it again
-        installer._save_state()
+        boot_step("the reported restore outcome", installer._save_state)
         events.emit("restore", f"{'applied' if last_restore.get('ok') else 'FAILED'}: {last_restore.get('files', 0)} files"
                     + (f" ({last_restore.get('error')})" if not last_restore.get("ok") else "")
                     + (f", pre-restore copy {last_restore.get('pre_restore')}" if last_restore.get("pre_restore") else ""))
