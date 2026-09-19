@@ -38,6 +38,7 @@
   <label>exclude_integrations <input id="mq_exclude_integrations" type="text" placeholder="a,b"></label>
   <label title="turn on only once the integration is fully configured here: the consuming HA creates the entities at the first publication">discovery_enabled <input id="mq_discovery_enabled" type="checkbox"></label>
   <label>discovery_prefix <input id="mq_discovery_prefix" type="text" placeholder="homeassistant"></label>
+  <label title="the version of the Home Assistant that consumes this discovery (e.g. 2026.4), so values it does not understand are left out: a platform or a device class it cannot parse costs the whole device its entities there. Empty = assume it is current, nothing is left out">main_ha_version <input id="mq_main_ha_version" type="text" placeholder="(current)"></label>
   <label title="the manager as a device on the consuming HA (integration health, update entities, memory / CPU / event-loop lag / volume sensors), also while discovery is off, e.g. in shadow mode">manager_discovery <input id="mq_manager_discovery" type="checkbox"></label>
   <label title="lets the consuming HA install updates, restart and back up through that device; anyone who can publish under this base topic can then do it">manager_commands <input id="mq_manager_commands" type="checkbox"></label>
   <label title="connect even if foreign retained data sits under our base topic">force_base_topic <input id="mq_force_base_topic" type="checkbox"></label>
