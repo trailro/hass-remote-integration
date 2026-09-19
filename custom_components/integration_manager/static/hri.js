@@ -20,6 +20,10 @@ async function fetchDownload(b,path,label,fallback){b.disabled=true; try{
   const url=URL.createObjectURL(await r.blob()); const a=document.createElement('a'); a.href=url; a.download=name;
   document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url),30000);
  }catch(err){alert(label+': '+err);}finally{b.disabled=false;}}
+// Version order, for every list of versions the pages show: Home Assistant releases (2026.10.1), the integration's
+// git tags (v0.10.0) and the manager's own. Sorted as strings, 2026.10.1 lands under 2026.8.4 and v0.10.0 under v0.9.0.
+const vparts=s=>{const m=String(s).match(/^v?(\d+)\.(\d+)\.(\d+)(?:b(\d+))?$/); return m?[+m[1],+m[2],+m[3],m[4]===undefined?1:0,+(m[4]||0)]:String(s).replace(/^v/,'').split('.').map(Number);};
+const vcmp=(a,b)=>{const x=vparts(a),y=vparts(b);for(let i=0;i<Math.max(x.length,y.length);i++){const d=(x[i]||0)-(y[i]||0);if(d)return d;}return 0;};  // a beta sorts before its release
 function chipBar(sel,counts,on,after){ $(sel).innerHTML=Object.keys(counts).sort().map(k=>`<span class="tag ${on.has(k)?'on':''}" data-k="${esc(k)}">${esc(k)} ${counts[k]}</span>`).join('');
  document.querySelectorAll(sel+' .tag').forEach(t=>t.onclick=()=>{const k=t.dataset.k;on.has(k)?on.delete(k):on.add(k);after();}); }
 

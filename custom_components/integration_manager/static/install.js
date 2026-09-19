@@ -23,7 +23,7 @@ async function options(){
   OPT=await (await fetch('api/build/options')).json();
   const reg=OPT.registry||{}; const curDom=$('#bdom').value, curHa=$('#bha').value;
   $('#bdom').innerHTML=Object.entries(reg).map(([d,s])=>`<option value="${esc(d)}" ${d===(curDom||(OPT.running&&OPT.running.domain))?'selected':''}>${esc(d)}${s.repo?' — '+esc(s.repo):' (local)'}</option>`).join('')||'<option value="">(registry empty)</option>';
-  const h=OPT.ha||{}; const vers=[...new Set([h.current,h.latest_stable,...(h.recent||[]),...(h.installed_venvs||[]),curHa].filter(Boolean))].sort().reverse();
+  const h=OPT.ha||{}; const vers=[...new Set([h.current,h.latest_stable,...(h.recent||[]),...(h.installed_venvs||[]),curHa].filter(Boolean))].sort(vcmp).reverse();
   $('#bha').innerHTML=vers.map(v=>`<option value="${esc(v)}" ${v===(curHa||h.current)?'selected':''}>${esc(v)}${v===h.current?' (running)':v===h.latest_stable?' (latest stable)':(h.installed_venvs||[]).includes(v)?' (venv on the volume)':''}</option>`).join('');
   $('#bhainfo').textContent=`python ${h.python||'?'}${h.pending?' · '+h.desired+' already wanted for the next restart':''}${h.error?' · PyPI: '+h.error:''}`;
   domInfo(); releases();
