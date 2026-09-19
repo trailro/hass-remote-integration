@@ -40,21 +40,30 @@ from plain HTTP traffic. These are:
   search for key material returns nothing by design, but redaction of material
   that carries no marker and no name in front of it is best effort — a report
   needs a case where something the scrubber does name comes out unmasked. A
-  named value is masked through the wrappers around it: a string repr
-  (`password=b'x'`), a constructor with an optional module and keyword
-  (`password=pydantic.SecretStr(value='x')`), a container — masked through to
-  its closing bracket, so the rest of a tuple goes with it
-  (`auth=('user', 'x')`) — a repr that names its type (`password=<SecretStr
-  'x'>`), and an auth scheme in front of a quoted or unquoted token
-  (`token: Bearer 'x'`, `token: Digest x`, in any case). The wrapper is kept so
-  the line keeps its shape. Two things are deliberately not masked: a wrapper
-  with **no name in front of it** (every rule is name + separator + value, and
-  reading a bare identifier as a wrapper once made the scrubber print a token it
-  had been masking), and a URL password over 1024 characters that also contains
-  `/`, which is not legal in a userinfo (RFC 3986). A name ending in `code` is a
-  secret (`user_code`, `device_code`); the codes that report a result are not
-  (`status_code`, `error_code`, `exit_code`, `return_code`, `reason_code`,
-  `http_code`, `response_code`). `rtsp://admin:p@ss/w0rd@host` still shows
+  named value is masked from the separator to the **end of the line**: the
+  scrubber no longer decides what a value looks like, because four review
+  rounds each found a shape nobody had described yet — a `)` inside a quoted
+  password, a tuple on a line the logger cut, a triple-quoted value, a plural
+  name, a `=` that arrived percent-encoded — and each time the shape nobody had
+  described was the one that got printed. Over-masking is the deliberate trade:
+  a name the scrubber knows takes the rest of its line with it, wrapper,
+  container, auth scheme and all (`password=SecretStr(value = 'x')`,
+  `passwords=['x']`, `Authorization: Digest username="u", response="…"`), as a
+  single `***`. The name matches singular or plural, and the separator may be
+  `=`, `:` or their percent-encoded spellings. Three things end the value
+  earlier, and none can be part of it: a quote it opened with (a quote that
+  never closes takes the rest of the line, and inside quotes a `)` closes
+  nothing), a delimiter that closes one opened *before* the name (the quote of
+  the message a token is written inside, the brace of the JSON object it sits
+  in), and the next top-level `name=` pair — from which `Authorization` and
+  `Cookie` are exempt, because their own value is written as name=value pairs.
+  Two things are deliberately not masked: a value with **no name in front of
+  it** (reading a bare identifier as a wrapper once made the scrubber print a
+  token it had been masking), and a URL password over 1024 characters that also
+  contains `/`, which is not legal in a userinfo (RFC 3986). A name ending in
+  `code` is a secret (`user_code`, `device_code`); the codes that report a
+  result are not (`status_code`, `error_code`, `exit_code`, `return_code`,
+  `reason_code`, `http_code`, `response_code`). `rtsp://admin:p@ss/w0rd@host` still shows
   `@ss/w0rd`: the rule stops at the first `@` a host follows, because
   `http://u:p@host/users/@me` is the same text and its path has to stay
   readable — percent-encode an `@` in a URL password;
