@@ -231,6 +231,28 @@ _DEVICE_TRACKER_TPL = _tpl(
     " or value_json.state in ['unavailable', 'unknown']"
     " else ('home' if value_json.state == 'home' else 'not_home')")
 
+# The main HA's MQTT update validates the rendered JSON as a whole and throws ALL of it away
+# for one field it refuses - a null anywhere, a release_url its cv.url rejects (a relative one,
+# which is what an integration serving its notes from /local or /api reports), an
+# update_percentage that is not a number in 0..100 - and the entity keeps nothing, not even the
+# version it had.  So only the fields that carry a value that platform accepts go out.
+# update_percentage is the one field that always goes out: null is what clears the progress bar
+# there, and a field left out keeps the value it had.
+_UPDATE_FIELDS = ["installed_version", "latest_version", "title", "release_summary", "in_progress"]
+_UPDATE_TPL = _tpl(
+    "dict("
+    f"(value_json.attributes.items() | selectattr('0', 'in', {_UPDATE_FIELDS!r}) | rejectattr('1', 'none') | list)"
+    " + ([('release_url', value_json.attributes.release_url)]"
+    " if value_json.attributes.get('release_url') is string"
+    " and (value_json.attributes.release_url.startswith('http://')"
+    " or value_json.attributes.release_url.startswith('https://')) else [])"
+    " + [('update_percentage', value_json.attributes.get('update_percentage')"
+    " if value_json.attributes.get('update_percentage') is number"
+    " and value_json.attributes.get('update_percentage') >= 0"
+    " and value_json.attributes.get('update_percentage') <= 100 else None)]"
+    ") | to_json"
+)
+
 # Availability on the entity's own document: 'unavailable' at the source is offline on the consumer.
 _AVAILABILITY_TPL = _tpl("'offline' if value_json.state == 'unavailable' else 'online'")
 # Same, for a platform with no no-value payload: an unknown state has nothing honest to show either.
@@ -247,13 +269,69 @@ def _offline_when_unknown(comp: dict[str, Any]) -> None:
             avail["value_template"] = _AVAILABILITY_UNKNOWN_TPL
 
 
-def _common(entry: er.RegistryEntry | None, state: State, doc_topic: str, prefix: str) -> dict[str, Any]:
+def _humidity_range(attrs: dict[str, Any], low_key: str, high_key: str) -> tuple[float, float]:
+    """(min, max) a target-humidity option may carry: the main HA refuses the
+    WHOLE device payload for a negative minimum, a maximum above 100 or a range
+    that does not grow, and a source is free to report any of the three."""
+    low, high = _num(attrs.get(low_key), 0), _num(attrs.get(high_key), 100)
+    return (low, high) if 0 <= low < high <= 100 else (0.0, 100.0)
+
+
+def _device_name(hass: HomeAssistant, entry: er.RegistryEntry | None) -> str | None:
+    """The name :func:`device_block` will publish for this entity's device, or
+    None when the entity has no device (it lands in the per-integration bucket,
+    whose name is no entity's own)."""
+    device_id = getattr(entry, "device_id", None) if entry is not None else None
+    if not device_id:
+        return None
+    dev = dr.async_get(hass).async_get(device_id)
+    return (dev.name_by_user or dev.name or dev.id) if dev else None
+
+
+def _unprefixed(name: str, device_name: str) -> str | None:
+    """`name` without the device's name in front of it, or `name` unchanged
+    when the device's name is not a prefix of it.  Home Assistant's own rule
+    (entity_registry._async_strip_prefix_from_entity_name): case-insensitive,
+    a separator has to follow, and a lower-case first word is capitalised."""
+    head, rest = name[:len(device_name)], name[len(device_name):]
+    if head.casefold() != device_name.casefold():
+        return name
+    stripped = rest.lstrip(" -:")
+    if not stripped or stripped == rest:  # "Hall Lamplight" only starts like "Hall Lamp"
+        return name
+    first = stripped.partition(" ")[0]
+    return stripped if not first.islower() else stripped[0].upper() + stripped[1:]
+
+
+def _entity_name(entry: er.RegistryEntry | None, state: State, device_name: str | None) -> str | None:
+    """The component's name, as the main Home Assistant will use it.
+
+    Every MQTT entity has ``has_entity_name`` there, so what it shows is
+    ``"<device name> <component name>"`` and a component that carries the
+    device's name reads "Hall Lamp Hall Lamp".  The entity that IS the device
+    has no name of its own there (``None``), and the others carry only their
+    own part - which is what the source shows too, by the same rule.
+
+    A source entity with ``has_entity_name`` already holds exactly that part in
+    the registry, ``None`` included.  For everything else (a legacy entity, or
+    one with no registry entry at all) the name in hand is the composed one, so
+    the device's name comes off the front of it the way Home Assistant does it.
+    """
+    own = (entry.name or entry.original_name) if entry else None
+    if entry is not None and getattr(entry, "has_entity_name", False) and device_name:
+        return own or None
+    full = own or state.attributes.get("friendly_name") or state.entity_id.split(".", 1)[1]
+    if not device_name:
+        return full
+    if full.casefold() == device_name.casefold():
+        return None
+    return _unprefixed(full, device_name)
+
+
+def _common(entry: er.RegistryEntry | None, state: State, doc_topic: str, prefix: str,
+            device_name: str | None = None) -> dict[str, Any]:
     domain, object_id = state.entity_id.split(".", 1)
-    name = None
-    if entry:
-        name = entry.name or entry.original_name
-    if not name:
-        name = state.attributes.get("friendly_name") or object_id
+    name = _entity_name(entry, state, device_name)
     status_topic = doc_topic.split("/", 1)[0] + "/status"
     comp: dict[str, Any] = {
         "platform": domain,
@@ -346,18 +424,25 @@ def build_component(
         if isinstance(getattr(entry, "supported_features", None), int):
             attrs.setdefault("supported_features", entry.supported_features)
     cmd = f"{cmd_base}/{domain}/{object_id}"
+    device_name = _device_name(hass, entry)
+    features = attrs.get("supported_features")
+
+    def supports(bits: int) -> bool:
+        """What the source's supported_features says; a source that reports none
+        (a registry entry from an integration that never loaded) announces all."""
+        return not isinstance(features, int) or bool(features & bits)
 
     if domain not in NATIVE:
-        return _mirror_as_sensor(entry, state, doc_topic, prefix)
+        return _mirror_as_sensor(entry, state, doc_topic, prefix, device_name)
     if compat is not None and not compat.knows_platform(domain):
         # date/time/datetime got their MQTT platforms in 2026.5: on an older
         # main HA the platform name alone invalidates the device payload.  The
         # sensor mirror is what that path is for - the entity still arrives,
         # read-only.
         compat.note_platform(domain)
-        return _mirror_as_sensor(entry, state, doc_topic, prefix)
+        return _mirror_as_sensor(entry, state, doc_topic, prefix, device_name)
 
-    comp = _common(entry, state, doc_topic, prefix)
+    comp = _common(entry, state, doc_topic, prefix, device_name)
     if domain in _COMMAND_ONLY:
         # no state to mirror, but availability is its own topic on these
         # platforms: keep both entries, or a button stays pressable while the
@@ -375,6 +460,14 @@ def build_component(
             comp["device_class"] = dc
         if dc == "enum" and attrs.get("options"):
             comp["options"] = list(attrs["options"])
+        if attrs.get("state_class") == "total":
+            # `total` is the one state class whose reset the main Home Assistant cannot
+            # infer: its statistics engine starts a new cycle only when last_reset changes
+            # (`total_increasing` has the value-drop heuristic instead), and MQTT blocks
+            # last_reset from the JSON attributes, so without this template a meter reset
+            # is booked as a negative delta and the energy dashboard loses the cycle.
+            # The platform refuses the template with any other state class.
+            comp["last_reset_value_template"] = _attr_or_empty("last_reset")
 
     elif domain == "binary_sensor":
         comp.update({"value_template": _STATE_TPL, "payload_on": "on", "payload_off": "off"})
@@ -448,8 +541,33 @@ def build_component(
                     "swing_mode_command_topic": f"{cmd}/swing_mode",
                 }
             )
+        if attrs.get("swing_horizontal_modes"):
+            comp.update(
+                {
+                    "swing_horizontal_modes": list(attrs["swing_horizontal_modes"]),
+                    "swing_horizontal_mode_state_topic": doc_topic,
+                    "swing_horizontal_mode_state_template": _attr('swing_horizontal_mode'),
+                    "swing_horizontal_mode_command_topic": f"{cmd}/swing_horizontal_mode",
+                }
+            )
         if attrs.get("current_humidity") is not None:
             comp.update({"current_humidity_topic": doc_topic, "current_humidity_template": _attr('current_humidity')})
+        if attrs.get("humidity") is not None or (isinstance(features, int) and features & 4):  # TARGET_HUMIDITY
+            low, high = _humidity_range(attrs, "min_humidity", "max_humidity")
+            comp.update(
+                {
+                    "target_humidity_state_topic": doc_topic,
+                    "target_humidity_state_template": _attr('humidity'),
+                    "target_humidity_command_topic": f"{cmd}/humidity",
+                    "min_humidity": low,
+                    "max_humidity": high,
+                }
+            )
+        if isinstance(features, int) and features & 128 and features & 256:  # TURN_OFF and TURN_ON
+            # The main HA's MQTT climate announces turn on/off whatever it was given; without
+            # this topic both fall back to writing an hvac mode, which is a different thing and
+            # loses the source's own on/off.  One topic serves both, so it needs both features.
+            comp["power_command_topic"] = f"{cmd}/power"
 
     elif domain == "water_heater":
         comp.pop("state_topic", None)
@@ -469,7 +587,6 @@ def build_component(
                 "temperature_unit": "C",
             }
         )
-        features = attrs.get("supported_features")
         if isinstance(features, int) and features & 8:  # WaterHeaterEntityFeature.ON_OFF; away mode has no MQTT option
             comp["power_command_topic"] = f"{cmd}/power"
 
@@ -517,25 +634,32 @@ def build_component(
                 comp["min_kelvin"] = int(attrs["min_color_temp_kelvin"])
             if attrs.get("max_color_temp_kelvin"):
                 comp["max_kelvin"] = int(attrs["max_color_temp_kelvin"])
-        if modes & {"rgb", "hs", "xy", "rgbw", "rgbww"}:
+        # Exactly one colour topic: the main HA reads the colour mode off the topics it was
+        # given, so an rgbw light announced on the rgb topic becomes a plain rgb light there
+        # and its white channel is gone.  hs and xy have no MQTT topic of their own here and
+        # keep travelling as the rgb the source computes for them.
+        colour = ("rgbww" if "rgbww" in modes else
+                  "rgbw" if "rgbw" in modes else
+                  "rgb" if modes & {"rgb", "hs", "xy"} else None)
+        if colour:
             comp.update(
-                {"rgb_state_topic": doc_topic, "rgb_value_template": _tpl("(value_json.attributes.get('rgb_color') or []) | join(',')"),
-                 "rgb_command_topic": f"{cmd}/rgb"}
+                {f"{colour}_state_topic": doc_topic,
+                 f"{colour}_value_template": _tpl(f"(value_json.attributes.get('{colour}_color') or []) | join(',')"),
+                 f"{colour}_command_topic": f"{cmd}/{colour}"}
             )
         if attrs.get("effect_list"):
             comp.update(
                 {"effect_list": list(attrs["effect_list"]), "effect_state_topic": doc_topic,
-                 "effect_value_template": _attr('effect'), "effect_command_topic": f"{cmd}/effect"}
+                 # the main HA takes the payload as the effect name, so the 'None' every other
+                 # attribute travels as would show as an effect called "None"; an empty payload
+                 # is the one it ignores.  A source whose effect really is the string "None"
+                 # still sends it, because it is the value that decides, not the absence of one.
+                 "effect_value_template": _attr_or_empty('effect'), "effect_command_topic": f"{cmd}/effect"}
             )
 
     elif domain == "cover":
         # MQTT cover derives its features from the topics and payloads: announce only what the source supports
         # (CoverEntityFeature bits), or a tilt-only cover gets open/close/stop buttons that fail here
-        features = attrs.get("supported_features")
-
-        def supports(bits: int) -> bool:
-            return not isinstance(features, int) or bool(features & bits)
-
         comp.update(
             {"value_template": _STATE_TPL,
              "state_open": "open", "state_closed": "closed", "state_opening": "opening",
@@ -566,14 +690,20 @@ def build_component(
                         "'OPEN' if value | int(-1) == 100 else ('CLOSE' if value | int(-1) == 0 else value)")
 
     elif domain == "valve":
-        comp.update(
-            {"value_template": _STATE_TPL, "command_topic": f"{cmd}/command",
-             "payload_open": "OPEN", "payload_close": "CLOSE", "payload_stop": "STOP"}
-        )
+        # The main HA derives the valve's features from the payloads it was given
+        # (ValveEntityFeature bits): announce what the source says it can do, or a valve
+        # that cannot be stopped gets a stop button that fails here.
+        comp.update({"value_template": _STATE_TPL, "command_topic": f"{cmd}/command"})
+        for key, (payload, bit) in {"payload_open": ("OPEN", 1), "payload_close": ("CLOSE", 2)}.items():
+            comp[key] = payload if supports(bit) else None
+        if supports(8):
+            comp["payload_stop"] = "STOP"
         if dc := _device_class(entry, attrs, domain, compat):
             comp["device_class"] = dc
-        if attrs.get("current_position") is not None or _declares(attrs, 4):  # ValveEntityFeature.SET_POSITION
-            # a position-reporting valve may not carry open/close payloads
+        # Declared feature first, so an unavailable valve keeps its position topics; a source that
+        # declares nothing is read from the value it has.  A position-reporting valve carries no
+        # open/close payloads at all: the main HA refuses the component for the keys themselves.
+        if _declares(attrs, 4) or attrs.get("current_position") is not None:  # ValveEntityFeature.SET_POSITION
             for k in ("payload_open", "payload_close"):
                 comp.pop(k, None)
             comp.update(
@@ -623,11 +753,16 @@ def build_component(
             # like the alarm panel: the code typed on the consuming side travels with the action and the
             # source lock checks it.  Without the template MQTT lock sends the bare payload, the code the
             # user typed stays there, and a code-protected lock refuses every command from the main HA.
+            # Every LockState the source can report, `opening` included: the main HA maps only the states
+            # it was given a payload for and shows the rest as unknown.
             {"value_template": _STATE_TPL, "state_locked": "locked", "state_unlocked": "unlocked",
-             "state_locking": "locking", "state_unlocking": "unlocking", "state_jammed": "jammed", "state_open": "open",
-             "command_topic": f"{cmd}/command", "payload_lock": "LOCK", "payload_unlock": "UNLOCK", "payload_open": "OPEN",
+             "state_locking": "locking", "state_unlocking": "unlocking", "state_jammed": "jammed",
+             "state_open": "open", "state_opening": "opening",
+             "command_topic": f"{cmd}/command", "payload_lock": "LOCK", "payload_unlock": "UNLOCK",
              "command_template": '{"action": "{{ value }}", "code": {{ code | to_json }}}'}
         )
+        if supports(1):  # LockEntityFeature.OPEN; the payload alone is what announces it there
+            comp["payload_open"] = "OPEN"
         # MQTT lock's code_format is the regex the main HA validates the typed code against (the alarm's
         # is a `number`/`text` keyword instead); the source lock's `code_format` is that same regex.
         if code_format := _valid_regex(attrs.get("code_format")):
@@ -686,8 +821,11 @@ def build_component(
                 "target_humidity_command_topic": f"{cmd}/humidity",
                 "current_humidity_topic": doc_topic,
                 "current_humidity_template": _attr('current_humidity'),
-                "min_humidity": _num(attrs.get("min_humidity"), 0),
-                "max_humidity": _num(attrs.get("max_humidity"), 100),
+                # what the source is doing right now (humidifying / drying / idle / off); an
+                # absent action travels as 'None', which the main HA reads as "no action"
+                "action_topic": doc_topic,
+                "action_template": _attr('action'),
+                **dict(zip(("min_humidity", "max_humidity"), _humidity_range(attrs, "min_humidity", "max_humidity"))),
             }
         )
         if dc := _device_class(entry, attrs, domain, compat):
@@ -710,22 +848,17 @@ def build_component(
              "payload_arm_vacation": "ARM_VACATION", "payload_arm_custom_bypass": "ARM_CUSTOM_BYPASS",
              "payload_disarm": "DISARM", "payload_trigger": "TRIGGER"}
         )
+        if isinstance(features, int):
+            # the main HA announces every arm mode it knows unless it is told which ones;
+            # a mode the source cannot arm is a button there that fails here
+            comp["supported_features"] = [name for name, bit in _ALARM_FEATURES.items() if features & bit]
         if code_format:
             comp["code"] = "REMOTE_CODE" if str(code_format).lower() == "number" else "REMOTE_CODE_TEXT"
 
     elif domain == "update":
-        comp.update(
-            {
-                # MQTT update validates the rendered JSON as a whole and drops all of it for one null field
-                # (a release_url of None is enough): only the fields that have a value go out
-                "value_template": _tpl(
-                    "dict(value_json.attributes.items() | selectattr('0', 'in', ['installed_version', 'latest_version', 'title',"
-                    " 'release_url', 'release_summary', 'in_progress']) | rejectattr('1', 'none') | list) | to_json"
-                ),
-                "command_topic": f"{cmd}/install",
-                "payload_install": "install",
-            }
-        )
+        comp["value_template"] = _UPDATE_TPL
+        if supports(1):  # UpdateEntityFeature.INSTALL; the command topic is what announces it there
+            comp.update({"command_topic": f"{cmd}/install", "payload_install": "install"})
         if dc := _device_class(entry, attrs, domain, compat):
             comp["device_class"] = dc
 
@@ -751,7 +884,6 @@ def build_component(
     elif domain == "vacuum":
         # MQTT vacuum has no value template: it reads `state` and `fan_speed` from the top level of the
         # document (see document_extras); a battery level stays an attribute (the platform has none)
-        features = attrs.get("supported_features")
         comp.update(
             {
                 "command_topic": f"{cmd}/command",
@@ -767,12 +899,12 @@ def build_component(
 
     elif domain == "lawn_mower":
         comp.pop("state_topic", None)
-        comp.update(
-            {"activity_state_topic": doc_topic, "activity_value_template": _STATE_TPL,
-             "start_mowing_command_topic": f"{cmd}/command", "start_mowing_command_template": "start_mowing",
-             "pause_command_topic": f"{cmd}/command", "pause_command_template": "pause",
-             "dock_command_topic": f"{cmd}/command", "dock_command_template": "dock"}
-        )
+        comp.update({"activity_state_topic": doc_topic, "activity_value_template": _STATE_TPL})
+        # one command topic per LawnMowerEntityFeature bit: the main HA announces the
+        # feature for every command topic it was given, and nothing for the ones it wasn't
+        for action, bit in (("start_mowing", 1), ("pause", 2), ("dock", 4)):
+            if supports(bit):
+                comp.update({f"{action}_command_topic": f"{cmd}/command", f"{action}_command_template": action})
 
     return comp
 
@@ -783,6 +915,11 @@ _VACUUM_ACTIVITIES = frozenset({"cleaning", "docked", "idle", "paused", "returni
 # MQTT vacuum feature names and the VacuumEntityFeature bits they stand for
 _VACUUM_FEATURES = {"start": 8192, "pause": 4, "stop": 8, "return_home": 16, "status": 128, "locate": 512,
                     "clean_spot": 1024, "fan_speed": 32, "send_command": 256}
+
+# Same, for the MQTT alarm panel: the names its supported_features option takes and the
+# AlarmControlPanelEntityFeature bits behind them.  Disarm is not a feature, every panel has it.
+_ALARM_FEATURES = {"arm_home": 1, "arm_away": 2, "arm_night": 4, "trigger": 8,
+                   "arm_custom_bypass": 16, "arm_vacation": 32}
 
 
 def document_extras(state: State) -> dict[str, Any]:
@@ -809,17 +946,20 @@ def event_stream_topic(doc_topic: str) -> str:
     return f"{base}/event_stream/{rest}"
 
 
-def _mirror_as_sensor(entry: er.RegistryEntry | None, state: State, doc_topic: str, prefix: str) -> dict[str, Any]:
+def _mirror_as_sensor(entry: er.RegistryEntry | None, state: State, doc_topic: str, prefix: str,
+                      device_name: str | None = None) -> dict[str, Any]:
     """Read-only mirror for domains without an MQTT platform (camera,
     media_player, weather, remote, todo, calendar, ...): a sensor whose
     state is the entity state and whose attributes are the full attribute
     set, so automations on the consuming side still see everything."""
     domain, object_id = state.entity_id.split(".", 1)
-    comp = _common(entry, state, doc_topic, prefix)
+    comp = _common(entry, state, doc_topic, prefix, device_name)
     comp.update(
         {
             "platform": "sensor",
-            "name": f"{comp['name']} ({domain})",
+            # a mirror of the entity that IS its device keeps no name of its own either:
+            # the main HA shows the device's name and this suffix, not "None (camera)"
+            "name": f"({domain})" if comp["name"] is None else f"{comp['name']} ({domain})",
             "default_entity_id": f"sensor.{domain}_{object_id}",
             "value_template": _STATE_TPL,
         }
@@ -1059,6 +1199,9 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
             "preset_mode": lambda: ("climate", "set_preset_mode", {**t, "preset_mode": p}),
             "fan_mode": lambda: ("climate", "set_fan_mode", {**t, "fan_mode": p}),
             "swing_mode": lambda: ("climate", "set_swing_mode", {**t, "swing_mode": p}),
+            "swing_horizontal_mode": lambda: ("climate", "set_swing_horizontal_mode", {**t, "swing_horizontal_mode": p}),
+            "humidity": lambda: ("climate", "set_humidity", {**t, "humidity": int(_finite(p))}),
+            "power": lambda: ("climate", "turn_on" if _on_off(p) else "turn_off", t),
         })
     if domain == "water_heater":
         return _pick(field, {
@@ -1079,6 +1222,9 @@ def command_to_service(domain: str, object_id: str, field: str, payload: str) ->
             "brightness": lambda: ("light", "turn_on", {**t, "brightness": int(_finite(p))}),
             "color_temp": lambda: ("light", "turn_on", {**t, "color_temp_kelvin": int(_finite(p))}),
             "rgb": lambda: ("light", "turn_on", {**t, "rgb_color": [int(x) for x in p.split(",")]}),
+            # the main HA renders these the same way it renders rgb: the channels, comma separated
+            "rgbw": lambda: ("light", "turn_on", {**t, "rgbw_color": [int(x) for x in p.split(",")]}),
+            "rgbww": lambda: ("light", "turn_on", {**t, "rgbww_color": [int(x) for x in p.split(",")]}),
             "effect": lambda: ("light", "turn_on", {**t, "effect": p}),
         })
     if domain == "cover":
