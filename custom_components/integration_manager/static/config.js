@@ -409,10 +409,16 @@ function pollProgress(delay=2000){
     }catch(e){ $('#baseerr').textContent='progress check failed: '+e.message; }
   },delay);
 }
-$('#start').onclick=async()=>{try{log(`start flow ${DOM}`);const r=await post('api/flow/start',{domain:DOM});if(r.message){log('error: '+r.message);return;}flow={id:r.flow_id,kind:'config'};render(r);}catch(e){log('error: '+e.message)}};
+$('#start').onclick=async()=>{try{await releaseFlow();log(`start flow ${DOM}`);const r=await post('api/flow/start',{domain:DOM});if(r.message){log('error: '+r.message);return;}flow={id:r.flow_id,kind:'config'};render(r);}catch(e){log('error: '+e.message)}};
 $('#submit').onclick=async()=>{ if(!flow) return; clearErrors(); let input; try{input=$('#submit').dataset.external==='1'?null:collect();}catch(e){showFieldError(e);return;}
   try{ const url=flow.kind==='config'?`api/flow/${flow.id}`:`api/options/${flow.id}`; const r=await post(url,{user_input:input}); if(r.type==='invalid_data'){ for(const [k,v] of Object.entries(r.errors||{})){ const w=[...$('#form').querySelectorAll('[data-name]')].find(x=>x.dataset.name===k); if(w&&w._err) w._err.textContent=String(v); else $('#baseerr').textContent=`${k}: ${v}`; } return; } if(r.message){$('#baseerr').textContent=r.message;return;} render(r);}catch(e){log('error: '+e.message)} };
-$('#abort').onclick=async()=>{ if(!flow) return; clearTimeout(PROGRESS_T); const r=await del(flow.kind==='config'?`api/flow/${flow.id}`:`api/options/${flow.id}`); if(!r.ok){ log('ERROR: abort failed: '+(r.error||r.message)); return; } log('aborted'); flow=null; $('#stepcard').hidden=true; $('#abort').disabled=true; $('#flowid').textContent=''; };
+$('#abort').onclick=async()=>{ if(!flow) return; const r=await abortFlow(flow); if(!r.ok){ log('ERROR: abort failed: '+(r.error||r.message)); return; } log('aborted'); flowEnded(); entries(); };
+// Home Assistant keeps a flow in progress until someone ends it, and a second flow for the same device is then
+// refused already_in_progress.  So the one this page holds is ended before it starts another, and an abandoned
+// one -- the page was reloaded, or closed mid-step -- is listed under Config entries with its own Abort.
+function abortFlow(f){ clearTimeout(PROGRESS_T); return del(f.kind==='config'?`api/flow/${f.id}`:`api/options/${f.id}`); }
+function flowEnded(){ flow=null; $('#stepcard').hidden=true; $('#abort').disabled=true; $('#flowid').textContent=''; }
+async function releaseFlow(){ if(!flow) return; const r=await abortFlow(flow); if(!r.ok) log('note: the flow this page held is still in progress: '+(r.error||r.message||'')); flowEnded(); }
 async function entries(){
   const r=await (await fetch('api/entries')).json();
   const t=$('#entries'); t.querySelectorAll('tr:not(:first-child)').forEach(e=>e.remove());
@@ -427,10 +433,17 @@ async function entries(){
     if(a==='reconfigure'){ const r=await post('api/flow/start',{domain:DOM,source:'reconfigure',entry_id:id}); if(r.message||!r.flow_id){log('error: '+(r.message||r.reason||'no flow'));return;} flow={id:r.flow_id,kind:'config'}; render(r); } });
   let prog=[]; try{ prog=await (await fetch('api/flow/progress')).json(); }catch(e){}
   const pb=$('#flowsprogress'); if(!pb) return; pb.innerHTML='';
-  // two reauth flows are two buttons: without the entry they belong to they are the same button twice
+  // two reauth flows are two buttons: without the entry they belong to they are the same button twice.
+  // A flow the operator started himself is listed too -- hiding it left an abandoned one with nowhere to go,
+  // while it kept refusing the next Start -- except the one this page is in the middle of, which has its own Abort.
   const titles={}; for(const e of r) titles[e.entry_id]=e.title;
-  for(const f of (Array.isArray(prog)?prog:[]).filter(f=>f.handler===DOM&&f.source!=='user')){ const b=document.createElement('button');
+  for(const f of (Array.isArray(prog)?prog:[]).filter(f=>f.handler===DOM&&!(flow&&flow.id===f.flow_id))){
     const who=f.entry_id?(titles[f.entry_id]||f.entry_id.slice(0,8)+'…'):'';
-    b.textContent=`Continue ${f.source||'flow'}${who?' · '+who:''}${f.step_id?' · '+f.step_id:''}`; b.onclick=async()=>{ const r=await post(`api/flow/${f.flow_id}`,{user_input:null}); if(r.message){log('error: '+r.message);return;} flow={id:f.flow_id,kind:'config'}; render(r); }; pb.appendChild(b); pb.appendChild(document.createTextNode(' ')); }
+    const what=`${f.source||'flow'}${who?' · '+who:''}${f.step_id?' · '+f.step_id:''}`;
+    const b=document.createElement('button'); b.textContent='Continue '+what;
+    b.onclick=async()=>{ await releaseFlow(); const r=await post(`api/flow/${f.flow_id}`,{user_input:null}); if(r.message){log('error: '+r.message);return;} flow={id:f.flow_id,kind:'config'}; render(r); };
+    const a=document.createElement('button'); a.textContent='Abort '+what; a.title='end this flow in Home Assistant: it blocks a new one for the same device';
+    a.onclick=async()=>{ const res=await del(`api/flow/${f.flow_id}`); if(!res.ok){log('ERROR: abort failed: '+(res.error||res.message));return;} log(`aborted ${what}`); entries(); };
+    pb.appendChild(b); pb.appendChild(document.createTextNode(' ')); pb.appendChild(a); pb.appendChild(document.createTextNode(' ')); }
 }
 load().catch(e=>log('error: '+e.message));
