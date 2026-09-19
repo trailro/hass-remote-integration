@@ -11,6 +11,13 @@ export function pageEsc(pagePath) {
   return new Function(`${line[0]}\nreturn esc;`)();
 }
 
+// the pages' own version order (static/hri.js), read out of the same file: every page loads it
+export function pageVcmp(pagePath) {
+  const src = fs.readFileSync(path.join(path.dirname(pagePath), 'hri.js'), 'utf8');
+  const lines = src.split('\n').filter(l => l.startsWith('const vparts=') || l.startsWith('const vcmp='));
+  return new Function(`${lines.join('\n')}\nreturn vcmp;`)();
+}
+
 // controls whose .value is a string in a browser
 const VALUED = new Set(['input', 'textarea', 'select', 'option']);
 const VOID = new Set(['input', 'br', 'hr', 'img', 'meta', 'link']);

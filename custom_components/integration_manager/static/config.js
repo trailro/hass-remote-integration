@@ -10,7 +10,7 @@ async function load(){
 }
 function renderVersions(x){
   const t=$('#vers'); t.querySelectorAll('tr:not(:first-child)').forEach(e=>e.remove()); if(!x) return;
-  const tags=Object.keys(x.versions||{}).sort().reverse();
+  const tags=Object.keys(x.versions||{}).sort(vcmp).reverse();
   for(const v of tags){const info=x.versions[v]||{}; const running=x.running&&x.running_tag===v; const tr=document.createElement('tr');
     tr.innerHTML=`<td><b>${esc(v)}</b>${x.previous_tag===v?' <span class="tag">previous</span>':''}</td><td>${esc(info.version||'')}</td><td class="mut">${esc((info.installed_at||'').slice(0,16))}</td><td>${running?'<span class="ok">running</span>':x.running_tag===v?'<span class="mut">deployed, stopped</span>':''}</td>
       <td>${running?`<button data-a="stop">Stop</button>`:`<button data-a="start" data-v="${esc(v)}">${x.running?'Switch to':'Start'} ${esc(v)}</button> <button data-a="remove" data-v="${esc(v)}">Remove</button>`}</td>`;

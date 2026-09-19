@@ -26,10 +26,10 @@ function renderIntegrations(s){
   for(const [d,x] of doms){
     const tr=document.createElement('tr');
     const upd=x.update_available?` <a href="/config?domain=${encodeURIComponent(d)}" style="text-decoration:none"><span class="tag warn" title="newer stable release on GitHub (weekly check)">update ${esc(x.update_available)}</span></a>`:'';
-    const vers=upd+Object.keys(x.versions||{}).sort().map(v=>`<span class="tag ${x.running&&x.running_tag===v?'ok':''}" title="${esc((x.versions[v]||{}).version||'')}">${esc(v)}${x.running&&x.running_tag===v?' · running':x.running_tag===v?' · last run':''}</span>`).join(' ')||'<span class="mut">none in store</span>';
+    const vers=upd+Object.keys(x.versions||{}).sort(vcmp).map(v=>`<span class="tag ${x.running&&x.running_tag===v?'ok':''}" title="${esc((x.versions[v]||{}).version||'')}">${esc(v)}${x.running&&x.running_tag===v?' · running':x.running_tag===v?' · last run':''}</span>`).join(' ')||'<span class="mut">none in store</span>';
     const ents=(x.entries||[]).length?(x.entries.map(e=>`${esc(e.title)} <span class="${e.disabled_by?'mut':e.state==='loaded'?'ok':'warn'}">${e.disabled_by?'disabled':esc(e.state)}</span>`).join(', ')):'<span class="mut">none (use its Config page)</span>';
     const st=x.running?`<span class="ok">running ${esc(x.running_tag||'')}</span>${x.loaded_as_integration?'':' <span class="warn">not loaded</span>'}`:'<span class="mut">stopped</span>';
-    const sel=`<select data-sel="${esc(d)}">${Object.keys(x.versions||{}).sort().reverse().map(v=>`<option ${v===(x.running_tag||x.newest_tag)?'selected':''}>${esc(v)}</option>`).join('')}</select>`;
+    const sel=`<select data-sel="${esc(d)}">${Object.keys(x.versions||{}).sort(vcmp).reverse().map(v=>`<option ${v===(x.running_tag||x.newest_tag)?'selected':''}>${esc(v)}</option>`).join('')}</select>`;
     tr.innerHTML=`<td><b>${esc(d)}</b><br><span class="mut">${esc(x.name||'')}</span></td><td>${vers}</td><td>${ents}</td><td>${st}</td>
       <td>${x.running?`<button data-a="stop" data-d="${esc(d)}">Stop</button>`:`${sel} <button data-a="start" data-d="${esc(d)}">Start</button>`} <a href="/config?domain=${encodeURIComponent(d)}"><button>Config</button></a> ${x.running?'':`<button data-a="uninstall" data-d="${esc(d)}">Uninstall</button>`}</td>`;
     t.appendChild(tr);

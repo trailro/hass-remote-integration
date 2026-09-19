@@ -12,6 +12,10 @@ N3 (follow-up): a builder Check answer recorded the selection made after the
 request, so an answer for v1 arriving once v2 was picked enabled Prepare for v2,
 and an older Check answering last replaced a newer one.
 
+C2 (this review): four lists of versions were sorted as strings, so 2026.10.1
+landed under 2026.8.4 and v0.10.0 under v0.9.0.  They now share the vcmp the
+System page already had, moved into static/hri.js, which every page loads.
+
 Needs node, which the container the unit tests run in does not have: it skips there and runs wherever node is
 installed (a developer machine, CI).  Every test fails on the tree before the fix."""
 
@@ -84,7 +88,32 @@ class PagesTest(unittest.TestCase):
         self.assertEqual((broken["alerts"], broken["saved"]), (["Memory snapshot: HTTP 500"], []))
 
 
+    def test_every_version_list_is_in_version_order(self):
+        """C2: sorted as strings, v0.10.0 came under v0.9.0 and 2026.10.1 under 2026.8.4."""
+        order = self.out["version_order"]
+        self.assertEqual(order["config_page"], ["v0.22.0", "v0.10.0", "v0.9.0", "v0.8.4"])     # newest first
+        self.assertEqual(order["manager_select"], ["v0.22.0", "v0.10.0", "v0.9.0", "v0.8.4"])  # the same, in the Start selector
+        self.assertEqual(order["manager_chips"], ["v0.8.4", "v0.9.0", "v0.10.0", "v0.22.0"])   # the chips read oldest first
+        self.assertEqual(order["install_page"], ["2026.10.1", "2026.10.0", "2026.9.2", "2026.9.0", "2026.8.4"])
+
+    def test_the_shared_comparison_handles_a_v_prefix_and_a_beta(self):
+        self.assertEqual(self.out["version_order"]["vcmp"],
+                         ["v0.9.0", "v0.10.0", "2026.8.4", "2026.10.0b0", "2026.10.0", "2026.10.1"])
+
+
 class SourceTest(unittest.TestCase):
+
+    def test_the_version_comparison_lives_in_the_file_every_page_loads(self):
+        # C2: one vcmp, in static/hri.js, instead of a copy per page (or a string sort, which is what they had)
+        with open(os.path.join(STATIC, "hri.js"), encoding="utf-8") as fh:
+            self.assertIn("const vcmp=", fh.read())
+        for name in ("config.js", "index.js", "install.js", "system.js"):
+            with self.subTest(page=name), open(os.path.join(STATIC, name), encoding="utf-8") as fh:
+                self.assertNotIn("const vcmp=", fh.read())
+        # and no version list is left on the default (string) sort; system.js sorts domain names, not versions
+        for name in ("config.js", "index.js", "install.js"):
+            with self.subTest(page=name), open(os.path.join(STATIC, name), encoding="utf-8") as fh:
+                self.assertEqual(re.findall(r"\.sort\(\)", fh.read()), [])
 
     def test_no_radio_group_is_named_after_its_field(self):
         with open(os.path.join(STATIC, "config.js"), encoding="utf-8") as fh:

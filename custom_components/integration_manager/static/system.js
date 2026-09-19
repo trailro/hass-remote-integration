@@ -28,8 +28,7 @@ ghState().catch(()=>{});
 // fetchDownload is in hri.js: the Log files page downloads a log file the same way
 $('#diagzip').onclick=()=>fetchDownload($('#diagzip'),'api/diagnostics','Diagnostics zip','hri-diagnostics.zip');
 $('#memsnap').onclick=()=>fetchDownload($('#memsnap'),'api/diag/memory','Memory snapshot',`hri-memory-${new Date().toISOString().slice(0,19).replace(/[-:]/g,'')}.json`);
-const vparts=s=>{const m=String(s).match(/^(\d+)\.(\d+)\.(\d+)(?:b(\d+))?$/); return m?[+m[1],+m[2],+m[3],m[4]===undefined?1:0,+(m[4]||0)]:String(s).split('.').map(Number);};
-const vcmp=(a,b)=>{const x=vparts(a),y=vparts(b);for(let i=0;i<Math.max(x.length,y.length);i++){const d=(x[i]||0)-(y[i]||0);if(d)return d;}return 0;};  // a beta sorts before its release
+// vcmp (version order) is in hri.js: the Config, Install and manager pages sort versions with the same one
 // Whether a version's pinned requirements have a wheel for this image's Python.  Checked on the server (pip,
 // no install), cached there per version for an hour; /api/ha hands over what that cache already holds, so
 // painting the list and the selection costs nothing and the 60 s refresh never starts a pip run.

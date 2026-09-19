@@ -5,12 +5,13 @@
 //   node tests/js/ha_list.mjs <path to static/>
 import fs from 'fs';
 import path from 'path';
-import { El, pageEsc } from './dom.mjs';
+import { El, pageEsc, pageVcmp } from './dom.mjs';
 
 const STATIC = process.argv[2];
 const src = fs.readFileSync(path.join(STATIC, 'system.js'), 'utf8');
 const between = (from, to) => { const at = src.indexOf(from); return src.slice(at, src.indexOf(to, at)); };
 const esc = pageEsc(path.join(STATIC, 'system.js'));
+const vcmp = pageVcmp(path.join(STATIC, 'system.js'));  // shared through hri.js: the Config, Install and manager pages sort with it too
 
 const BLOCKED = {
   version: '2026.9.1', ok: false, checked: true, missing: ['lru-dict==1.3.0'], warnings: [], notes: [],
@@ -38,9 +39,9 @@ function page(answers) {
   $('#haall').type = 'checkbox';
   const post = async (url, body) => { sent.push([url, body]); return answers.shift(); };
   const fetch = async (url) => { fetched.push(url); return { json: async () => answers.shift() }; };
-  const code = 'let HA=null;\n' + between('const vparts=', 'function haPlan(');
-  const api = new Function('$', 'post', 'esc', 'fetch', 'haPlan',
-    code + '\nreturn {ha, haOptions, haMark, haCheck, HACHK};')($, post, esc, fetch, () => {});
+  const code = 'let HA=null;\n' + between('const HACHK={};', 'function haPlan(');
+  const api = new Function('$', 'post', 'esc', 'fetch', 'haPlan', 'vcmp',
+    code + '\nreturn {ha, haOptions, haMark, haCheck, HACHK};')($, post, esc, fetch, () => {}, vcmp);
   const shown = () => $('#haver').options.map(o => ({ value: o.value, text: o.textContent, selected: o.selected }));
   return { $, sent, fetched, shown, ...api };
 }

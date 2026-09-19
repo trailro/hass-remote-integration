@@ -4,7 +4,7 @@
 //   node tests/js/r13_pages.mjs <path to static/>
 import fs from 'fs';
 import path from 'path';
-import { El, Option, document, pageEsc } from './dom.mjs';
+import { El, Option, document, pageEsc, pageVcmp } from './dom.mjs';
 
 const STATIC = process.argv[2];
 const read = name => fs.readFileSync(path.join(STATIC, name), 'utf8');
@@ -81,4 +81,47 @@ const pick = (root, input) => { for (const r of radios(root)) if (r !== input &&
     current: await run(async ({ api, pending }) => { const p = api.check(); pending[0].res(ok('CHECK_V1')); await p; }),
   };
 }
+{  // C2: every list of versions a page shows, sorted as strings -- 2026.10.1 under 2026.8.4, v0.10.0 under v0.9.0
+  const esc = pageEsc(path.join(STATIC, 'config.js'));
+  const vcmp = pageVcmp(path.join(STATIC, 'config.js'));      // shared through hri.js
+  class Table extends El { querySelectorAll(sel) { return sel.startsWith('tr:not') ? [] : super.querySelectorAll(sel); } }
+  const TAGS = ['v0.8.4', 'v0.9.0', 'v0.10.0', 'v0.22.0'];    // the integration's git tags, in the store
+  const versions = Object.fromEntries(TAGS.map(t => [t, { version: t.slice(1), installed_at: '2026-09-01T10:00' }]));
+  const page = (tables = []) => { const els = {};
+    return s => (els[s] ??= Object.assign(tables.includes(s) ? new Table('table') : new El('div'), { id: s.slice(1) })); };
+
+  // the Config page's version store table
+  const $c = page(['#vers']);
+  const renderVersions = new Function('$', 'esc', 'document', 'vcmp', 'log', 'post', 'confirm', 'startIntegration', 'load', 'DOM',
+    between(read('config.js'), 'function renderVersions(', "$('#relrefresh').onclick") + '\nreturn renderVersions;')(
+    $c, esc, document, vcmp, () => {}, async () => ({ ok: true }), () => true, async () => ({ ok: true }), () => {}, 'demo');
+  renderVersions({ versions, running: false, running_tag: null, previous_tag: null, pre_update_backup: '' });
+  const config_page = $c('#vers').querySelectorAll('b').map(b => b.textContent);
+
+  // the manager page's chips and its start selector
+  const $i = page(['#inst']);
+  const renderIntegrations = new Function('$', 'esc', 'document', 'vcmp', 'log', 'post', 'confirm', 'startIntegration',
+    'status', 'mqttSummary', 'INSTALLED', 'RUN',
+    between(read('index.js'), 'let LAST_FP=null;', 'async function mqttSummary(') + '\nreturn renderIntegrations;')(
+    $i, esc, document, vcmp, () => {}, async () => ({ ok: true }), () => true, async () => ({ ok: true }),
+    async () => {}, async () => {}, { demo: { versions, entries: [], running: false, name: 'Demo' } }, null);
+  renderIntegrations({ installed: { demo: 1 }, running: null, updates: {} });
+  const manager_chips = $i('#inst').querySelectorAll('.tag').map(t => t.textContent.trim());
+  const manager_select = $i('#inst').querySelectorAll('option').map(o => o.textContent);
+
+  // the Install page's Home Assistant selector
+  const $b = page();
+  const HA = { current: '2026.9.2', latest_stable: '2026.10.1', python: '3.14.7',
+               recent: ['2026.10.1', '2026.10.0', '2026.9.2', '2026.9.0', '2026.8.4'], installed_venvs: ['2026.8.4', '2026.9.2'] };
+  const options = new Function('$', 'esc', 'vcmp', 'fetch', 'domInfo', 'releases',
+    between(read('install.js'), 'let OPT=null', 'let CHECK=null') + '\nreturn options;')(
+    $b, esc, vcmp, async () => ({ json: async () => ({ registry: { demo: { repo: 'trailro/demo' } }, ha: HA, running: { domain: 'demo' } }) }),
+    () => {}, () => {});
+  await options();
+  const install_page = $b('#bha').querySelectorAll('option').map(o => o.value);
+
+  out.version_order = { config_page, manager_chips, manager_select, install_page,
+                        vcmp: ['2026.10.1', '2026.8.4', 'v0.10.0', 'v0.9.0', '2026.10.0b0', '2026.10.0'].sort(vcmp) };
+}
+
 console.log(JSON.stringify(out));
