@@ -11,6 +11,15 @@ export function pageEsc(pagePath) {
   return new Function(`${line[0]}\nreturn esc;`)();
 }
 
+// a one-line helper of static/hri.js (which ui.py puts at the top of every page, so the pages use it without
+// declaring it), read out of the file next to the page under test and handed to the code under test
+export function pageConst(pagePath, name) {
+  const src = fs.readFileSync(path.join(path.dirname(pagePath), 'hri.js'), 'utf8');
+  const line = new RegExp(`^const ${name}=.*;$`, 'm').exec(src);
+  if (!line) throw new Error(`static/hri.js declares no ${name} on a line of its own`);
+  return new Function(`${line[0]}\nreturn ${name};`)();
+}
+
 // the pages' own version order (static/hri.js), read out of the same file: every page loads it
 export function pageVcmp(pagePath) {
   const src = fs.readFileSync(path.join(path.dirname(pagePath), 'hri.js'), 'utf8');

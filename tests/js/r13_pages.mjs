@@ -4,7 +4,7 @@
 //   node tests/js/r13_pages.mjs <path to static/>
 import fs from 'fs';
 import path from 'path';
-import { El, Option, document, pageEsc, pageVcmp } from './dom.mjs';
+import { El, Option, document, pageEsc, pageVcmp, pageConst } from './dom.mjs';
 
 const STATIC = process.argv[2];
 const read = name => fs.readFileSync(path.join(STATIC, name), 'utf8');
@@ -19,8 +19,8 @@ const pick = (root, input) => { for (const r of radios(root)) if (r !== input &&
 
 {  // F5: two sections each holding a single-select list of the same name
   const code = between(read('config.js'), 'function optionsOf(', 'function clearErrors(');
-  const { field, collect } = new Function('document', 'esc', 'Option', code + '\nreturn {field, collect};')(
-    document, pageEsc(path.join(STATIC, 'config.js')), Option);
+  const { field, collect } = new Function('document', 'esc', 'Option', 'valueList', code + '\nreturn {field, collect};')(
+    document, pageEsc(path.join(STATIC, 'config.js')), Option, pageConst(path.join(STATIC, 'config.js'), 'valueList'));
   const list = dflt => ({ name: 'mode', selector: { select: { mode: 'list', options: ['x', 'y'] } }, default: dflt });
   const form = new El('form');
   for (const [name, dflt] of [['first', 'x'], ['second', 'y']]) form.appendChild(field({ type: 'expandable', name, schema: [list(dflt)] }, {}, null));

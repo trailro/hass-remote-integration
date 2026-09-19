@@ -3,14 +3,14 @@
 // that output; they skip when node is missing (the container has none).
 //   node tests/js/config_form.mjs <path to config.js>
 import fs from 'fs';
-import { El, Option, document, pageEsc } from './dom.mjs';  // .value is a string there, as in a browser: that is what hid F15
+import { El, Option, document, pageEsc, pageConst } from './dom.mjs';  // .value is a string there, as in a browser: that is what hid F15
 import { selector as customMulti, roundTrips, typeItems } from './select_roundtrip.mjs';
 
 const src = fs.readFileSync(process.argv[2], 'utf8');
 const code = src.slice(src.indexOf('function optionsOf('), src.indexOf('function clearErrors('));
 const esc = pageEsc(process.argv[2]);
-const { field, collect } = new Function('document', 'esc', 'Option', code + '\nreturn {field, collect};')(
-  document, esc, Option);
+const { field, collect } = new Function('document', 'esc', 'Option', 'valueList', code + '\nreturn {field, collect};')(
+  document, esc, Option, pageConst(process.argv[2], 'valueList'));  // valueList lives in static/hri.js, which every page loads
 
 function submit(schemaField, touch) {  // what the page would send for a form the user did not touch (or touched so)
   const form = new El('div');
@@ -79,6 +79,35 @@ const scenarios = {
   text_multiple_multiline: () => { const w = field({ ...multiText({ multiline: true }), default: ['x'] }, {}, null); return { tag: items(w)[0].tag }; },
   text_multiple_password: () => { const w = field({ ...multiText({ type: 'password' }), default: ['x'] }, {}, null); return { type: items(w)[0].type }; },
   text_single_unchanged: () => submit({ name: 'word', selector: { text: {} }, default: 'Smith, John' }),
+
+  // F4: whether there is a default is decided before it is turned into a string.  "null" and "undefined" are
+  // values HA takes, and the page dropped them as if the schema had given no default at all; the other way
+  // round, no default at all was read as the option literally called "null" or "undefined".
+  word_single_custom_null: () => submit({ name: 'choice', selector: { select: { options: ['a', 'b'], custom_value: true } }, default: 'null' }),
+  word_single_custom_undefined: () => submit({ name: 'choice', selector: { select: { options: ['a', 'b'], custom_value: true } }, default: 'undefined' }),
+  word_single_list_custom_null: () => submit({ name: 'choice', selector: { select: { options: ['a', 'b'], custom_value: true, mode: 'list' } }, default: 'null' }),
+  word_single_list_custom_undefined: () => submit({ name: 'choice', selector: { select: { options: ['a', 'b'], custom_value: true, mode: 'list' } }, default: 'undefined' }),
+  word_multi_custom: () => submit({ name: 'choices', selector: { select: { options: ['a', 'b'], multiple: true, custom_value: true } }, default: ['a', 'null', 'undefined'] }),
+  word_multi_list_custom: () => submit({ name: 'choices', selector: { select: { options: ['a', 'b'], multiple: true, custom_value: true, mode: 'list' } }, default: ['a', 'null', 'undefined'] }),
+  word_single_custom_typed: () => submit({ name: 'choice', selector: { select: { options: ['a', 'b'], custom_value: true } }, default: 'a' }, type('null')),
+  word_multi_custom_typed: () => submit({ name: 'choices', selector: { select: { options: ['a', 'b'], multiple: true, custom_value: true } }, default: [] }, typeItem('undefined')),
+  // without custom_value nothing changes: the word counts when the options list it, and is nothing when they do not
+  word_single_listed_no_custom: () => submit({ name: 'choice', selector: { select: { options: ['null', 'undefined', 'b'] } }, default: 'null' }),
+  word_single_list_listed_no_custom: () => submit({ name: 'choice', selector: { select: { options: ['null', 'undefined', 'b'], mode: 'list' } }, default: 'undefined' }),
+  word_multi_listed_no_custom: () => submit({ name: 'choices', selector: { select: { options: ['null', 'undefined', 'b'], multiple: true } }, default: ['null', 'undefined'] }),
+  word_single_unlisted_no_custom: () => submit({ name: 'choice', selector: { select: { options: ['a', 'b'] } }, default: 'null' }),
+
+  // a default that really is not there: nothing is chosen, and nothing is offered as a custom value already made
+  missing_single_custom: () => submit({ name: 'choice', selector: { select: { options: ['a', 'b'], custom_value: true } } }),
+  missing_multi_custom: () => submit({ name: 'choices', selector: { select: { options: ['a', 'b'], multiple: true, custom_value: true } } }),
+  missing_multi_custom_null_default: () => submit({ name: 'choices', selector: { select: { options: ['a', 'b'], multiple: true, custom_value: true } }, default: null }),
+  missing_multi_custom_null_in_list: () => submit({ name: 'choices', selector: { select: { options: ['a', 'b'], multiple: true, custom_value: true } }, default: [null, 'a'] }),
+  // ...whatever the options happen to be called: these used to pick themselves
+  missing_single_word_option: () => submit({ name: 'choice', selector: { select: { options: ['undefined', 'b'] } } }),
+  missing_single_word_option_null_default: () => submit({ name: 'choice', selector: { select: { options: ['null', 'b'] } }, default: null }),
+  missing_single_list_word_option: () => submit({ name: 'choice', selector: { select: { options: ['undefined', 'b'], mode: 'list' } } }),
+  missing_multi_word_option: () => submit({ name: 'choices', selector: { select: { options: ['null', 'undefined', 'b'], multiple: true } }, default: null }),
+  missing_suggested_value_falls_back_to_the_default: () => submit({ name: 'choice', selector: { select: { options: ['null', 'b'] } }, description: { suggested_value: null }, default: 'b' }),
 };
 // F18: the round trips services_form.mjs runs too; the list goes out under roundtrip.<fixture>
 for (const [key, fx] of Object.entries(roundTrips)) {
