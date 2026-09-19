@@ -5,6 +5,8 @@ const fmtAge=iso=>{const s=ageS(iso);if(s==null)return '—';
 const ageCls=iso=>{const s=ageS(iso);return s==null?'':s<600?'ok':s<3600?'warn':'bad'};
 const fmtTime=iso=>iso?new Date(iso).toLocaleTimeString():'';
 function stateCls(st){return st==='unavailable'?'bad':(st==='unknown'||st==null)?'warn':''}
+const MQTT_SINCE_2026_5=new Set(['date','time','datetime']);  // these MQTT platforms landed in HA 2026.5
+const needsNewHA=r=>r.discovery==='native'&&MQTT_SINCE_2026_5.has(r.entity_id.split('.')[0]);
 function render(){
  if($('#tb').contains(document.activeElement)) return;  // an inline edit is in progress: do not rebuild under the cursor
  const q=$('#q').value.trim().toLowerCase(), integ=$('#integ').value,
@@ -33,7 +35,7 @@ function render(){
    <td><span class="tag">${esc(r.integration)}</span></td>
    <td class="upd ${ageCls(r.last_updated)}" title="${esc(r.last_updated||'')}">${r.last_updated?`${fmtTime(r.last_updated)} <span class="mut">· ${fmtAge(r.last_updated)} ago</span>`:'—'}</td>
    <td class="upd ${ageCls(r.last_reported)}" title="${esc(r.last_reported||'')}">${r.last_reported?`${fmtTime(r.last_reported)} <span class="mut">· ${fmtAge(r.last_reported)} ago</span>`:'—'}</td>
-   <td class="mut" style="font-size:12px">${r.mqtt_rule&&r.mqtt_rule.exclude?'<span class="tag warn" title="excluded by an MQTT rule: not published, not discovered">excluded</span>':r.mqtt_topic?esc(r.mqtt_topic.split('/').slice(1).join('/')):'—'}${r.mqtt_rule&&r.mqtt_rule.name?` <span class="tag" title="published under this name">as “${esc(r.mqtt_rule.name)}”</span>`:''}${r.discovery==='native'?' <span class="tag ok" title="native HA discovery on its own domain">disc</span>':r.discovery==='mirror'?' <span class="tag warn" title="no MQTT platform in HA: mirrored as a sensor with all attributes">mirror</span>':''}</td>`;
+   <td class="mut" style="font-size:12px">${r.mqtt_rule&&r.mqtt_rule.exclude?'<span class="tag warn" title="excluded by an MQTT rule: not published, not discovered">excluded</span>':r.mqtt_topic?esc(r.mqtt_topic.split('/').slice(1).join('/')):'—'}${r.mqtt_rule&&r.mqtt_rule.name?` <span class="tag" title="published under this name">as “${esc(r.mqtt_rule.name)}”</span>`:''}${r.discovery==='native'?' <span class="tag ok" title="native HA discovery on its own domain">disc</span>':r.discovery==='mirror'?' <span class="tag warn" title="no MQTT platform in HA: mirrored as a sensor with all attributes">mirror</span>':''}${needsNewHA(r)?' <span class="tag bad" title="the MQTT date, time and datetime platforms exist only from Home Assistant 2026.5: a main instance older than that rejects the whole discovery payload of this device, not just this entity, so every other entity of the device disappears there too. Exclude this entity from MQTT until the main instance is updated.">HA 2026.5+</span>':''}</td>`;
   tr.onclick=()=>{open.has(r.entity_id)?open.delete(r.entity_id):open.add(r.entity_id);render()};
   tb.appendChild(tr);
   if(open.has(r.entity_id)){

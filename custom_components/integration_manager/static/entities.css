@@ -6,3 +6,4 @@ tr.e{cursor:pointer}tr.e:hover td{background:#1b232b}
 .k{color:var(--mut)}
 
 .upd{white-space:nowrap;font-size:12px}
+.tag.bad{border-color:var(--bad);color:var(--bad)}
