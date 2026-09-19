@@ -188,10 +188,13 @@ def load_state() -> dict:
 
 
 def _count(value) -> int:
-    """boot_failures as written by hand or by an older version: anything that is not a number counts as 0."""
+    """boot_failures as written by hand or by an older version: anything that is not a number counts as 0.
+    json.load reads 1e999 and Infinity as a float infinity, and int() refuses that with OverflowError, not
+    ValueError: uncaught it killed the container in _prepare, before Home Assistant was even started."""
     try:
         return max(0, int(value or 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        log(f"ha.json: boot_failures={value!r} is not a count; counting 0 failed boots")
         return 0
 
 
@@ -985,6 +988,16 @@ def _stop_boot_server() -> None:
         _boot_server = None
 
 
+def nothing_has_run_here(state: dict) -> bool:
+    """True only for a volume that has never had a Home Assistant on it: no version recorded in ha.json and
+    no .storage for one to have written.  "No usable venv" is NOT that test - a Python bump in the image
+    makes venv_ok fail for every venv on the volume - and Home Assistant migrates .storage forward only, so
+    installing the image's own older version there would downgrade a running instance onto newer storage."""
+    if any(state.get(key) for key in ("current", "proven", "previous")):
+        return False
+    return not os.path.isdir(os.path.join(CONFIG_DIR, ".storage"))
+
+
 def _prepare() -> str:
     """Everything before the exec; returns the venv's python."""
     sweep_json_tmp_files()
@@ -1074,11 +1087,12 @@ def _prepare() -> str:
         ok = install(wanted)
         if not ok:
             fallback = current if current and venv_ok(current) else next(iter(reversed(installed_versions())), None)
-            if fallback is None:
+            if fallback is None and nothing_has_run_here(state):
                 # A fresh volume whose very first install fails (a release published today with no wheel for
                 # this image's Python) has no other venv to go back to - except the version the image was
                 # built and tested with.  One extra attempt, here: exiting instead left a new user in a
-                # restart loop that asked PyPI for the same broken version at every boot.
+                # restart loop that asked PyPI for the same broken version at every boot.  Only here: on a
+                # volume that has run, the image default is usually OLDER than what the operator runs.
                 baked = MIN_VERSION if MIN_VERSION and ha_vkey(DEFAULT_VERSION) < ha_vkey(MIN_VERSION) else DEFAULT_VERSION
                 if baked != wanted and install(baked):
                     log(f"install of {wanted} failed; installed this image's own {baked} instead")
@@ -1086,11 +1100,23 @@ def _prepare() -> str:
                     state["desired"] = wanted = baked  # recorded, so the next boot does not try the broken one again
                     save_state(state)
                 else:
-                    state["last_error"] = f"install of {wanted} failed; running {fallback}"
-                    state["desired"] = fallback
+                    state["last_error"] = f"install of Home Assistant {wanted} failed and this volume has no other version to run"
                     save_state(state)
                     log("no working Home Assistant venv; exiting")
                     sys.exit(1)
+            elif fallback is None:
+                # Something has run here: no venv on the volume works on this image's Python (a Python bump),
+                # and the version that does is the one that just failed to install - a passing network error
+                # is enough.  Say so and let the boot fail: installing an older Home Assistant over a .storage
+                # a newer one has migrated is not something this manager does anywhere else without asking.
+                # desired stays as it is, so a retry installs what the operator actually runs.
+                log(f"install of {wanted} failed and no venv on this volume runs on this image's Python; "
+                    "not installing an older Home Assistant over the existing configuration: exiting")
+                state["last_error"] = (f"install of Home Assistant {wanted} failed, and no version already on this volume can "
+                                       "run on this image's Python; no older version is installed over the existing "
+                                       "configuration (see the container log)")
+                save_state(state)
+                sys.exit(1)
             else:
                 state["last_error"] = f"install of {wanted} failed; running {fallback}"
                 state["desired"] = fallback
