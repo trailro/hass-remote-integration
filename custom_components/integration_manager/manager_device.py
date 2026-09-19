@@ -223,6 +223,7 @@ class ManagerDevice:
         self.installer = installer
         self.updater = updater
         self.publisher = publisher
+        installer.manager = self  # the health watchdog asks it what the manager is doing before it restarts anything
         self.resources: dict[str, Any] = dict.fromkeys(RESOURCE_KEYS)
         config_dir = getattr(installer, "config_dir", None)
         self._latest_file = os.path.join(config_dir, "integration_manager", LATEST_FILE) if config_dir else None
@@ -482,6 +483,16 @@ class ManagerDevice:
             return 0.0
         return min(interval, interval - (now - last))
 
+    async def _note_run(self, action: str) -> None:
+        """The action ran: its interval starts now, on disk too (a monotonic clock restarts with the process)."""
+        self._last_run[action] = time.time()
+        if not self._runs_file:
+            return
+        try:
+            await writer.async_write(self._runs_file, self._last_run)
+        except Exception as err:  # noqa: BLE001 - a full volume must not leave the action unanswered
+            _LOGGER.warning("the limit of manager action %s was not saved (it applies until a restart): %s", action, err)
+
     def _action_held(self) -> float | None:
         """Seconds the running action has held the lock, None when none holds it (or one hung past ACTION_MAX_S)."""
         if not self._action_lock.locked():
@@ -512,13 +523,7 @@ class ManagerDevice:
             async with self._action_lock:
                 self._running = action
                 self._running_since = time.monotonic()
-                self._last_run[action] = time.time()  # wall clock, kept on disk (a monotonic clock restarts with the process)
                 try:
-                    if self._runs_file:
-                        try:
-                            await writer.async_write(self._runs_file, self._last_run)
-                        except Exception as err:  # noqa: BLE001 - a full volume must not leave the action shown as running, unanswered
-                            _LOGGER.warning("the limit of manager action %s was not saved (it applies until a restart): %s", action, err)
                     self.publisher.publish_manager()  # in_progress shows at once
                     res = await getattr(self, f"_do_{action}")()
                 except (ValueError, OSError) as err:
@@ -526,6 +531,11 @@ class ManagerDevice:
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.exception("manager action %s failed", action)
                     res = {"ok": False, "error": f"{type(err).__name__}: {err}"}
+                else:
+                    # only a run starts the limit: an action refused by what it called ("an install is running")
+                    # did nothing, and spending its interval - on disk, so a restart inherits it - refused the
+                    # next press for ten minutes.  A second press while this one runs is refused by the lock.
+                    await self._note_run(action)
                 finally:
                     self._running = None
         restart = bool(res.pop("restart", False))

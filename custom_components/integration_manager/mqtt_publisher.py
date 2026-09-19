@@ -506,6 +506,9 @@ class MqttPublisher:
     _learned_for = ""
     _mqtt311 = False
     _receive_max = 0
+    # the session the last CONNACK opened speaks MQTT 5: its subscription carries noLocal, so nothing this
+    # process publishes comes back to it.  False until one says otherwise (the safe side: 3.1.1 echoes)
+    _session_v5 = False
     # _calls is iterated and changed on paho's thread and changed on the loop (a call refused for the in-flight cap)
     _calls_lock = threading.Lock()
     _subscribing: list[Any] | None = None  # [client, mid, topics, online announced] of the SUBSCRIBE waiting for its SUBACK
@@ -1335,20 +1338,47 @@ class MqttPublisher:
     def _status_topic(self) -> str:
         return f"{self.base_topic}/status"
 
+    def _recorded_elsewhere(self, last: dict[str, Any]) -> bool:
+        """The names recorded last went to a broker the settings no longer name.  A record written before brokers
+        were named (no ``broker`` key) belongs to the configured one: that is what _defer_cleanup assumes too."""
+        try:
+            return self._pending_key("", last["broker"])[1:] != self._pending_key("", self._broker_identity())[1:]
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def _defer_foreign_identity(self, last: dict[str, Any]) -> None:
+        """Blocking: the retained data of the names recorded last sits on another broker, which no client built here
+        reaches.  Recorded as pending for that broker, like an uninstall during an outage: _retry_pending_cleanups
+        clears it once the settings name that broker again, and the Status page says so meanwhile."""
+        key = self._pending_key(last["base"], last["broker"])
+        if key in self._cleanup_pending:
+            return  # already waiting: keep its "since"
+        self._set_cleanup_pending(key, {"base": last["base"], "prefix": last.get("prefix") or self.config.discovery_prefix,
+                                        "broker": last["broker"], "error": "", "since": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+        _LOGGER.warning("MQTT: what %s published stays on %s:%s (the settings name another broker now): it is removed "
+                        "when they name it again", last["base"], key[1], key[2])
+        events.emit("mqtt", f"retained data of {last['base']} left on {key[1]}:{key[2]}: the settings name another broker now")
+
     def _sweep_old_identity(self, base: str) -> bool:
         """Blocking: what the names recorded last (base topic, discovery prefix) left retained, when they differ from
         the current ones; records the current names once done.  False when the sweep failed (retried later)."""
         last = read_json(self._identity_file(), {}) or {}
         swept = True
-        if isinstance(last, dict) and last.get("base") and (last["base"], last.get("prefix")) != (base, self.config.discovery_prefix):
-            # changed while we were not connected (async_reconnect only moves a live
-            # connection): what the previous names left retained goes now; with the
-            # same identity only the discovery configs under the old prefix moved
-            same_base = last["base"] == base
-            n = self._clear_retained_under(last["base"], last.get("prefix") or self.config.discovery_prefix, docs=not same_base)
-            swept = n is not None
-            _LOGGER.info("MQTT: identity/prefix changed while disconnected (%s/%s -> %s/%s): cleared %s retained topics",
-                         last.get("base"), last.get("prefix"), base, self.config.discovery_prefix, n)
+        if isinstance(last, dict) and last.get("base"):
+            if self._recorded_elsewhere(last):
+                # a scan from here would look for that identity on this broker, find nothing, report a clean sweep
+                # and record the new names: what is retained on the other broker would be forgotten, and the main
+                # Home Assistant reading that broker would keep the entities for good
+                self._defer_foreign_identity(last)
+            elif (last["base"], last.get("prefix")) != (base, self.config.discovery_prefix):
+                # changed while we were not connected (async_reconnect only moves a live
+                # connection): what the previous names left retained goes now; with the
+                # same identity only the discovery configs under the old prefix moved
+                same_base = last["base"] == base
+                n = self._clear_retained_under(last["base"], last.get("prefix") or self.config.discovery_prefix, docs=not same_base)
+                swept = n is not None
+                _LOGGER.info("MQTT: identity/prefix changed while disconnected (%s/%s -> %s/%s): cleared %s retained topics",
+                             last.get("base"), last.get("prefix"), base, self.config.discovery_prefix, n)
         if swept:
             self._remember_identity(base, self.config.discovery_prefix)
         return swept
@@ -1467,6 +1497,7 @@ class MqttPublisher:
         announced = getattr(properties, "MaximumPacketSize", None)
         self._broker_max_packet = announced if isinstance(announced, int) and announced > 0 else 0
         v5 = getattr(client, "protocol", None) == mqtt.MQTTv5
+        self._session_v5 = v5  # read by _note_cleared on paho's thread: only a 3.1.1 session echoes our own clears
         self.stats["connected"] = True
         self.stats["connect_error"] = ""
         self.stats["subscribe_error"] = ""
@@ -1649,7 +1680,11 @@ class MqttPublisher:
             _LOGGER.error("MQTT message %s could not be handled: %s", msg.topic, err)
 
     def _note_cleared(self, topic: str) -> None:
-        """Paho's thread: this process just emptied that retained command topic."""
+        """Paho's thread: this process just emptied that retained command topic.  Only on an MQTT 3.1.1 session:
+        an MQTT 5 subscription carries noLocal, so that clear never comes back, and arming the topic would only
+        swallow the next genuine empty command on it (a blanked text entity, an empty notification)."""
+        if self._session_v5:
+            return
         now = time.monotonic()
         self._cleared_cmds = {t: at for t, at in self._cleared_cmds.items() if now - at < CLEARED_ECHO_WINDOW_S}
         while len(self._cleared_cmds) >= CLEARED_ECHO_MAX:
