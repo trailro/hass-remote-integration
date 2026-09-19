@@ -243,3 +243,186 @@ class CodeNamesTest(unittest.TestCase):
         for line in ("status_code: 404", "error_code: 12", "exit_code=1", "return_code: 2", "reason_code: 5"):
             with self.subTest(line=line):
                 self.assertEqual(diagnostics.scrub(line), line)
+
+
+class NestedWrapperTest(unittest.TestCase):
+    """R2-02: a named value is masked whatever it is wrapped in.
+
+    The first round read one wrapper - one ``(`` or one string prefix - so a
+    value that arrived in two (``SecretStr(b'x')``), inside a container
+    (``{'password': ['x']}``), as a keyword argument (``SecretStr(value='x')``)
+    or under a dotted name (``pydantic.SecretStr('x')``) still had its wrapper
+    masked and its secret printed.  ``auth=('user', 'x')`` masked the first
+    element of the tuple and printed the second next to it.  And the auth scheme
+    the first round added was possessive and lived in the unquoted branch only,
+    so ``token: Bearer 'x'`` ate the scheme, failed on the quote after it, and
+    came out with nothing masked at all - a leak the round-one fix introduced.
+    """
+
+    def assertMasked(self, text, expected=None, secret=None):
+        out = _scrub(text)
+        self.assertNotIn(secret or SECRET, out, f"{text!r} -> {out!r}")
+        self.assertIn("***", out, f"{text!r} -> {out!r}")
+        if expected is not None:
+            self.assertEqual(out, expected)
+        return out
+
+    def test_two_wrappers_around_one_value(self):
+        self.assertMasked(f"password=SecretStr(b'{SECRET}')", "password=SecretStr(b'***')")
+        self.assertMasked(f'password=SecretStr(rb"{SECRET}")', 'password=SecretStr(rb"***")')
+
+    def test_a_dotted_wrapper_name(self):
+        self.assertMasked(f"password=pydantic.SecretStr('{SECRET}')", "password=pydantic.SecretStr('***')")
+
+    def test_a_keyword_argument_inside_the_wrapper(self):
+        self.assertMasked(f"password=SecretStr(value='{SECRET}')", "password=SecretStr(value='***')")
+
+    def test_a_repr_that_names_its_type_inside_the_brackets(self):
+        self.assertMasked(f"password=<SecretStr '{SECRET}'>", "password=<SecretStr '***'>")
+
+    def test_a_value_inside_a_list(self):
+        self.assertMasked("{'password': ['" + SECRET + "']}", "{'password': ['***']}")
+        self.assertMasked('{"api_key": ["' + SECRET + '"]}', '{"api_key": ["***"]}')
+
+    def test_a_tuple_is_masked_through_its_closing_bracket(self):
+        self.assertMasked(f"auth=('user', '{SECRET}')", "auth=('***')")
+
+    def test_a_quoted_value_after_a_known_auth_scheme(self):
+        for scheme in ("Bearer", "Basic", "Token", "bearer"):
+            with self.subTest(scheme=scheme):
+                self.assertMasked(f"token: {scheme} '{TOKEN}'", f"token: {scheme} '***'", secret=TOKEN)
+
+    def test_an_auth_scheme_the_bearer_rule_does_not_know(self):
+        for scheme in ("Digest", "Negotiate", "NTLM"):
+            with self.subTest(scheme=scheme):
+                self.assertMasked(f"token: {scheme} {TOKEN}", "token: ***", secret=TOKEN)
+
+    def test_a_bare_identifier_is_still_not_a_wrapper(self):
+        """Pins behaviour that already held, and that this must not undo: the
+        round-one attempt at a wider prefix printed a token the scrubber had
+        been masking.  tests/test_r4_web.py pins the same shape."""
+        self.assertEqual(_scrub(f'raise RuntimeError("refresh failed with access_token={SECRET}")'),
+                         'raise RuntimeError("refresh failed with access_token=***")')
+        self.assertEqual(_scrub(f"msg='token={SECRET}'"), "msg='token=***'")
+
+    def test_a_value_with_no_bracket_keeps_what_follows_it(self):
+        """Pins behaviour that already held: the run to a closing bracket only
+        exists for a value that opened one, so an ordinary JSON line keeps its
+        comma, its next field and its own closing brace."""
+        self.assertEqual(_scrub(f'{{"password": "{SECRET}", "user": "bob"}}'),
+                         '{"password": "***", "user": "bob"}')
+
+
+class UrlCredentialLengthTest(unittest.TestCase):
+    """R2-04: the bound the first round put on the credential run.
+
+    Bounding the run at 256 characters left a credential longer than that with
+    no match at all, so it went into the zip whole - the unbounded rule it
+    replaced had masked it.  And the run was lazy, so it stopped at the first
+    ``@`` in the authority rather than the last, which leaves the rest of a
+    password that holds an ``@`` printed
+    (``rtsp://admin:p@ss/w0rd@192.168.1.5``).  That second one is not fixed
+    here and has no test: ``tests/test_r3_web.py`` pins the opposite answer for
+    the same text (``http://u:p@host/users/@me`` keeps its path), and the two
+    are indistinguishable - the first ``@`` of each is followed by a run of
+    host characters and a ``/``.
+    """
+
+    def test_a_credential_longer_than_the_bound(self):
+        jwt = "eyJ" + "A" * 300  # synthetic, longer than _URL_CRED_MAX
+        out = _scrub(f"git fetch https://oauth2:{jwt}@gitlab.example.com/x.git")
+        self.assertNotIn(jwt, out, out)
+        self.assertEqual(out, "git fetch https://oauth2:***")
+
+    def test_a_credential_longer_than_the_bound_inside_a_json_string(self):
+        jwt = "eyJ" + "B" * 400
+        out = _scrub(f'{{"remote": "https://oauth2:{jwt}@gitlab.example.com/x.git"}}')
+        self.assertNotIn(jwt, out, out)
+        self.assertEqual(out, '{"remote": "https://oauth2:***"}')
+
+    def test_two_credentialed_urls_on_one_line(self):
+        """The shape a greedy run must not swallow: the second URL's host is a
+        host, so a run reaching for the last ``@`` on the line masks everything
+        between the two and prints neither.  The ``&`` form leaked before this
+        round as well - the host ended at an ``&`` the rule did not accept as
+        an end, so neither URL matched."""
+        self.assertEqual(_scrub(f'{{"a":"http://u:{SECRET}@h1","b":"http://u2:{SECRET}2@h2"}}'),
+                         '{"a":"http://u:***@h1","b":"http://u2:***@h2"}')
+        self.assertEqual(_scrub(f"url=http://a:{SECRET}@c.example&next=http://d:{SECRET}@f.example"),
+                         "url=http://a:***@c.example&next=http://d:***@f.example")
+
+
+class UrlCredentialGrowthTest(unittest.TestCase):
+    """R2-03: the scheme backtracked, and the long-credential runs must not.
+
+    ``\\b[a-z][a-z0-9+.-]*://`` let the scheme run to the end of the line and
+    walk back looking for ``://`` from every letter of it, which is quadratic
+    on a line of ``a.a.a...`` - 2.3 s on 40 kB and 9.1 s on 80 kB, four times
+    the time for twice the input.  A single ``@`` anywhere on the line is
+    enough to defeat the caller's short-circuit and pay it.
+
+    Both checks are on growth rather than on a stopwatch: twice the input for
+    roughly twice the time is what separates the fix from the bug, and a
+    threshold tight enough to catch the bug by its absolute time is one a busy
+    runner fails for being busy.  The floor keeps a measurement of a few
+    milliseconds from turning scheduler noise into a failure.
+    """
+
+    FLOOR_S = 0.25
+
+    @staticmethod
+    def _time(line):
+        return min(UrlCredentialGrowthTest._once(line) for _ in range(3))
+
+    @staticmethod
+    def _once(line):
+        start = time.perf_counter()
+        diagnostics._scrub_one_line_rules(line)
+        return time.perf_counter() - start
+
+    def assertLinear(self, make):
+        small, large = self._time(make(10000)), self._time(make(20000))
+        self.assertLess(large, max(3 * small, self.FLOOR_S),
+                        f"{small:.3f}s on half the input, {large:.3f}s on all of it")
+
+    def test_the_scheme_does_not_backtrack(self):
+        self.assertLinear(lambda n: "a." * n + "@")
+
+    def test_the_long_credential_branches_do_not_rescan_the_line(self):
+        """The new branches, pinned the same way: an ``@`` early on defeats the
+        short-circuit and none follows the URLs, so every ``scheme://x:`` on the
+        line runs both of them and fails."""
+        self.assertLinear(lambda n: "x@y" + "a://b:c" * n)
+
+
+class DictCodeNamesTest(unittest.TestCase):
+    """R2-14 / R2-15: one list of code names for the dict rule and the text rule.
+
+    ``scrub()`` on a dict knew ``pin_code`` and nothing else, so an OAuth code
+    in a status or in a config entry's options went into the zip whole although
+    the same name in a log line was masked.  In the other direction the text
+    rule masked ``http_code`` and ``response_code``, which are HTTP statuses
+    like the siblings already excluded by name.
+    """
+
+    def test_an_oauth_code_in_a_dict_is_masked(self):
+        for name in ("code", "user_code", "device_code", "auth_code", "pin_code", "device-code"):
+            with self.subTest(name=name):
+                self.assertEqual(diagnostics.scrub({name: SECRET}), {name: "***"})
+
+    def test_a_result_code_in_a_dict_stays_readable(self):
+        for name in ("status_code", "error_code", "exit_code", "return_code",
+                     "reason_code", "http_code", "response_code"):
+            with self.subTest(name=name):
+                self.assertEqual(diagnostics.scrub({name: 404}), {name: 404})
+
+    def test_an_http_code_in_a_line_stays_readable(self):
+        for line in ("http_code: 404", "response_code=500"):
+            with self.subTest(line=line):
+                self.assertEqual(_scrub(line), line)
+
+    def test_a_name_that_merely_ends_in_code_is_not_one(self):
+        """Pins what mqtt_publisher documents: zipcode, barcode, not a code."""
+        for name in ("zipcode", "barcode"):
+            with self.subTest(name=name):
+                self.assertEqual(diagnostics.scrub({name: "12345"}), {name: "12345"})

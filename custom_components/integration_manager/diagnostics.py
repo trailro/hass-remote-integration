@@ -35,8 +35,15 @@ from .mqtt_publisher import SECRET_NAME_ENDINGS, SECRET_NAME_WORDS
 _PLAIN_KEYS = logbuffer.PLAIN_KEYS
 # the names the MQTT history, status and log mask (mqtt_publisher): anywhere in a name, and as a word of its own
 _ENDINGS, _WORDS = "|".join(SECRET_NAME_ENDINGS), "|".join(SECRET_NAME_WORDS)
+# "code" names an OAuth secret - code, user_code, device_code, pin_code and every other spelling of it.
+# A code that reports a result is not one, and a bundle with every HTTP status masked is a bundle nobody
+# can debug from, so those are excluded by name: a name nobody listed is masked rather than printed.  The
+# dict rule and the text rule share this, so a name masks the same whether it arrives as a key or as a line
+_RESULT_CODE_NAMES = ("status", "error", "exit", "return", "reason", "http", "response")
+_NOT_RESULT_CODE = "".join(rf"(?<!{name}_)" for name in _RESULT_CODE_NAMES)
 _SECRET_KEY = re.compile(
-    rf"({_ENDINGS}|bearer|cookie|hmac|authorization|webhook_id|cloudhook_url|pin_code|signature"
+    rf"({_ENDINGS}|bearer|cookie|hmac|authorization|webhook_id|cloudhook_url|signature"
+    rf"|(?:^|[_-]){_NOT_RESULT_CODE}code$"
     r"|(api|access|private|local|encryption|device|client|master|app|user|shared|signing|session|auth|link|network|aes|ssl)[_-]?key"
     rf"|^(?!{_PLAIN_KEYS}$).*key$"  # any *key: Z-Wave (lr_)s2_*_key, security_key, api-key, ...
     r"|(^|[_-])(irk|ltk|csrk|pwd|pw|sig|session_?id)$|(^|[_-])otp([_-]|$)"  # BLE bonding keys, one-time codes
@@ -45,36 +52,49 @@ _SECRET_KEY = re.compile(
 # never closes (a line the logger cut) is masked to the end of the text.  A name and value that are themselves inside a
 # JSON string have their quotes escaped (\"password\": \"x\"): that value ends at the same run of backslashes and the
 # same quote it opened with.  Every repeat is possessive and its branches start on different characters, so the match
-# never backtracks (of the rules here only _URL_CRED below needs a bound): the one-line rules run on every line
-# a search reads, whatever the line holds
+# never backtracks: the one-line rules run on every line a search reads, whatever the line holds, so the runs
+# that are not driven by a quote (_VALUE_CLOSE and _URL_CRED below) carry a bound instead
 _QUOTED = (r"\"(?:[^\"\\]++|\\[\s\S])*+\"?|'(?:[^'\\]++|\\[\s\S])*+'?"
            r"|(?P<esc_run>\\++)(?P<esc_quote>[\"'])(?:[^\\]++|(?!(?P=esc_run)(?P=esc_quote))\\++[\"']?)*+(?:(?P=esc_run)(?P=esc_quote))?")
-# a quoted value is often wrapped: a string repr (b'x', rb"x"), a wrapper's constructor (SecretStr('x')), a
-# parenthesised literal.  Without this the value alternative below took the unquoted branch, which stops at
-# the first quote, and masked the wrapper instead of the secret ("password=b'hunter2'" -> "password=***'hunter2'").
-# Only these two shapes count as a wrapper: something ending in "(", and one of Python's one- or two-letter
-# string prefixes.  A bare identifier does not, because a secret that merely abuts a quote looks exactly like
-# one (`RuntimeError("... access_token=SECRET")` ends the value at the closing quote of the message, and
-# taking SECRET for a prefix printed it and masked the quote after it).  Both branches end in a lookahead for
-# the quote, so a value that is not quoted after all costs two failed tests and no retries
-_VALUE_PREFIX = r"(?P<pre>(?:(?:[A-Za-z_]\w*+)?+\(|[bBrRuUfF]{1,2})(?=\\*+['\"]))?+"
+# a quoted value is often wrapped, and in more than one layer: a string repr (b'x', rb"x"), a constructor
+# (SecretStr('x'), pydantic.SecretStr(value='x')), a container ({'password': ['x']}, ('user', 'x')), a repr
+# (<SecretStr 'x'>), an auth scheme (Bearer 'x').  Without this the value alternative below took the unquoted
+# branch, which stops at the first quote, and masked the wrapper instead of the secret ("password=b'hunter2'"
+# -> "password=***'hunter2'").  One layer is an optional dotted name and an opening bracket, then optionally a
+# keyword name or the type name of a repr inside it; after the layers come an optional auth scheme and one of
+# Python's one- or two-letter string prefixes.  A bare identifier is never a layer of its own, because a secret
+# that merely abuts a quote looks exactly like one (`RuntimeError("... access_token=SECRET")` ends the value at
+# the closing quote of the message, and taking SECRET for a prefix printed it and masked the quote after it) -
+# an identifier only counts inside a bracket that opened before it.  Every layer eats a bracket, so the repeat
+# is bounded by the brackets on the line and nothing is read twice, and the whole prefix ends in a lookahead for
+# the quote, so a value that is not quoted after all costs one failed test and no retries
+_VALUE_SCHEMES = r"Bearer|Basic|Token|Digest|Negotiate|NTLM|OAuth|Hawk|ApiKey|SSWS"
+_VALUE_WRAP = (r"(?:[A-Za-z_][\w.]*+)?+(?P<open>[(\[{<])[ \t]*+"
+               r"(?:[A-Za-z_]\w*+(?:[ \t]*+=(?!=)|[ \t]++))?+")
+_VALUE_PREFIX = (rf"(?P<pre>(?:{_VALUE_WRAP})*+(?:(?:{_VALUE_SCHEMES})[ \t]++)?+"
+                 r"(?:[bBrRuUfF]{1,2})?+(?=\\*+['\"]))?+")
+# a value that came inside a bracket is masked through to that bracket's close, so the rest of a tuple or a
+# list goes with it: "auth=('user', 'hunter2')" masked 'user' and printed the password next to it.  The run is
+# bounded and possessive, and the tail only runs at all when the prefix did open a bracket, so the plain
+# "name": "value" of a JSON line keeps the comma and everything after it
+_VALUE_CLOSE = r"(?(open)(?:[^)\]}>\r\n]{0,256}+(?P<close>[)\]}>]))?+)"
 # an auth scheme belongs to the value it introduces ("token: Bearer abc..."): without this the value ended at
-# the space after the scheme, so the scheme was masked and the token printed, and _BEARER never saw the line
-_VALUE_SCHEME = r"(?:(?:Bearer|Basic|Token)\s++)?+"
+# the space after the scheme, so the scheme was masked and the token printed, and _BEARER never saw the line.
+# This is the unquoted branch; the quoted one takes its scheme from _VALUE_PREFIX, because a possessive scheme
+# here ate "Bearer " and then failed on the quote after it, and the whole line came out unmasked
+_VALUE_SCHEME = rf"(?:(?:{_VALUE_SCHEMES})\s++)?+"
 _SECRET_TEXT = re.compile(
-    # "code" is an OAuth secret (code, user_code, device_code); status_code and its siblings are not, and a
-    # diagnostics bundle with every HTTP status masked is a bundle nobody can debug from
-    rf"((?:{_ENDINGS}|hmac|webhook_id|cloudhook_url|pin_code|signature|(?<![A-Za-z0-9])(?<!status_)(?<!error_)(?<!exit_)(?<!return_)(?<!reason_)code|(?<![A-Za-z0-9])(?:{_WORDS})"
+    rf"((?:{_ENDINGS}|hmac|webhook_id|cloudhook_url|signature|(?<![A-Za-z0-9]){_NOT_RESULT_CODE}code|(?<![A-Za-z0-9])(?:{_WORDS})"
     rf"|\bpwd|\w_pw\b|\bsession_?id|\b(?:irk|ltk|csrk|sig)\b|\b(?!{_PLAIN_KEYS}\b)\w*key"
     r"|(?:api|access|private|local|encryption|device|client|master|app|shared|signing|session|auth|link|network|aes|ssl)[_-]?key)"
     r"(?:\\*+['\"])?\s*[=:]\s*)"
-    rf"({_VALUE_PREFIX}(?:{_QUOTED})|{_VALUE_SCHEME}[^'\",\s}}]+)", re.I)
+    rf"({_VALUE_PREFIX}(?:{_QUOTED}){_VALUE_CLOSE}|{_VALUE_SCHEME}[^'\",\s}}]+)", re.I)
 # every name _SECRET_TEXT knows ends in a letter, then the = or :, so a text without this has nothing it masks; the
 # rule is the costly one (a Logs page search masks every record it passes), and most log lines fail this test
 _SECRET_TEXT_HINT = re.compile(r"[a-z](?:\\*+['\"])?\s*[=:]", re.I)
 # the whole value of an Authorization header, scheme included (Digest, a custom scheme, a bare token)
 _AUTH_TEXT = re.compile(rf"(authorization(?:\\*+['\"])?\s*[=:]\s*)"
-                        rf"({_VALUE_PREFIX}(?:{_QUOTED})|(?:[A-Za-z-]+\s+)?[^'\",\s}}]+)", re.I)
+                        rf"({_VALUE_PREFIX}(?:{_QUOTED}){_VALUE_CLOSE}|(?:[A-Za-z-]+\s+)?[^'\",\s}}]+)", re.I)
 # Cookie / Set-Cookie: every cookie of the header, to the end of the line
 _COOKIE_TEXT = re.compile(rf"(\b(?:set-)?cookie(?:\\*+['\"])?\s*[=:]\s*)({_QUOTED}|[^\r\n]+)", re.I)
 # a whole PEM block.  A truncated one (a cut log tail): the rest of the BEGIN line, and the lines under it that are
@@ -95,15 +115,33 @@ _PEM_BODY_LINE = re.compile(r"[A-Za-z0-9+/]+={0,2}")
 _PEM_BODY_TAIL = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{40,}={0,2}\Z")
 # case-insensitive: a logger that lower-cases its headers writes "authorization: bearer ..."
 _BEARER = re.compile(r"\b(Bearer|Basic)\s+([A-Za-z0-9._~+/=-]{8,})", re.I)
-# user:password@host: the password may hold "/" or "@" (urlsplit cuts the authority at the first "/"), so it
-# runs to the "@" that a host-like part follows.  That run is the one rule here that is not linear: unbounded,
-# it walked to the end of the line from every "scheme://x:" in it, which on a long line with no whitespace
-# (log content is device-influenced: a compact JSON body on one line) is quadratic - measured 1.3 s on 56 kB
-# and a minute on a megabyte, on an executor thread holding the diagnostics lock.  It is bounded here instead:
-# a credential longer than this is not one, and the caller skips the rule outright on a text with no "@" in it
+# user:password@host: the password may hold "/" and "@" (urlsplit cuts the authority at the first "/"), so it
+# runs to the first "@" that a host-like part follows.  The first one, not the last: after it comes the path,
+# and an "@" in a path is not the end of a credential ("http://u:p@host/users/@me").  That is also why
+# "rtsp://admin:p@ss/w0rd@192.168.1.5" keeps "@ss/w0rd" - the two are the same text to this rule, and a run
+# reaching for the last "@" masks the path of the first.  Nothing here may grow faster than the line: log
+# content is device-influenced (a compact JSON body on one line), and the cost is paid on an executor thread
+# holding the diagnostics lock.  Every part is therefore bounded - the scheme (unbounded, it backtracked from
+# every letter of "a.a.a...", 2.3 s on 40 kB and 9.1 s on 80 kB), the credential, the host of the lookahead -
+# and the caller skips the rule outright on a text with no "@" in it.  An "&" and a backslash end the host as
+# a "/" does, so a line carrying two credentialed URLs (?a=url&b=url, a URL inside a JSON string) has both
+# masked instead of neither
 _URL_CRED_MAX = 256
-_URL_CRED = re.compile(rf"(\b[a-z][a-z0-9+.-]*://[^/\s:@]*:)\S{{1,{_URL_CRED_MAX}}}?@"
-                       r"(?=[A-Za-z0-9._~%\[\]:-]*(?:[/?#\s\"'<>,;)]|$))", re.I)
+# past the bound the credential is masked to the end of its run instead of being left whole: a 300-character
+# JWT in "https://oauth2:<jwt>@gitlab..." found no "@" within the bound and came out printed in full.  Two
+# runs, both possessive, so a failed attempt is one scan and no retries.  The first has no length limit and
+# excludes "/", so it stops within the gap to the next "//" on the line and stays linear however many URLs
+# that line holds; a "/" is not legal in a userinfo anyway (RFC 3986), so that is every credential a URL is
+# meant to carry, at any length.  The second admits "/" as well, for the ones urlsplit tolerates, and pays
+# for it with a bound - nothing stops its scan before the end of the line, and the scan would then be run
+# again from every "scheme://x:" after it
+_URL_CRED_LONG = 1024
+_URL_CRED_RUN = r"[^\s\"'<>,;&]"  # the tail stops where one URL on a line ends and the next begins
+_URL_CRED = re.compile(rf"((?<![a-z0-9+.-])[a-z][a-z0-9+.-]{{0,31}}://[^/\s:@]*:)"
+                       rf"(?:\S{{1,{_URL_CRED_MAX}}}?(?P<at>@)"
+                       rf"(?=[A-Za-z0-9._~%\[\]:-]{{0,255}}(?:[/?#\s\"'<>,;)&\\]|$))"
+                       rf"|[^\s@/\"'<>,;&]{{{_URL_CRED_MAX},}}+@{_URL_CRED_RUN}*+"
+                       rf"|[^\s@\"'<>,;&]{{{_URL_CRED_MAX},{_URL_CRED_LONG}}}+@{_URL_CRED_RUN}*+)", re.I)
 _GH_TOKEN = re.compile(r"\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
 LOG_FILE_TAIL = 500
 DIAG_CACHE_S = 10  # a link any page can hit: one build at a time, repeats within this window get the same zip
@@ -127,17 +165,19 @@ def _mask_value(match: re.Match[str]) -> str:
     """The name, and the value as ``***`` inside the quotes it opened with.
 
     A wrapper the value came in (``b'x'``, ``SecretStr('x')``) is kept in
-    front of the masked quotes, so the line keeps its shape and only the
-    secret goes; a rule without the ``pre`` group has no wrapper to keep."""
-    pre = match.groupdict().get("pre") or ""
+    front of the masked quotes, and the bracket it opened is put back after
+    them, so the line keeps its shape and only the secret goes; a rule without
+    the ``pre`` group has no wrapper to keep."""
+    groups = match.groupdict()
+    pre, close = groups.get("pre") or "", groups.get("close") or ""
     value = match.group(2)[len(pre):]
-    if match.group("esc_run"):
+    if groups.get("esc_run"):
         quote = match.group("esc_run") + match.group("esc_quote")
     elif value[:1] in ('"', "'"):
         quote = value[0]
     else:
         return match.group(1) + "***"
-    return match.group(1) + pre + quote + "***" + quote
+    return match.group(1) + pre + quote + "***" + quote + close
 
 
 def _scrub_one_line_rules(value: str) -> str:
@@ -153,7 +193,10 @@ def _scrub_one_line_rules(value: str) -> str:
     # a token, not "Basic information": anything but a plain word (base64 without padding is often letters only)
     value = _BEARER.sub(lambda m: m.group(0) if re.fullmatch(r"[A-Z]?[a-z]+", m.group(2)) else f"{m.group(1)} ***", value)
     if "@" in value:  # no "@" in the text, no credential run to find: the whole rule is skipped
-        value = _URL_CRED.sub(r"\1***@", value)
+        # the branch that found the closing "@" keeps it, so the host stays readable; the one that ran past the
+        # bound masked the credential to the end of its run and has no "@" to put back.  A lambda, not a
+        # function: tests/test_r9_web.py reads the names this function uses to check the search prefilter
+        value = _URL_CRED.sub(lambda m: m.group(1) + ("***@" if m.group("at") else "***"), value)
     return _GH_TOKEN.sub("***", value)
 
 
