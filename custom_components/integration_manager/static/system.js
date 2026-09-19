@@ -40,7 +40,7 @@ function haCheckText(c){
   if(c.checked===false) return `<span class="mut">${esc((c.notes||[]).join('; ')||'not checked')}</span>`;
   return `<span class="ok">installs here</span> <span class="mut">${esc((c.notes||[]).join('; '))}</span>`;
 }
-// what is known about a version without asking anything: an answer already in hand, or the image's baseline -
+// what is known about a version without asking anything: an answer already in hand, or the image's floor -
 // everything below it is refused before an install is scheduled, and that is arithmetic, not a check
 function haKnown(v){
   if(HACHK[v]) return HACHK[v];

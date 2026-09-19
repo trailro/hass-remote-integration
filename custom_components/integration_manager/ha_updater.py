@@ -192,8 +192,10 @@ class HaUpdater:
 
     async def validate(self, version: str) -> None:
         """Raise ValueError unless ``version`` exists on PyPI (or is installed
-        for this Python), is not older than the image's baseline and supports
-        this Python."""
+        for this Python), is not older than the image's floor and supports
+        this Python.  A venv already on the volume is an exception to the PyPI
+        check only, never to the floor: the entrypoint boots what is there,
+        but nothing may be scheduled below what was measured."""
         version = version.strip()
         avail = await self.available()
         if version not in self._releases:
@@ -235,7 +237,7 @@ class HaUpdater:
         shape ``dependency_check`` answers in: the Python a release needs, and
         a report ``preflight`` still holds from this hour (its own check, or
         the one ``POST /api/ha/update`` ran before it refused).  A version
-        older than the image's baseline is left out on purpose: the answer
+        older than the image's floor is left out on purpose: the answer
         carries ``baseline`` once and the page does that arithmetic itself,
         which keeps "show all versions" from repeating the same sentence a
         thousand times.  Rendering the System page must never start a pip run,
