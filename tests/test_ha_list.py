@@ -233,12 +233,12 @@ class FloorAndDefaultTest(_Updater, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.up._image_refusal(BASELINE), "")
             between = "2026.1.0"  # older than what a fresh volume installs, newer than the floor
             self.assertEqual(self.up._image_refusal(between), "")
-            self.assertIn("older than this image's baseline", self.up._image_refusal(ANCIENT))
+            self.assertIn("older than this image's floor", self.up._image_refusal(ANCIENT))
             out = await self.status()
             self.assertEqual((out["baseline"], out["default_version"]), (OLD, BASELINE))
 
     async def test_an_image_without_the_new_variable_keeps_the_old_meaning(self):
         with mock.patch.dict(os.environ, {"HA_VERSION_DEFAULT": BASELINE}, clear=False):
             os.environ.pop("HA_VERSION_MIN", None)
-            self.assertIn("older than this image's baseline", self.up._image_refusal(OLD))
+            self.assertIn("older than this image's floor", self.up._image_refusal(OLD))
             self.assertEqual((await self.status())["baseline"], BASELINE)

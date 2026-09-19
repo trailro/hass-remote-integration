@@ -83,6 +83,13 @@ class CanaryWorkflowTest(unittest.TestCase):
         self.assertIn('[ "$STABLE" = "$DEFAULT" ]', before_pr)  # nothing to propose
         self.assertIn("gh pr list --head", before_pr)           # and never twice for the same version
 
+    def test_a_refused_pull_request_becomes_an_issue_rather_than_a_failed_run(self):
+        """Creating pull requests from Actions is a repository setting that is off by default, and a
+        canary that reports nothing because of a permission is worse than one that reports by hand."""
+        tail = self.report.split("gh pr create", 1)[1]
+        self.assertIn("compare/main...", tail)  # the branch is pushed: say where it is
+        self.assertIn("gh issue create", tail)
+
     def test_a_failure_reuses_its_issue_instead_of_opening_another_every_week(self):
         self.assertIn("gh issue list", self.report)
         self.assertIn("gh issue comment", self.report)

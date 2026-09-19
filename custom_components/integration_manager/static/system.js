@@ -46,7 +46,7 @@ function haKnown(v){
   if(HACHK[v]) return HACHK[v];
   const b=HA&&HA.baseline;
   return b&&v&&vcmp(v,b)<0?{version:v,ok:false,checked:true,missing:[],warnings:[],notes:[],
-    blockers:[`${v} is older than this image's baseline ${b}; not installable here`]}:null;
+    blockers:[`${v} is older than this image's floor ${b}; not installable here`]}:null;
 }
 function haCheckShow(v){ $('#hacheck').innerHTML=v?haCheckText(haKnown(v)):''; }
 // the mark a version carries in the list; nothing is claimed about one nobody has checked

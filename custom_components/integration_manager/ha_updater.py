@@ -217,7 +217,7 @@ class HaUpdater:
         if floor and _key(version) < _key(floor):
             # older releases have no wheels for this image's Python: pip would
             # grind for minutes and the entrypoint would fall back
-            return f"{version} is older than this image's baseline {floor}; not installable here"
+            return f"{version} is older than this image's floor {floor}; not installable here"
         spec = self._releases.get(version)
         if spec:
             from packaging.specifiers import SpecifierSet

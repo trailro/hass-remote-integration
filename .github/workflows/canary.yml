@@ -105,4 +105,6 @@ jobs:
           PRERELEASE: ${{ needs.versions.outputs.prerelease }}
           DEFAULT: ${{ needs.versions.outputs.default }}
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GH_SERVER: ${{ github.server_url }}
+          GH_REPO: ${{ github.repository }}
         run: sh .github/canary_report.sh
