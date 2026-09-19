@@ -319,14 +319,22 @@ class CutoverView(ManagerView):
         except Exception as err:  # noqa: BLE001
             out.append(f"the entity ids registered on the main Home Assistant could not be checked ({err})")
             return out
-        held = {e.get("entity_id"): e.get("platform") for e in registry if e.get("platform") != "mqtt"}
-        announced = sorted({c.get("default_entity_id") for dev in self.publisher.discovery_preview() for c in dev["components"].values()
+        preview = self.publisher.discovery_preview()
+        # Anything else registered under that id sends our entity to <id>_2, whatever holds it: the integration
+        # itself, an unrelated MQTT entity (another bridge, a hand-written sensor) or a leftover of an earlier
+        # identity of this container.  Only our own mirror of that very entity is not in the way, so the exception
+        # is by unique id - not "every mqtt entity", which let the two foreign cases through silently.
+        ours = {c.get("unique_id") for dev in preview for c in dev["components"].values() if c.get("unique_id")}
+        held = {e.get("entity_id"): e.get("platform") for e in registry
+                if not (e.get("platform") == "mqtt" and e.get("unique_id") in ours)}
+        announced = sorted({c.get("default_entity_id") for dev in preview for c in dev["components"].values()
                             if c.get("default_entity_id")})
         taken = [eid for eid in announced if eid in held]
         if taken:
+            shown = ", ".join(f"{eid} ({held[eid] or 'unknown'})" for eid in taken[:3])
             out.append(f"{len(taken)} entity id{'s' if len(taken) > 1 else ''} the container announces {'are' if len(taken) > 1 else 'is'} still registered "
-                       f"on the main Home Assistant ({', '.join(taken[:3])}{'…' if len(taken) > 3 else ''}): the MQTT entities would get _2 ids; "
-                       "remove the integration there first")
+                       f"on the main Home Assistant ({shown}{'…' if len(taken) > 3 else ''}): the MQTT entities would get _2 ids; "
+                       "remove whatever holds them there first")
         return out
 
     @with_body
