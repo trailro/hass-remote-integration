@@ -103,7 +103,7 @@ class Settings:
         """Backups to keep after an automatic prune; 0 = all."""
         try:
             return max(0, int(self.data.get("backup_keep", 5)))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return 5
 
     @property
@@ -117,9 +117,12 @@ class Settings:
         return h
 
     def int_(self, key: str, lo: int = 0, hi: int = 10**9) -> int:
+        """OverflowError as well as the usual two: json.load reads ``1e999`` and ``Infinity`` out of a
+        hand-edited settings.json as a float infinity, and int() refuses that one with OverflowError -
+        which turned every reader of the file, GET /api/settings included, into a 500."""
         try:
             return min(hi, max(lo, int(self.data.get(key, DEFAULTS[key]))))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return int(DEFAULTS[key])
 
     def bool_(self, key: str) -> bool:
@@ -147,7 +150,7 @@ class Settings:
                     base["stale_s"] = min(86400, max(60, int(own["stale_s"])))
                 if own.get("unavailable_pct") is not None:
                     base["unavailable_pct"] = min(100, max(1, int(own["unavailable_pct"])))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 pass
             if own.get("mode") in HEALTH_MODES:
                 base["mode"] = own["mode"]

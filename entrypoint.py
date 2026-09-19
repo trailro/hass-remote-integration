@@ -414,7 +414,9 @@ def _run_pip(cmd: list[str], out, idle_timeout: float = PIP_IDLE_TIMEOUT_S, env:
 # Debian package names (policy 5.6.1: at least two characters, lowercase letters, digits, "+", "-", "."), with the
 # optional :architecture.  What HRI_APT_PACKAGES holds goes into apt-get's argv, so anything else in it - an option,
 # a URL, a path, a shell metacharacter - is not a package and is never passed on (nothing here sees a shell either).
-APT_PACKAGE_RE = re.compile(r"[a-z0-9][a-z0-9+.-]+(?::[a-z0-9][a-z0-9-]*)?")
+# The name has to end in a letter, a digit or "+" (g++): a trailing "-" is apt's own operator, and "libturbojpeg0-"
+# in the variable would have apt *remove* that package at every boot instead of installing anything.
+APT_PACKAGE_RE = re.compile(r"[a-z0-9][a-z0-9+.-]*[a-z0-9+](?::[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)?")
 
 
 def apt_packages_wanted() -> tuple[list[str], list[str]]:
@@ -1072,13 +1074,27 @@ def _prepare() -> str:
         ok = install(wanted)
         if not ok:
             fallback = current if current and venv_ok(current) else next(iter(reversed(installed_versions())), None)
-            state["last_error"] = f"install of {wanted} failed; running {fallback}"
-            state["desired"] = fallback
             if fallback is None:
-                save_state(state)
-                log("no working Home Assistant venv; exiting")
-                sys.exit(1)
-            wanted = fallback
+                # A fresh volume whose very first install fails (a release published today with no wheel for
+                # this image's Python) has no other venv to go back to - except the version the image was
+                # built and tested with.  One extra attempt, here: exiting instead left a new user in a
+                # restart loop that asked PyPI for the same broken version at every boot.
+                baked = MIN_VERSION if MIN_VERSION and ha_vkey(DEFAULT_VERSION) < ha_vkey(MIN_VERSION) else DEFAULT_VERSION
+                if baked != wanted and install(baked):
+                    log(f"install of {wanted} failed; installed this image's own {baked} instead")
+                    state["last_error"] = f"Home Assistant {wanted} could not be installed; this image's {baked} is running instead"
+                    state["desired"] = wanted = baked  # recorded, so the next boot does not try the broken one again
+                    save_state(state)
+                else:
+                    state["last_error"] = f"install of {wanted} failed; running {fallback}"
+                    state["desired"] = fallback
+                    save_state(state)
+                    log("no working Home Assistant venv; exiting")
+                    sys.exit(1)
+            else:
+                state["last_error"] = f"install of {wanted} failed; running {fallback}"
+                state["desired"] = fallback
+                wanted = fallback
 
     _phase("installing the manager's requirements into the venv if they changed", wanted)
     ensure_extra_requirements(wanted)
