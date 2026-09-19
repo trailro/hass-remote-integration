@@ -121,17 +121,26 @@ class WrappedSecretValueTest(unittest.TestCase):
 
 
 class UrlCredentialCostTest(unittest.TestCase):
-    """F-03: the one rule that was not linear."""
+    """F-03: the one rule that was not linear.
+
+    The bound is a second, not the tenth of a second the fixed rule actually needs: this runs on
+    whatever machine CI was given, and a threshold close to the measurement fails for being on a
+    busy runner rather than for being quadratic.  A second still separates the two cases by more
+    than an order of magnitude in both directions - the fix measures 0.07 s here and 0.21 s on a
+    loaded CI runner, the bug measured 8.3 s on the same input.
+    """
+
+    BUDGET_S = 1.0
 
     def test_a_long_run_without_whitespace_is_bounded(self):
         line = "a://b:c" * 20000  # 140 kB, no whitespace, no "@": 8.3 s before the fix
         best = min(self._time(line) for _ in range(3))
-        self.assertLess(best, 0.2, f"_scrub_one_line_rules took {best:.3f}s on {len(line)} characters")
+        self.assertLess(best, self.BUDGET_S, f"_scrub_one_line_rules took {best:.3f}s on {len(line)} characters")
 
     def test_a_long_run_that_does_hold_an_at_sign_is_bounded(self):
         line = "a://b:c" * 20000 + "@host/ "  # the "@" short-circuit cannot help here
         best = min(self._time(line) for _ in range(3))
-        self.assertLess(best, 0.2, f"_scrub_one_line_rules took {best:.3f}s on {len(line)} characters")
+        self.assertLess(best, self.BUDGET_S, f"_scrub_one_line_rules took {best:.3f}s on {len(line)} characters")
 
     @staticmethod
     def _time(line):
