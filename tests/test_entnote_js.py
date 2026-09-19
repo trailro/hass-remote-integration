@@ -43,7 +43,8 @@ class EntitiesPageNewHomeAssistantMarkTest(unittest.TestCase):
         title = self.marks("date.oven_service")[0]["title"]
         self.assertIn("only from Home Assistant 2026.5", title)
         self.assertIn("the whole discovery payload of this device, not just this entity", title)
-        self.assertIn("Exclude this entity from MQTT until the main instance is updated.", title)
+        self.assertIn("Set main_ha_version on the MQTT page", title)  # the setting handles it
+        self.assertIn("or exclude it from MQTT", title)                # and the old way still works
 
     def test_the_mark_is_told_apart_from_the_tag_next_to_it(self):
         tags = self.out["rows"]["time.wake_up"]["tags"]
