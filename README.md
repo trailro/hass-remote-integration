@@ -588,7 +588,9 @@ three have to support that Python:
   discovery schemas and the unit tests run against it — so neither number is a
   claim nobody checks. A weekly job does the same against whatever Home
   Assistant is newest that week and against its newest pre-release, so a
-  release that breaks the manager is found here rather than by you. The floor
+  release that breaks the manager is found here rather than by you — and when
+  a newer release passes, that job is what proposes making it the default, so
+  `HA_VERSION_DEFAULT` only ever names a version something has booted. The floor
   is where this manager was measured, not a guess — in September 2026, on this
   image's CPython 3.14.7 on `aarch64`: 2026.5.0, 2026.6.0 and 2026.7.0 were
   each run end to end (the manager, its UI and API, MQTT discovery to a main
