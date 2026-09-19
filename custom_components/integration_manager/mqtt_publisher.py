@@ -2934,8 +2934,20 @@ class MqttPublisher:
         if res.get("pre_update_backup"):
             res["stale_docs_cleared"] = await self.async_clear_stale_docs()
 
+    CONNECT_GRACE_S = 5.0  # a reconnect is connect_async + loop_start: the CONNACK lands on paho's thread
+
     async def async_clear_stale_docs(self) -> int:
+        # Every caller arrives straight from async_after_start, which reconnects - and _connected only
+        # flips in the _on_connect callback, on paho's own thread.  Answering 0 here because the CONNACK
+        # has not landed yet meant a version switch never cleared the documents of entities the new
+        # version dropped: they stayed on the main Home Assistant until an unrelated republish.  The
+        # broker being genuinely down still answers 0, five seconds later.
         if not self._connected:
+            deadline = time.monotonic() + self.CONNECT_GRACE_S
+            while not self._connected and time.monotonic() < deadline:
+                await asyncio.sleep(0.05)
+        if not self._connected:
+            _LOGGER.warning("MQTT: stale documents not cleared (no connection within %.0f s)", self.CONNECT_GRACE_S)
             return 0
         await self.async_republish_all()  # so _topics reflects the new version first
         return await self.hass.async_add_executor_job(self._clear_stale_docs)
