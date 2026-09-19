@@ -6,6 +6,8 @@ every patch is evaluated against the new code and against the requirement
 versions the update would bring, a requirement known to be a wrapper over a
 program or a shared library the image does not carry is reported as a warning,
 so is one pip backtracked years behind what the requirement allows,
+an import of a name Home Assistant has removed by the version this
+container will run is reported as a warning too,
 the manifest's dependencies are checked
 against HA's loader, and the minimum Home Assistant version (hacs.json) is
 compared with the target.  The report says what would change and whether
@@ -269,6 +271,87 @@ def _may_provide(module: str, distributions: set[str]) -> bool:
     does not say which modules a package installs)."""
     want = _canon(module.split(".")[0])
     return any(d == want or (d.startswith(_SHIM_PREFIXES) and d.split("-", 1)[1] == want) for d in distributions)
+
+
+# Names Home Assistant itself removed.  The stdlib table above catches what the interpreter dropped; this one
+# catches what the core dropped, which is the far more common way a third-party integration stops loading after
+# a core update: a hard ImportError at setup, found from the traceback rather than before the install.
+#
+# One line per name: module -> {symbol: (first Home Assistant version without it, its replacement or "")}.
+# The version is the earliest release the name was verified missing from, read out of the published wheel
+# (homeassistant-<ver>-py3-none-any.whl), never out of a release note.  The 2026.9 rows say 2026.9.3 because
+# that is the wheel they were diffed against: a target of 2026.9.0 to 2026.9.2 stays quiet rather than the
+# table guessing at a patch release nobody looked at.  A name is only reported when its version is at or below
+# the Home Assistant the release is checked for, so the table may name removals no operator has reached yet.
+# To extend it, add a line - and check the wheel, the way every line here was checked.
+#
+# Source: the 2026.5.0 -> 2026.9.3 wheel diff (F3 of the breaking-change survey), re-verified against the
+# 2026.9.3 in this image, which is also where each replacement comes from: helpers.target really does carry
+# async_extract_referenced_entity_ids and SelectedEntities, and really does not carry ServiceTargetSelector.
+# Only imports are seen, so an attribute Home Assistant removed from a class that stayed
+# (VacuumEntityFeature.BATTERY, 2026.9) cannot be listed here.
+_REMOVED_HA_SYMBOLS: dict[str, dict[str, tuple[str, str]]] = {
+    "homeassistant.const": {
+        "CLOUD_NEVER_EXPOSED_ENTITIES": ("2026.6.0", ""),
+    },
+    "homeassistant.helpers.trigger": {
+        "async_track_same_state": ("2026.7.0", ""),
+        "TRIGGER_DISABLED_TRIGGERS": ("2026.7.0", ""),
+    },
+    "homeassistant.helpers.condition": {
+        "CONDITION_DISABLED_CONDITIONS": ("2026.7.0", ""),
+    },
+    # the ATTR_* re-exports became a StrEnum in homeassistant.const; the wheel diff elided the tail of the
+    # list, so only the three names it printed are here
+    "homeassistant.helpers.entity": {
+        "ATTR_ASSUMED_STATE": ("2026.7.0", "homeassistant.const.EntityStateAttribute.ASSUMED_STATE"),
+        "ATTR_ATTRIBUTION": ("2026.7.0", "homeassistant.const.EntityStateAttribute.ATTRIBUTION"),
+        "ATTR_DEVICE_CLASS": ("2026.7.0", "homeassistant.const.EntityStateAttribute.DEVICE_CLASS"),
+    },
+    "homeassistant.helpers.entity_registry": {
+        "STATE_UNKNOWN": ("2026.7.0", "homeassistant.const.STATE_UNKNOWN"),
+    },
+    "homeassistant.helpers.service": {
+        "async_extract_referenced_entity_ids": ("2026.8.0", "homeassistant.helpers.target.async_extract_referenced_entity_ids"),
+        "SelectedEntities": ("2026.8.0", "homeassistant.helpers.target.SelectedEntities"),
+        "ServiceTargetSelector": ("2026.8.0", ""),
+    },
+    # http kept the package and moved the names into http/server.py and http/config.py; three went for good
+    "homeassistant.components.http": {
+        "HomeAssistantApplication": ("2026.8.0", "homeassistant.components.http.server.HomeAssistantApplication"),
+        "MAX_CLIENT_SIZE": ("2026.8.0", "homeassistant.components.http.server.MAX_CLIENT_SIZE"),
+        "ConfData": ("2026.8.0", "homeassistant.components.http.config.ConfData"),
+        "SERVER_PORT": ("2026.8.0", "homeassistant.const.SERVER_PORT"),
+        "HomeAssistantTCPSite": ("2026.8.0", ""),
+        "async_get_last_config": ("2026.8.0", ""),
+        "start_http_server_and_save_config": ("2026.8.0", ""),
+    },
+    # the CONCENTRATION_* re-exports went at the same time; the wheel diff elided their names, so only the one
+    # it printed is listed
+    "homeassistant.components.sensor.const": {
+        "PERCENTAGE": ("2026.8.0", "homeassistant.const.PERCENTAGE"),
+    },
+    "homeassistant.components.number.const": {
+        "PERCENTAGE": ("2026.8.0", "homeassistant.const.PERCENTAGE"),
+    },
+    "homeassistant.helpers.device_registry": {
+        "DEVICE_INFO_KEYS": ("2026.8.0", ""),
+        "LOW_PRIO_CONFIG_ENTRY_DOMAINS": ("2026.8.0", ""),
+        "DEVICE_INFO_TYPES": ("2026.9.3", ""),
+    },
+    "homeassistant.helpers.config_validation": {
+        "voluptuous_serialize": ("2026.9.3", "the voluptuous-serialize package, or homeassistant.helpers.config_validation.to_field_list"),
+    },
+    "homeassistant.helpers.data_entry_flow": {
+        "voluptuous_serialize": ("2026.9.3", "the voluptuous-serialize package"),
+    },
+    "homeassistant.runner": {
+        "HassEventLoopPolicy": ("2026.9.3", "homeassistant.runner.create_event_loop"),
+    },
+    "homeassistant.components.vacuum": {
+        "ATTR_BATTERY_LEVEL": ("2026.9.3", ""),
+    },
+}
 
 
 # Packages that pip installs perfectly but that are only a wrapper over something the image must already
@@ -555,6 +638,31 @@ def _catches_import_error(handler: Any) -> bool:
     return any(n in ("ImportError", "ModuleNotFoundError", "Exception", "BaseException") for n in names)
 
 
+def _guarded_imports(tree: Any) -> set[int]:
+    """The ids of the nodes under a `try:` whose `except` catches an ImportError: an import there is a
+    fallback the integration already handles, not something to report."""
+    import ast
+
+    guarded: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Try) and any(_catches_import_error(h) for h in node.handlers):
+            for stmt in node.body:
+                guarded.update(id(n) for n in ast.walk(stmt))
+    return guarded
+
+
+def _source_files(component_dir: str):
+    """(absolute path, path relative to the integration) of every .py file Home Assistant would load, in a
+    stable order: the folders it never imports are skipped at the top level, a package named like one deeper
+    in the tree is checked like any other."""
+    for root, dirs, files in os.walk(component_dir):
+        dirs[:] = sorted(d for d in dirs if d != "__pycache__" and not (root == component_dir and d in _NOT_LOADED_DIRS))
+        for name in sorted(files):
+            if name.endswith(".py"):
+                path = os.path.join(root, name)
+                yield path, os.path.relpath(path, component_dir)
+
+
 def _code_checks(component_dir: str) -> tuple[list[str], list[str]]:
     """Blocking: (syntax errors, imports of removed standard modules) of the integration's code, with this
     interpreter (the image's Python).  Nothing is imported or run."""
@@ -563,49 +671,69 @@ def _code_checks(component_dir: str) -> tuple[list[str], list[str]]:
 
     errors: list[str] = []
     removed: list[str] = []
-    for root, dirs, files in os.walk(component_dir):
-        dirs[:] = sorted(d for d in dirs if d != "__pycache__" and not (root == component_dir and d in _NOT_LOADED_DIRS))
-        for name in sorted(files):
-            if not name.endswith(".py"):
+    for path, rel in _source_files(component_dir):
+        try:
+            size = os.path.getsize(path)
+            if size > MAX_CHECK_BYTES:
+                errors.append(f"{rel}: too large to check ({size} bytes)")
                 continue
-            path = os.path.join(root, name)
-            rel = os.path.relpath(path, component_dir)
-            try:
-                size = os.path.getsize(path)
-                if size > MAX_CHECK_BYTES:
-                    errors.append(f"{rel}: too large to check ({size} bytes)")
-                    continue
-                with open(path, encoding="utf-8") as fh:
-                    source = fh.read()
-                tree = ast.parse(source, filename=rel)
-                compile(source, rel, "exec", dont_inherit=True)  # what ast accepts but the compiler refuses
-            except SyntaxError as err:
-                errors.append(f"{rel}:{err.lineno}: {err.msg}")
+            with open(path, encoding="utf-8") as fh:
+                source = fh.read()
+            tree = ast.parse(source, filename=rel)
+            compile(source, rel, "exec", dont_inherit=True)  # what ast accepts but the compiler refuses
+        except SyntaxError as err:
+            errors.append(f"{rel}:{err.lineno}: {err.msg}")
+            continue
+        except (MemoryError, RecursionError) as err:  # "Parser stack overflowed": Python refuses to load it too
+            errors.append(f"{rel}: too complex to parse ({type(err).__name__})")
+            continue
+        except (OSError, UnicodeDecodeError, ValueError) as err:
+            errors.append(f"{rel}: {err}")
+            continue
+        guarded = _guarded_imports(tree)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                modules = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                modules = [node.module]
+            else:
                 continue
-            except (MemoryError, RecursionError) as err:  # "Parser stack overflowed": Python refuses to load it too
-                errors.append(f"{rel}: too complex to parse ({type(err).__name__})")
-                continue
-            except (OSError, UnicodeDecodeError, ValueError) as err:
-                errors.append(f"{rel}: {err}")
-                continue
-            guarded: set[int] = set()
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Try) and any(_catches_import_error(h) for h in node.handlers):
-                    for stmt in node.body:
-                        guarded.update(id(n) for n in ast.walk(stmt))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    modules = [a.name for a in node.names]
-                elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                    modules = [node.module]
-                else:
-                    continue
-                for module in modules:
-                    top = module.split(".")[0]
-                    hit = module if module in _REMOVED_STDLIB else top if top in _REMOVED_STDLIB else None
-                    if hit and id(node) not in guarded and importlib.util.find_spec(top) is None:
-                        removed.append(f"{rel}:{node.lineno} imports {hit}")
+            for module in modules:
+                top = module.split(".")[0]
+                hit = module if module in _REMOVED_STDLIB else top if top in _REMOVED_STDLIB else None
+                if hit and id(node) not in guarded and importlib.util.find_spec(top) is None:
+                    removed.append(f"{rel}:{node.lineno} imports {hit}")
     return errors, removed
+
+
+def _ha_symbol_checks(component_dir: str, target: str) -> list[str]:
+    """Blocking: one line per import of a name Home Assistant ``target`` no longer has ("sensor.py:4 imports
+    homeassistant.helpers.service.async_extract_referenced_entity_ids, removed in 2026.8.0, now
+    homeassistant.helpers.target.async_extract_referenced_entity_ids").  A name a newer Home Assistant than the
+    target removed is not reported: on the version this container will run, the import still works.  Nothing is
+    imported or run, and a file that does not parse says nothing here - _code_checks already reports it."""
+    import ast
+
+    hits: list[str] = []
+    for path, rel in _source_files(component_dir):
+        try:
+            if os.path.getsize(path) > MAX_CHECK_BYTES:
+                continue
+            with open(path, encoding="utf-8") as fh:
+                tree = ast.parse(fh.read(), filename=rel)
+        except (OSError, SyntaxError, UnicodeDecodeError, ValueError, MemoryError, RecursionError):
+            continue
+        guarded = _guarded_imports(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or node.level != 0 or not node.module or id(node) in guarded:
+                continue
+            for alias in node.names:
+                removed = _REMOVED_HA_SYMBOLS.get(node.module, {}).get(alias.name)
+                if not removed or ha_vkey(removed[0]) > ha_vkey(target):
+                    continue
+                hits.append(f"{rel}:{node.lineno} imports {node.module}.{alias.name}, removed in {removed[0]}"
+                            + (f", now {removed[1]}" if removed[1] else ""))
+    return hits
 
 
 def _config_flow_version(component_dir: str) -> int | None:
@@ -826,6 +954,14 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
                 warnings.append(f"the integration imports modules Python {py} no longer has ({'; '.join(shimmed[:3])}): "
                                 "it fails when loaded, unless one of its requirements provides them")
 
+        # 5c. names Home Assistant removed: an ImportError at setup, and never a blocker - the table is a
+        # help, not a verdict, and a release may import one of them from a place the table does not know
+        ha_symbols = await hass.async_add_executor_job(_ha_symbol_checks, scratch, target)
+        if ha_symbols:
+            warnings.append(f"the integration imports names Home Assistant {target} no longer has ({'; '.join(ha_symbols[:3])}): "
+                            "it fails when loaded, unless it catches the ImportError somewhere the check cannot see"
+                            + (f" (+{len(ha_symbols) - 3} more)" if len(ha_symbols) > 3 else ""))
+
         # 6. configuration surface
         yaml_present = os.path.isfile(installer.yaml_path(domain))
         old = installer.installed_manifest(domain) or {}
@@ -856,6 +992,7 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
                          "new": manifest.get("version"), "min_ha": min_ha},
             "requirements": req_rows, "also_installed": extra, "pip_ok": pip["ok"], "pip_error": pip["stderr"],
             "source_builds": source_builds, "python": py, "code_errors": code_errors, "removed_imports": removed_imports,
+            "removed_ha_symbols": ha_symbols,
             "dependencies": dep_rows, "patches": patch_rows, "config": cfg,
             "duration_s": round(time.monotonic() - t0, 1),
         }
