@@ -11,7 +11,6 @@ from __future__ import annotations
 import functools
 import importlib.metadata as md
 import os
-import json
 import logging
 import re
 from typing import Any
