@@ -121,6 +121,13 @@ HISTORY_MAX = 200      # commands and calls remembered (in memory)
 DEDUP_WINDOW_S = 300   # a call repeating an _id seen this recently is answered from history, not run again
 CALLS_REMEMBERED = 1000  # _ids kept for that answer; beyond it the oldest is forgotten
 CALLS_IN_FLIGHT_MAX = 50  # service calls and commands whose service has not returned yet (timed-out ones included)
+# An _id larger than this is refused with an answer: it is kept in the dedup map for DEDUP_WINDOW_S, in the
+# command history and echoed in every result, so an unbounded one costs memory in three places at once.
+CALL_ID_MAX_BYTES = 128
+# A clear of a retained command published by this process comes back to it on an MQTT 3.1.1 session (no
+# noLocal): the topic is remembered this long, and at most this many at a time.
+CLEARED_ECHO_WINDOW_S = 30.0
+CLEARED_ECHO_MAX = 64
 # Never callable over MQTT (anyone with broker credentials could otherwise
 # stop this instance or run arbitrary commands); the catalog hides them too.
 CALL_DENY_DOMAINS = frozenset({"homeassistant", "shell_command", "python_script", "hassio", "integration_manager"})
@@ -325,6 +332,25 @@ def _call_key(domain: str, service: str, call_id: Any) -> str:
     return f"{domain}.{service}:{json.dumps(call_id, sort_keys=True, default=str)}"
 
 
+def _call_id_problem(call_id: Any) -> str | None:
+    """Why this _id is refused, None when it fits.  It is held for DEDUP_WINDOW_S in the dedup map, kept in the
+    command history and echoed in every result and every /api/mqtt/commands poll, so its size is capped once,
+    here, rather than truncated differently in each of the three."""
+    if call_id is None:
+        return None
+    size = len(json.dumps(call_id, default=str, ensure_ascii=False).encode("utf-8", "replace"))
+    if size > CALL_ID_MAX_BYTES:
+        return f"_id is {size} bytes: at most {CALL_ID_MAX_BYTES} are accepted"
+    return None
+
+
+def _short_call_id(call_id: Any) -> Any:
+    """An oversized _id cut down to something that can be answered with and logged: enough for the sender to
+    recognise its own call, never enough to be worth storing."""
+    text = call_id if isinstance(call_id, str) else json.dumps(call_id, default=str, ensure_ascii=False)
+    return text[:CALL_ID_MAX_BYTES // 2] + "…"
+
+
 def _no_constant(name: str) -> Any:
     raise ValueError(f"{name} is not a number a service accepts")
 
@@ -471,6 +497,8 @@ class MqttPublisher:
     _cleanup_pending_lock = threading.Lock()
     _cleanup_retrying = False
     _in_flight = 0  # service calls and commands whose service task has not finished
+    # replaced by a dict of its own in __init__ and in _note_cleared, which never mutates this one in place
+    _cleared_cmds: dict[str, float] = {}
     _connected_at = 0.0  # monotonic time of the last CONNACK: a drop right after one is not a TLS problem
     _broker_max_packet = 0  # maximum packet size the broker announced (MQTT 5 only), 0 = none announced
     # what the broker at _learned_for taught this process: it refused MQTT 5, it announced a receive maximum below
@@ -555,6 +583,9 @@ class MqttPublisher:
         # idempotency: _id -> the canonical call record (state, result) for DEDUP_WINDOW_S,
         # independent of the visual history (which commands can push out)
         self._calls: dict[str, dict[str, Any]] = {}
+        # command topics whose retained payload this process just cleared -> when (paho's thread only).  An MQTT
+        # 3.1.1 session has no noLocal, so the broker sends that clear straight back as a live empty payload.
+        self._cleared_cmds: dict[str, float] = {}
         self._range_pending: dict[str, dict[str, Any]] = {}
         self._default_id_warned: set[str] = set()  # entities whose default_entity_id another entity asked for first, warned once each
         self._collision_warned: set[str] = set()  # entities skipped for a component key clash, warned once each  # entity_id -> the first half of a range change, waiting for the second
@@ -1617,6 +1648,20 @@ class MqttPublisher:
         except Exception as err:  # noqa: BLE001
             _LOGGER.error("MQTT message %s could not be handled: %s", msg.topic, err)
 
+    def _note_cleared(self, topic: str) -> None:
+        """Paho's thread: this process just emptied that retained command topic."""
+        now = time.monotonic()
+        self._cleared_cmds = {t: at for t, at in self._cleared_cmds.items() if now - at < CLEARED_ECHO_WINDOW_S}
+        while len(self._cleared_cmds) >= CLEARED_ECHO_MAX:
+            del self._cleared_cmds[next(iter(self._cleared_cmds))]  # the oldest
+        self._cleared_cmds[topic] = now
+
+    def _clear_of_ours(self, topic: str) -> bool:
+        """The empty payload now arriving on `topic` is the clear this process published moments ago.  Once per
+        clear: a second empty payload on the same topic is a real (and refused) command, not the echo."""
+        at = self._cleared_cmds.pop(topic, None)
+        return at is not None and time.monotonic() - at < CLEARED_ECHO_WINDOW_S
+
     def _handle_message(self, msg) -> None:
         if getattr(msg, "retain", False):
             if not msg.payload:
@@ -1627,6 +1672,13 @@ class MqttPublisher:
             # topic is cleared here and not only when our identity moves.
             _LOGGER.warning("MQTT: ignoring retained command on %s (commands must not be retained), clearing it", msg.topic)
             self._publish(msg.topic, None, qos=1)
+            self._note_cleared(msg.topic)
+            return
+        if not msg.payload and self._clear_of_ours(msg.topic):
+            # our own clear of that retained command, echoed back: an MQTT 3.1.1 subscription has no noLocal, and
+            # the broker strips the retain flag on a live delivery, so it arrives looking like a command of ""
+            # - which text and notify take as a value (a blanked text entity, an empty notification).
+            _LOGGER.debug("MQTT: the clear of the retained command on %s came back to us; ignored", msg.topic)
             return
         manager_prefix = self._manager_cmd_base() + "/"
         if msg.topic.startswith(manager_prefix):
@@ -1962,6 +2014,8 @@ class MqttPublisher:
         except Exception:  # noqa: BLE001
             parsed = None
         call_id = parsed.get("_id") if isinstance(parsed, dict) else _refused_call_id(payload) if parsed is None else None
+        if _call_id_problem(call_id) is not None:
+            call_id = _short_call_id(call_id)  # the answer carries it, and so does the history
         parts = [p.lower() for p in rest.split("/")]
         valid = len(parts) == 2 and all(_SERVICE_NAME.fullmatch(p) for p in parts)
         self._finish(self._remember("call", ".".join(parts) if valid else rest[:80], "", call_id), "error", error)
@@ -1983,6 +2037,10 @@ class MqttPublisher:
         except (ValueError, RecursionError) as err:
             parsed, bad = None, str(err)
         sent_id = parsed.get("_id") if isinstance(parsed, dict) else _refused_call_id(payload) if parsed is None else None
+        # nothing below this line handles the id at full size: every refusal answers with it, and the history keeps it
+        id_problem = _call_id_problem(sent_id)
+        if id_problem is not None:
+            sent_id = _short_call_id(sent_id)
 
         def remember(what: str) -> dict[str, Any]:
             if isinstance(parsed, (dict, list)):
@@ -2002,6 +2060,11 @@ class MqttPublisher:
         if denied:
             self._publish_result(domain, service, {"id": sent_id, "service": f"{domain}.{service}", "ok": False, "error": denied})
             self._finish(remember(f"{domain}.{service}"), "rejected", denied)
+            return
+        if id_problem is not None:
+            self._publish_result(domain, service, {"id": sent_id, "service": f"{domain}.{service}", "ok": False, "error": id_problem})
+            self._finish(remember(f"{domain}.{service}"), "rejected", id_problem)
+            _LOGGER.warning("MQTT call %s.%s refused: %s", domain, service, id_problem)
             return
         if bad is not None:
             self._publish_result(domain, service, {"id": sent_id, "service": f"{domain}.{service}", "ok": False, "error": f"bad payload: {bad}"})
@@ -2049,10 +2112,20 @@ class MqttPublisher:
                 # timed out, the service still runs: a repeat of the _id is answered "running" until it ends
                 seen["state"], seen["result"] = state, res
 
+        def forget() -> None:
+            """A refusal that happens BEFORE async_call: the service never ran, so the _id must not be
+            remembered.  An integration still loading answers "unknown service" for a moment, and a retry of
+            that same _id within DEDUP_WINDOW_S would be answered from history instead of being run."""
+            with self._calls_lock:  # paho's thread iterates the dict
+                if seen is not None and self._calls.get(call_key) is seen:
+                    del self._calls[call_key]
+
         async def _call() -> None:
             try:
                 await _run()
             except Exception as err:  # noqa: BLE001 - the caller waits on result/: an answer, never silence
+                # the _id is NOT forgotten here: an internal error is not a refusal, and a repeat of it is
+                # answered from that record rather than sent down the same broken path again
                 res = {"id": call_id, "service": f"{domain}.{service}", "ok": False, "error": self._internal_error(f"{domain}.{service}", err)}
                 done("error", res["error"], res)
                 self._publish_result(domain, service, res)
@@ -2063,21 +2136,21 @@ class MqttPublisher:
                 res = {**base, "ok": False, "error": f"unknown service {domain}.{service}"}
                 self._publish_result(domain, service, res)
                 done("error", res["error"], res)
+                forget()  # an integration that is still loading: the retry must run, not be answered from history
                 _LOGGER.warning("MQTT call %s.%s failed: unknown service", domain, service)
                 return
             if problem := self._call_target_problem(data, domain, service):
                 res = {**base, "ok": False, "error": problem}
                 self._publish_result(domain, service, res)
                 done("rejected", problem, res)
+                forget()  # an entity that has not been added yet: the same _id may be sent again
                 _LOGGER.warning("MQTT call %s.%s refused: %s", domain, service, problem)
                 return
             if self._in_flight >= CALLS_IN_FLIGHT_MAX:
                 res = {**base, "ok": False, "error": f"too many calls in progress ({CALLS_IN_FLIGHT_MAX}): try again later"}
                 self._publish_result(domain, service, res)
                 done("rejected", res["error"], res)
-                with self._calls_lock:  # paho's thread iterates the dict
-                    if seen is not None and self._calls.get(call_key) is seen:
-                        del self._calls[call_key]  # never ran: a retry with the same _id runs once there is room
+                forget()  # never ran: a retry with the same _id runs once there is room
                 _LOGGER.warning("MQTT call %s.%s refused: %s calls in progress", domain, service, self._in_flight)
                 return
             wants = self.hass.services.supports_response(domain, service) != SupportsResponse.NONE
@@ -2563,6 +2636,14 @@ class MqttPublisher:
         announced = self.config.discovery_enabled or (discovery_id == manager_id and self.config.manager_discovery)
         if not announced:
             return False
+        if discovery_id == manager_id and "." not in entity_id:
+            # parity derives the entity id from the unique id, and the manager's components are not named after
+            # theirs (unique id manager_restart, component key button_<base>_restart): mapped back here, or the
+            # removal form goes out under a key the main Home Assistant never saw and removes nothing
+            mapped = disc.manager_entity_id(self.base_topic, entity_id)
+            if mapped is None:
+                return False  # no component of the manager device has that unique id: nothing of ours to remove
+            entity_id = mapped
         if discovery_id not in groups:
             # the whole device is gone here: an empty retained config removes it there
             self._last_hash.pop(self._discovery_topic(discovery_id), None)
@@ -2698,6 +2779,7 @@ class MqttPublisher:
             return
         manager_topic = self._discovery_topic(f"{base}_manager")
         groups, _ = self._group_by_device() if self.config.discovery_enabled else ({}, {})
+        live_topics = set(self._topics.values())  # once: the loop below runs over every retained topic
         removed_components, cleared_devices, docs = 0, 0, []
         for topic, payload in found.items():
             if not self._is_ours(topic, payload, base):
@@ -2727,7 +2809,7 @@ class MqttPublisher:
                     self._last_hash.pop(topic, None)
                     self._publish_device_discovery(did, groups[did][0], groups[did][1], removed=extra)
                     removed_components += len(extra)
-            elif "published_at" in doc and topic not in set(self._topics.values()):
+            elif "published_at" in doc and topic not in live_topics:
                 eid = doc.get("entity_id")
                 if isinstance(eid, str) and (self._entity_gone(eid) or self._excluded_now(eid)):
                     docs.append(topic)

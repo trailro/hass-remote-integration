@@ -75,6 +75,19 @@ def device_class_problem(comp: dict[str, Any], device_class: str) -> str | None:
     return None
 
 
+# Home Assistant refuses these two read-only platforms an entity category of config (2026.9.3:
+# sensor/__init__.py "cannot be added as the entity category is set to config", binary_sensor/__init__.py
+# the same).  The entity is then never created there, which parity reports as permanently missing.
+CONFIG_CATEGORY_REFUSED = frozenset({"sensor", "binary_sensor"})
+
+
+def entity_category_problem(comp: dict[str, Any], category: str) -> str | None:
+    """Why the main Home Assistant would refuse this component with that entity category, None when it fits."""
+    if category == "config" and comp.get("platform") in CONFIG_CATEGORY_REFUSED:
+        return f"the main Home Assistant refuses a {comp['platform']} whose entity category is config"
+    return None
+
+
 def matches(pattern: str, entity_id: str) -> bool:
     return pattern == entity_id or (any(ch in pattern for ch in "*?[") and fnmatch.fnmatchcase(entity_id, pattern))
 
@@ -89,6 +102,7 @@ class MqttRules:
         # set by the publisher: the components of the entities a pattern matches, as published without rules
         self.components: Callable[[str], Iterable[tuple[str, dict[str, Any]]]] | None = None
         self._class_warned: set[tuple[str, str]] = set()
+        self._category_warned: set[tuple[str, str]] = set()
         self.load()
 
     def load(self) -> None:
@@ -156,6 +170,8 @@ class MqttRules:
             if cleaned:
                 if cleaned.get("device_class") and cleaned.get("device_class") != (self.rules.get(pattern) or {}).get("device_class"):
                     self.check_device_class(pattern, cleaned["device_class"])
+                if cleaned.get("entity_category") and cleaned.get("entity_category") != (self.rules.get(pattern) or {}).get("entity_category"):
+                    self.check_entity_category(pattern, cleaned["entity_category"])
                 new[pattern] = cleaned
         self.rules = new
 
@@ -170,6 +186,8 @@ class MqttRules:
         cur = self.clean(cur)
         if cur.get("device_class") and changes.get("device_class") is not None:
             self.check_device_class(entity_id, cur["device_class"])
+        if cur.get("entity_category") and changes.get("entity_category") is not None:
+            self.check_entity_category(entity_id, cur["entity_category"])
         if cur:
             self.rules[entity_id] = cur
         else:
@@ -183,6 +201,13 @@ class MqttRules:
         for entity_id, comp in (self.components(pattern) if self.components else ()):
             if problem := device_class_problem(comp, device_class):
                 raise ValueError(f"device_class {device_class} does not fit {entity_id}: {problem}")
+
+    def check_entity_category(self, pattern: str, category: str) -> None:
+        """Refuses an entity category the main Home Assistant would not take for an entity the pattern matches now,
+        the way an unfit device class is refused (one added later is published without it: apply_component)."""
+        for entity_id, comp in (self.components(pattern) if self.components else ()):
+            if problem := entity_category_problem(comp, category):
+                raise ValueError(f"entity_category {category} does not fit {entity_id}: {problem}")
 
     def for_entity(self, entity_id: str) -> dict[str, Any]:
         out: dict[str, Any] = {}
@@ -202,9 +227,16 @@ class MqttRules:
             comp["enabled_by_default"] = False
         elif rule.get("enabled_by_default") is True:
             comp.pop("enabled_by_default", None)  # an exact-id rule re-enabling over a glob
-        for k in ("entity_category", "icon"):
-            if rule.get(k):
-                comp[k] = rule[k]
+        if category := rule.get("entity_category"):
+            # a glob matching an entity it does not fit: the main HA refuses a sensor whose entity category is
+            # config outright, so the entity never appears there and parity reports it missing for good
+            if (problem := entity_category_problem(comp, category)) is None:
+                comp["entity_category"] = category
+            elif (key := (str(comp.get("unique_id")), category)) not in self._category_warned:
+                self._category_warned.add(key)
+                _LOGGER.warning("MQTT rule: entity_category %s not applied to %s: %s", category, comp.get("unique_id"), problem)
+        if rule.get("icon"):
+            comp["icon"] = rule["icon"]
         if dc := rule.get("device_class"):
             # a glob matching an entity it does not fit: the main HA would refuse the whole device config, and the
             # rest of the rule (and every other entity of the device) with it
