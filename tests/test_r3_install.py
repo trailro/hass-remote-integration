@@ -298,7 +298,8 @@ class DirectUrlRequirementsTest(unittest.TestCase):
     def test_only_archives_are_built_and_from_their_url(self):
         proc = SimpleNamespace(returncode=0, stdout=json.dumps(self.REPORT), stderr="")
         with mock.patch.object(preflight, "_run_pip", return_value=proc):
-            res = preflight._pip_dry_run("python", ["fromgit @ git+https://github.com/o/fromgit"], None)
+            # a manifest may not name a URL (installer.bad_requirement); pip's report can still carry direct entries
+            res = preflight._pip_dry_run("python", ["fromgit"], None)
         self.assertEqual({r["name"]: r["source_only"] for r in res["install"]}, {"fromgit": False, "fromdir": False, "tarball": True, "wheel": False})
         with mock.patch.object(preflight, "_run_pip", return_value=SimpleNamespace(returncode=0, stderr="")) as run:
             built = preflight._build_from_source("python", res["install"], None)
