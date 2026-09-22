@@ -24,8 +24,8 @@ from plain HTTP traffic. These are:
   path the check misses, a forged or replayed session after the password
   changed or after a logout (other than the sessions a logout the volume could
   not record gives back at a restart, a documented limit), or guessing faster than the lockout allows; also
-  while `HRI_PASSWORD_FILE` is empty or unreadable, which must refuse every
-  password;
+  while `HRI_PASSWORD_FILE` is empty or unreadable, or `HRI_PASSWORD` holds only
+  spaces or tabs, which must refuse every password;
 
 - a way around the protections that do exist: the Host header guard against
   DNS rebinding, the JSON requirement for state-changing requests and the
@@ -121,3 +121,9 @@ those projects.
   `requirements.txt` with a lower bound, most with an upper bound too (`regex`
   is date-versioned and has only a floor), and resolved against Home
   Assistant's constraints.
+- **State attributes are mirrored as the integration sets them.** Only
+  `access_token` and URLs carrying a `token=` are left out of entity documents
+  (they open this container's proxy). An attribute named `password`, `pin` or
+  `api_key` is published like any other: filtering by name would drop real data
+  (`error_code`, `zip_code`, a GPIO `pin`) that the main Home Assistant shows
+  today. A secret in a state attribute is a bug of that integration.
