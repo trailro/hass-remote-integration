@@ -407,8 +407,14 @@ class Installer:
                 if manager_domain_error(domain):
                     _LOGGER.warning("%s: the %s entry is ignored (%s)", path, domain, manager_domain_error(domain))
                     continue
-                if isinstance(spec, dict) and (spec.get("repo") or spec.get("local")):
-                    out[str(domain)] = {**out.get(str(domain), {}), **spec}
+                if not isinstance(spec, dict) or not (spec.get("repo") or spec.get("local")):
+                    continue
+                repo = spec.get("repo")
+                if repo and not (isinstance(repo, str) and _REPO_RE.match(repo) and ".." not in repo):
+                    # as add_to_registry and the views check it: the repo becomes a GitHub API path
+                    _LOGGER.warning("%s: the %s entry is ignored (repo %r is not owner/name)", path, domain, str(repo)[:100])
+                    continue
+                out[str(domain)] = {**out.get(str(domain), {}), **spec}
         return out
 
     def add_to_registry(self, domain: str, repo: str, name: str | None = None, local: bool = False) -> dict[str, Any]:
@@ -786,18 +792,27 @@ class Installer:
     def _entries_of(self, domain: str) -> list[Any]:
         return self.hass.config_entries.async_entries(domain)
 
-    def _domain_info(self, domain: str, patch_rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    def _disk_info(self, domain: str) -> dict[str, Any]:
+        """Blocking: what _domain_info reads from the volume (status() gathers it in the executor)."""
+        tags = list((self.state.installed.get(domain) or {}).get("versions") or {})
+        return {"present": {t: os.path.isdir(self._version_dir(domain, t)) for t in tags},
+                "manifest": self.installed_manifest(domain) if domain == self.state.domain else None,
+                "spec": self.spec(domain)}
+
+    def _domain_info(self, domain: str, patch_rows: list[dict[str, Any]] | None = None,
+                     disk: dict[str, Any] | None = None) -> dict[str, Any]:
         rec = self.state.installed.get(domain, {})
         running = domain == self.state.domain
-        manifest = self.installed_manifest(domain) if running else None
+        disk = disk if disk is not None else self._disk_info(domain)
+        manifest = disk["manifest"] if running else None
         reqs = manifest.get("requirements", []) if manifest else []
         req_versions = self._requirement_versions(reqs) if running else {}
         entries = self._entries_of(domain)
-        versions = {tag: {**v, "dir_present": os.path.isdir(self._version_dir(domain, tag))} for tag, v in (rec.get("versions") or {}).items()}
+        versions = {tag: {**v, "dir_present": bool(disk["present"].get(tag))} for tag, v in (rec.get("versions") or {}).items()}
         return {
             "domain": domain,
-            "name": self.spec(domain).get("name") or domain,
-            "repo": self.spec(domain).get("repo"),
+            "name": disk["spec"].get("name") or domain,
+            "repo": disk["spec"].get("repo"),
             "versions": versions,
             "newest_tag": max(versions, key=tag_key) if versions else None,
             "running": running,
@@ -854,14 +869,23 @@ class Installer:
 
     async def status(self) -> dict[str, Any]:
         domain = self.state.domain
-        # user patch modules run their status(ctx) and read files: executor, once
-        patch_rows = await self.hass.async_add_executor_job(lambda: {d: self._patch_rows(d) for d in list(self.state.installed)})
-        if domain:  # importlib.metadata off the loop: _domain_info reads the warm cache
-            await self.hass.async_add_executor_job(self._requirement_versions, (self.installed_manifest(domain) or {}).get("requirements", []))
-        infos = {d: self._domain_info(d, patch_rows.get(d)) for d in self.state.installed}
+
+        def read() -> tuple[dict, dict, dict, str]:
+            # user patch modules run their status(ctx) and read files; the version directories, the manifest, the
+            # registry files and importlib (metadata, find_spec) are the volume too: executor, once per poll
+            domains = list(self.state.installed)
+            rows = {d: self._patch_rows(d) for d in domains}
+            disk = {d: self._disk_info(d) for d in domains}
+            if domain:  # _domain_info then reads the warm cache
+                self._requirement_versions(((disk.get(domain) or {}).get("manifest") or self.installed_manifest(domain) or {}).get("requirements", []))
+            return rows, disk, self.registry(), self.site_packages
+
+        patch_rows, disk, registry, site_packages = await self.hass.async_add_executor_job(read)
+        infos = {d: self._domain_info(d, patch_rows.get(d), disk.get(d)) for d in self.state.installed}
         info = infos.get(domain) if domain else None
         if info:
-            info["dependency_requirements"] = await self.hass.async_add_executor_job(self._requirement_versions, await self.dependency_requirements(domain))
+            deps = await self.dependency_requirements(domain, manifest=disk[domain]["manifest"] if domain in disk else None)
+            info["dependency_requirements"] = await self.hass.async_add_executor_job(self._requirement_versions, deps)
         return {
             "integration": self.installed_domain,
             "ha_version": homeassistant.const.__version__,
@@ -874,8 +898,8 @@ class Installer:
             "watchdog": self.watchdog_status(),
             "updates": self.updates,
             "updates_checked_at": self.updates_checked_at,
-            "registry": self.registry(),
-            "site_packages": self.site_packages,
+            "registry": registry,
+            "site_packages": site_packages,
             "state": asdict(self.state),
             "busy": self.busy,
             "versions_store_bytes": await self.hass.async_add_executor_job(self._store_size),
@@ -2298,8 +2322,8 @@ class Installer:
         manifest = self.installed_manifest(domain) or {}
         return list(manifest.get("requirements", [])) + await self.dependency_requirements(domain)
 
-    async def dependency_requirements(self, domain: str | None = None) -> list[str]:
-        manifest = self.installed_manifest(domain)
+    async def dependency_requirements(self, domain: str | None = None, manifest: dict[str, Any] | None = None) -> list[str]:
+        manifest = manifest or self.installed_manifest(domain)
         if not manifest:
             return []
         seen: set[str] = set()
@@ -2852,6 +2876,8 @@ class Installer:
             manifest = self._manifest_at(staging)
             if not manifest or manifest.get("domain") != domain:
                 raise RuntimeError("manifest.json missing or its domain differs")
+            if (why := next((w for w in map(bad_requirement, manifest.get("requirements", [])) if w), None)):
+                raise RuntimeError(f"{domain} {tag}: {why}")  # refused here as a release is, not only at start
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise

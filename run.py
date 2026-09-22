@@ -110,7 +110,9 @@ def _sync_manager_component() -> None:
     want image updates to propagate, so overwrite on every boot.
     """
     dst = os.path.join(CONFIG_DIR, "custom_components", "integration_manager")
-    if os.path.isdir(dst):
+    if os.path.islink(dst):
+        os.remove(dst)  # rmtree refuses a link (every boot would stop here); the link goes, never what it points at
+    elif os.path.isdir(dst):
         shutil.rmtree(dst)
     shutil.copytree(MANAGER_SRC, dst)
 
