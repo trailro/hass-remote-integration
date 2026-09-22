@@ -827,7 +827,7 @@ def recent(domain: str, ref: str) -> dict[str, Any] | None:
 async def gate(hass: HomeAssistant, installer, domain: str, tag: str | None) -> dict[str, Any]:
     """Whether a start of (domain, tag) from the UI or the API should wait for a confirmation:
     {"blocked", "report", "skipped"}.  Starting the version that already runs (or ran last) or a release
-    without a GitHub repository is not gated; a preflight that cannot run (GitHub is unreachable, for
+    without a GitHub repository (other than a dev build) is not gated; a preflight that cannot run (GitHub is unreachable, for
     example) does not block either: the smoke test still guards the start.  A dev build is gated like any
     other version: it is checked against the stored copy, never against GitHub, so there is nothing about
     an uploaded tree the check cannot read - and a syntax error or a requirement with no wheel in one costs
@@ -848,7 +848,7 @@ async def gate(hass: HomeAssistant, installer, domain: str, tag: str | None) -> 
         # nothing to check and nothing to confirm: start() refuses a version that is not in the store, forced or not
         return {"blocked": False, "report": None, "skipped": None}
     spec = installer.spec(domain) or {}
-    if not spec.get("repo"):
+    if not spec.get("repo") and target != installer.LOCAL_TAG:  # a dev build is checked from its stored copy, repository or not
         return {"blocked": False, "report": None, "skipped": "no GitHub repository known"}
     def stamp() -> str:
         versions_now = (installer.state.installed.get(domain) or {}).get("versions") or {}
@@ -884,7 +884,7 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
     check of one that is not in the registry (the environment builder registers nothing before Prepare)."""
     t0 = time.monotonic()
     repo = repo or (installer.spec(domain) or {}).get("repo")
-    if not repo:
+    if not repo and not source_dir:  # a stored copy is read from the volume: nothing to download
         raise ValueError(f"{domain}: no GitHub repository known (registry)")
     blockers: list[str] = []
     warnings: list[str] = []
