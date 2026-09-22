@@ -23,10 +23,28 @@ def _tmp(test):
 
 
 class UrlRequirementTest(unittest.TestCase):
+    URLS = ("pkg @ https://host/x.whl", "pkg @ git+https://github.com/a/b", "pkg @ file:///config/x.tar.gz",
+            'pkg[x] @ https://h/x.whl ; python_version>"3"')
+
+    def test_url_requirements_are_refused(self):
+        for req in self.URLS:
+            with self.subTest(req=req):
+                self.assertIn("URL", inst_mod.bad_requirement(req) or "")
+        for req in ("requests>=2.0", "pkg[extra]==1.0; python_version>'3.8'", "ramses-rf==0.60.4"):
+            self.assertIsNone(inst_mod.bad_requirement(req))
+
     def test_ha_never_counts_a_url_requirement_installed(self):
         """Why a URL requirement is not just a policy question: HA hands it to uv at every boot and start."""
         self.assertFalse(inst_mod.pkg_util.is_installed("packaging @ https://example.invalid/packaging.whl"))
         self.assertTrue(inst_mod.pkg_util.is_installed("packaging>=1"))
+
+    def test_url_requirement_never_reaches_uv(self):
+        inst = object.__new__(Installer)
+        inst.constraints = ""
+        with mock.patch.object(inst_mod.pkg_util, "install_package") as pip, \
+                self.assertLogs("custom_components.integration_manager.installer", "ERROR"):
+            self.assertEqual(inst._install_requirements(["pkg @ https://host/x.whl"]), ["pkg @ https://host/x.whl"])
+        pip.assert_not_called()
 
 
 def _hanging_python(test, pidfile):
