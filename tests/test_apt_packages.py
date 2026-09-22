@@ -174,7 +174,7 @@ class AptCommandTest(unittest.TestCase):
     def test_apt_is_run_without_a_shell(self):
         calls = self.run_install(["ffmpeg", "libpcap0.8"])
         self.assertEqual([cmd for cmd, _kw in calls],
-                         [["apt-get", "update"], ["apt-get", "install", "-y", "--no-install-recommends", "ffmpeg", "libpcap0.8"]])
+                         [["apt-get", "update"], ["apt-get", "-o", "APT::Cmd::Pattern-Only=true", "install", "-y", "--no-install-recommends", "ffmpeg", "libpcap0.8"]])
         for cmd, kw in calls:
             self.assertIsInstance(cmd, list)
             self.assertFalse(kw.get("shell"), kw)  # the value never reaches a shell
@@ -191,7 +191,7 @@ class AptCommandTest(unittest.TestCase):
         with open(self.ep.APT_LOG_FILE, encoding="utf-8") as fh:
             text = fh.read()
         self.assertIn("# apt-get install ffmpeg", text)
-        self.assertIn("$ apt-get install -y --no-install-recommends ffmpeg", text)
+        self.assertIn("$ apt-get -o APT::Cmd::Pattern-Only=true install -y --no-install-recommends ffmpeg", text)
         with mock.patch.object(self.ep, "_run_pip", write):  # one install per file, as ha-install.log
             self.ep._apt_install(["jq"])
         with open(self.ep.APT_LOG_FILE, encoding="utf-8") as fh:
