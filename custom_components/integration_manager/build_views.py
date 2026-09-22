@@ -27,6 +27,7 @@ from jsonio import ha_vkey
 from homeassistant.core import HomeAssistant
 
 from . import events, preflight
+from .diagnostics import scrub_text
 from .ha_updater import HaUpdater
 from .http_util import ManagerView, with_body
 from .installer import _DOMAIN_RE, _REPO_RE, METADATA_MAX_BYTES, Installer, manager_domain_error, read_capped
@@ -88,8 +89,8 @@ class PreflightView(ManagerView):
             try:
                 report = await preflight.run(self.hass, self.installer, domain, ref, ha or None)
                 return self.json({"ok": True, "report": report})
-            except Exception as err:  # noqa: BLE001
-                return self.json({"ok": False, "error": f"{type(err).__name__}: {err}"})
+            except Exception as err:  # noqa: BLE001 - aiohttp text: a redirected download's URL carries a token
+                return self.json({"ok": False, "error": scrub_text(f"{type(err).__name__}: {err}")})
 
 
 class DevView(ManagerView):
@@ -217,7 +218,7 @@ class BuildCheckView(ManagerView):
             try:
                 report = await preflight.run(self.hass, self.installer, domain, ref, ha or None, archive_ref=commit or None, repo=repo)
             except Exception as err:  # noqa: BLE001
-                return self.json({"ok": False, "error": f"{type(err).__name__}: {err}", "ha_check": ha_check})
+                return self.json({"ok": False, "error": scrub_text(f"{type(err).__name__}: {err}"), "ha_check": ha_check})
         if not ha_check["ok"]:
             report["blockers"].append(f"Home Assistant {ha}: {ha_check['error']}")
             report["ok"] = False
@@ -227,7 +228,10 @@ class BuildCheckView(ManagerView):
             report["warnings"].append(f"this container holds {cur}: preparing {domain} replaces it (config entries, patches, YAML, MQTT identity), after a backup")
         check_id = _check_token(domain, ref, ha, commit)
         if report["ok"]:
-            self._checks[check_id] = time.monotonic()
+            now = time.monotonic()
+            for key in [k for k, at in self._checks.items() if now - at >= CHECK_TTL_S]:
+                del self._checks[key]  # a pass Prepare can no longer use
+            self._checks[check_id] = now
         else:
             self._checks.pop(check_id, None)  # a combination that fails now must not be prepared on an older pass
         return self.json({"ok": True, "report": report, "ha_check": ha_check, "check_id": check_id if report["ok"] else None})
