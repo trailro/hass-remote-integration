@@ -377,6 +377,11 @@ container announces over MQTT with what your main HA has made of it.
 3. When you are happy: **remove the integration from your main HA** (delete
    its config entries; disabling keeps its entity ids registered, and the
    Cutover page refuses then), then click *Enable discovery* on **Cutover**.
+   The page refuses while something would replace this container's
+   configuration at the next restart (a scheduled restore, rollback, version
+   switch or import, an action still running) or while a smoke test is
+   pending: restart or wait first, or the entities the main HA creates now
+   would be replaced.
    Your main HA creates the entities from MQTT; the page watches until all of
    them exist. The entity ids stay the same, but the unique ids are new
    (`hass_<domain>_<entity id>`), so areas, labels and custom names set on the
@@ -573,8 +578,8 @@ Assistant versions.
 rules refuse an older version, both before anything is scheduled. The first is
 the image's floor, `HA_VERSION_MIN` (2026.5.0 in this image): anything older is
 refused outright, and no force lifts it. That is not the same number as the
-version a fresh volume installs (`HA_VERSION_DEFAULT`, 2026.9.3) — the floor is
-the oldest release the manager was measured on, the default is a recent one to
+version a fresh volume installs (`HA_VERSION_DEFAULT`, the version the image
+was built with) — the floor is the oldest release the manager was measured on, the default is a recent one to
 start from. The second rule applies above the floor: an older release pins
 requirements published before this image's Python existed, PyPI has no wheel
 for them and the image has no compiler, so the manager resolves the chosen
@@ -582,7 +587,10 @@ version's pins itself — nothing is installed, and the answer is cached for an
 hour, except a *could not check*: that says PyPI could not be reached at that
 moment, not anything about the version, so the next attempt asks again — and
 refuses a version whose requirements
-cannot install, naming the package. A check can take minutes on an old version,
+cannot install, naming the package. A pin in the release's own metadata that
+is a pip option or a direct URL (`pkg @ https://...`) is never handed to pip;
+it blocks the version, as it would in an integration's manifest. A check can
+take minutes on an old version,
 and only one runs at a time. On **System**, *Check selected version* (and
 picking a version in the list) shows the same verdict for the selection. When
 the resolution cannot answer the question at all (PyPI unreachable, pip gave
@@ -649,11 +657,10 @@ three have to support that Python:
 
 - **The image's floor.** The image is built with two Home Assistant versions,
   both build-time `ARG`s: `HA_VERSION_MIN` (2026.5.0 here) is the oldest
-  release it installs at all, and `HA_VERSION` → `HA_VERSION_DEFAULT`
-  (2026.9.3 here) is what a fresh volume installs when it is not told to take
-  the newest, and the fallback when PyPI cannot be reached. Anything older
-  than the floor is refused outright, before any of the checks below and with
-  no force path, and a venv of that version already sitting on the volume is
+  release it installs at all, and `HA_VERSION` → `HA_VERSION_DEFAULT` is what
+  a fresh volume installs when it is not told to take the newest, and the
+  fallback when PyPI cannot be reached. Anything older than the floor is
+  refused outright, before any of the checks below and with no force path, and a venv of that version already sitting on the volume is
   not an exception: selecting it is refused too, because nothing has measured
   this manager below the floor and the list must not offer what the manager
   will not schedule. What the floor never blocks is recovery — the container
@@ -1016,7 +1023,9 @@ opens its own file; after a restart the page selects the same file again by
 its name, and says so when several files share that name. A tail reads at most
 the last 32 MB of a file, and a search also stops after 20000 lines that hold
 something the masking looks at (a word such as `token` or `key`); *lines read*
-says how far it got.
+says how far it got. A line longer than 1 MiB (a log that stopped writing
+newlines) shows its first 1 MiB and ends in `[... N more bytes of this line
+not shown]`; *Download file* has all of it.
 
 **Download file**, next to the tail controls, saves the selected file whole.
 It is masked exactly as the table is, line by line as it is sent, so nothing
@@ -1172,7 +1181,9 @@ HRI_DEV_SRC=/path/to/your/checkout docker compose \
 (With explicit `-f` files Compose no longer loads the override on its own:
 list it, or leave it out if you do not have one.)
 
-The directory is mounted read-only at `/dev-src`. The **Install** page lists
+The directory is mounted read-only at `/dev-src` (the `dev_source_dir` setting,
+`POST /api/settings`, points it at another absolute path in the container when
+your own mount puts the checkout elsewhere). The **Install** page lists
 every `manifest.json` it finds there (except the manager's own
 `integration_manager`); *Install as local* copies it into the
 version store as version `local`, which you start like any other. *Reinstall +
@@ -1218,9 +1229,11 @@ hass_<domain>/manager/result                        outcome of a manager action,
 - **Entity document**: state, attributes, `last_changed`, `last_updated`,
   `last_reported`, and the registry metadata (unique id, name, device class,
   unit, icon, category, device). Access tokens are left out of the
-  attributes: `access_token`, and any attribute whose URL carries a `token=`
-  (the `entity_picture` of a camera, image or media player), which would open
-  this container's proxy. Every other attribute is published as the integration
+  attributes, at any depth: `access_token`, and any value whose URL carries a
+  `token=` (the `entity_picture` of a camera, image or media player, also
+  inside a list or a nested attribute), which would open this container's
+  proxy. A state that is such a URL is published with the token replaced by
+  `***`. Every other attribute is published as the integration
   sets it, under any name: an attribute is state the integration chose to show,
   and the main Home Assistant needs it as it is (`code_format`, `error_code`, a
   GPIO `pin`). The secret-name masking of the command history and the logs does
@@ -1758,13 +1771,16 @@ secret) to require a password:
   can carry one; spaces are, so a password may start or end with one. A value
   of nothing but line ends is no password (no login); a value of nothing but
   spaces or tabs is a password that failed to arrive (see above). The file
-  of `HRI_PASSWORD_FILE` is read without the spaces and line ends around it;
+  of `HRI_PASSWORD_FILE` is read without the spaces and line ends around it,
+  once, when the process starts: after changing it (rotating a Docker
+  secret) restart for the new password to count;
 - after 5 wrong attempts from one address, that address is refused for 15
   minutes (for IPv6, the whole /64 it belongs to); after 30 wrong attempts
   within 5 minutes from all addresses together (for example from a whole IPv6
   range), every password attempt is refused, also the right one, until the
   count drops (at most 5 minutes; logged and in the timeline). Browsers already
-  logged in keep working;
+  logged in keep working. The counts are held in memory, so a restart (of the
+  container, or the process restart the UI offers) clears them;
 - changing the password logs every browser out.
 
 The password covers every path on the port, Home Assistant's own included:
@@ -1843,10 +1859,13 @@ What is in place:
   so is the login page's own `<style>` element.
 - Secrets (MQTT password, GitHub token, parent HA token) are write-only in the
   UI, stored in files readable only by the owner, and never logged or included
-  in the diagnostics zip. The diagnostics zip, the log file tails and downloads, the records on
-  the Logs page (message and traceback) and the inspection of an imported Home
-  Assistant backup mask passwords (also `pwd`, `*_pw`, passphrases, passcodes
-  and PIN codes), tokens, credentials, session ids, signatures, WiFi and other
+  in the diagnostics zip. The diagnostics zip, the log file tails and
+  downloads, the records on the Logs page (message and traceback), the
+  inspection of an imported Home Assistant backup, and the error text a failed
+  service call (Services page), config or options flow step, config entry
+  action, release lookup, backup or Home Assistant import answers with mask
+  passwords (also `pass`, `pw`, `pwd`, passphrases, passcodes and PIN codes),
+  tokens, credentials, session ids, signatures, WiFi and other
   pre-shared keys (`psk`, `wifi_psk`), `auth` as a word of its own (`auth`,
   `basic_auth`, not `author` or `oauth`), every value named `…key` (`local_key`,
   `noise_psk`, `encryption_key`, Z-Wave `network_key`, `s0`/`s2_*_key` and
@@ -1854,7 +1873,8 @@ What is in place:
   URLs, …) except `translation_key`, `sort_key` and `primary_key`, Bluetooth
   `irk`/`ltk`, whole PEM blocks, PINs, one-time codes, HMAC keys, webhook ids
   and cloudhook URLs, `Authorization` values (`Bearer`, `Basic` and any other
-  scheme), `Cookie`/`Set-Cookie` values and credentials in URLs (also a
+  scheme) and a value named `bearer`, `Cookie`/`Set-Cookie` values and
+  credentials in URLs (also a
   password holding `/` or `@`). Masking errs on the side of hiding too much.
   A value the masking finds a name for is masked to the end of its line —
   wrapper, container and auth scheme and all — as a single `***`: the rule no
@@ -1884,11 +1904,27 @@ What is in place:
   `//api/logs`, `/api/logs;x`, `/x/../api/logs`), including the ones the
   server answers with 404 but still logs; lines written by an earlier version are masked where
   they are shown and in the diagnostics zip. A parameter name counts as a
-  credential when it holds `token`, `secret`, `password` and the like anywhere,
-  or `pass`, `sig`, `key`, `code` or `session` as a word of its own (`authSig`,
-  `api_key`, but not `zipcode`, `keyword` or `design`; `translation_key`,
-  `sort_key` and `primary_key` stay readable), and a percent-encoded name counts
-  as its decoded one, also when the `=` after it is percent-encoded (`%3D`). A
+  credential when it holds `token`, `secret`, `password`, `authorization`,
+  `hmac`, `psk`, `webhook_id` and the like anywhere, or `pass`, `pw`, `pwd`,
+  `pin`, `otp`, `auth`, `sig`, `bearer`, `key`, `code` or `session` as a word of
+  its own (`authSig`, `api_key`, `basic_auth`, but not `zipcode`, `keyword`,
+  `author` or `design`; `translation_key`, `sort_key` and `primary_key` stay
+  readable), and a percent-encoded name counts as its decoded one, also when
+  the `=` after it is percent-encoded (`%3D`). The request line, the
+  diagnostics zip, the log pages and the MQTT command history mask by the same
+  list of names.
+  That is all that is masked before a line is written: `process.log` and the
+  container log (`docker logs`, and any log driver) otherwise hold what Home
+  Assistant and the integration logged, as they logged it — an integration that
+  logs `password=…`, an `Authorization` header or a PEM block puts it there.
+  The masking of names, headers, URL credentials and keys happens where the
+  manager hands a log out: the Logs page, the Log files page (tail and
+  download) and the diagnostics zip. The manager's own lines that quote an
+  integration's exception (a failed MQTT command, a failed call from the
+  Services page) are masked before they are logged. Masking every line on its
+  way to the log would put the scrubber on the logging path of the whole
+  process, the event loop included, at tens of microseconds a line and
+  milliseconds for a long one. Share `docker logs` output with that in mind. A
   `-----BEGIN …-----` line with no END marker masks the
   rest of its own line and the base64-only lines under it, and nothing else.
   A key is recognised from its `-----END …-----` marker or from the shape of
@@ -1945,8 +1981,8 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | `HRI_VERSION` | `latest` | Image tag Compose pulls, for example `0.22.0` |
 | `HRI_REGISTRY` | `ghcr.io/trailro` | Where Compose pulls the image from: `ghcr.io/trailro` (GitHub Container Registry) or `docker.io/trailro26` (Docker Hub); the same image either way. A `docker-compose.yml` from 0.16.0 or older ignores it and pulls from GitHub Container Registry: download the file again to use it |
 | `TZ` | `UTC` | Time zone; an unknown zone falls back to UTC, with an error in the log |
-| `HA_VERSION_LATEST` | `1` | `0` installs the image's default Home Assistant (`HA_VERSION_DEFAULT`, 2026.9.3 here) on a fresh volume instead of the newest |
-| `HRI_APT_PACKAGES` | unset | Debian packages the container installs at boot, before Home Assistant starts, for what pip cannot install (the `ffmpeg` binary, BlueZ): names separated by spaces or commas, for example `ffmpeg libpcap0.8t64`. Only Debian package names are accepted (`libc6:arm64` too); anything else — an option, a URL, a path, a shell metacharacter, or a name ending in `-` (`libturbojpeg0-`), which is apt's own *remove* operator and not part of any package name — is refused with a line in the log and nothing is installed for it, and the value never reaches a shell. A name ending in `+` (`g++`) is fine: that character really is part of Debian package names. Each name must be the exact name of a package: apt is told not to read one as a pattern, so a typo such as `python3.1.` fails like any unknown package instead of installing every package whose name it happens to match. Packages that are already installed are not installed again, so a restart costs nothing; they live in the container, not on the volume, so recreating the container or updating the image installs them again. A failure (no network, an unknown package) is recorded on **System** and does not stop the boot. The output is in `integration_manager/apt-install.log`. A `docker-compose.yml` from 0.17.2 or older does not pass it to the container: download the file again to use it |
+| `HA_VERSION_LATEST` | `1` | `0` installs the image's default Home Assistant (`HA_VERSION_DEFAULT`, the version the image was built with) on a fresh volume instead of the newest |
+| `HRI_APT_PACKAGES` | unset | Debian packages the container installs at boot, before Home Assistant starts, for what pip cannot install (the `ffmpeg` binary, BlueZ): names separated by spaces or commas, for example `ffmpeg libpcap0.8t64`. Only Debian package names are accepted (`libc6:arm64` too); anything else — an option, a URL, a path, a shell metacharacter, or a name ending in `-` (`libturbojpeg0-`), which is apt's own *remove* operator and not part of any package name — is refused with a line in the log and nothing is installed for it, and the value never reaches a shell. A name ending in `+` (`g++`) is fine: that character really is part of Debian package names. Do not add a `+` that is not part of the name: apt reads `ffmpeg+` as `ffmpeg` and installs it, but the check for what is already installed looks for a package literally called `ffmpeg+`, finds none, and runs apt again at every boot. Each name must be the exact name of a package: apt is told not to read one as a pattern, so a typo such as `python3.1.` fails like any unknown package instead of installing every package whose name it happens to match. Packages that are already installed are not installed again, so a restart costs nothing; they live in the container, not on the volume, so recreating the container or updating the image installs them again. A failure (no network, an unknown package) is recorded on **System** and does not stop the boot. The output is in `integration_manager/apt-install.log`. A `docker-compose.yml` from 0.17.2 or older does not pass it to the container: download the file again to use it |
 | `HRI_DEV_SRC` | `./dev-src` | Dev mode: directory mounted at `/dev-src` |
 | `HRI_DEBUGPY` | unset | Dev mode: debugger port |
 | `HRI_DEBUGPY_HOST` | `127.0.0.1` | Dev mode: address debugpy binds inside the container (the dev overlay sets `0.0.0.0`) |
@@ -2087,6 +2123,11 @@ tails, logs or diagnostics, or run or store patch code, also need `X-Requested-W
 `/api/diagnostics`, `/api/diag/memory` (also without `refs`), `/api/logs`,
 `/api/log_files`, `/api/log_files/tail` and `/api/log_files/download`, and aborting a flow
 (`DELETE /api/flow/<id>`, `DELETE /api/options/<flow_id>`); without it they answer `400`.
+`GET /api/backups/<name>/download` does not need it: the page sends that
+header only through `fetch`, which would hold the whole backup in the
+browser's memory before saving it, so the backup link is a plain download the
+browser writes to disk as it arrives. Another page can start that download in
+your browser (while you are logged in), but cannot read it.
 `?refresh=1` on `/api/releases` and `/api/ha` is ignored without it.
 `GET /api/status` answers without the header too (for monitors and
 `verify.sh`), but then from a copy at most 10 seconds old, since building it
@@ -2102,11 +2143,11 @@ points:
 | Configuration | `POST /api/flow/start`, `GET /api/flow/progress`, `POST/DELETE /api/flow/<id>`, `POST/DELETE /api/options/<flow_id>`, `GET/POST /api/yaml/<domain>`, `GET /api/entries`, `POST /api/entries/<entry_id>/{options,reload,delete}` (an unknown entry id, there or in a `reconfigure` flow start, answers 404 with a message) |
 | Patches | `GET /api/patches/<domain>`, `POST /api/patches/<domain>/upload`, `POST /api/patches/<domain>/<name>/{apply,delete}`, `GET /api/patch_editor/<domain>?name=`, `POST /api/patch_editor/<domain>/{check,save}` |
 | MQTT | `GET/POST /api/mqtt/config`, `GET/POST /api/mqtt/rules`, `POST /api/mqtt/{reconnect,republish}`, `GET /api/mqtt/discovery`, `GET /api/mqtt/commands` |
-| Entities | `GET /api/entities` (an entity's attributes are the published ones whether or not it is published: an `access_token` and a picture URL carrying `token=` are left out of the row as well, so excluding an entity from MQTT never shows more than publishing it), `POST /api/entities/<entity_id>/{rename,name,disable,enable,delete,mqtt_exclude,mqtt_include,mqtt_name}`, `GET /api/devices`, `POST /api/devices/<device_id>/{name,delete}` (`delete` asks every config entry of the device first whether its integration can remove devices at all, and changes nothing when one cannot; an integration that refuses, or fails, after another entry was already detached answers `ok: false` with the entries detached so far in the error and `config_entries_detached`), `GET /api/services`, `POST /api/services/call` |
+| Entities | `GET /api/entities` (an entity's attributes are the published ones whether or not it is published: an `access_token` and a picture URL carrying `token=` are left out of the row as well, and a token in the state is masked, so excluding an entity from MQTT never shows more than publishing it), `POST /api/entities/<entity_id>/{rename,name,disable,enable,delete,mqtt_exclude,mqtt_include,mqtt_name}`, `GET /api/devices`, `POST /api/devices/<device_id>/{name,delete}` (`delete` asks every config entry of the device first whether its integration can remove devices at all, and changes nothing when one cannot; an integration that refuses, or fails, after another entry was already detached answers `ok: false` with the entries detached so far in the error and `config_entries_detached`), `GET /api/services`, `POST /api/services/call` |
 | System | `GET /api/ha`, `POST /api/ha/{update,rollback,check}`, `POST /api/restart`, `GET/POST /api/settings` |
 | Backups | `GET /api/backups`, `POST /api/backups/create`, `POST /api/backups/upload`, `GET /api/backups/<name>/download`, `POST /api/backups/<name>/{restore,delete}`, `POST /api/backups/restore/cancel` (answers `cancelled`; a restore that belongs to a scheduled Home Assistant version change is refused with `for_version`, and a full rollback's restore with `rollback`, the backup it restores) |
 | Import | `POST /api/import/upload`, `GET/POST /api/import/inspect`, `POST /api/import/{apply,apply_all,clear}` |
-| Cutover | `GET /api/parity`, `POST /api/parity/{test,remove_orphans}`, `POST /api/cutover/{status,enable,undo}`; `enable` takes `force`, which skips the checks on the main Home Assistant (MQTT loaded, the integration's config entries, entity ids held there by anything but this container's own mirrors) but not the container's own (an integration running, health, MQTT connected), and the answer and the timeline say `forced`; the answer carries `checked`, false when the main HA was not checked (forced, or no main HA configured, which the timeline marks `unchecked`); `undo` answers `cleared_discovery_configs` and `manager_device_kept`; a check on the main HA that cannot run (unreachable, its registry unreadable) blocks the enable rather than passing. Removing an orphan while discovery is off is refused, except for the manager device while `manager_discovery` announces it. A matched row carries `state_comparable`: `button`, `scene`, `notify` and `event` are not compared by state (the command-only platforms have no state topic on the main HA, and an event entity's state is a "last triggered" timestamp each side keeps for itself), so those never count as differing; their availability, renames and disabled flag are still reported. An orphan of the manager device is removed by its component key rather than the unique id the removal form used to carry — a unique id that belongs to no component of that device is now refused instead of reported as removed |
+| Cutover | `GET /api/parity`, `POST /api/parity/{test,remove_orphans}`, `POST /api/cutover/{status,enable,undo}`; `enable` takes `force`, which skips the checks on the main Home Assistant (MQTT loaded, the integration's config entries, entity ids held there by anything but this container's own mirrors) but not the container's own (an integration running, health, MQTT connected), nor what would replace the container's configuration under the new entities: an action running (install, start, import, restore, a Home Assistant version change being prepared) or a restore, full rollback, Home Assistant version switch or backup import scheduled for the next restart; the answer and the timeline say `forced`. `force` does skip a pending smoke test, and the answer and the timeline say `smoke_skipped`; the answer carries `checked`, false when the main HA was not checked (forced, or no main HA configured, which the timeline marks `unchecked`); `undo` answers `cleared_discovery_configs` and `manager_device_kept`; a check on the main HA that cannot run (unreachable, its registry unreadable) blocks the enable rather than passing. Removing an orphan while discovery is off is refused, except for the manager device while `manager_discovery` announces it. A matched row carries `state_comparable`: `button`, `scene`, `notify` and `event` are not compared by state (the command-only platforms have no state topic on the main HA, and an event entity's state is a "last triggered" timestamp each side keeps for itself), so those never count as differing; their availability, renames and disabled flag are still reported. An orphan of the manager device is removed by its component key rather than the unique id the removal form used to carry — a unique id that belongs to no component of that device is now refused instead of reported as removed |
 | Logs | `GET /api/logs?level=&prefix=&q=&since_id=&limit=` (`limit` 1 to 2000, `since_id` 0 to 2^63-1, otherwise `400`; the answer carries `cursor`, the next `since_id`), `GET /api/logs/loggers`, `POST /api/logs/level` (`{"logger": …, "level": …}`), `GET /api/log_files` (an `id` per file, which changes at every start), `GET /api/log_files/tail?id=&file=&lines=&q=` (`file` is the masked name, answered `409` when several files share it; a real name is not accepted), `GET /api/log_files/download?id=&file=` (the same file selection; the file masked and streamed as an attachment under its masked name, at most its last 32 MB, `X-Log-Truncated` when it was cut), `GET/POST /api/settings` (`log_format`) |
 | Diagnostics | `GET /api/diagnostics` (zip, secrets removed), `GET /api/diag/memory[?refs=<type>]` (one probe at a time: a second one meanwhile answers `429`) |
 
