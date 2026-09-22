@@ -143,7 +143,7 @@ Put your settings in a `.env` file next to `docker-compose.yml`:
 ```bash
 TZ=Europe/Berlin          # your time zone
 HRI_PORT=8087             # port of the UI
-# HRI_VERSION=0.22.2      # optional: pin a release (default: latest)
+# HRI_VERSION=0.23.0      # optional: pin a release (default: latest)
 # HRI_REGISTRY=docker.io/trailro26  # optional: pull from Docker Hub (default: ghcr.io/trailro)
 # HRI_PASSWORD=...        # optional: require a password for the UI and API
 # HRI_APT_PACKAGES=ffmpeg  # optional: Debian packages installed at boot (what pip cannot install)
@@ -425,7 +425,10 @@ docker compose pull && docker compose up -d
 
 Everything lives on the volume (Home Assistant, the integration, its
 configuration, backups), so replacing the container keeps it; the new manager
-is copied onto the volume at boot. With `HRI_VERSION` pinned, change it first.
+is copied onto the volume at boot, next to the old one, and takes its place
+only once the copy is complete: on a full volume the copy fails, the old
+manager starts, and the log says so — the UI you need to free the disk stays
+up. With `HRI_VERSION` pinned, change it first.
 Home Assistant writes its registries last when it stops, so the compose file
 gives the container 240 s to stop (`stop_grace_period`; a stop that hangs
 ends the process on its own after about 235 s, before Docker kills it) and runs an init process; with plain
@@ -447,7 +450,7 @@ holds off for the first 20 minutes, which is where the first install of Home
 Assistant fits (see *Troubleshooting*).
 
 The top bar shows the version that runs and the commit its image was built
-from (`v0.22.0 · 1a2b3c4`), linking to that release. When GitHub has newer
+from (`v0.23.0 · 1a2b3c4`), linking to that release. When GitHub has newer
 releases than the one running (checked with the other update checks), a banner
 under the top bar says so and links the release notes of each newer release,
 newest first. Hiding it applies in that browser only, until a newer release is
@@ -600,7 +603,8 @@ rules refuse an older version, both before anything is scheduled. The first is
 the image's floor, `HA_VERSION_MIN` (2026.5.0 in this image): anything older is
 refused outright, and no force lifts it. That is not the same number as the
 version a fresh volume installs (`HA_VERSION_DEFAULT`, the version the image
-was built with) — the floor is the oldest release the manager was measured on, the default is a recent one to
+was built with; an override that empties it stops the container at boot with
+the reason, since there is no version to fall back to) — the floor is the oldest release the manager was measured on, the default is a recent one to
 start from. The second rule applies above the floor: an older release pins
 requirements published before this image's Python existed, PyPI has no wheel
 for them and the image has no compiler, so the manager resolves the chosen
@@ -1329,10 +1333,12 @@ hass_<domain>/manager/result                        outcome of a manager action,
   logged under `custom_components.integration_manager.mqtt_publisher.paho`
   (INFO and above; DEBUG gives a packet trace, which names topics and sizes but
   never the password or a payload).
-- **Refused login**: a broker that refuses the connection (a wrong user
-  name or password, a client the ACL does not know) is logged once and put on
-  the timeline once as `the broker refused the login: Not authorized` (or the
-  broker's other reason); `connect_error` of `GET /api/mqtt/status` and the MQTT
+- **Refused login**: a broker that refuses the connection is logged once and
+  put on the timeline once — `the broker refused the login: Not authorized`
+  or `… the login: Bad user name or password`, whichever the broker sends, for
+  a wrong user name or password, and `the broker refused the connection:
+  <reason>` for any other refusal;
+  `connect_error` of `GET /api/mqtt/status` and the MQTT
   page keep that reason for as long as the client library retries, instead of
   the `Unspecified error` disconnection the library reports after each refusal.
 - **Discovery** (off by default): one retained config per device. Entities of
@@ -2026,7 +2032,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 |---|---|---|
 | `HRI_PORT` | `8087` | Port of the UI and API; a changed port is picked up at the next boot, and one pinned in `.storage/http` by an older setup or a restored backup is dropped; a value that is not a port number (1-65535) stops the container at boot with a line in the log. The image's healthcheck reads it too, so a changed port needs nothing else |
 | `HRI_NAME` | `hass-remote-integration` | Container and volume name |
-| `HRI_VERSION` | `latest` | Image tag Compose pulls, for example `0.22.0` |
+| `HRI_VERSION` | `latest` | Image tag Compose pulls, for example `0.23.0` |
 | `HRI_REGISTRY` | `ghcr.io/trailro` | Where Compose pulls the image from: `ghcr.io/trailro` (GitHub Container Registry) or `docker.io/trailro26` (Docker Hub); the same image either way. A `docker-compose.yml` from 0.16.0 or older ignores it and pulls from GitHub Container Registry: download the file again to use it |
 | `TZ` | `UTC` | Time zone; an unknown zone falls back to UTC, with an error in the log |
 | `HA_VERSION_LATEST` | `1` | `0` installs the image's default Home Assistant (`HA_VERSION_DEFAULT`, the version the image was built with) on a fresh volume instead of the newest |
@@ -2193,7 +2199,7 @@ points:
 | MQTT | `GET/POST /api/mqtt/config`, `GET/POST /api/mqtt/rules`, `POST /api/mqtt/{reconnect,republish}`, `GET /api/mqtt/discovery`, `GET /api/mqtt/commands` |
 | Entities | `GET /api/entities` (an entity's attributes are the published ones whether or not it is published: an `access_token` and a picture URL carrying `token=` are left out of the row as well, and a token in the state is masked, so excluding an entity from MQTT never shows more than publishing it), `POST /api/entities/<entity_id>/{rename,name,disable,enable,delete,mqtt_exclude,mqtt_include,mqtt_name}`, `GET /api/devices`, `POST /api/devices/<device_id>/{name,delete}` (`delete` asks every config entry of the device first whether its integration can remove devices at all, and changes nothing when one cannot; an integration that refuses, or fails, after another entry was already detached answers `ok: false` with the entries detached so far in the error and `config_entries_detached`), `GET /api/services`, `POST /api/services/call` |
 | System | `GET /api/ha`, `POST /api/ha/{update,rollback,check}`, `POST /api/restart`, `GET/POST /api/settings` |
-| Backups | `GET /api/backups`, `POST /api/backups/create`, `POST /api/backups/upload`, `GET /api/backups/<name>/download`, `POST /api/backups/<name>/{restore,delete}`, `POST /api/backups/restore/cancel` (answers `cancelled`; a restore that belongs to a scheduled Home Assistant version change is refused with `for_version`, and a full rollback's restore with `rollback`, the backup it restores) |
+| Backups | `GET /api/backups`, `POST /api/backups/create`, `POST /api/backups/upload`, `GET /api/backups/<name>/download`, `POST /api/backups/<name>/{restore,delete}`, `POST /api/backups/restore/cancel` (answers `cancelled`, and the timeline records the cancel; a restore that belongs to a scheduled Home Assistant version change is refused with `for_version`, and a full rollback's restore with `rollback`, the backup it restores) |
 | Import | `POST /api/import/upload`, `GET/POST /api/import/inspect`, `POST /api/import/{apply,apply_all,clear}` |
 | Cutover | `GET /api/parity`, `POST /api/parity/{test,remove_orphans}`, `POST /api/cutover/{status,enable,undo}`; `enable` takes `force`, which skips the checks on the main Home Assistant (MQTT loaded, the integration's config entries, entity ids held there by anything but this container's own mirrors) but not the container's own (an integration running, health, MQTT connected), nor what would replace the container's configuration under the new entities: an action running (install, start, import, restore, a Home Assistant version change being prepared) or a restore, full rollback, Home Assistant version switch or backup import scheduled for the next restart; the answer and the timeline say `forced`. `force` does skip a pending smoke test, and the answer and the timeline say `smoke_skipped`; the answer carries `checked`, false when the main HA was not checked (forced, or no main HA configured, which the timeline marks `unchecked`); `undo` answers `cleared_discovery_configs` and `manager_device_kept`; a check on the main HA that cannot run (unreachable, its registry unreadable) blocks the enable rather than passing. Removing an orphan while discovery is off is refused, except for the manager device while `manager_discovery` announces it. A matched row carries `state_comparable`: `button`, `scene`, `notify` and `event` are not compared by state (the command-only platforms have no state topic on the main HA, and an event entity's state is a "last triggered" timestamp each side keeps for itself), so those never count as differing; their availability, renames and disabled flag are still reported. An orphan of the manager device is removed by its component key rather than the unique id the removal form used to carry — a unique id that belongs to no component of that device is now refused instead of reported as removed |
 | Logs | `GET /api/logs?level=&prefix=&q=&since_id=&limit=` (`limit` 1 to 2000, `since_id` 0 to 2^63-1, otherwise `400`; the answer carries `cursor`, the next `since_id`), `GET /api/logs/loggers`, `POST /api/logs/level` (`{"logger": …, "level": …}`), `GET /api/log_files` (an `id` per file, which changes at every start), `GET /api/log_files/tail?id=&file=&lines=&q=` (`file` is the masked name, answered `409` when several files share it; a real name is not accepted), `GET /api/log_files/download?id=&file=` (the same file selection; the file masked and streamed as an attachment under its masked name, at most its last 32 MB, `X-Log-Truncated` when it was cut), `GET/POST /api/settings` (`log_format`) |
@@ -2377,7 +2383,10 @@ progress (50): try again later`.
   for, so a write that fails is logged and the restart goes ahead. A restart
   that fails for another reason before anything stops is refused the same way,
   with the reason. Once a restart is accepted, the process gives Home
-  Assistant about 205 s to stop and then exits anyway, so a stop that hangs
+  Assistant about 225 s to stop (the same total a `docker stop` allows: there
+  the count of 205 s starts once Home Assistant's first stage, up to 20 s, is
+  over) and then
+  exits anyway, so a stop that hangs
   still ends in a restart rather than in a container that is up and
   unreachable.
 - **MQTT says the base topic is in use.** Something else left retained messages
