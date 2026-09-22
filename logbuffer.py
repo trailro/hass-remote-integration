@@ -44,7 +44,9 @@ _TORN_ID = re.compile(r'\{"id":\s*(\d+)')  # the id at the start of a record who
 # before a record is written, so they never reach process.log or the container log.
 # the query runs to whitespace or a fragment: a quote inside a value is part of it (a closing quote after a masked
 # value goes with it, which errs on the side of hiding)
-_URL_QUERY = re.compile(r"([^\s\"'?#]*)\?([^\s#]+)")
+# the path starts where a run of its characters starts: tried from inside a run too, a run with no query after it
+# was scanned once per character (a request line of 8 KB took a quarter of a second on the logging thread)
+_URL_QUERY = re.compile(r"(?<![^\s\"'?#])([^\s\"'?#]*)\?([^\s#]+)")
 _URL_ORIGIN = re.compile(r"^(?:[A-Za-z][A-Za-z0-9+.-]*:)?//[^/]*")  # http://host, or //host (a scheme-relative URL)
 _LOG_SEARCH_PATHS = ("/api/logs", "/api/log_files/tail", "/api/log_files/download")  # the paths themselves: not /x/api/logs, not /api/logs/level
 # on the log search endpoints every value is masked but these, in the form the pages send them
@@ -96,6 +98,13 @@ def _mask_query(match: re.Match[str]) -> str:
         name, sep, value = part.partition("=")
         if search and part and not sep:
             part = "***"  # a value with an unencoded "&" in it (the raw path HA's security filter logs)
+        elif not sep and "%" in part:
+            # "access_token%3Dabc": the name-value "=" percent-encoded, so the whole pair reads as one name
+            name_text, sep_text, value_text = unquote_plus(part).partition("=")
+            if sep_text and value_text and _CREDENTIAL_PARAM.search(name_text) and not _PLAIN_PARAM.fullmatch(name_text):
+                # the name is decoded once, so its first "=" is the first %3D (in either case) of the text
+                cut = min(i for i in (part.find("%3D"), part.find("%3d")) if i >= 0) + 3
+                part = part[:cut] + "***"
         elif sep and value:
             name_text = unquote_plus(name)
             if search:
@@ -112,7 +121,7 @@ def mask_query_secrets(text: str) -> str:
     """``text`` with the query values above replaced by ``***``, whatever
     they hold: the rest of the line (method, path, status, size, time) is
     kept, and a masked line does not depend on what the value was."""
-    if "?" not in text or "=" not in text:
+    if "?" not in text:  # not "=" too: a "=" percent-encoded as %3D still separates a name from its value
         return text
     return _URL_QUERY.sub(_mask_query, text)
 
