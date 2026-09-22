@@ -372,10 +372,6 @@ def _ekey_lookup(entities: dict[str, Any], entity_domain: str, unique_id: Any) -
     return str(unique_id) if str(unique_id) in entities else None
 
 
-def _domains_of(entity_id: str) -> list[str]:
-    return [entity_id.split(".", 1)[0]]
-
-
 def _enable_wanted(want: dict[str, Any], entry: er.RegistryEntry) -> bool:
     """The other instance had this entity on, and here it is off because its
     integration ships it off (``entity_registry_enabled_default = False``:
@@ -520,13 +516,10 @@ class RegistryAligner:
         dropped = 0
         for domain, m in self.maps.items():
             for key, want in list(m["entities"].items()):
-                eid = None
-                for platform_domain in _domains_of(want["entity_id"]):
-                    # "<entity domain>:<unique_id>" keys; an older map holds bare unique_ids (which may contain ':' themselves)
-                    uid = key[len(platform_domain) + 1:] if key.startswith(platform_domain + ":") else key
-                    eid = ereg.async_get_entity_id(platform_domain, domain, uid)
-                    if eid:
-                        break
+                platform_domain = want["entity_id"].split(".", 1)[0]
+                # "<entity domain>:<unique_id>" keys; an older map holds bare unique_ids (which may contain ':' themselves)
+                uid = key[len(platform_domain) + 1:] if key.startswith(platform_domain + ":") else key
+                eid = ereg.async_get_entity_id(platform_domain, domain, uid)
                 entry = ereg.async_get(eid) if eid else None
                 if entry is None:
                     continue
@@ -708,6 +701,18 @@ def _forget_cached_stores(hass: HomeAssistant, names: list[str]) -> None:
         manager.async_invalidate(name)
 
 
+async def _save_config_entries(hass: HomeAssistant, domain: str) -> None:
+    """Write core.config_entries now instead of SAVE_DELAY later (what HA's
+    final write does).  Also waits for a save already under way."""
+    store = getattr(hass.config_entries, "_store", None)
+    if store is None:
+        return
+    try:
+        await store._async_handle_write_data()  # noqa: SLF001 - internal HA API, as in Installer.async_flush_stores
+    except Exception as err:  # noqa: BLE001 - HA still saves it itself a second later
+        _LOGGER.warning("import of %s: the config entries could not be saved at once (%s)", domain, err)
+
+
 def _unmask(given: Any, stored: Any, misses: list[str] | None = None, path: str = "") -> Any:
     """The import form may come from the masked GET summary (diagnostics.scrub):
     whatever still equals the masked form of the backup's value at the same
@@ -798,7 +803,7 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
                 installed: bool = True, cleanup: bool = True, allow_existing: bool = False) -> dict[str, Any]:
     cfg = hass.config.config_dir
     out_dir = os.path.join(cfg, EXTRACT_DIR)
-    summary = load_summary(cfg)
+    summary = await hass.async_add_executor_job(load_summary, cfg)
     if not summary:
         raise ValueError("no inspected backup: upload and inspect one first")
     dom = summary["domains"].get(domain)
@@ -917,12 +922,16 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
     if not_loaded:
         _undo()
         raise ValueError(f"the entry did not load ({reason}); it was removed again, fix the options and retry")
+    # The originals set aside go only once the entry is on disk, and before anything slow: a restart in between
+    # puts every .pre-import back (clean_import_leftovers), which is right while the entry is not saved and wrong
+    # once it is.  Home Assistant saves config entries SAVE_DELAY after async_add, so that save is made now.
+    await _save_config_entries(hass, domain)
+    await hass.async_add_executor_job(_commit)
     # Done with the other instance's .storage (it holds every integration's
     # credentials): removed right away once imported (apply_all keeps it until
     # its last entry).  A failed import keeps it for the retry; Clear removes it.
     if cleanup:
         await hass.async_add_executor_job(clear, cfg)
-    await hass.async_add_executor_job(_commit)
     result: dict[str, Any] = {"entry_id": entry.entry_id, "state": entry.state.value, "copied_storage": copied, "cleaned_up": cleanup,
                               # disabled only because its integration does not run: resumed when it starts (a disabled source entry stays so)
                               "suspended": entry.disabled_by is not None and not src.get("disabled_by")}
@@ -945,7 +954,7 @@ async def apply_all(hass: HomeAssistant, aligner: RegistryAligner, domains: list
     imported, so a retry after a partial import completes it.  A domain that
     had entries of its own before any of this backup's is skipped whole."""
     cfg = hass.config.config_dir
-    summary = load_summary(cfg)
+    summary = await hass.async_add_executor_job(load_summary, cfg)
     if not summary:
         raise ValueError("no inspected backup: upload and inspect one first")
     todo, results, warnings = [], [], []
