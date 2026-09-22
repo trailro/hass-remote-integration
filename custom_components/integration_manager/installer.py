@@ -1070,7 +1070,11 @@ class Installer:
             elif stored and not recorded:
                 # a reinstall of a recorded tag: the record still describes the copy set aside, which goes back
                 await self.hass.async_add_executor_job(self._restore_aside, domain, tag)
-            self.state.last_error = f"{type(err).__name__}: {err}"
+            from .diagnostics import scrub_text  # diagnostics imports this module
+
+            # raise_for_status names the URL it answered for: a private repo's zipball is redirected to codeload
+            # with ?token= in it, and last_error goes to state.json, the timeline and the page
+            self.state.last_error = scrub_text(f"{type(err).__name__}: {err}")
             events.emit("error", f"install {domain} {tag} failed: {self.state.last_error}", domain=domain, tag=tag)
             self._save_state()
             return {"ok": False, "error": self.state.last_error}

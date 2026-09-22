@@ -1172,9 +1172,18 @@ def _ha_wheel_check(python: str, version: str) -> dict[str, Any]:
 
     # a pin behind an environment marker (an extra, another platform) is not part of what the entrypoint installs
     base = [r for r in pins if ";" not in r]
+    # the pins come from the release's metadata: an option or a URL among them would be a pip argument of its own
+    # here, and at the entrypoint's install would fetch from somewhere else than the index; never handed to pip,
+    # and said, since an unchecked pin must not read as a checked one
+    if (refused := [r for r in base if bad_requirement(r)]):
+        base = [r for r in base if r not in refused]
+        out["ok"] = False
+        out["blockers"] += [f"Home Assistant {version}: {bad_requirement(r)}" for r in refused]
     out["requirements"] = len(base)
     left, missing = list(base), []
     for _ in range(MAX_HA_MISSING):
+        if not left:
+            break  # nothing left for pip to look at (pip refuses an empty list as an error of its own)
         try:
             proc = _pip_no_deps(python, left)
         except subprocess.TimeoutExpired:
@@ -1214,8 +1223,8 @@ def _ha_wheel_check(python: str, version: str) -> dict[str, Any]:
             "(add one with HRI_APT_PACKAGES=build-essential and force, or choose a newer Home Assistant version)")
     elif out["checked"]:
         out["notes"].append(f"all {len(base)} pinned requirements of Home Assistant {version} have a wheel for Python {py} on {machine}")
-    if len(base) != len(pins):
-        out["notes"].append(f"{len(pins) - len(base)} conditional requirement(s) not checked (they depend on extras or another platform)")
+    if len(base) + len(refused) != len(pins):
+        out["notes"].append(f"{len(pins) - len(base) - len(refused)} conditional requirement(s) not checked (they depend on extras or another platform)")
     out["duration_s"] = round(time.monotonic() - t0, 1)
     return out
 
