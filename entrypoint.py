@@ -469,7 +469,9 @@ def _apt_install(packages: list[str]) -> None:
         fh.flush()
         # the same idle budget as pip: a slow mirror runs on, a run that writes nothing for 15 minutes is a hang
         _run_pip(["apt-get", "update"], fh, env=env)
-        _run_pip(["apt-get", "install", "-y", "--no-install-recommends", *packages], fh, env=env)
+        # Pattern-Only: a name that is no package ("python3.1.", "libc6.dev") is not read as a regex over every
+        # package name, which installed hundreds of them; an exact name, with or without :arch, installs as before
+        _run_pip(["apt-get", "-o", "APT::Cmd::Pattern-Only=true", "install", "-y", "--no-install-recommends", *packages], fh, env=env)
     _clean_apt_lists()
 
 
