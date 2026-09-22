@@ -258,8 +258,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     # Entity -> MQTT translator: publishes every entity (state, attributes,
     # registry metadata, integration tag) as retained JSON; LWT on
     # <base>/status.  Connects only if enabled in integration_manager/mqtt.json.
-    publisher = MqttPublisher(hass, key_provider=lambda: installer.instance_key, health_provider=installer.health,
-                              rules_provider=installer.settings.health_for)
+    publisher = await hass.async_add_executor_job(functools.partial(  # reads mqtt.json and mqtt_rules.json
+        MqttPublisher, hass, key_provider=lambda: installer.instance_key, health_provider=installer.health,
+        rules_provider=installer.settings.health_for))
     installer.health_source = publisher.build_health
     manager_device = await hass.async_add_executor_job(ManagerDevice, hass, installer, ha_updater, publisher)  # reads its JSON files
     publisher.manager = manager_device

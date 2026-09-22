@@ -23,9 +23,10 @@ discovery.MANAGER_ACTIONS):
 * ``install_integration``: preflight, install (unless that version is in
   the store already) and start the newest release (a start takes a backup,
   runs the smoke test and rolls back on its own, and MQTT follows it, as
-  from the UI), then a restart if the running code has to be replaced;
+  from the UI), then a restart if the running code has to be replaced
+  (at most every 10 min);
 * ``install_home_assistant``: the newest stable Home Assistant (upgrades
-  only, backup first, configuration kept), then a restart;
+  only, backup first, configuration kept), then a restart (at most every 10 min);
 * ``restart``, ``backup`` (at most every 10 min), ``check_updates`` (every 5 min).
 
 Every sample also goes to a resource history (one a minute, kept for
@@ -77,7 +78,10 @@ _LOGGER = logging.getLogger(__name__)
 MANAGER_REPO = "trailro/hass-remote-integration"
 MAX_RELEASES = 20  # newer releases remembered for the banner
 VERSION_CHECK_S = 12 * 3600
-MIN_INTERVAL_S = {"backup": 600, "check_updates": 300}  # a flood of presses must not rotate every backup away
+# A flood of presses must not rotate every backup away.  Each install takes a backup too, and a release whose smoke
+# test fails is rolled back and stays in the store as the newest one: unlimited, every press installs it again (a backup
+# and a restart or two each time), and a Home Assistant upgrade that fails at boot is scheduled again the same way.
+MIN_INTERVAL_S = {"backup": 600, "check_updates": 300, "install_integration": 600, "install_home_assistant": 600}
 # An action that never returns (a backup whose executor job queues behind an exhausted pool) held the lock
 # for good, and every later command was refused with "X is still running".  Longer than any real action:
 # an install with its smoke test is bounded by smoke_test_s, an HA upgrade by its download and pip run.
@@ -598,6 +602,10 @@ class ManagerDevice:
             raise ValueError(f"preflight of the stored {domain} {tag} blocked: {'; '.join((gate['report'] or {}).get('blockers') or [])}")
         res = await inst.start(domain, tag)
         if not res.get("ok"):
+            if "pip_failed" in res:
+                # the start ran (its backup taken, the new files deployed and put back): answered, not refused, so it
+                # spends the limit - otherwise every press of a release whose requirements never install takes a backup
+                return {"ok": False, "error": f"start of {domain} {tag} failed: {res.get('error')}"}
             raise ValueError(f"start of {domain} {tag} failed: {res.get('error')}")
         return {"ok": True, "note": f"{domain} {tag} started", "restart": bool(res.get("restart_required")), "started": res}
 
