@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import time
 from typing import Any
@@ -28,7 +29,7 @@ from homeassistant.core import HomeAssistant
 from . import events, preflight
 from .ha_updater import HaUpdater
 from .http_util import ManagerView, with_body
-from .installer import _DOMAIN_RE, _REPO_RE, Installer, manager_domain_error
+from .installer import _DOMAIN_RE, _REPO_RE, METADATA_MAX_BYTES, Installer, manager_domain_error, read_capped
 from .installer import tag_ok as _ok_ref
 from .ui import load_template, render
 
@@ -61,7 +62,8 @@ async def _commit_of(hass: HomeAssistant, installer: Installer, domain: str, ref
                                                      timeout=aiohttp.ClientTimeout(total=20)) as resp:
             if resp.status != 200:
                 return ""
-            return str((await resp.json()).get("sha") or "")
+            data = json.loads(await read_capped(resp, f"{repo}@{ref} commit", METADATA_MAX_BYTES))
+            return str((data.get("sha") if isinstance(data, dict) else "") or "")
     except Exception:  # noqa: BLE001
         return ""
 
