@@ -376,9 +376,13 @@ class CutoverView(ManagerView):
                 await self.publisher.async_save({"discovery_enabled": True})
                 await self.publisher.async_reload_config()  # no reconnect: the parent would see every entity flap to unavailable
             n = await self.publisher.async_republish_all(full=True)
+            # no main Home Assistant configured: nothing there was checked, which is not what a checked enable says
+            checked = s["parent_configured"] and not forced
             events.emit("cutover", f"discovery enabled on the parent: {n} documents republished"
-                        + (" (forced: the checks on the main Home Assistant were skipped)" if forced else ""), forced=forced)
-            return self.json({"ok": True, "republished": n, "forced": forced, **self._status()})
+                        + (" (forced: the checks on the main Home Assistant were skipped)" if forced
+                           else "" if checked else " (unchecked: no main Home Assistant is configured to check)"),
+                        forced=forced, checked=checked)
+            return self.json({"ok": True, "republished": n, "forced": forced, "checked": checked, **self._status()})
         if action == "undo":
             if s["discovery_enabled"]:
                 await self.publisher.async_save({"discovery_enabled": False})
@@ -387,7 +391,7 @@ class CutoverView(ManagerView):
                 cleared = await self.publisher.async_clear_discovery()
             except RuntimeError as err:
                 return self.json({"ok": False, "error": f"discovery disabled, but the retained configs could not be cleared: {err}; "
-                                                    "retried at the next MQTT connection", **self._status()})
+                                                    "retried at the next full republish (at every MQTT connection, and every full_republish_interval_min minutes)", **self._status()})
             self.publisher.undiscover_done()
             # the manager device is not entity discovery: it follows manager_discovery, and removing it here would
             # only drop its customisations on the main HA before the next health tick announces it again
