@@ -25,6 +25,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 PYPI_URL = "https://pypi.org/pypi/homeassistant/json"
 CACHE_S = 600
 _STABLE = re.compile(r"^\d{4}\.\d{1,2}\.\d+\Z")  # \Z: "$" also matches before a trailing newline
+_ANY_DOMAIN = object()  # config_backup_for: made while any integration ran
 _VERSION = re.compile(r"\d{4}\.\d{1,2}\.\d+(?:b\d+)?")  # a release or a beta, fullmatch: entrypoint.VERSION_RE
 # How many of the newest stable releases the System page offers without being asked for more.  Home Assistant
 # publishes a release every month and a handful of patches on top of it, and this image's Python only has wheels
@@ -119,29 +120,57 @@ class HaUpdater:
         self._cache = (now, info)
         return info
 
-    def config_backup_for(self, version: str, backups: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    def config_backup_for(self, version: str, backups: list[dict[str, Any]] | None = None,
+                          running: Any = _ANY_DOMAIN, skipped: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
         """The newest backup made on a Home Assistant that ``version`` can
         read (that version or an older one): the last moment the
         configuration existed in a format a downgrade to it understands.
-        Home Assistant only migrates storage forward."""
+        Home Assistant only migrates storage forward.  ``running``: the
+        integration that runs now (None: none); only a backup made while it
+        ran qualifies, since only its .storage is restored and the manager
+        state stays.  ``skipped`` collects the backups that fitted the version
+        but were made while another integration ran (or none), or say nothing."""
         import backupkit
 
-        listed = backups if backups is not None else backupkit.list_backups(self.hass.config.config_dir)  # newest first
+        cfg = self.hass.config.config_dir if backups is None or running is not _ANY_DOMAIN else None
+        listed = backups if backups is not None else backupkit.list_backups(cfg)  # newest first
         # a pre-restore copy holds whatever was on the volume at that moment (a half-migrated or crashed
         # configuration too): never the configuration a downgrade restores
         fits = [b for b in listed if b.get("ha_version") and _key(b["ha_version"]) <= _key(version)
                 and "pre-restore" not in str(b.get("name") or "")]
         # this volume's own backups first: an uploaded one comes from somewhere else
         own = [b for b in fits if not str(b.get("name") or "").startswith("upload-")]
-        return (own or fits or [None])[0]
+        for b in own + [b for b in fits if b not in own]:
+            if running is _ANY_DOMAIN:
+                return b
+            # recorded in backup-info.json (describe); an older backup's state.json is opened, only while
+            # nothing newer qualified.  An archive that does not say is never picked on its own: a wrong pick
+            # restores another integration's configuration, a refusal only asks for rebuild or keep
+            domain = b["domain"] if "domain" in b else backupkit.backup_domain(cfg, str(b.get("name") or ""))
+            if domain is not backupkit.UNKNOWN_DOMAIN and domain == running:
+                return b
+            if skipped is not None:
+                skipped.append({**b, "domain": None if domain is backupkit.UNKNOWN_DOMAIN else domain,
+                                "domain_known": domain is not backupkit.UNKNOWN_DOMAIN})
+        return None
+
+    def running_domain(self) -> Any:
+        """Blocking: the integration state.json on the volume names as running (the installer saves every change
+        there); _ANY_DOMAIN when it cannot be read."""
+        import backupkit
+
+        path = self.hass.config.path(backupkit.MARKER)
+        domain = backupkit._domain_of_state_file(path) if os.path.isfile(path) else backupkit.UNKNOWN_DOMAIN  # noqa: SLF001
+        return _ANY_DOMAIN if domain is backupkit.UNKNOWN_DOMAIN else domain
 
     def _config_backups(self, versions: list[str], current: str) -> dict[str, dict[str, Any]]:
         import backupkit
 
         backups = backupkit.list_backups(self.hass.config.config_dir)
+        running = self.running_domain()  # what a switch with restore picks (views.async_change_ha_version)
         out = {}
         for v in versions:
-            if _key(v) < _key(current) and (b := self.config_backup_for(v, backups)):
+            if _key(v) < _key(current) and (b := self.config_backup_for(v, backups, running)):
                 out[v] = {k: b.get(k) for k in ("name", "created", "label", "ha_version")}
         return out
 

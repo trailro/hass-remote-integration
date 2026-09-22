@@ -258,9 +258,18 @@ async def async_change_ha_version(installer: Installer, updater: HaUpdater, targ
             if mode == "restore" and restore_backup is not None:
                 restore = await hass.async_add_executor_job(backupkit.describe, cfg, restore_backup)
             elif mode == "restore":
-                restore = await hass.async_add_executor_job(updater.config_backup_for, target)
+                # only .storage comes back and the manager state stays: a backup from another integration's time
+                # would bring its config entries back under the one that runs (as a partial restore, backup_views)
+                skipped: list[dict[str, Any]] = []
+                restore = await hass.async_add_executor_job(updater.config_backup_for, target, None, installer.running, skipped)
                 if restore is None:
-                    raise ValueError(f"no backup made on Home Assistant {target} or older: choose rebuild or keep")
+                    why = ""
+                    if skipped:
+                        others = sorted({str(b["domain"]) if b["domain_known"] and b["domain"] else
+                                         ("no integration" if b["domain_known"] else "an integration they do not record") for b in skipped})
+                        why = (f" made while {installer.running or 'no integration'} ran ({len(skipped)} on that version or older were made while "
+                               f"{', '.join(others)} ran)")
+                    raise ValueError(f"no backup made on Home Assistant {target} or older{why}: choose rebuild or keep")
             if mode == "rebuild":
                 from .import_views import _IMPORT_LOCK
 
