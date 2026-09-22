@@ -4,9 +4,9 @@
 set and not empty: every page and API call needs a session cookie from
 ``/login``, or the password as ``Authorization: Bearer <password>`` for
 scripts.  Unset or empty: no login, as before.  A ``HRI_PASSWORD_FILE``
-that cannot be read, or that is there but empty, is a password that was
-meant to be set: the UI stays closed with a password nobody knows, and the
-login page says why.
+that cannot be read, or that is there but empty, and a ``HRI_PASSWORD`` of
+only whitespace, are a password that was meant to be set: the UI stays
+closed with a password nobody knows, and the login page says why.
 
 The session cookie carries its expiry and an HMAC over it and a tag of the
 password, keyed with a random key kept on the volume: changing the password
@@ -79,7 +79,11 @@ def _configured_password() -> tuple[str, str]:
     # form (a password input strips them) nor sent in a header, so no usable password loses anything.  Spaces are
     # kept, unlike in the file: they can be typed, and a password may end with one on purpose
     password = os.environ.get("HRI_PASSWORD", "").strip("\r\n")
-    return (password, "") if password.strip() else ("", "")
+    if password and not password.strip():
+        # only spaces, tabs and the like: a password was meant to be set (a template that rendered blank) and
+        # did not arrive, like an empty HRI_PASSWORD_FILE; taken as it is, it would be guessed in a few tries
+        return secrets.token_urlsafe(32), "HRI_PASSWORD is set but holds only whitespace"
+    return password, ""
 
 
 def _load_key(path: str) -> tuple[bytes, OSError | None]:
