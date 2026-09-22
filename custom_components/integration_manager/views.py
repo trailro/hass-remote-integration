@@ -25,6 +25,7 @@ from homeassistant.const import __version__ as HA_VERSION
 from jsonio import ha_vkey
 from homeassistant.helpers.http import HomeAssistantView
 
+from .diagnostics import scrub_text
 from .http_util import BadRequest, ManagerView, with_body, _json_object
 
 from . import events, ha_import, notifications
@@ -139,7 +140,7 @@ class ReleasesView(ManagerView):
             rels = await self.installer.releases(domain=domain, force=force)
             return self.json(rels if with_notes else [{k: v for k, v in r.items() if k != "notes"} for r in rels])
         except Exception as err:  # noqa: BLE001 - GitHub errors surface in the UI
-            return self.json_message(f"{type(err).__name__}: {err}", status_code=502)
+            return self.json_message(scrub_text(f"{type(err).__name__}: {err}"), status_code=502)
 
 
 class RegistryView(ManagerView):
@@ -489,8 +490,8 @@ class FlowStartView(ManagerView):
             return self.json_message(f"{domain} has no config flow", status_code=400)
         except UnknownEntry as err:  # reconfigure of an entry id that does not exist (or belongs to another domain)
             return self.json_message(str(err), status_code=404)
-        except Exception as err:  # noqa: BLE001 - surfaced to the UI
-            return self.json_message(f"{type(err).__name__}: {err}", status_code=500)
+        except Exception as err:  # noqa: BLE001 - surfaced to the UI, masked: the text is the integration's
+            return self.json_message(scrub_text(f"{type(err).__name__}: {err}"), status_code=500)
 
 
 class FlowProgressView(ManagerView):
@@ -518,7 +519,7 @@ class FlowResourceView(ManagerView):
         except data_entry_flow.InvalidData as err:  # per-field errors, as HA's own flow view answers
             return self.json({"type": "invalid_data", "errors": err.schema_errors}, status_code=400)
         except Exception as err:  # noqa: BLE001
-            return self.json_message(f"{type(err).__name__}: {err}", status_code=500)
+            return self.json_message(scrub_text(f"{type(err).__name__}: {err}"), status_code=500)
 
     async def delete(self, request: web.Request, flow_id: str) -> web.Response:
         if request.headers.get("X-Requested-With") != "fetch":  # no JSON body to gate on: the header del() sends
@@ -547,7 +548,7 @@ class OptionsResourceView(ManagerView):
         except data_entry_flow.InvalidData as err:  # per-field errors, as the config flow answers
             return self.json({"type": "invalid_data", "errors": err.schema_errors}, status_code=400)
         except Exception as err:  # noqa: BLE001
-            return self.json_message(f"{type(err).__name__}: {err}", status_code=500)
+            return self.json_message(scrub_text(f"{type(err).__name__}: {err}"), status_code=500)
 
     async def delete(self, request: web.Request, flow_id: str) -> web.Response:
         if request.headers.get("X-Requested-With") != "fetch":  # no JSON body to gate on: the header del() sends
@@ -594,7 +595,7 @@ class EntryActionView(ManagerView):
         except UnknownEntry:
             return self.json_message(f"unknown config entry {entry_id}", status_code=404)
         except Exception as err:  # noqa: BLE001
-            return self.json_message(f"{type(err).__name__}: {err}", status_code=500)
+            return self.json_message(scrub_text(f"{type(err).__name__}: {err}"), status_code=500)
         return self.json_message("unknown action", status_code=400)
 
 

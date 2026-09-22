@@ -29,12 +29,12 @@ from . import events, notifications
 from .installer import Installer
 from .logfiles_page import _entry_paths, _log_files, open_log_file
 from .memdiag import snapshot as memory_snapshot
-from .mqtt_publisher import SECRET_NAME_ENDINGS, SECRET_NAME_WORDS
 
 # names ending in "key" that are known not to be secrets (everything else ending in "key" is masked)
 _PLAIN_KEYS = logbuffer.PLAIN_KEYS
-# the names the MQTT history, status and log mask (mqtt_publisher): anywhere in a name, and as a word of its own
-_ENDINGS, _WORDS = "|".join(SECRET_NAME_ENDINGS), "|".join(SECRET_NAME_WORDS)
+# the credential names every masking rule shares (logbuffer): anywhere in a name, and as a word of its own.  The
+# MQTT history, status and log mask a subset of them (mqtt_publisher; tests/test_review3_masking.py pins it)
+_ENDINGS, _WORDS = "|".join(logbuffer.CREDENTIAL_NAMES), "|".join(logbuffer.CREDENTIAL_WORDS)
 # "code" names an OAuth secret - code, user_code, device_code, pin_code and every other spelling of it.
 # A code that reports a result is not one, and a bundle with every HTTP status masked is a bundle nobody
 # can debug from, so those are excluded by name: a name nobody listed is masked rather than printed.  The
@@ -42,12 +42,12 @@ _ENDINGS, _WORDS = "|".join(SECRET_NAME_ENDINGS), "|".join(SECRET_NAME_WORDS)
 _RESULT_CODE_NAMES = ("status", "error", "exit", "return", "reason", "http", "response")
 _NOT_RESULT_CODE = "".join(rf"(?<!{name}_)" for name in _RESULT_CODE_NAMES)
 _SECRET_KEY = re.compile(
-    rf"({_ENDINGS}|bearer|cookie|hmac|authorization|webhook_id|cloudhook_url|signature"
+    rf"({_ENDINGS}|bearer|cookie"
     rf"|(?:^|[_-]){_NOT_RESULT_CODE}code$"
     r"|(api|access|private|local|encryption|device|client|master|app|user|shared|signing|session|auth|link|network|aes|ssl)[_-]?key"
     rf"|^(?!{_PLAIN_KEYS}$).*key$"  # any *key: Z-Wave (lr_)s2_*_key, security_key, api-key, ...
-    r"|(^|[_-])(irk|ltk|csrk|pwd|pw|sig|session_?id)$|(^|[_-])otp([_-]|$)"  # BLE bonding keys, one-time codes
-    rf"|(^|[_-])(pass|{_WORDS})$)", re.I)
+    r"|(^|[_-])otp([_-]|$)"  # one-time codes: otp_code, otp_value
+    rf"|(^|[_-])({_WORDS}|session_?id)$)", re.I)
 # The name-and-value rule masks conservatively: after a name it knows, the value is everything to the end of the
 # line unless the text itself says where it ends.  Three rounds of review each found a new leak in the rule this
 # replaces, because that rule described the shapes a value can take (a quote, a wrapper, a bracket, an auth
@@ -59,8 +59,8 @@ _SECRET_KEY = re.compile(
 # because only the singular was a name), then the separator: "=", ":", their percent-encoded spellings
 # ("?password%3Dx", which no rule read as a separator), and any of those with spaces around them.
 _SECRET_TEXT = re.compile(
-    rf"(?:{_ENDINGS}|hmac|authorization|webhook_id|cloudhook_url|signature|(?<![A-Za-z0-9]){_NOT_RESULT_CODE}code|(?<![A-Za-z0-9])(?:{_WORDS})"
-    rf"|\bpwd|\w_pws?+\b|\bsession_?id|\b(?:irk|ltk|csrk|sig)s?+\b|\b(?!{_PLAIN_KEYS}\b)\w*key"
+    rf"(?:{_ENDINGS}|(?<![A-Za-z0-9]){_NOT_RESULT_CODE}code|(?<![A-Za-z0-9])(?:{_WORDS})"
+    rf"|(?<![A-Za-z0-9])session_?id|\b(?!{_PLAIN_KEYS}\b)\w*key"
     r"|(?:api|access|private|local|encryption|device|client|master|app|shared|signing|session|auth|link|network|aes|ssl)[_-]?key"
     r"|(?<![A-Za-z0-9])(?:set-)?cookie)"
     r"s?+(?:\\*+['\"])?+\s*+(?:[=:]|%3[DA])\s*+", re.I)

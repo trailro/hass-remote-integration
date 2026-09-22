@@ -13,6 +13,7 @@ from typing import Any
 
 from aiohttp import web
 
+from .diagnostics import scrub_text
 from .http_util import BadRequest, ManagerView, _bad, _json_object
 from .ui import load_template, render
 from homeassistant.core import HomeAssistant, SupportsResponse
@@ -94,7 +95,8 @@ class ServiceCallView(ManagerView):
         try:
             resp = await task
         except Exception as err:  # noqa: BLE001 - validation errors and integration errors alike go to the UI
-            return self.json({"ok": False, "error": f"{type(err).__name__}: {err}"})
+            # the integration's own text: masked as the MQTT command history masks the same exception
+            return self.json({"ok": False, "error": scrub_text(f"{type(err).__name__}: {err}")})
         out: dict = {"ok": True, "ms": int((time.monotonic() - t0) * 1000)}
         if return_response:
             out["response"] = resp
@@ -108,6 +110,7 @@ class ServiceCallView(ManagerView):
         def done(task: asyncio.Task) -> None:
             cls._in_flight -= 1
             if not task.cancelled() and (err := task.exception()) is not None:
-                _LOGGER.warning("%s.%s from /services failed: %s", domain, service, err)
+                # masked like the answer: the record reaches the container log, which masks nothing itself
+                _LOGGER.warning("%s.%s from /services failed: %s", domain, service, scrub_text(str(err)))
 
         return done

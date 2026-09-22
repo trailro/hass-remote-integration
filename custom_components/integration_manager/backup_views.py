@@ -15,6 +15,7 @@ from homeassistant.core import HomeAssistant
 from jsonio import fsync_dir, ha_vkey, read_json
 
 from . import events, ha_import
+from .diagnostics import scrub_text
 from .http_util import ManagerView, with_body
 
 import backupkit  # /app/backupkit.py (/app is on sys.path)
@@ -82,7 +83,7 @@ class BackupCreateView(ManagerView):
         except ValueError as err:
             return self.json({"ok": False, "error": str(err)})
         except Exception as err:  # noqa: BLE001
-            return self.json({"ok": False, "error": f"{type(err).__name__}: {err}"})
+            return self.json({"ok": False, "error": scrub_text(f"{type(err).__name__}: {err}")})
         return self.json({"ok": True, "backup": rec, "pruned": removed})
 
 
