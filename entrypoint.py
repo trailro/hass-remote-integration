@@ -50,7 +50,10 @@ def _parse_port(raw: str) -> int | None:
 
 
 PORT = _parse_port(os.environ.get("HRI_PORT", "8087"))
-DEFAULT_VERSION = os.environ.get("HA_VERSION_DEFAULT", "2026.8.3")
+# The image sets it (Dockerfile ARG HA_VERSION, the one place the weekly canary moves): a literal fallback here
+# drifted from it, and a fresh volume without network would have installed that stale version.  main() refuses
+# to start without it instead.
+DEFAULT_VERSION = os.environ.get("HA_VERSION_DEFAULT", "")
 # The oldest version this image installs (ha_updater refuses anything older, with no force).  A
 # DEFAULT_VERSION under it would put a version on a fresh volume that the UI then refuses to go back to,
 # so the floor wins and says so.
@@ -318,6 +321,10 @@ def _log_tail() -> str:
 
 
 class _StatusHandler(http.server.BaseHTTPRequestHandler):
+    # every request is one small GET answered at once (no long poll, no stream): a connection that sends nothing
+    # would otherwise hold its thread in readline() for good, and anyone on the LAN could open them by the thousand
+    timeout = 30
+
     def do_GET(self) -> None:  # noqa: N802
         if not status_host_ok(self.headers.get("Host", "")):
             self.send_error(403, "Host not allowed (DNS rebinding guard)")
@@ -663,13 +670,14 @@ def clean_import_leftovers() -> None:
             log(f"removed leftover {rel}")
 
 
-def reset_storage_for_rebuild(wanted: str, restored: bool, storage_restored: bool = False) -> bool:
+def reset_storage_for_rebuild(wanted: str, restored: bool, storage_restored: bool = False, restore_failed: bool = False) -> bool:
     """A downgrade with a clean start (scheduled from the manager): empty
     .storage before the older Home Assistant boots; the manager rebuilds
     the integration's configuration after the start.  Only for the version
     it was scheduled for, with its extracted source and a readable
-    pre-change backup.  True when .storage was emptied.  ``storage_restored``:
-    the restore applied at this boot replaced .storage."""
+    pre-change backup.  True when .storage was emptied.  ``restored``: a restore
+    was applied at this boot; ``storage_restored``: it replaced .storage;
+    ``restore_failed``: one ran and failed (nothing changed, or it was put back)."""
     try:
         with open(REBUILD_FILE, encoding="utf-8") as fh:
             plan = json.load(fh)
@@ -687,6 +695,8 @@ def reset_storage_for_rebuild(wanted: str, restored: bool, storage_restored: boo
     why = ""
     if restored:
         why = "a restore was applied at this boot"
+    elif restore_failed and wanted != plan.get("to"):
+        why = f"Home Assistant {wanted} boots, not {plan.get('to')}"  # also once .storage was emptied for it ("import")
     elif stage not in ("reset", "renaming"):
         return False
     elif wanted != plan.get("to"):
@@ -754,7 +764,7 @@ def reset_storage_for_rebuild(wanted: str, restored: bool, storage_restored: boo
     # the set-aside copy stays until the manager finished the rebuild (ha_import.drop_rebuild removes it)
     plan.update(stage="import", aside=aside_name)
     write_json(REBUILD_FILE, plan)
-    for old in glob.glob(f"{storage}.pre-rebuild-*"):
+    for old in glob.glob(f"{glob.escape(storage)}.pre-rebuild-*"):
         if old != aside:
             shutil.rmtree(old, ignore_errors=True)  # an earlier clean start's copy, only once this one is recorded
     log(f"clean start for Home Assistant {plan.get('to')}: .storage emptied, the integration is rebuilt after the boot (backup {plan.get('backup')})")
@@ -932,7 +942,9 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
                 return back
             log(f"restoring the configuration for the fallback to {wanted} failed and {back} is not installed; booting {wanted}")
             state.pop("recovery", None)
-    reset = reset_storage_for_rebuild(wanted, restored, restored and bool(last.get("ok")) and "storage" in (last.get("parts") or []))
+    # a restore that failed and was put back changed nothing: it does not stand in for the clean start
+    reset = reset_storage_for_rebuild(wanted, restored and bool(last.get("ok")), restored and bool(last.get("ok")) and "storage" in (last.get("parts") or []),
+                                      restore_failed=restored and not last.get("ok"))
     if not isinstance(change, dict):
         return wanted
     if change.get("to") != wanted:
@@ -1000,6 +1012,10 @@ def main() -> None:
     os.makedirs(STATE_DIR, exist_ok=True)  # before the first log() call
     if PORT is None:
         log(f"HRI_PORT={os.environ.get('HRI_PORT')!r} is not a TCP port (1-65535): fix the container's environment; not starting")
+        sys.exit(2)
+    if not DEFAULT_VERSION.strip():
+        log("HA_VERSION_DEFAULT is empty: the image sets it to the Home Assistant version it was built with, so this "
+            "container's environment overrides it with nothing; remove that override. Not starting")
         sys.exit(2)
     _phase("checking the volume")
     _boot_server = start_status_server()
