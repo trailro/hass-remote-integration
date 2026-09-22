@@ -42,6 +42,7 @@ import os
 import threading
 import time
 import traceback
+from collections.abc import Callable, Iterable
 from dataclasses import MISSING, asdict, dataclass, field
 from datetime import timedelta
 from typing import Any
@@ -199,11 +200,16 @@ _SECRET_NAME = (r"(?!(?:translation|sort|primary)_key\b)"
 # of backslashes and quote it opened with.  A longer run is a quote escaped inside it (\\\"); a shorter one, or that
 # quote alone, ends the string around it.  A value never closed (a text the history cut) is masked to the end.  Every repeat
 # is possessive and its branches start on different characters, so the match never fails and nothing is read twice
-# (the lookaheads read at most the run they stand at).
+# (the lookaheads read at most the run they stand at).  One exception: an unquoted value that is an HTTP auth scheme
+# ("Authorization: Bearer <token>", "token: Basic <credentials>") takes the credential after it, which a value ending at
+# the first space would print; when no credential follows, the scheme word and its spaces are read a second time as a
+# plain value, once per name: still linear.
+_AUTH_SCHEMES = ("bearer", "basic", "digest", "token", "negotiate", "ntlm", "hoba", "mutual")
 _CODE_VALUE = re.compile(
     r"""((?<![A-Za-z0-9_-])""" + _SECRET_NAME + r"""(?:\\*+["'])?\s*+[:=]\s*+)"""
     r"""(?:(\\++)(["'])(?:[^\\"']++|(?!\3)["']|\\++(?!\3)|(?!\2\3)(?=\2)\\++\3)*+(?:\2\3)?"""
-    r"""|"(?:[^"\\]++|\\[\s\S])*+"?|'(?:[^'\\]++|\\[\s\S])*+'?|[^,}\s]++)""",
+    r"""|"(?:[^"\\]++|\\[\s\S])*+"?|'(?:[^'\\]++|\\[\s\S])*+'?"""
+    r"""|(?:""" + "|".join(_AUTH_SCHEMES) + r""")[ \t]++[^,}\s]++|[^,}\s]++)""",
     re.IGNORECASE)
 _CODE_VALUE_CUT = _CODE_VALUE  # the rule for a text cut to MASK_SCAN_CHARS: a value the cut left open is one never closed
 # what the text rule reads of a history row, a status line or a log line (shown cut to a few hundred characters)
@@ -213,6 +219,34 @@ _JSON_STRING = re.compile(r'"(?:[^"\\]+|\\.)*"?')
 _JSON_BRACKET = re.compile(r"[\[\]{}]")
 # service data fields that name entities besides the target (media_player.join, scene.apply/create, group.set, ...)
 _ENTITY_LIST_KEYS = frozenset({"group_members", "snapshot_entities", "entities", "add_entities", "remove_entities"})
+
+
+def password_text(hass: HomeAssistant, entity_id: str) -> bool:
+    """A text entity in password mode, read like discovery reads it: its state attributes, else its registry
+    capabilities (an entity without a state yet)."""
+    state = hass.states.get(entity_id)
+    if state is not None:
+        attrs = state.attributes
+    else:
+        entry = er.async_get(hass).async_get(entity_id)
+        attrs = (entry.capabilities or {}) if entry is not None else {}
+    return attrs.get("mode") == "password"
+
+
+def password_value(hass: HomeAssistant, domain: str, service: str, data: dict[str, Any],
+                   reachable: Callable[[], Iterable[str]]) -> str | None:
+    """The value of a text.set_value call that may reach a text entity in password mode: one named in entity_id, or,
+    for a target by area, device, floor or label, any entity of `reachable` in that mode.  The MQTT calls and the
+    Services page mask it with this, so what is sent to such an entity never shows in a history or a log."""
+    value = data.get("value")
+    if (domain, service) != ("text", "set_value") or not isinstance(value, str) or not value:
+        return None
+    ids = data.get("entity_id")
+    named = [ids] if isinstance(ids, str) else ids if isinstance(ids, list) else []
+    candidates = {p.strip().lower() for x in named if isinstance(x, str) for p in x.split(",")}
+    if any(k in data for k in ("area_id", "device_id", "floor_id", "label_id")):
+        candidates |= {e for e in reachable() if e.startswith("text.")}
+    return value if any(password_text(hass, e) for e in candidates if e.startswith("text.")) else None
 
 
 def _mask_codes(text: str, limit: int | None = None) -> str:
@@ -560,6 +594,11 @@ _ENTITY_SERVICE_CALLS = frozenset({"entity_service_call", "batched_entity_servic
 class MqttPublisher:
     _stopping = False  # Home Assistant is stopping: no client may be created any more
     _identity_sweep_due = False  # the sweep of an identity that changed while disconnected failed: retried after a connect
+    # the last CONNACK was a refusal: paho follows it with a disconnection ("Unspecified error"), which must not replace the reason
+    _refused = False
+    # manager device discovery topics announced to the main HA (kept on disk), None before a record exists (a new install, or
+    # one upgraded from a version that kept none).  Replaced as a whole, never changed in place
+    _manager_announced: frozenset[str] | None = None
     # (base topic, host, port, tls, username) -> {base, prefix, broker, error, since}: uninstalled identities whose retained
     # data that broker did not take, retried by a timer (no identity is needed) while the settings name that broker, and
     # never sent to another one.  Replaced as a whole, never changed in place, under the lock
@@ -949,6 +988,7 @@ class MqttPublisher:
     async def async_start(self) -> None:
         self._undiscover_due = await self.hass.async_add_executor_job(self._read_undiscover_due)
         self._cleanup_pending = await self.hass.async_add_executor_job(self._read_cleanup_pending)
+        self._manager_announced = await self.hass.async_add_executor_job(self._read_manager_announced)
         # listeners for the life of the process: the publisher is never set up twice
         self.hass.bus.async_listen(EVENT_STATE_CHANGED, self._on_state)
         self.hass.bus.async_listen(er.EVENT_ENTITY_REGISTRY_UPDATED, self._on_registry)
@@ -1600,6 +1640,7 @@ class MqttPublisher:
         exists, and a refusal by the next one (another broker, perhaps) is news.  paho's own reconnects do not come here."""
         self.stats["connect_error"] = self.stats["subscribe_error"] = ""
         self._last_refusal = ""
+        self._refused = False
         self._last_subscribe_error = ""
 
     def _on_connect(self, client, userdata, flags, reason_code, properties=None) -> None:
@@ -1608,16 +1649,22 @@ class MqttPublisher:
         if reason_code != 0:
             self._connected = False
             self.stats["connected"] = False
+            # paho 2.1 calls on_disconnect right after a refused CONNACK (MQTT 5 and 3.1.1 alike), with a reason of its
+            # own ("Unspecified error"): _on_disconnect keeps what is said here
+            self._refused = True
             if self._learned_mqtt311(client, reason_code):
                 self.stats["connect_error"] = "the broker refused MQTT 5: reconnecting with MQTT 3.1.1"
                 self._replace_client_soon(client)
                 return
-            self.stats["connect_error"] = f"reason_code={reason_code}"
             reason = str(reason_code)
-            if reason != self._last_refusal:  # one line per reason, like a disconnection: paho retries for ever,
-                self._last_refusal = reason   # and a wrong password would otherwise write ~1440 ERRORs a day
+            what = "login" if reason in ("Not authorized", "Bad user name or password") else "connection"
+            self.stats["connect_error"] = f"the broker refused the {what} (reason_code={reason_code}); retrying"
+            if reason != self._last_refusal:  # one line and one event per reason, like a disconnection: paho retries
+                self._last_refusal = reason   # for ever, and a wrong password would otherwise write ~1440 ERRORs a day
                 _LOGGER.error("MQTT connect refused: %s", reason_code)
+                events.emit("mqtt", f"the broker refused the {what}: {reason_code}")
             return
+        self._refused = False
         if self._stopping:
             return  # no "online" and no republish while Home Assistant stops
         if self._learned_receive_max(client, properties):
@@ -1784,6 +1831,9 @@ class MqttPublisher:
         # large" (what mosquitto sends) reaches us as a normal disconnection, and a broker never ends a session we did
         # not ask it to end for a normal reason
         from_broker = getattr(flags, "is_disconnect_packet_from_server", False) is True
+        if self._refused:
+            self._refused = False  # the end of the refused attempt: its reason is reported and stays the status
+            return
         if reason_code != 0 or from_broker:
             reason = str(reason_code) if reason_code != 0 else "the broker ended the session"
             # A plain connection to a TLS listener never gets a CONNACK, so the TLS hint is only honest while
@@ -2006,29 +2056,11 @@ class MqttPublisher:
         return pending
 
     def _password_text(self, entity_id: str) -> bool:
-        """A text entity in password mode, read like discovery reads it: its state attributes, else its registry
-        capabilities (an entity without a state yet)."""
-        state = self.hass.states.get(entity_id)
-        if state is not None:
-            attrs = state.attributes
-        else:
-            entry = er.async_get(self.hass).async_get(entity_id)
-            attrs = (entry.capabilities or {}) if entry is not None else {}
-        return attrs.get("mode") == "password"
+        return password_text(self.hass, entity_id)
 
     def _password_value(self, domain: str, service: str, data: dict[str, Any]) -> str | None:
-        """The value of a text.set_value call that may reach a text entity in password mode: one named in entity_id, or,
-        for a target by area, device, floor or label, any published text entity in that mode."""
-        value = data.get("value")
-        if (domain, service) != ("text", "set_value") or not isinstance(value, str) or not value:
-            return None
-        ids = data.get("entity_id")
-        named = [ids] if isinstance(ids, str) else ids if isinstance(ids, list) else []
-        candidates = {p.strip().lower() for x in named if isinstance(x, str) for p in x.split(",")}
-        if any(k in data for k in ("area_id", "device_id", "floor_id", "label_id")):
-            # paho's thread: a snapshot, the loop adds and removes entities meanwhile
-            candidates |= {e for e in list(self._topics) if e.startswith("text.")}
-        return value if any(self._password_text(e) for e in candidates if e.startswith("text.")) else None
+        # paho's thread: a snapshot of the published entities, the loop adds and removes them meanwhile
+        return password_value(self.hass, domain, service, data, lambda: list(self._topics))
 
     def _on_manager_command(self, action: str, payload: str) -> None:
         """<base>/manager/cmd/<action> (paho thread): see manager_device.py."""
@@ -3074,7 +3106,10 @@ class MqttPublisher:
         # flips in the _on_connect callback, on paho's own thread.  Answering 0 here because the CONNACK
         # has not landed yet meant a version switch never cleared the documents of entities the new
         # version dropped: they stayed on the main Home Assistant until an unrelated republish.  The
-        # broker being genuinely down still answers 0, five seconds later.
+        # broker being genuinely down still answers 0, five seconds later.  With MQTT off nothing will connect: no
+        # wait, and no warning about a connection nobody asked for.
+        if not self.config.enabled:
+            return 0
         if not self._connected:
             deadline = time.monotonic() + self.CONNECT_GRACE_S
             while not self._connected and time.monotonic() < deadline:
@@ -3258,12 +3293,62 @@ class MqttPublisher:
         mid, block, comps = self._manager_discovery()
         if self.config.manager_discovery:
             self._publish_device_discovery(mid, block, comps)
-        elif not self._manager_absent_sent and self._publish(self._discovery_topic(mid), None, qos=1):
-            # once per connection, no memory needed: turned off while disconnected
-            # or across a restart still removes a device announced earlier
-            self._discovery_map.pop(mid, None)
-            self._blocks.pop(mid, None)
+            if mid in self._discovery_map:  # published (with entity discovery on, turning that off removes it)
+                self._set_manager_announced(self._discovery_topic(mid), True)
+                self._manager_absent_sent = False  # turned off again later in this connection: removed again
+            return
+        if self._manager_absent_sent:
+            return
+        topic = self._discovery_topic(mid)
+        # Removed only when there is something to remove: an empty config for a device the main HA never received makes
+        # it warn "No device components to cleanup" at every connect.  What was announced is kept on disk, so turning it
+        # off while disconnected or across a restart still removes it; without a record the broker is asked, once.
+        if self._manager_announced is None:
             self._manager_absent_sent = True
+            self.hass.async_create_background_task(self._async_clear_manager_if_retained(mid, topic),
+                                                   "integration_manager MQTT manager device check")
+        elif topic not in self._manager_announced:
+            self._manager_absent_sent = True
+        elif self._publish(topic, None, qos=1):
+            self._manager_removed(mid, topic)
+
+    def _manager_removed(self, mid: str, topic: str) -> None:
+        self._discovery_map.pop(mid, None)
+        self._blocks.pop(mid, None)
+        self._manager_absent_sent = True
+        self._set_manager_announced(topic, False)
+
+    async def _async_clear_manager_if_retained(self, mid: str, topic: str) -> None:
+        """No record of what was announced (a new install, or one upgraded from a version that kept none): a manager
+        device config retained on the broker is what the main HA has; one that is not there needs no removal."""
+        try:
+            found = await self.hass.async_add_executor_job(self._retained_scan, "mgr", [(topic, 1)])
+        except Exception as err:  # noqa: BLE001 - unknown, so removed as before: at worst the main HA warns once
+            _LOGGER.debug("MQTT: could not read the retained manager device config (%s): removing it", err)
+            found = {topic: b"?"}
+        if not self._connected or self._moving or self.config.manager_discovery or self.config.discovery_enabled:
+            return  # the settings or the connection changed meanwhile: the next pass decides
+        if not found.get(topic):
+            self._set_manager_announced(topic, False)
+        elif self._publish(topic, None, qos=1):
+            self._manager_removed(mid, topic)
+
+    def _manager_announced_file(self) -> str:
+        return self.hass.config.path("integration_manager", "mqtt_manager_device.json")
+
+    def _read_manager_announced(self) -> frozenset[str] | None:
+        """Blocking."""
+        data = read_json(self._manager_announced_file(), None)
+        topics = data.get("announced") if isinstance(data, dict) else None
+        return frozenset(t for t in topics if isinstance(t, str)) if isinstance(topics, list) else None
+
+    def _set_manager_announced(self, topic: str, announced: bool) -> None:
+        """Loop: written by the ordered writer, and only on a change (the manager config is re-announced every minute)."""
+        current = self._manager_announced or frozenset()
+        if self._manager_announced is not None and (topic in current) == announced:
+            return
+        self._manager_announced = current | {topic} if announced else current - {topic}
+        writer.write_nowait(self._manager_announced_file(), {"announced": sorted(self._manager_announced)}, fsync=False)
 
     def _manager_discovery(self) -> tuple[str, dict[str, Any], dict[str, dict[str, Any]]]:
         return disc.manager_device(
