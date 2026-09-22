@@ -196,6 +196,14 @@ def _manual_restore_pending(config_dir: str) -> bool:
     return backupkit.pending(config_dir) and not backupkit.pending_for_version(config_dir)
 
 
+def _rollback_restore_pending(installer: Installer, config_dir: str) -> str | None:
+    """Blocking: the backup of the full rollback whose restore is the one scheduled, if it is."""
+    rollback = getattr(getattr(installer, "state", None), "rollback_backup", None)
+    if rollback and (backupkit._pending_meta(config_dir) or {}).get("name") == rollback:  # noqa: SLF001
+        return rollback
+    return None
+
+
 def _restore_newer_than(config_dir: str, target: str) -> str | None:
     """Blocking: the Home Assistant version a restore scheduled by hand or by a full rollback was made on, when
     its .storage is newer than ``target``.  The boot of ``target`` drops that restore (it cannot read it:
@@ -245,12 +253,14 @@ async def async_change_ha_version(installer: Installer, updater: HaUpdater, targ
         installer.busy = True  # right away: nothing may start an install while this change is prepared
         try:
             if mode != "keep" and await hass.async_add_executor_job(_manual_restore_pending, cfg):
+                # a full rollback's restore cannot be cancelled (RestoreCancelView): only the restart finishes it
+                if (rollback := await hass.async_add_executor_job(_rollback_restore_pending, installer, cfg)):
+                    raise ValueError(f"a full rollback restores {rollback} at the next restart: restart to finish the rollback first")
                 raise ValueError("a restore scheduled on System is waiting for the restart: cancel it first")
             if mode == "keep" and (made_on := await hass.async_add_executor_job(_restore_newer_than, cfg, target)):
                 # a keep leaves that restore scheduled, and the boot of the older target drops it.  After a full
                 # rollback that boots the previous code on the .storage the rejected version migrated
-                rollback = getattr(getattr(installer, "state", None), "rollback_backup", None)
-                if rollback and (await hass.async_add_executor_job(backupkit._pending_meta, cfg) or {}).get("name") == rollback:  # noqa: SLF001
+                if (rollback := await hass.async_add_executor_job(_rollback_restore_pending, installer, cfg)):
                     raise ValueError(f"a full rollback restores {rollback} (made on Home Assistant {made_on}) at the next restart and "
                                      f"{target} cannot read it: restart to finish the rollback first")
                 raise ValueError(f"a restore scheduled on System (a backup made on Home Assistant {made_on}) is waiting for the restart "
