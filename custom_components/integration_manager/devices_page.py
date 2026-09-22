@@ -124,33 +124,51 @@ class DeviceActionView(ManagerView):
                 update(device_id, name_by_user=(name.strip() or None) if name else None)
                 return self.json({"ok": True})
             if action == "delete":
-                dev = reg.async_get(device_id)
-                removed = 0
-                child = disc.is_child_device(dev)
-                entry_ids = [dev.config_entry_id] if child and getattr(dev, "config_entry_id", None) else list(getattr(dev, "config_entries", None) or [])
-                for entry_id in entry_ids:
-                    entry = self.hass.config_entries.async_get_entry(entry_id)
-                    if entry is None:
-                        continue
-                    try:
-                        integration = await loader.async_get_integration(self.hass, entry.domain)
-                        component = await integration.async_get_component()
-                    except Exception:  # noqa: BLE001
-                        component = None
-                    hook = getattr(component, "async_remove_config_entry_device", None)
-                    if hook is None:
-                        return self.json({"ok": False, "error": f"{entry.domain} does not allow removing devices (no async_remove_config_entry_device), like in HA"})
-                    if not await hook(self.hass, entry, dev):
-                        return self.json({"ok": False, "error": f"{entry.domain} refused to remove this device"})
-                    if child:
-                        reg.async_remove_device(device_id)  # a child device belongs to one entry: removed as a whole
-                        removed += 1
-                        break
-                    reg.async_update_device(device_id, remove_config_entry_id=entry_id)
-                    removed += 1
-                if reg.async_get(device_id) is not None and removed == 0:
-                    reg.async_remove_device(device_id)  # orphan device without config entries
-                return self.json({"ok": True, "config_entries_detached": removed})
+                return await self._delete(reg, device_id)
         except Exception as err:  # noqa: BLE001
             return self.json({"ok": False, "error": f"{type(err).__name__}: {err}"})
         return self.json_message("unknown action", status_code=400)
+
+    async def _delete(self, reg: Any, device_id: str) -> web.Response:
+        """Every entry's removal hook is looked up before anything changes: an entry whose integration
+        has none refuses the delete as a whole.  A hook that refuses or fails after an earlier entry was
+        detached cannot be undone (that hook has done its cleanup); the answer names what was detached."""
+        dev = reg.async_get(device_id)
+        child = disc.is_child_device(dev)
+        entry_ids = [dev.config_entry_id] if child and getattr(dev, "config_entry_id", None) else list(getattr(dev, "config_entries", None) or [])
+        targets = []
+        for entry_id in entry_ids:
+            entry = self.hass.config_entries.async_get_entry(entry_id)
+            if entry is None:
+                continue
+            try:
+                integration = await loader.async_get_integration(self.hass, entry.domain)
+                component = await integration.async_get_component()
+            except Exception:  # noqa: BLE001
+                component = None
+            hook = getattr(component, "async_remove_config_entry_device", None)
+            if hook is None:
+                return self.json({"ok": False, "error": f"{entry.domain} does not allow removing devices (no async_remove_config_entry_device), like in HA"})
+            targets.append((entry, hook))
+        detached: list[str] = []
+
+        def failed(error: str) -> web.Response:
+            if detached:
+                error += f"; already detached from {', '.join(detached)} (not undone)"
+            return self.json({"ok": False, "error": error, "config_entries_detached": len(detached)})
+
+        for entry, hook in targets:
+            try:
+                if not await hook(self.hass, entry, dev):
+                    return failed(f"{entry.domain} refused to remove this device")
+                if child:
+                    reg.async_remove_device(device_id)  # a child device belongs to one entry: removed as a whole
+                    detached.append(entry.domain)
+                    break
+                reg.async_update_device(device_id, remove_config_entry_id=entry.entry_id)
+            except Exception as err:  # noqa: BLE001
+                return failed(f"{entry.domain}: {type(err).__name__}: {err}")
+            detached.append(entry.domain)
+        if reg.async_get(device_id) is not None and not detached:
+            reg.async_remove_device(device_id)  # orphan device without config entries
+        return self.json({"ok": True, "config_entries_detached": len(detached)})
