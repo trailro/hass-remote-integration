@@ -294,6 +294,25 @@ Choose whichever fits the integration, on the **Integration** page:
   original, before it deletes the extracted backup. A restart at any point
   leaves either the imported entry with the imported store, or no entry and
   the volume's own store as it was.
+  An import never goes next to a config entry the integration already has
+  here: *Import* of one entry (`POST /api/import/apply`) is refused with
+  "already has a config entry here" (delete that entry on the config flow page
+  first; the uploaded backup stays for the retry), and *Import all*
+  (`POST /api/import/apply_all`) skips every integration that has entries of
+  its own and lists them under `skipped`. An entry imported from this same
+  backup before is skipped as "already imported", and the other entries of its
+  integration still come over. Import all deletes the uploaded backup once
+  nothing failed, skipped entries included, even when everything was skipped:
+  to import a skipped integration after deleting its entry, upload the backup
+  again.
+  The result's `alignment` counts what was aligned at the moment the entry had
+  just set up: `entities` and `devices` are the ones that already existed then
+  (an entity with a state, or one its integration ships disabled that you had
+  turned on). Entities and devices the integration creates later are aligned as
+  they are created and are not added to those counters; `pending_entities` and
+  `pending_devices` are the map entries still waiting for theirs at that moment,
+  so a small `entities` with a large `pending_entities` is normal for an
+  integration that adds its entities after setup.
 
 ### 3. Start it
 
@@ -305,7 +324,7 @@ changes. Each requirement gets 30 minutes to install: one that takes longer (a
 build that hangs, a download that never ends) is stopped together with
 everything it started and reported as `pip failed for: <requirement>`, so the
 manager does not stay busy until the container restarts. Starting a version other than the deployed one runs its preflight
-first (not for an integration without a GitHub repository; see
+first (not for a release of an integration without a GitHub repository, but a dev build always; see
 [Updating the integration](#updating-the-integration)); blockers ask whether
 to start anyway. If a start fails after the new files went out, the files of the
 version that was running are put back.
@@ -457,9 +476,11 @@ started from your main HA over MQTT refuses on blockers, since nobody is there
 to confirm, and says why in its result. Through the API, `POST /api/run/start`
 answers `needs_force` with the report, and `force: true` starts anyway; a
 version that is not in the store is refused plainly, with nothing to force.
-Starting the version that is already deployed, an integration without a GitHub
-repository, a rollback and a restore skip the preflight. A dev build does not:
-the check reads the copy on the volume, never GitHub, so an uploaded tree is as
+Starting the version that is already deployed, a release of an integration
+without a GitHub repository, a rollback and a restore skip the preflight. A dev
+build does not, also one of a domain that has no repository (a new domain
+installed from the dev directory is registered without one): the check reads
+the copy on the volume, never GitHub, so an uploaded tree is as
 checkable as a release, and its report is keyed on when that copy was
 installed, so the next upload is checked again. A
 preflight that cannot run (GitHub is unreachable, for example) does not stop the
@@ -1301,6 +1322,12 @@ hass_<domain>/manager/result                        outcome of a manager action,
   logged under `custom_components.integration_manager.mqtt_publisher.paho`
   (INFO and above; DEBUG gives a packet trace, which names topics and sizes but
   never the password or a payload).
+- **Refused login**: a broker that refuses the connection (a wrong user
+  name or password, a client the ACL does not know) is logged once and put on
+  the timeline once as `the broker refused the login: Not authorized` (or the
+  broker's other reason); `connect_error` of `GET /api/mqtt/status` and the MQTT
+  page keep that reason for as long as the client library retries, instead of
+  the `Unspecified error` disconnection the library reports after each refusal.
 - **Discovery** (off by default): one retained config per device. Entities of
   every domain that has an MQTT platform become native entities with working
   commands; the rest (cameras, media players, weather, …) are mirrored as
@@ -1388,13 +1415,19 @@ hass_<domain>/manager/result                        outcome of a manager action,
 - **Commands**: numeric command topics accept only finite numbers. Text
   values, notify messages and select options are used exactly as sent, spaces
   included. The value sent to a `text` entity in password mode, on any of its
-  command topics or with `text.set_value`, shows as `***` in the command history, the
-  status and the log, also inside a service error that quotes it (the result
-  sent back to the caller keeps it). What a service *says back* is masked too:
+  command topics, with `text.set_value` over MQTT or from the Services page,
+  shows as `***` in the command history, the status and the log, also inside a
+  service error that quotes it (the result sent back to the caller keeps it).
+  Only what is sent is masked: the entity's state is its value, and it is
+  published in the entity's retained document and mirrored on the main Home
+  Assistant as it is, readable by anyone who may read the base topic, like any
+  other state (see the note on state attributes above). What a service *says back* is masked too:
   an exception is free-form text, so the command history, `GET
   /api/mqtt/commands`, the status document and the log line run it through the
   same rules the Logs page uses — a password, a `?token=` URL or an
   `Authorization: Bearer …` in an integration's error message comes out `***`,
+  and so does a credential written after an auth scheme in what the caller
+  sent (`"Authorization: Bearer …"`, `token: Basic …` in a call's data),
   while an ordinary failure stays readable word for word. The two bounds of a thermostat range change arrive as two
   commands and become one service call: the first waits up to 1 s for the
   second. An alarm panel with a code asks for it on the main HA and sends it
@@ -1581,6 +1614,14 @@ hass_<domain>/manager/result                        outcome of a manager action,
   entities go unavailable when three minutes pass without one, so a stuck
   container never keeps showing an old `ok`. They also stay unavailable during a
   restart until Home Assistant in the container has started again.
+  Turning `manager_discovery` off (with discovery off) removes the device from
+  the main Home Assistant at the next connection or health tick, also after a
+  restart: the container keeps a record of having announced it
+  (`integration_manager/mqtt_manager_device.json`). Without that record (a new
+  install, or an upgrade from a version that kept none) it looks for the
+  retained config on the broker once and removes it only if it is there, so the
+  main Home Assistant is no longer sent a removal for a device it never had
+  (which it logged as `No device components to cleanup` at every connection).
 - **Manager actions** (`manager_commands`, off by default): *Install* on the
   integration and Home Assistant update entities (each at most every 10
   minutes), plus *Restart*, *Back up now* (at most every 10 minutes) and *Check
