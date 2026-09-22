@@ -1,7 +1,8 @@
 """Uploads bigger than the HTTP server's client_max_size (Home Assistant sets 16 MB) must still arrive whole.
 
-aiohttp applies client_max_size to request.read()/post()/json() and to BodyPartReader.read(); the upload views
-stream the part with read_chunk(), which it does not cap.  Pinned against a real aiohttp server with a 1 MB cap,
+aiohttp applies client_max_size to request.read()/post()/json() (and, from 3.14, to BodyPartReader.read(); the
+3.13.5 Home Assistant 2026.5.0 pins does not); the upload views stream the part with read_chunk(), which no
+version caps.  Pinned against a real aiohttp server with a 1 MB cap,
 so an aiohttp or view change that starts buffering the part fails here, not on an operator's 2 GB import."""
 
 import asyncio
@@ -29,9 +30,8 @@ def _post(view_cls, filename, payload, cfg):
     view = view_cls(hass)
     view.json = web.json_response
 
-    async def buffered(request):  # the control: the same request read whole hits the cap
-        field = await (await request.multipart()).next()
-        return web.json_response({"bytes": len(await field.read())})
+    async def buffered(request):  # the control: the same request read whole hits the cap, in every aiohttp version
+        return web.json_response({"bytes": len(await request.read())})
 
     async def run():
         app = web.Application(client_max_size=CAP)
