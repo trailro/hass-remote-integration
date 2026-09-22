@@ -36,7 +36,8 @@ from plain HTTP traffic. These are:
   diagnostics zip, the UI or what is published over MQTT (an entity's
   `access_token`, or a URL carrying a token in a document, in what `GET /api/entities` answers for a
   published or an excluded entity alike, and in the error an integration's own exception puts in the
-  command history or the log); the log searches run on the masked text and a
+  command history, the log or the answer to a request from the UI); the log
+  searches run on the masked text and a
   search for key material returns nothing by design, but redaction of material
   that carries no marker and no name in front of it is best effort — a report
   needs a case where something the scrubber does name comes out unmasked. A
@@ -122,8 +123,9 @@ those projects.
   is date-versioned and has only a floor), and resolved against Home
   Assistant's constraints.
 - **State attributes are mirrored as the integration sets them.** Only
-  `access_token` and URLs carrying a `token=` are left out of entity documents
-  (they open this container's proxy). An attribute named `password`, `pin` or
+  `access_token` and URLs carrying a `token=` are left out of entity documents,
+  at any depth in the attributes (they open this container's proxy); a token in
+  the state itself is masked as `***`. An attribute named `password`, `pin` or
   `api_key` is published like any other: filtering by name would drop real data
   (`error_code`, `zip_code`, a GPIO `pin`) that the main Home Assistant shows
   today. A secret in a state attribute is a bug of that integration.
