@@ -47,6 +47,8 @@ from datetime import timedelta
 from typing import Any
 
 import paho.mqtt.client as mqtt
+from paho.mqtt.packettypes import PacketTypes
+from paho.mqtt.properties import Properties
 from paho.mqtt.subscribeoptions import SubscribeOptions
 
 from homeassistant.config_entries import SIGNAL_CONFIG_ENTRY_CHANGED
@@ -132,14 +134,26 @@ CLEARED_ECHO_MAX = 64
 # stop this instance or run arbitrary commands); the catalog hides them too.
 CALL_DENY_DOMAINS = frozenset({"homeassistant", "shell_command", "python_script", "hassio", "integration_manager"})
 # Over MQTT only (the Services page is the operator's): dismiss_all from anyone with broker credentials would erase
-# the manager's own smoke-test and HA-change notifications, and create could plant fake ones.
-MQTT_CALL_DENY_DOMAINS = CALL_DENY_DOMAINS | {"persistent_notification"}
+# the manager's own smoke-test and HA-change notifications, and create could plant fake ones.  The system services an
+# integration's dependencies can bring along take no target, so the published-entity check never refuses them:
+# recorder (purge deletes history, disable stops it), logger (log levels), system_log (writes and clears log
+# entries), backup (a full backup of /config each call) and conversation (process runs a sentence against every
+# entity here, published or not).  None is loaded unless the running integration depends on it.
+MQTT_CALL_DENY_DOMAINS = CALL_DENY_DOMAINS | {"persistent_notification", "recorder", "logger", "system_log", "backup", "conversation"}
 # notify.persistent_notification creates the same notifications as persistent_notification.create
 MQTT_CALL_DENY_SERVICES = frozenset({("notify", "persistent_notification")})
 # A call payload is scanned before it is parsed: a huge or deeply nested one is refused with an answer
 # (json.loads would raise RecursionError, and everything that walks the data after it could too).
 CALL_MAX_BYTES = 256 * 1024
 CALL_MAX_DEPTH = 64
+# The largest packet the main connection takes from the broker, announced in its CONNECT (MQTT 5's Maximum Packet
+# Size).  All it subscribes to is commands, calls and manager actions, each refused over CALL_MAX_BYTES; unannounced,
+# paho reads a packet of any length the protocol allows (256 MiB) into memory first, and mosquitto forwards whatever it
+# accepted (max_packet_size 0 by default).  A broker drops a larger message for this client instead of sending it (MQTT 5
+# 3.1.2.11.4), so a call that large gets no answer.  The headroom covers the longest topic and the properties.  Only
+# the main connection announces it: the scan clients read retained data of any size by design (a foreign document too
+# large to reach them would make the base-topic probe pass), and an MQTT 3.1.1 connection cannot announce anything.
+INBOUND_MAX_PACKET = CALL_MAX_BYTES + 64 * 1024
 
 # A packet over the broker's maximum makes the broker close the connection, and paho replays the queued
 # QoS 1 message on every automatic reconnect: one oversized document loops the bridge and stops everything
@@ -859,9 +873,17 @@ class MqttPublisher:
         return True
 
     @staticmethod
-    def _connect_options(client: mqtt.Client) -> dict[str, Any]:
+    def _connect_options(client: mqtt.Client, inbound_max: int = 0) -> dict[str, Any]:
+        """inbound_max: the Maximum Packet Size the client announces (MQTT 5 only), 0 for none."""
+        if getattr(client, "protocol", None) != mqtt.MQTTv5:
+            return {}
         # MQTT 5 has no clean_session; clean_start on every connect (paho's default is the first only) is the same thing
-        return {"clean_start": True} if getattr(client, "protocol", None) == mqtt.MQTTv5 else {}
+        options: dict[str, Any] = {"clean_start": True}
+        if inbound_max:
+            props = Properties(PacketTypes.CONNECT)
+            props.MaximumPacketSize = inbound_max
+            options["properties"] = props  # paho sends it again on every automatic reconnect
+        return options
 
     def _new_client(self, client_id: str) -> mqtt.Client:
         """A paho client with the configured credentials and TLS: the connection, and every scan, probe and cleanup."""
@@ -1484,7 +1506,7 @@ class MqttPublisher:
             c.on_subscribe = self._on_subscribe
             c.suppress_exceptions = True  # a callback bug must not kill the network thread
             c.reconnect_delay_set(min_delay=2, max_delay=60)
-            c.connect_async(self.config.host, self.config.port, keepalive=60, **self._connect_options(c))
+            c.connect_async(self.config.host, self.config.port, keepalive=60, **self._connect_options(c, INBOUND_MAX_PACKET))
             self._client = c  # before its network thread starts: "online" goes out only for the current client
             c.loop_start()
             self.stats["connect_error"] = ""
