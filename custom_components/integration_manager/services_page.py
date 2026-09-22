@@ -18,7 +18,7 @@ from .http_util import BadRequest, ManagerView, _bad, _json_object
 from .ui import load_template, render
 from homeassistant.core import HomeAssistant, SupportsResponse
 
-from .mqtt_publisher import CALL_DENY_DOMAINS, CALL_TIMEOUT_S, CALLS_IN_FLIGHT_MAX, _json_default
+from .mqtt_publisher import CALL_DENY_DOMAINS, CALL_TIMEOUT_S, CALLS_IN_FLIGHT_MAX, _json_default, password_value
 from .services_catalog import service_rows
 
 _LOGGER = logging.getLogger(__name__)
@@ -87,7 +87,10 @@ class ServiceCallView(ManagerView):
             self.hass.services.async_call(domain, service, data, blocking=True, target=target or None,
                                           return_response=return_response))
         type(self)._in_flight += 1
-        task.add_done_callback(self._call_done(domain, service))
+        # a value sent to a text entity in password mode stays out of the log, as over MQTT (text's own error quotes it)
+        secret = password_value(self.hass, domain, service, {**data, **(target or {})},
+                                lambda: self.hass.states.async_entity_ids("text"))
+        task.add_done_callback(self._call_done(domain, service, secret))
         finished, _ = await asyncio.wait({task}, timeout=CALL_TIMEOUT_S)
         if not finished:
             _LOGGER.warning("%s.%s from /services timed out after %ss", domain, service, CALL_TIMEOUT_S)
@@ -103,14 +106,16 @@ class ServiceCallView(ManagerView):
         return web.json_response(out, dumps=lambda o: json.dumps(o, default=_json_default))
 
     @classmethod
-    def _call_done(cls, domain: str, service: str) -> Any:
+    def _call_done(cls, domain: str, service: str, secret: str | None = None) -> Any:
         """Frees the slot whenever the call ends, however late, and keeps a
         timed-out call's exception from being reported as never retrieved."""
 
         def done(task: asyncio.Task) -> None:
             cls._in_flight -= 1
             if not task.cancelled() and (err := task.exception()) is not None:
-                # masked like the answer: the record reaches the container log, which masks nothing itself
-                _LOGGER.warning("%s.%s from /services failed: %s", domain, service, scrub_text(str(err)))
+                # masked like the answer: the record reaches the container log, which masks nothing itself.  The answer
+                # keeps a password-mode value (the caller sent it); the log does not
+                text = str(err).replace(secret, "***") if secret else str(err)
+                _LOGGER.warning("%s.%s from /services failed: %s", domain, service, scrub_text(text))
 
         return done
