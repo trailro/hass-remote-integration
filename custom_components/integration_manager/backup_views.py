@@ -7,6 +7,7 @@ import os
 import re
 import tempfile
 from typing import Any
+from urllib.parse import quote
 
 from aiohttp import web
 from homeassistant.const import __version__ as HA_VERSION
@@ -24,7 +25,22 @@ MAX_UPLOAD = 200 * 1024 * 1024
 
 
 def _name_ok(name: str) -> bool:
-    return bool(_NAME_RE.match(name)) and ".." not in name
+    if ".." in name:
+        return False
+    if _NAME_RE.match(name):
+        return True
+    # a backup made before labels were reduced to ASCII in its file name (backupkit.file_label) kept the letters
+    # of any alphabet str.isalnum() takes ("...-înainte.zip"): still downloadable, restorable and deletable
+    stem = name[:-len(".zip")]
+    return name.endswith(".zip") and len(name) <= _NAME_MAX and stem[:1].isalnum() \
+        and all(ch.isalnum() or ch in "._-" for ch in stem)
+
+
+def _attachment(name: str) -> str:
+    """Content-Disposition for a download: an older backup's name may not be ASCII (RFC 6266 filename*)."""
+    if name.isascii():
+        return f'attachment; filename="{name}"'
+    return f"attachment; filename=\"{backupkit.file_label(name[:-len('.zip')])}.zip\"; filename*=UTF-8''{quote(name, safe='')}"
 
 
 class BackupsView(ManagerView):
@@ -160,7 +176,7 @@ class BackupActionView(ManagerView):
         path = os.path.join(self.hass.config.config_dir, backupkit.BACKUP_DIR, name)
         if not await self.hass.async_add_executor_job(os.path.isfile, path):
             return self.json_message("not found", status_code=404)
-        return web.FileResponse(path, headers={"Content-Disposition": f'attachment; filename="{name}"'})
+        return web.FileResponse(path, headers={"Content-Disposition": _attachment(name)})
 
     @with_body
     async def post(self, request: web.Request, body: dict[str, Any], name: str, action: str) -> web.Response:
@@ -189,6 +205,17 @@ class BackupActionView(ManagerView):
                 choice = str(body.get("ha") or "keep")
                 if choice not in ("keep", "backup"):
                     return self.json({"ok": False, "error": "ha must be keep or backup"})
+                if parts is not None and ("storage" in parts) != ("manager" in parts):
+                    # the config entries (.storage) and what the manager runs (state.json) come from one backup together:
+                    # the manager of one integration over the entries of another deploys it next to them, both run, and
+                    # everything is published under the identity of the one the manager names
+                    then = await self.hass.async_add_executor_job(backupkit.backup_domain, cfg, name)
+                    now = getattr(self.installer, "running", None)
+                    if then is not backupkit.UNKNOWN_DOMAIN and then != now:
+                        alone, without = (".storage", "the manager part") if "storage" in parts else ("the manager part", ".storage")
+                        return self.json({"ok": False, "error": f"{name} was made while {then or 'no integration'} ran, and {now or 'no integration'} runs now: "
+                                                                f"{alone} without {without} would leave the configuration of one and the manager of the other. "
+                                                                "Restore .storage + manager, or everything"})
                 made_on = (await self.hass.async_add_executor_job(backupkit.describe, cfg, name)).get("ha_version")
                 boot = await self.hass.async_add_executor_job(backupkit.boot_version, cfg) or HA_VERSION
                 touches_storage = parts is None or "storage" in parts

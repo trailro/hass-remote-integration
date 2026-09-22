@@ -514,12 +514,20 @@ def ensure_apt_packages(state: dict) -> None:
     state["apt"] = record
 
 
+_install_log_started = False  # the first install of this boot started the file afresh
+
+
 def install(version: str) -> bool:
+    global _install_log_started
     d = venv_dir(version)
     _status.update(phase="preparing venv", version=version, kind="install", title=None)
-    try:  # one install per file: it used to grow forever (every pip run appended)
-        with open(LOG_FILE, "w", encoding="utf-8") as fh:
+    # one boot's installs per file: it used to grow forever (every pip run appended).  Only the first install of
+    # the boot starts it afresh: pip's output goes nowhere else, and a second install (the image's own version
+    # after the wanted one failed) truncating it took the reason of that failure with it
+    try:
+        with open(LOG_FILE, "a" if _install_log_started else "w", encoding="utf-8") as fh:
             fh.write(f"# install of Home Assistant {version}, {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        _install_log_started = True
     except OSError:
         pass
     shutil.rmtree(d, ignore_errors=True)
