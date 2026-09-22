@@ -25,6 +25,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 PYPI_URL = "https://pypi.org/pypi/homeassistant/json"
 CACHE_S = 600
 _STABLE = re.compile(r"^\d{4}\.\d{1,2}\.\d+\Z")  # \Z: "$" also matches before a trailing newline
+_VERSION = re.compile(r"\d{4}\.\d{1,2}\.\d+(?:b\d+)?")  # a release or a beta, fullmatch: entrypoint.VERSION_RE
 # How many of the newest stable releases the System page offers without being asked for more.  Home Assistant
 # publishes a release every month and a handful of patches on top of it, and this image's Python only has wheels
 # for the newest of them, so a list of every release ever published is a list of entries that answer "no": ten
@@ -75,7 +76,7 @@ class HaUpdater:
         out = []
         try:
             for name in os.listdir(self.hass.config.config_dir):
-                if name.startswith("venv-") and name != "venv-current" and os.path.isfile(self.hass.config.path(name, ".ok")):
+                if name.startswith("venv-") and name != "venv-current" and self._venv_for_this_python(name[5:]):
                     out.append(name[5:])
         except OSError:
             pass
@@ -83,7 +84,7 @@ class HaUpdater:
 
     def _venv_for_this_python(self, version: str) -> bool:
         """What entrypoint.venv_ok checks: installed completely, for the Python this image runs."""
-        if not re.fullmatch(r"\d{4}\.\d{1,2}\.\d+(b\d+)?", version):
+        if not _VERSION.fullmatch(version):
             return False
         venv = self.hass.config.path(f"venv-{version}")
         site = os.path.join(venv, "lib", f"python{sys.version_info[0]}.{sys.version_info[1]}", "site-packages", "homeassistant", "__init__.py")
@@ -283,7 +284,7 @@ class HaUpdater:
         in executor threads (run.py's boot-ok mark, an async_set_desired), so on the loop it would wait for their
         fsync too, with nothing bounding it on a stalled disk, and every view, MQTT command and timer waits with it."""
         version = version.strip()
-        if not _STABLE.match(version) and not re.match(r"^\d{4}\.\d{1,2}\.\d+(b\d+)?\Z", version):
+        if not _VERSION.fullmatch(version):
             raise ValueError(f"not a Home Assistant version: {version!r}")
 
         def apply(state: dict[str, Any]) -> dict[str, Any]:
