@@ -46,6 +46,7 @@ from dataclasses import MISSING, asdict, dataclass, field
 from datetime import timedelta
 from typing import Any
 
+import logbuffer
 import paho.mqtt.client as mqtt
 from paho.mqtt.packettypes import PacketTypes
 from paho.mqtt.properties import Properties
@@ -180,10 +181,12 @@ RESERVED_TOPIC_SEGMENTS = frozenset({"call", "cmd", "result", "services", "manag
 # Names of secrets, shared with the diagnostics masker (the zip, the Logs and Log files pages), so what the command
 # history, the status and the log hide is hidden there too.  These end a longer name as they are (access_token,
 # old_password, wifi_psk, user_credentials) ...
-SECRET_NAME_ENDINGS = ("usercode", "passcode", "pincode", "password", "passwd", "passphrase", "secret", "token", "apikey",
-                       "passkey", "bindkey", "credentials", "credential", "psk")
-# ... and these only as a word of their own (pin, user_pin, otp, basic_auth; not spin, author, oauth or authority)
-SECRET_NAME_WORDS = ("pin", "otp", "auth")
+# the shared credential list (logbuffer), which the request-line, dict and text rules of diagnostics use too: a list
+# of its own here had drifted (pass, pw and bearer were masked in a log line and printed in the command history).
+# Here a name must END in one of these, so "credentials" is spelled out: "credential" anywhere covers it elsewhere.
+SECRET_NAME_ENDINGS = tuple(dict.fromkeys((*logbuffer.CREDENTIAL_NAMES, "credentials")))
+# ... and these only as a word of their own (pin, user_pin, otp, basic_auth, db_pw; not spin, author, oauth or passed)
+SECRET_NAME_WORDS = logbuffer.CREDENTIAL_WORDS
 # A key names a secret when it ends in one of these: code, key and the words above as a word of their own (user_code,
 # api_key, not zipcode or hotkey), the endings anywhere.  Not: translation/sort/primary_key.
 _SECRET_NAME = (r"(?!(?:translation|sort|primary)_key\b)"
