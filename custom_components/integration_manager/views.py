@@ -195,6 +195,16 @@ def _manual_restore_pending(config_dir: str) -> bool:
     return backupkit.pending(config_dir) and not backupkit.pending_for_version(config_dir)
 
 
+def _restore_newer_than(config_dir: str, target: str) -> str | None:
+    """Blocking: the Home Assistant version a restore scheduled by hand or by a full rollback was made on, when
+    its .storage is newer than ``target``.  The boot of ``target`` drops that restore (it cannot read it:
+    entrypoint.apply_config_changes); the restore a version change scheduled is that change's, replaced by the next."""
+    if not _manual_restore_pending(config_dir) or "storage" not in backupkit.pending_parts(config_dir):
+        return None
+    made_on = backupkit.pending_ha_version(config_dir)
+    return made_on if made_on and ha_vkey(made_on) > ha_vkey(target) else None
+
+
 def _drop_change_restore(config_dir: str) -> bool:
     """The restore an older version change scheduled, and only that: on the rebuild branch the clean start
     cancel_config_change would drop as well is the one stage_rebuild has just written."""
@@ -235,6 +245,15 @@ async def async_change_ha_version(installer: Installer, updater: HaUpdater, targ
         try:
             if mode != "keep" and await hass.async_add_executor_job(_manual_restore_pending, cfg):
                 raise ValueError("a restore scheduled on System is waiting for the restart: cancel it first")
+            if mode == "keep" and (made_on := await hass.async_add_executor_job(_restore_newer_than, cfg, target)):
+                # a keep leaves that restore scheduled, and the boot of the older target drops it.  After a full
+                # rollback that boots the previous code on the .storage the rejected version migrated
+                rollback = getattr(getattr(installer, "state", None), "rollback_backup", None)
+                if rollback and (await hass.async_add_executor_job(backupkit._pending_meta, cfg) or {}).get("name") == rollback:  # noqa: SLF001
+                    raise ValueError(f"a full rollback restores {rollback} (made on Home Assistant {made_on}) at the next restart and "
+                                     f"{target} cannot read it: restart to finish the rollback first")
+                raise ValueError(f"a restore scheduled on System (a backup made on Home Assistant {made_on}) is waiting for the restart "
+                                 f"and {target} cannot read it: cancel it first, or restart before the switch")
             restore = None
             if mode == "restore" and restore_backup is not None:
                 restore = await hass.async_add_executor_job(backupkit.describe, cfg, restore_backup)

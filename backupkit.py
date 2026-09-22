@@ -28,6 +28,7 @@ from jsonio import fsync_dir, ha_vkey, write_json
 import shutil
 import struct
 import time
+import unicodedata
 import zipfile
 
 BACKUP_DIR = "backups"
@@ -272,6 +273,15 @@ def _write_member(zf: zipfile.ZipFile, path: str, rel: str, log) -> bool:
     return True
 
 
+def file_label(label: str) -> str:
+    """The part of a backup's file name a label gives: ASCII only, the one alphabet the backup endpoints accept in
+    a name (a name with other letters was listed but could not be downloaded, restored or deleted).  Accents come
+    off, so a Romanian label stays readable ("inainte-de-update"), whitespace becomes "-", anything else goes; the
+    label itself is kept as typed in backup-info.json."""
+    text = re.sub(r"\s+", "-", unicodedata.normalize("NFKD", label).strip())
+    return "".join(ch for ch in text if ch.isascii() and (ch.isalnum() or ch in "-_."))
+
+
 def create(config_dir: str, label: str = "", storage_version: str | None = None, log=None) -> dict:
     """Write <config>/backups/<timestamp>[-label].zip and return its record.
     ``storage_version``: the Home Assistant version that wrote .storage, when
@@ -282,7 +292,7 @@ def create(config_dir: str, label: str = "", storage_version: str | None = None,
     bdir = os.path.join(config_dir, BACKUP_DIR)
     os.makedirs(bdir, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    safe = re.sub(r"\.{2,}", ".", "".join(ch for ch in label if ch.isalnum() or ch in "-_."))[:48]
+    safe = re.sub(r"\.{2,}", ".", file_label(label))[:48]
     name = reserve_name(bdir, f"{stamp}{'-' + safe if safe else ''}")
     final = os.path.join(bdir, name)
     _drop_dead_partials(bdir)
@@ -486,6 +496,26 @@ def prune(config_dir: str, keep: int = KEEP_DEFAULT, protect: set[str] | None = 
             continue  # pruned by a concurrent backup already
         removed.append(b["name"])
     return removed
+
+
+UNKNOWN_DOMAIN = object()
+_STATE_MAX = 8 * 1024 * 1024  # state.json lists every installed version: far more than it ever holds
+
+
+def backup_domain(config_dir: str, name: str) -> object:
+    """The integration that ran when the backup was made (``domain`` of its state.json; None: none ran), or
+    UNKNOWN_DOMAIN when the archive does not say."""
+    try:
+        with zipfile.ZipFile(os.path.join(config_dir, BACKUP_DIR, name)) as zf:
+            member = zf.getinfo(MARKER)
+            if member.file_size > _STATE_MAX:
+                return UNKNOWN_DOMAIN
+            state = json.loads(zf.read(member))
+    except (OSError, zipfile.BadZipFile, KeyError, ValueError):
+        return UNKNOWN_DOMAIN
+    if not isinstance(state, dict) or not isinstance(state.get("domain"), (str, type(None))):
+        return UNKNOWN_DOMAIN
+    return state.get("domain")
 
 
 def validate(path: str) -> dict:
@@ -734,9 +764,9 @@ def pending_ha_version(config_dir: str) -> str | None:
 
 def pending_forced(config_dir: str) -> bool:
     """The scheduled restore may bring back .storage of a backup without a recorded Home Assistant version.
-    A schedule written before that was checked (no "force" key) was accepted by the rules of its time."""
-    meta = _pending_meta(config_dir) or {}
-    return meta.get("force") is True or "force" not in meta
+    Only a schedule that says so: one without the key is an edited file, or one a manager older than 0.14.0
+    wrote and never booted since, and the boot drops that restore with a message rather than guess."""
+    return (_pending_meta(config_dir) or {}).get("force") is True
 
 
 def pending_parts(config_dir: str) -> list[str]:
