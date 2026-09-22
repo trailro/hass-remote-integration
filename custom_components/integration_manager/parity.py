@@ -296,8 +296,30 @@ class CutoverView(ManagerView):
             "discovery_enabled": self.publisher.config.discovery_enabled,
             "discovery_devices": self.publisher.stats.get("discovery_devices", 0),
             "parent_configured": bool(st.data.get("parent_ha_url")) and bool(st.data.get("parent_ha_token")),
-            "smoke_pending": bool(self.installer.smoke.get("pending")),
+            "smoke_pending": bool(self.installer.smoke.get("pending") or self.installer.state.pending_smoke),
         }
+
+    async def _replacement_refusals(self) -> list[str]:
+        """What would replace this container's configuration under the entities the parent is about to create:
+        an action running now, or a restore, rollback, clean start or import the next restart applies.  Their
+        .storage (entity ids, so the unique ids announced) or mqtt.json (discovery off again) replaces this one,
+        and the parent keeps entities nobody publishes and loses the customisations made on them.  The health
+        watchdog's refusals, read the same way: its checks of what the next restart applies are reused whole."""
+        from .import_views import _IMPORT_LOCK
+        from .scheduler import Scheduler
+        from .views import _ha_change_lock_taken
+
+        inst = self.installer
+        out = []
+        if inst.busy:
+            out.append("another action is running (an install, start, stop, import, restore or full rollback): wait for it to finish")
+        elif _ha_change_lock_taken():
+            out.append("a Home Assistant version change, a restore or a full rollback is being prepared")
+        elif _IMPORT_LOCK.locked():
+            out.append("an import or upload from a Home Assistant backup is running")
+        if scheduled := await self.hass.async_add_executor_job(Scheduler(self.hass, inst)._scheduled_refusal):  # noqa: SLF001
+            out.append(scheduled)
+        return out
 
     async def _parent_blockers(self, domain: str, components: list[str]) -> list[str]:
         """The main Home Assistant must not hold the integration any more: a config entry (enabled or disabled)
@@ -357,7 +379,13 @@ class CutoverView(ManagerView):
                 problems.append(f"health is {s['health']}: {s['health_reason']}")
             if not s["mqtt_connected"]:
                 problems.append("MQTT is not connected")
-            # force skips only the checks on the main Home Assistant, and says so in the answer and on the timeline
+            problems += await self._replacement_refusals()
+            # force skips the checks on the main Home Assistant and a pending smoke test (a version under test that
+            # may still be rolled back), and says so in the answer and on the timeline; nothing else
+            smoke_skipped = bool(body.get("force")) and s["smoke_pending"]
+            if s["smoke_pending"] and not smoke_skipped:
+                problems.append("a smoke test is pending: a failed one rolls back and restores the configuration "
+                                "(new entity ids on the main Home Assistant); wait for its verdict")
             forced = bool(body.get("force")) and s["parent_configured"]
             if s["parent_configured"] and not forced:
                 try:
@@ -380,9 +408,11 @@ class CutoverView(ManagerView):
             checked = s["parent_configured"] and not forced
             events.emit("cutover", f"discovery enabled on the parent: {n} documents republished"
                         + (" (forced: the checks on the main Home Assistant were skipped)" if forced
-                           else "" if checked else " (unchecked: no main Home Assistant is configured to check)"),
-                        forced=forced, checked=checked)
-            return self.json({"ok": True, "republished": n, "forced": forced, "checked": checked, **self._status()})
+                           else "" if checked else " (unchecked: no main Home Assistant is configured to check)")
+                        + (" (forced past a pending smoke test)" if smoke_skipped else ""),
+                        forced=forced, checked=checked, smoke_skipped=smoke_skipped)
+            return self.json({"ok": True, "republished": n, "forced": forced, "checked": checked, "smoke_skipped": smoke_skipped,
+                              **self._status()})
         if action == "undo":
             if s["discovery_enabled"]:
                 await self.publisher.async_save({"discovery_enabled": False})

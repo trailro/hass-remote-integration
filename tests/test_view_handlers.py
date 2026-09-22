@@ -5,7 +5,9 @@ import asyncio
 import importlib
 import inspect
 import pkgutil
+import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import custom_components.integration_manager as im
@@ -73,7 +75,9 @@ class FakePublisher:
 def _view(parent=True):
     hass = mock.Mock()
     hass.async_add_executor_job = mock.AsyncMock(side_effect=lambda f, *a: f(*a))
-    installer = mock.Mock(running="ramses_cc", running_tag="0.60.4", smoke={"pending": None})
+    installer = mock.Mock(running="ramses_cc", running_tag="0.60.4", smoke={"pending": None}, busy=False,
+                          state=SimpleNamespace(pending_smoke=None), config_dir=(tmp := tempfile.mkdtemp()), state_dir=tmp)
+    installer.rollback_restore_refusal.return_value = None
     installer.settings.data = {"parent_ha_url": "http://parent", "parent_ha_token": "t"} if parent else {}
     return parity.CutoverView(hass, installer, FakePublisher())
 
