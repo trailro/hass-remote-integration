@@ -32,8 +32,10 @@ import logging
 import os
 import re
 import shutil
+import signal
 import site
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -81,7 +83,9 @@ CORRUPT_STATE_KEEP = 3  # state.json.corrupt-<stamp> copies kept; the older ones
 
 
 def tag_ok(tag: Any) -> bool:
-    return isinstance(tag, str) and bool(_TAG_RE.match(tag)) and ".." not in tag
+    # a stored tag is a directory name with "/" spelled "%2F" (_version_dir), unpacked first as .staging-<name>:
+    # past NAME_MAX that fails only after the download
+    return isinstance(tag, str) and bool(_TAG_RE.match(tag)) and ".." not in tag and len(tag) + 2 * tag.count("/") <= 255 - len(".staging-")
 
 
 _SAVE_LOCKS: dict[str, threading.Lock] = {}
@@ -115,6 +119,54 @@ def bad_requirement(req: Any) -> str | None:
     except Exception as err:  # noqa: BLE001
         return f"requirement {req[:100]!r} is not a valid requirement ({err})"
     return None
+
+
+PIP_INSTALL_TIMEOUT_S = 1800  # one requirement, wall clock (uv runs --quiet: no output to watch for progress)
+_pip_deadline = threading.local()
+
+
+def _bounded_install(args: list[str], env: dict[str, str]) -> str | None:
+    """HA's util/package._install (same Popen, same args and env from install_package), with uv in its own
+    process group and a deadline: a build backend that hangs, or a download that never ends, is killed with
+    everything it started, instead of holding ``busy`` until the container restarts.  Only calls made from
+    _install_requirements carry a deadline; every other caller (HA's own requirement installs) gets HA's."""
+    deadline = getattr(_pip_deadline, "at", None)
+    if deadline is None:
+        return _bounded_install.ha_install(args, env)  # type: ignore[attr-defined]
+    with subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+                          close_fds=False, start_new_session=True) as proc:
+        try:
+            _, stderr = proc.communicate(timeout=max(0.0, deadline - time.monotonic()))
+        except BaseException as err:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            proc.wait()  # not communicate(): a backend that left the group could hold the pipes open
+            if isinstance(err, subprocess.TimeoutExpired):
+                return f"did not finish within {PIP_INSTALL_TIMEOUT_S}s: stopped"
+            raise
+        if proc.returncode != 0:
+            return stderr.decode("utf-8", "replace").strip()
+    return None
+
+
+_BOUND_GUARD = threading.Lock()
+
+
+def _bind_install() -> bool:
+    """Put _bounded_install in place of HA's _install (once; a reload of this module re-wraps HA's own, not the
+    previous wrapper).  False when this HA has no _install to wrap: the install then runs unbounded, as before."""
+    with _BOUND_GUARD:
+        cur = getattr(pkg_util, "_install", None)
+        if cur is _bounded_install:
+            return True
+        cur = getattr(cur, "ha_install", cur)
+        if not callable(cur):
+            return False
+        _bounded_install.ha_install = cur  # type: ignore[attr-defined]
+        pkg_util._install = _bounded_install
+        return True
 
 
 async def read_capped(resp, what: str, limit: int | None = None) -> bytes:
@@ -343,7 +395,8 @@ class Installer:
         directory: no repo, so no releases/updates, everything else works."""
         domain = domain.strip().lower()
         repo = repo.strip().strip("/")
-        if not re.fullmatch(r"[a-z0-9_]{1,64}", domain) or (repo.count("/") != 1 and not (local and not repo)):
+        repo_ok = bool(_REPO_RE.match(repo)) and ".." not in repo  # as the views check: it becomes a GitHub API path
+        if not _DOMAIN_RE.match(domain) or (not repo_ok and not (local and not repo)):
             raise ValueError("domain must be a HA domain (a_b), repo must be owner/name")
         if (why := manager_domain_error(domain)):
             raise ValueError(why)
@@ -2867,8 +2920,15 @@ class Installer:
         if failed:
             _LOGGER.error("requirements refused: %s", "; ".join(bad_requirement(r) or "" for r in failed))
         todo = [r for r in dict.fromkeys(requirements) if r not in failed and (force or not pkg_util.is_installed(r))]
+        if todo and not _bind_install():
+            _LOGGER.warning("this Home Assistant has no util.package._install: requirements install without a time limit")
         for req in todo:
-            if not pkg_util.install_package(req, constraints=self.constraints, timeout=600):
+            _pip_deadline.at = time.monotonic() + PIP_INSTALL_TIMEOUT_S  # covers install_package's own retry too
+            try:
+                ok = pkg_util.install_package(req, constraints=self.constraints, timeout=600)
+            finally:
+                _pip_deadline.at = None
+            if not ok:
                 failed.append(req)
         if todo:
             importlib.invalidate_caches()
