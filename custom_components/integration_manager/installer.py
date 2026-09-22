@@ -109,15 +109,20 @@ def manager_domain_error(domain: Any) -> str | None:
 
 def bad_requirement(req: Any) -> str | None:
     """Why ``req`` must not reach pip or uv, or None: an option ("-e ...",
-    "--index-url ...") in a manifest would change what gets installed from where."""
+    "--index-url ...") or a direct URL ("pkg @ https://...", "pkg @ git+...",
+    "pkg @ file://...") in a manifest would change what gets installed from where.
+    A URL requirement is also never "installed" to HA (util/package.is_installed
+    returns False for any req.url), so it would go to uv at every boot and start."""
     if not isinstance(req, str) or req.strip().startswith("-"):
         return f"requirement {str(req)[:100]!r} is an option, not a package"
     try:
         from packaging.requirements import Requirement
 
-        Requirement(req)
+        parsed = Requirement(req)
     except Exception as err:  # noqa: BLE001
         return f"requirement {req[:100]!r} is not a valid requirement ({err})"
+    if parsed.url:
+        return f"requirement {req[:100]!r} installs from a URL, not from the package index"
     return None
 
 
