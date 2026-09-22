@@ -258,6 +258,16 @@ def installed_versions() -> list[str]:
 SAFE_HOST_SUFFIXES = (".local", ".lan", ".home", ".internal", ".home.arpa", ".localdomain")  # as hostguard.py
 
 
+def _bare_host(host: str) -> str:
+    """hostguard._bare: a Host value or an allowed_hosts entry without its port and the one trailing dot."""
+    h = host.strip().lower()
+    if h.startswith("["):
+        h = h[1:].split("]", 1)[0]
+    elif h.count(":") == 1:
+        h = h.split(":", 1)[0]
+    return h[:-1] if h.endswith(".") else h
+
+
 def status_host_ok(host: str) -> bool:
     """The manager's DNS-rebinding rule (hostguard._host_ok) for the page served while HA installs."""
     try:
@@ -265,14 +275,10 @@ def status_host_ok(host: str) -> bool:
             extra_raw = str((json.load(fh) or {}).get("allowed_hosts") or "")
     except (OSError, ValueError, AttributeError):
         extra_raw = ""
-    # a fully qualified name may end in one dot (foo.local.): the same host, as hostguard treats it
-    extra = {re.sub(r":\d+$", "", x.strip().lower()).removesuffix(".") for x in extra_raw.split(",") if x.strip()}
-    h = (host or "").strip().lower()
-    if h.startswith("["):
-        h = h[1:].split("]", 1)[0]
-    elif h.count(":") == 1:
-        h = h.split(":", 1)[0]
-    h = h.removesuffix(".")
+    # the entries and the Host value go through one rule, hostguard's: a separate port rule for the entries
+    # read `name:`, `a:b:8087` and `[name]:8087` differently from the manager
+    extra = {_bare_host(x) for x in extra_raw.split(",") if x.strip()}
+    h = _bare_host(host or "")
     if not h:
         return False
     # rstrip("."): gethostname() may come back fully qualified with the trailing dot, and hostguard
@@ -296,7 +302,9 @@ def install_status() -> dict:
 
 
 def password_configured() -> bool:
-    return bool(os.environ.get("HRI_PASSWORD", "").strip() or os.environ.get("HRI_PASSWORD_FILE", "").strip())
+    # as auth._configured_password: a password of spaces or tabs is one (the manager locks the UI and says why),
+    # only line ends are none - an empty HRI_PASSWORD= line of an .env saved with Windows line ends
+    return bool(os.environ.get("HRI_PASSWORD", "").strip("\r\n") or os.environ.get("HRI_PASSWORD_FILE", "").strip())
 
 
 def _log_tail() -> str:

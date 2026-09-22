@@ -91,6 +91,18 @@ class HostGuardParityTest(unittest.TestCase):
             hostguard._own_hostname.cache_clear()
             self._compare(["box", "box.", "box:8087"])
 
+    def test_the_two_rules_agree_on_odd_allowed_hosts_entries(self):
+        """An allowed_hosts entry went through a port rule of its own on the install page (`:\\d+$`), the
+        one-colon rule in the manager: `name:`, `a:b:8087` and a bracketed name were read differently."""
+        raw = "name:, other:abc, a:b:8087, [br.example]:8087, [v6name], [fe80::1]:8087"
+        self._write_allowed(raw)
+        hosts = ["name", "name:8087", "other", "other:abc", "a:b:8087", "br.example", "[br.example]:8087",
+                 "v6name", "[v6name]", "fe80::1", "[fe80::1]:8087"]
+        with mock.patch.object(self.ep.socket, "gethostname", return_value=HOSTNAME), \
+             mock.patch.object(hostguard.socket, "gethostname", return_value=HOSTNAME):
+            hostguard._own_hostname.cache_clear()
+            self._compare(hosts, raw)
+
     def test_both_carry_the_same_safe_suffixes(self):
         self.assertEqual(tuple(self.ep.SAFE_HOST_SUFFIXES), tuple(hostguard.SAFE_SUFFIXES))
 
