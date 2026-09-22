@@ -1160,7 +1160,12 @@ refused because it cannot be located; each hunk is looked for from its own line
 shifted by the hunks before it, like GNU patch, and a hunk whose lines occur in
 more than one place about as near is refused as ambiguous; a patched block
 that also exists as a twin still counts as applied, unless an unpatched copy is
-about as near too). Two optional
+about as near too). A diff's file paths may carry one `a/`, `b/` or `./` prefix
+and then name the file relative to the integration's own directory
+(`a/const.py`), as `custom_components/<domain>/…` (`a/custom_components/<domain>/const.py`),
+or relative to site-packages for a library (`a/some_lib/module.py`); the
+integration's domain on its own (`a/<domain>/const.py`) is none of these and
+reports the file absent. Two optional
 headers retire a patch on its own:
 
 ```python
@@ -1178,7 +1183,9 @@ next to what the hunk expects; a module runs its `status(ctx)`.
 When a patch stops fitting the code it targets (upstream changed it, a file is
 gone, the module fails), the integration still starts without it and a
 notification on the Overview says which patch and why. It goes away once every
-patch applies again.
+patch applies again. It is worked out again when patches are applied (a start,
+a boot, *Apply*) and when one is deleted; uploading or saving a patch changes
+it only at the next of those.
 
 A patch retired by its own headers is listed as `skipped` and is nothing to act
 on — unless it patched an installed library rather than the integration's own
