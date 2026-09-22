@@ -82,22 +82,35 @@ def _configured_password() -> tuple[str, str]:
     return (password, "") if password.strip() else ("", "")
 
 
-def _load_key(path: str) -> bytes:
-    """Blocking: the session signing key, created on first use (mode 600)."""
+def _load_key(path: str) -> tuple[bytes, OSError | None]:
+    """Blocking: the session signing key, created on first use (mode 600), and
+    the error when a new one could not be written.  The key only signs session
+    cookies, so one that is not on the volume (a full or read-only volume on the
+    first boot, or after a restore: backups leave it out) is still a random key
+    that works: the password is checked all the same, and only the sessions end
+    at the next restart, which tries the write again.  Refusing to start instead
+    would take the login page, and with it the UI that frees the disk."""
     try:
         with open(path, "rb") as fh:
             key = fh.read()
         if len(key) >= 32:
-            return key
+            return key, None
     except OSError:
         pass
     key = secrets.token_bytes(32)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as fh:
-        fh.write(key)
-    os.replace(path + ".tmp", path)
-    return key
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(key)
+        os.replace(path + ".tmp", path)
+    except OSError as err:
+        try:
+            os.unlink(path + ".tmp")  # a partial write: the space it holds is what the volume is short of
+        except OSError:
+            pass
+        return key, err
+    return key, None
 
 
 class Auth:
@@ -265,7 +278,10 @@ async def async_setup_auth(hass: HomeAssistant) -> Auth:
     if unusable:
         _LOGGER.error("%s: nobody can log in until it is fixed", unusable)
         events.emit("auth", f"{unusable}: nobody can log in until it is fixed")
-    key = await hass.async_add_executor_job(_load_key, hass.config.path("integration_manager", "auth_key"))
+    key, key_error = await hass.async_add_executor_job(_load_key, hass.config.path("integration_manager", "auth_key"))
+    if key_error:
+        _LOGGER.error("login key not written (%s): kept in memory only, so every session ends at the next restart", key_error)
+        events.emit("auth", f"auth_key not written ({key_error}): logins work, but every session ends at the next restart")
     auth = Auth(password, key, hass.config.path("integration_manager", "auth_revoked"), unusable)
     await hass.async_add_executor_job(auth.load_revoked)
     hass.data[DATA_KEY] = auth
