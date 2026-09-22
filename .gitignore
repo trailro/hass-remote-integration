@@ -4,3 +4,6 @@ __pycache__/
 dev-src/
 .env
 docker-compose.override.yml
+
+# Claude Code operator-local instructions
+CLAUDE.local.md
