@@ -477,13 +477,44 @@ def platform_of(hass: HomeAssistant, entity_id: str) -> str | None:
 
 # A camera, image or media player carries the access token of this container's proxy (/api/camera_proxy/...?token=)
 # in access_token and in its picture URLs: a credential for this container, and on a camera a new value every five
-# minutes, which would rewrite the retained document each time.  Neither is published.
+# minutes, which would rewrite the retained document each time.  Neither is published, at any depth: an attribute
+# key access_token and a string carrying such a URL are left out of the dict or list that holds them.  The state
+# cannot be left out, so a token in it is masked instead.
 _TOKEN_URL = re.compile(r"[?&](?:access_)?token=", re.IGNORECASE)
+_TOKEN_VALUE = re.compile(r"([?&](?:access_)?token=)[^&#\s]*", re.IGNORECASE)
+_LEFT_OUT = object()
+
+
+def _without_tokens(value: Any) -> Any:
+    """value with every token-carrying string and access_token key taken out (_LEFT_OUT for such a string itself);
+    the very same object when there is none, so an entity without a token costs one walk and no copy."""
+    if isinstance(value, str):
+        return _LEFT_OUT if _TOKEN_URL.search(value) else value
+    if isinstance(value, dict):
+        out, changed = {}, False
+        for k, v in value.items():
+            kept = _LEFT_OUT if k == "access_token" else _without_tokens(v)
+            if kept is _LEFT_OUT:
+                changed = True
+            else:
+                out[k] = kept
+                changed = changed or kept is not v
+        return out if changed else value
+    if isinstance(value, (list, tuple, set, frozenset)):
+        items = [_without_tokens(v) for v in value]
+        if all(a is b for a, b in zip(items, value)):
+            return value
+        return [v for v in items if v is not _LEFT_OUT]
+    return value
 
 
 def _published_attributes(attributes: Any) -> dict[str, Any]:
-    return {k: v for k, v in attributes.items()
-            if k != "access_token" and not (isinstance(v, str) and _TOKEN_URL.search(v))}
+    kept = _without_tokens(attributes)
+    return dict(kept) if kept is attributes else kept
+
+
+def _published_state(state: str) -> str:
+    return _TOKEN_VALUE.sub(r"\1***", state) if _TOKEN_URL.search(state) else state
 
 
 def _comp_key(entity_id: str) -> str:
@@ -1164,7 +1195,10 @@ class MqttPublisher:
             while ack["rc"] is None and time.monotonic() < deadline:
                 time.sleep(0.05)
             if ack["rc"] is not None and (self._learned_mqtt311(c, ack["rc"]) if ack["rc"] != 0 else self._learned_receive_max(c, ack["props"])):
-                self._stop_client(c)
+                # stopped beside the second attempt, not before it: the stop takes a second on a broker that answers
+                # (paho's select), up to 2 x STOP_JOIN_S on one that does not, and the deadline is the second
+                # handshake's; that client never subscribed or published, and its own stop stays bounded
+                threading.Thread(target=self._stop_client, args=(c,), name="hri-mqtt-stop-refused", daemon=True).start()
                 continue
             if ack["rc"] is None or ack["rc"] != 0:
                 self._stop_client(c)
@@ -1178,7 +1212,8 @@ class MqttPublisher:
         loop_stop() alone joins a thread that ends only once no QoS 1 message waits for its acknowledgement, which a
         live broker that stopped acknowledging never gives: the DISCONNECT goes first (paho closes the socket once
         it is written), and a thread still running after STOP_JOIN_S (the broker does not even read) has its socket
-        closed under it."""
+        closed under it.  Nothing it still reads is handed on (see _disconnect)."""
+        c.on_message = None
         try:
             c.disconnect()
         except Exception:  # noqa: BLE001
@@ -1521,6 +1556,12 @@ class MqttPublisher:
         with self._subscribing_lock:  # an "online" being published goes out before the "offline" below, none after it
             c, self._client = self._client, None
             self._subscribing = None
+        if c is not None:
+            # no command starts once the client is let go: its thread keeps reading through the "offline" below and
+            # its stop (seconds on a broker that stops reading), and what it ran there would answer on a client that
+            # is gone - a caller that retries on silence runs it twice.  paho reads the callback under the lock its
+            # setter takes; one already handed to _on_message finishes, as it would a moment earlier.
+            c.on_message = None
         if c is None:
             self._live_base = self._live_prefix = None
             self._forget_errors()
@@ -2437,7 +2478,7 @@ class MqttPublisher:
             "domain": domain,
             "object_id": object_id,
             "integration": integration,
-            "state": state.state,
+            "state": _published_state(state.state),
             "attributes": _published_attributes(state.attributes),
             "last_changed": state.last_changed.isoformat(),
             "last_updated": state.last_updated.isoformat(),
@@ -2766,7 +2807,8 @@ class MqttPublisher:
             live = set(self._topics.values())
             keep_prefixes = (f"{base}/services/", f"{base}/cmd/", f"{base}/call/")
             stale = [t for t, p in found.items()
-                     if t not in live and t not in (self._status_topic(), self._health_topic()) and not t.startswith(keep_prefixes)
+                     if t not in live and t not in (self._status_topic(), self._health_topic(), self._manager_topic())
+                     and not t.startswith(keep_prefixes)
                      and self._is_ours(t, p, base) and b"published_at" in p]
             self._clear_topics("stale", stale)
         except Exception as err:  # noqa: BLE001
