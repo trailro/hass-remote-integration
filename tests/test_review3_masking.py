@@ -129,7 +129,6 @@ class OneWordListTest(unittest.TestCase):
             logbuffer.mask_query_secrets(line)
             self.assertLess(time.perf_counter() - t0, 0.1, name[:8])
 
-    @unittest.expectedFailure  # until logfiles_page._RULE_LITERALS holds "pw" (not only "_pw"): then remove this line
     def test_the_log_files_search_prefilter_finds_every_name(self):
         """A line the rules change must pass logfiles_page's prefilter, or the Log files search decides on its raw
         text (a guess at a masked value would find the line)."""

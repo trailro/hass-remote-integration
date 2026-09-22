@@ -62,7 +62,7 @@ MAX_DOWNLOAD_NAME = 120
 # path: ?%73ession=), comes out of them unchanged, so the search skips them for it.  A rule added there needs its
 # literal here (the tests list every rule the function runs, and compare the two)
 _RULE_LITERALS = ("pass", "token", "secret", "credential", "psk", "hmac", "key", "webhook_id", "cloudhook_url", "pin",
-                  "sig", "code", "otp", "pwd", "_pw", "session", "irk", "ltk", "csrk", "cookie", "authorization",
+                  "sig", "code", "otp", "pwd", "pw", "session", "irk", "ltk", "csrk", "cookie", "authorization",
                   "bearer", "basic", "auth", "://", "gh", "github_pat_",
                   "api")  # an access line of a log search, in any spelling of its path: its values are masked (logbuffer)
 # the rules are case-insensitive, and re's IGNORECASE takes four characters beyond ASCII for letters: lower() alone
