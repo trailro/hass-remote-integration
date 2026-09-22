@@ -95,8 +95,13 @@ LOG_FLUSH_S = 5  # at exit: log lines still queued
 # log queue 10) could reach ~245 s in the worst case: the watchdog cuts that before Docker's SIGKILL.
 # A restart asked for from the manager arms it itself (hass.data["hri_stop_watchdog"]) before it calls
 # async_stop: a stop that hangs on its way to that first stage never reaches the STOP event, and the hard
-# exit that exists for exactly this case would never fire.
+# exit that exists for exactly this case would never fire.  Armed there, before the first stage rather than
+# after it, it gets that stage's 20 s on top (MANAGER_STOP_WATCHDOG_S): with 205 s it cut HA's last stage
+# (20 + 100 + 60 + 30 = 210 s) short.  No Docker grace period applies to that path (the process exits by
+# itself); a `docker stop` arriving meanwhile is still inside its 240 s: 225 + 5 + 5 = 235 s.
 STOP_WATCHDOG_S = 205
+STOPPING_STAGE_S = 20  # homeassistant.core.STOPPING_STAGE_SHUTDOWN_TIMEOUT, 2026.5.0 to 2026.9.3
+MANAGER_STOP_WATCHDOG_S = STOP_WATCHDOG_S + STOPPING_STAGE_S
 WATCHDOG_DRAIN_S = 5
 _stop_watchdog: threading.Thread | None = None  # armed once, by whichever of the two paths gets there first
 _boot_settled = False  # this boot's boot_failures count is resolved: marked ok, or taken back after a stop
@@ -108,13 +113,42 @@ def _sync_manager_component() -> None:
 
     The HA loader only scans ``<config_dir>/custom_components``, and we
     want image updates to propagate, so overwrite on every boot.
+
+    The copy goes next to it first and is swapped in with two renames, as a deploy does (the same
+    ``.deploying``/``.replaced`` names, which _sweep_deploy_leftovers sorts out after a kill): deleting first
+    and copying after left no manager at all when the copy failed (a full volume) or the container was killed
+    in between, and without it Home Assistant does not start - nor the UI that would free the space.  A copy
+    that fails keeps the one already there, with an error in the log.
     """
     dst = os.path.join(CONFIG_DIR, "custom_components", "integration_manager")
+    tmp, aside = dst + ".deploying", dst + ".replaced"
+    if os.path.isdir(aside) and not os.path.islink(aside) and not os.path.lexists(dst):
+        os.rename(aside, dst)  # killed between the two renames (_sweep_deploy_leftovers, which runs first, does the same)
+    for leftover in (tmp, aside):
+        if os.path.islink(leftover) or os.path.isfile(leftover):
+            os.remove(leftover)
+        elif os.path.isdir(leftover):
+            shutil.rmtree(leftover)
+    try:
+        shutil.copytree(MANAGER_SRC, tmp)
+    except OSError as err:
+        shutil.rmtree(tmp, ignore_errors=True)
+        if not os.path.isdir(dst) or os.path.islink(dst):
+            raise
+        _LOGGER.error("the manager from this image could not be copied onto the volume (%s): starting the copy "
+                      "already there; free space and restart the container", err)
+        return
     if os.path.islink(dst):
         os.remove(dst)  # rmtree refuses a link (every boot would stop here); the link goes, never what it points at
-    elif os.path.isdir(dst):
-        shutil.rmtree(dst)
-    shutil.copytree(MANAGER_SRC, dst)
+    elif os.path.lexists(dst):
+        os.rename(dst, aside)
+    try:
+        os.rename(tmp, dst)
+    except OSError:
+        if os.path.lexists(aside) and not os.path.lexists(dst):
+            os.rename(aside, dst)
+        raise
+    shutil.rmtree(aside, ignore_errors=True)
 
 
 def _sweep_deploy_leftovers() -> None:
@@ -236,7 +270,7 @@ async def _boot() -> int:
 
     # installer.restart arms it when it asks HA to stop: a stop that hangs before HA's first stage
     # never fires EVENT_HOMEASSISTANT_STOP, where _on_stop below would otherwise arm it
-    hass.data["hri_stop_watchdog"] = _arm_stop_watchdog
+    hass.data["hri_stop_watchdog"] = _arm_manager_stop_watchdog
     # and takes this boot's failure count back through the same helper as the stop path: one boot, one
     # increment, taken back once, so the crashes of earlier boots stay counted towards the fallback
     hass.data["hri_undo_boot_failure"] = _undo_boot_failure
@@ -561,6 +595,11 @@ def _arm_stop_watchdog(timeout: float = STOP_WATCHDOG_S) -> threading.Thread:
     _stop_watchdog = thread
     thread.start()
     return thread
+
+
+def _arm_manager_stop_watchdog() -> threading.Thread:
+    """What installer.restart calls before async_stop: see MANAGER_STOP_WATCHDOG_S."""
+    return _arm_stop_watchdog(MANAGER_STOP_WATCHDOG_S)
 
 
 def _install_excepthooks() -> None:

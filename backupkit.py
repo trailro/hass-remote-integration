@@ -661,8 +661,17 @@ def pending_archive(config_dir: str) -> str | None:
     meta = _pending_meta(config_dir)
     if meta is None:
         return None
-    path = os.path.join(config_dir, STATE_DIR, meta.get("zip") or os.path.basename(LEGACY_PENDING_ZIP))
+    name = meta.get("zip") or os.path.basename(LEGACY_PENDING_ZIP)
+    # a hand-edited or torn meta: a number or a list raised TypeError in the join (the boot stopped before Home
+    # Assistant), and a path reached outside the state dir.  Refused here, drop_orphan_schedule drops it with a message
+    if not _plain_archive_name(name):
+        return None
+    path = os.path.join(config_dir, STATE_DIR, name)
     return path if os.path.isfile(path) else None
+
+
+def _plain_archive_name(name) -> bool:
+    return isinstance(name, str) and name not in (".", "..") and os.path.basename(name) == name
 
 
 def _drop_stale_pending(config_dir: str, keep: str | None = None) -> None:
@@ -742,10 +751,12 @@ def drop_orphan_schedule(config_dir: str, log=print, record=None) -> dict | None
             return None
         meta = _pending_meta(config_dir) or {}
         name = meta.get("name") if isinstance(meta.get("name"), str) else None
+        zip_name = meta.get("zip") or os.path.basename(LEGACY_PENDING_ZIP)
         result = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "ok": False, "backup": name, "parts": pending_parts(config_dir),
                   "for_version": meta.get("for_version") if isinstance(meta.get("for_version"), str) else None,
-                  "error": f"the scheduled restore of {name or 'a backup'} was dropped: its copy of the archive "
-                           f"({meta.get('zip') or os.path.basename(LEGACY_PENDING_ZIP)}) is gone from the volume; nothing was restored"}
+                  "error": f"the scheduled restore of {name or 'a backup'} was dropped: " + (
+                      f"its copy of the archive ({zip_name}) is gone from the volume; nothing was restored" if _plain_archive_name(zip_name) else
+                      f"its schedule names no archive file ({str(zip_name)[:80]!r}); nothing was restored")}
         log(f"restore: {result['error']}")
         if record is not None:
             try:
