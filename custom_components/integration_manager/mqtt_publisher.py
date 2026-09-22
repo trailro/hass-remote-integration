@@ -612,9 +612,9 @@ class MqttPublisher:
         # command topics whose retained payload this process just cleared -> when (paho's thread only).  An MQTT
         # 3.1.1 session has no noLocal, so the broker sends that clear straight back as a live empty payload.
         self._cleared_cmds: dict[str, float] = {}
-        self._range_pending: dict[str, dict[str, Any]] = {}
+        self._range_pending: dict[str, dict[str, Any]] = {}  # entity_id -> the first half of a range change, waiting for the second
         self._default_id_warned: set[str] = set()  # entities whose default_entity_id another entity asked for first, warned once each
-        self._collision_warned: set[str] = set()  # entities skipped for a component key clash, warned once each  # entity_id -> the first half of a range change, waiting for the second
+        self._collision_warned: set[str] = set()  # entities skipped for a component key clash, warned once each
         self._registry_timer: asyncio.TimerHandle | None = None
         # entity_id -> document topic last published (the registry entry is
         # already gone when the remove event fires, so recompute is wrong)
@@ -706,7 +706,9 @@ class MqttPublisher:
                 continue
             try:
                 value = _bounded(name, out[name])
-                if value == out[name]:
+                # an int only: 1.0 and true compare equal to 1, and paho takes neither (qos << 1 raises for every
+                # publish, getaddrinfo refuses a float port) while the setting looked accepted
+                if value == out[name] and type(out[name]) is int:
                     continue
             except (TypeError, ValueError, OverflowError):
                 pass
@@ -925,9 +927,11 @@ class MqttPublisher:
                 self.stats["connect_error"] = f"{type(err).__name__}: {err}"
 
     async def async_reload_config(self) -> None:
-        """Adopt settings that do not need a reconnect (discovery on/off).  Under the
-        connection lock: a reconnect in flight would otherwise assign the config it
-        loaded before this change and re-announce what Undo just cleared."""
+        """Adopt mqtt.json without reconnecting, for the settings that need none (discovery on/off).  The whole file
+        is adopted: a broker, TLS or credential change in it (a hand edit, a form save whose reconnect has not run
+        yet) is what status() and the pending cleanups name from here on, while the connection keeps the broker it
+        has until the next reconnect.  Under the connection lock: a reconnect in flight would otherwise assign the
+        config it loaded before this change and re-announce what Undo just cleared."""
         async with self._conn_lock:
             new = await self.hass.async_add_executor_job(self._load)
             if self.config.discovery_enabled and not new.discovery_enabled:
@@ -1257,7 +1261,10 @@ class MqttPublisher:
 
     @staticmethod
     def _pending_key(base: str, broker: dict[str, Any]) -> tuple:
-        return (base, str(broker["host"]), int(broker["port"]), bool(broker["tls"]), str(broker["username"]))
+        """Host and port decide which broker a removal waits for, as in _recorded_elsewhere: another user, or TLS turned
+        on, reaches the same retained data, and a key holding them never matched again once either changed.  The record
+        keeps all four (the file format is unchanged), so older files read into this key as they are."""
+        return (base, str(broker["host"]), int(broker["port"]))
 
     def _read_cleanup_pending(self) -> dict[tuple, dict[str, Any]]:
         """Blocking.  Records written before they named their broker (a mapping by base topic) are bound to the broker
@@ -1382,8 +1389,7 @@ class MqttPublisher:
 
         Host and port only: a different user, or TLS turned on, is the same broker holding the same retained
         data, and treating it as another one deferred a removal to a broker that was never going to be named
-        again - a pending entry nothing could ever clear.  They stay part of the pending key, which is about
-        reaching a broker, not about which one it is.
+        again - a pending entry nothing could ever clear.  The pending key (_pending_key) compares the same two.
         """
         try:
             here = self._broker_identity()
@@ -1717,7 +1723,12 @@ class MqttPublisher:
             # A plain connection to a TLS listener never gets a CONNACK, so the TLS hint is only honest while
             # none arrived.  A drop moments after one is a broker closing an established connection - a packet
             # over its maximum is the usual cause - and blaming TLS sends the operator the wrong way.
-            hint = (f"; the broker closed the connection {lived:.0f}s after accepting it (a packet over its maximum looks like this)"
+            # A second container running the same integration on this broker connects with the same client id, and
+            # the broker ends the older session for it: both see this, over and over (mosquitto's MQTT 5 "session
+            # taken over" carries no properties, and paho 2.1 drops a DISCONNECT reason that has none)
+            hint = (f"; the broker closed the connection {lived:.0f}s after accepting it (a packet over its maximum looks like this, "
+                    f"and so does another client connecting with the client id {self.client_id}: a second container "
+                    "running the same integration on this broker)"
                     if lived is not None and lived < DROP_AFTER_CONNECT_S
                     else "" if lived is not None
                     else "; if the port is a TLS listener, turn TLS on" if not self.config.tls and reason == "Unspecified error" else "")
@@ -1771,8 +1782,8 @@ class MqttPublisher:
             # the broker it would also arrive again at every connect, so the
             # topic is cleared here and not only when our identity moves.
             _LOGGER.warning("MQTT: ignoring retained command on %s (commands must not be retained), clearing it", msg.topic)
-            self._publish(msg.topic, None, qos=1)
-            self._note_cleared(msg.topic)
+            if self._publish(msg.topic, None, qos=1):
+                self._note_cleared(msg.topic)  # a clear never sent (an identity move) has no echo to swallow
             return
         if not msg.payload and self._clear_of_ours(msg.topic):
             # our own clear of that retained command, echoed back: an MQTT 3.1.1 subscription has no noLocal, and
