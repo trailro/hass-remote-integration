@@ -72,7 +72,10 @@ connections on unload.
   disabled flags by unique id, so after the cutover the main HA keeps the
   entity ids your automations use.
 - The Cutover page compares both sides entity by entity, by discovery unique
-  id, and needs only read access to the main HA (URL and a long-lived token).
+  id, and only reads from the main HA (URL and a long-lived token). The token
+  is not limited to reading, though: a long-lived token acts with every right
+  of the user who created it. Nothing the page asks for needs an administrator,
+  so create the token under a dedicated user without admin rights.
   *Enable discovery* reads the main HA's config entries and entity registry to
   make sure the integration is gone there. A main HA that answers the
   config-entry query with an error (an older version) is only checked for
@@ -80,6 +83,10 @@ connections on unload.
   main HA unreachable, its entity registry unreadable) refuses the enable.
   `force: true` on `POST /api/cutover/enable` skips the checks on the main HA,
   and the answer and the timeline say `forced`.
+  With no main HA configured (the URL and token are optional) there is
+  nothing to check there and the enable goes ahead: the answer says
+  `checked: false` and the timeline says `unchecked`. A checked enable
+  answers `checked: true`; a forced one `checked: false` and `forced: true`.
   It compares the MQTT entities this container announces with the MQTT
   entities on the main HA; the main HA's own entities of the integration are
   not part of it, so compare those (entity ids, states) by hand before the cutover.

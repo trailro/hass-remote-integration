@@ -179,7 +179,7 @@ def _run_pip(cmd: list[str]) -> subprocess.CompletedProcess:
 def _pip_dry_run(python: str, requirements: list[str], constraints: str | None) -> dict[str, Any]:
     """Blocking: what pip would install for ``requirements`` in this venv.
     ``--dry-run --report`` resolves everything and installs nothing, but it
-    downloads the archives, and for a source archive or a direct URL it runs
+    downloads the archives, and for a source archive it runs
     the package's build backend to read its metadata."""
     if not requirements:
         return {"ok": True, "install": [], "stderr": ""}
