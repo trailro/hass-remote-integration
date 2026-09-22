@@ -14,6 +14,7 @@ from aiohttp import web
 from homeassistant.core import HomeAssistant
 
 from . import events, patches, preflight
+from .diagnostics import scrub_text
 from .installer import _DOMAIN_RE, Installer
 from .installer import save_lock as _save_lock
 from .installer import tag_ok as _tag_ok
@@ -151,8 +152,8 @@ class ReleasePreviewView(ManagerView):
             return self.json({"ok": False, "error": "domain and tag required"})
         try:
             return self.json({"ok": True, **await self.installer.preview(domain, tag)})
-        except Exception as err:  # noqa: BLE001
-            return self.json({"ok": False, "error": f"{type(err).__name__}: {err}"})
+        except Exception as err:  # noqa: BLE001 - aiohttp and GitHub text: it can carry a URL with a token in it
+            return self.json({"ok": False, "error": scrub_text(f"{type(err).__name__}: {err}")})
 
 
 class YamlView(ManagerView):
@@ -182,8 +183,8 @@ class YamlView(ManagerView):
             return self.json({"ok": False, "error": "text must be a string under 512 KB"})
         try:
             res = await self.hass.async_add_executor_job(self.installer.yaml_write, domain, text)
-        except Exception as err:  # noqa: BLE001 - yaml errors of every flavour go to the UI
-            return self.json({"ok": False, "error": f"{type(err).__name__}: {err}"})
+        except Exception as err:  # noqa: BLE001 - yaml errors of every flavour go to the UI, masked like a log line
+            return self.json({"ok": False, "error": scrub_text(f"{type(err).__name__}: {err}")})
         if domain == self.installer.running:
             self.installer.state.restart_required = True
             self.installer.state.last_action = f"YAML config of {domain} saved; applies at the next restart"

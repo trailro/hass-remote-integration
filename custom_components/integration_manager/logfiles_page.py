@@ -374,10 +374,20 @@ def _tail(path: str, lines: int, needle: str) -> tuple[list[str], int]:
             text = _scrub_one_line_rules(text)  # before the search, whether or not the raw line holds the needle
         return needle in text.lower()
 
+    def cut(raw: bytes, over: int) -> tuple[str, int]:
+        # a line longer than MAX_LINE_CHARS keeps its start (time, level, logger); the rest is counted, not held
+        over += max(0, len(raw) - MAX_LINE_CHARS)
+        return raw[:MAX_LINE_CHARS].decode("utf-8", errors="replace"), over
+
+    def shown(text: str, over: int) -> str:
+        # said after masking and searching: the note must not change what either decides
+        return f"{text} [... {over} more bytes of this line not shown]" if over else text
+
     with open_log_file(path) as fh:
         fh.seek(0, os.SEEK_END)
         pos = fh.tell()
         buf = b""
+        over = 0  # bytes of the partial line in buf already cut off its end
         block = 64 * 1024
         scanned_bytes = 0
         while pos > 0 and len(found) < lines and scanned_bytes < MAX_SCAN_BYTES and ruled < MAX_MASKED_OUT:
@@ -388,23 +398,31 @@ def _tail(path: str, lines: int, needle: str) -> tuple[list[str], int]:
             buf = fh.read(step) + buf
             parts = buf.split(b"\n")
             buf = parts[0]  # possibly partial first line, keep for next round
-            chunk, in_block = mask_key_material_lines(
-                [raw.decode("utf-8", errors="replace") for raw in parts[1:]], in_block)
-            for text in reversed(chunk):
+            cuts = [cut(raw, 0) for raw in parts[1:]]
+            if cuts and over:
+                cuts[-1] = cut(parts[-1], over)  # the long line ends here: its start is in this block
+                over = 0
+            if len(buf) > MAX_LINE_CHARS:
+                # a line with no newline for this long: only its start is kept, so no read copies more than that
+                over += len(buf) - MAX_LINE_CHARS
+                buf = buf[:MAX_LINE_CHARS]
+            chunk, in_block = mask_key_material_lines([t for t, _ in cuts], in_block)
+            for text, (_, cut_off) in zip(reversed(chunk), reversed(cuts)):
                 if not text.strip():
                     continue
                 scanned += 1
                 if matches(text):
-                    found.append(text)
+                    found.append(shown(text, cut_off))
                     if len(found) >= lines:
                         break
                 if ruled >= MAX_MASKED_OUT:
                     break
         if pos == 0 and buf.strip() and len(found) < lines and scanned_bytes < MAX_SCAN_BYTES + block and ruled < MAX_MASKED_OUT:
-            text = mask_key_material_lines([buf.decode("utf-8", errors="replace")], in_block)[0][0]
+            first, cut_off = cut(buf, over)
+            text = mask_key_material_lines([first], in_block)[0][0]
             scanned += 1
             if matches(text):
-                found.append(text)
+                found.append(shown(text, cut_off))
     found.reverse()
     return found, scanned
 
