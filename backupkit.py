@@ -84,6 +84,8 @@ EXCLUDE_GLOBS = (
 )
 KEEP_DEFAULT = 5
 _LOGGER = logging.getLogger(__name__)
+UNKNOWN_DOMAIN = object()  # backup_domain: the archive does not say which integration ran
+_STATE_MAX = 8 * 1024 * 1024  # state.json lists every installed version: far more than it ever holds
 INFO_MAX = 64 * 1024  # backup-info.json is a few hundred bytes; a huge one is a zip bomb
 # files in a backup, as the Home Assistant backup import (ha_import.MAX_MEMBERS): a volume holds a few thousand, and
 # every member costs memory and time to read even when empty (500000 took 17 s and 286 MB to validate)
@@ -298,6 +300,7 @@ def create(config_dir: str, label: str = "", storage_version: str | None = None,
     _drop_dead_partials(bdir)
     fd, tmp = tempfile.mkstemp(dir=bdir, prefix=f".{name}.", suffix=".tmp")
     count = 0
+    domain = UNKNOWN_DOMAIN
     try:
         with os.fdopen(fd, "wb") as fh:
             with zipfile.ZipFile(fh, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -308,7 +311,11 @@ def create(config_dir: str, label: str = "", storage_version: str | None = None,
                         raise ValueError(f"the configuration holds more than {MAX_MEMBERS} files: no backup was made")
                     if _write_member(zf, path, rel, log):
                         count += 1
+                        if rel == MARKER:
+                            domain = _domain_of_state_file(path)
                 info = {"created": stamp, "label": label, "files": count, "tool": "hass-remote-integration", "ha_version": storage_version or ha_version(config_dir)}
+                if domain is not UNKNOWN_DOMAIN:
+                    info["domain"] = domain  # what backup_domain reads from state.json, without opening it again
                 zf.writestr("backup-info.json", json.dumps(info))
             fh.flush()
             os.fsync(fh.fileno())  # a power loss right after the rename must not leave a named but empty or torn backup
@@ -399,6 +406,8 @@ def describe(config_dir: str, name: str) -> dict:
     record = {"name": name, "bytes": st.st_size, "mtime": st.st_mtime,
               "created": info.get("created"), "label": info.get("label", ""), "files": info.get("files"),
               "ha_version": known_ha_version(info.get("ha_version"))}
+    if "domain" in info and isinstance(info["domain"], (str, type(None))):
+        record["domain"] = info["domain"]  # absent: not recorded (an older backup), read with backup_domain
     with _DESCRIBED_LOCK:
         if len(_DESCRIBED) >= _DESCRIBED_MAX:
             _DESCRIBED.clear()
@@ -498,24 +507,34 @@ def prune(config_dir: str, keep: int = KEEP_DEFAULT, protect: set[str] | None = 
     return removed
 
 
-UNKNOWN_DOMAIN = object()
-_STATE_MAX = 8 * 1024 * 1024  # state.json lists every installed version: far more than it ever holds
+def _state_domain(state: object) -> object:
+    if not isinstance(state, dict) or not isinstance(state.get("domain"), (str, type(None))):
+        return UNKNOWN_DOMAIN
+    return state.get("domain")
+
+
+def _domain_of_state_file(path: str) -> object:
+    try:
+        if os.path.getsize(path) > _STATE_MAX:
+            return UNKNOWN_DOMAIN
+        with open(path, encoding="utf-8") as fh:
+            return _state_domain(json.load(fh))
+    except (OSError, ValueError):
+        return UNKNOWN_DOMAIN
 
 
 def backup_domain(config_dir: str, name: str) -> object:
     """The integration that ran when the backup was made (``domain`` of its state.json; None: none ran), or
-    UNKNOWN_DOMAIN when the archive does not say."""
+    UNKNOWN_DOMAIN when the archive does not say.  create records it in backup-info.json too (describe has it);
+    an older backup's state.json is read."""
     try:
         with zipfile.ZipFile(os.path.join(config_dir, BACKUP_DIR, name)) as zf:
             member = zf.getinfo(MARKER)
             if member.file_size > _STATE_MAX:
                 return UNKNOWN_DOMAIN
-            state = json.loads(zf.read(member))
+            return _state_domain(json.loads(zf.read(member)))
     except (OSError, zipfile.BadZipFile, KeyError, ValueError):
         return UNKNOWN_DOMAIN
-    if not isinstance(state, dict) or not isinstance(state.get("domain"), (str, type(None))):
-        return UNKNOWN_DOMAIN
-    return state.get("domain")
 
 
 def validate(path: str) -> dict:

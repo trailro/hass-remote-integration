@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import unittest
+import zipfile
 from types import SimpleNamespace
 from unittest import mock
 
@@ -121,6 +122,88 @@ class KeepSwitchAfterRollbackTest(unittest.TestCase):
         state = self._boot()
         self.assertEqual(self._storage(), "before the update")
         self.assertTrue(state["last_restore"]["ok"])
+
+
+class RestoreSwitchPicksThisIntegrationsBackupTest(unittest.TestCase):
+    """A switch with restore brings back .storage only: the backup it picks must be one made while the running
+    integration ran, never the newest one of another integration's time."""
+
+    def setUp(self):
+        KeepSwitchAfterRollbackTest.setUp(self)
+        self.installer.running = "ydom"
+
+    def _backup(self, label, domain, made_on=OLDER):
+        """One second newer than the backup before it: the list is ordered by when a backup was made."""
+        state = os.path.join(self.cfg, backupkit.MARKER)
+        with open(state, "w", encoding="utf-8") as fh:
+            json.dump({"domain": domain}, fh)
+        self.made = getattr(self, "made", 0) + 1
+        with mock.patch.object(backupkit.time, "strftime", return_value=f"20260101-0000{self.made:02d}"):
+            return backupkit.create(self.cfg, label, made_on)["name"]
+
+    def _switch(self, mode="restore"):
+        try:
+            return asyncio.run(self.views.async_change_ha_version(self.installer, self.updater, OLDER, mode, "test")), None
+        except ValueError as err:
+            return None, str(err)
+
+    def test_the_newest_backup_of_the_running_integration_is_picked(self):
+        mine = self._backup("mine", "ydom")
+        self._backup("theirs", "xdom")  # newer, made on the target too, but while another integration ran
+        result, err = self._switch()
+        self.assertIsNone(err)
+        self.assertEqual(result["restore"], mine)
+        self.assertEqual(backupkit._pending_meta(self.cfg)["name"], mine)
+
+    def test_only_another_integrations_backups_is_refused_and_says_why(self):
+        self._backup("theirs", "xdom")
+        self._backup("none", None)
+        result, err = self._switch()
+        self.assertIsNone(result, "a switch restored another integration's .storage under the running one")
+        self.assertIn(f"no backup made on Home Assistant {OLDER} or older", err)
+        self.assertIn("choose rebuild or keep", err)
+        self.assertIn("xdom", err)
+        self.assertIn("no integration", err)
+        self.assertFalse(backupkit.pending(self.cfg))
+
+    def test_an_older_backup_without_the_record_is_read_from_its_state(self):
+        name = self._backup("old", "ydom")
+        path = os.path.join(self.cfg, backupkit.BACKUP_DIR, name)
+        with zipfile.ZipFile(path) as zf:  # as an older manager wrote it: no "domain" in backup-info.json
+            members = {n: zf.read(n) for n in zf.namelist()}
+        info = json.loads(members["backup-info.json"])
+        self.assertEqual(info.pop("domain"), "ydom")
+        members["backup-info.json"] = json.dumps(info).encode()
+        with zipfile.ZipFile(path, "w") as zf:
+            for n, data in members.items():
+                zf.writestr(n, data)
+        self.assertNotIn("domain", backupkit.describe(self.cfg, name))
+        result, err = self._switch()
+        self.assertIsNone(err)
+        self.assertEqual(result["restore"], name)
+
+    def test_an_archive_that_does_not_say_is_not_picked(self):
+        name = self._backup("odd", "ydom")
+        path = os.path.join(self.cfg, backupkit.BACKUP_DIR, name)
+        with zipfile.ZipFile(path) as zf:
+            members = {n: zf.read(n) for n in zf.namelist()}
+        info = json.loads(members["backup-info.json"])
+        info.pop("domain")
+        members["backup-info.json"] = json.dumps(info).encode()
+        members[backupkit.MARKER] = b"not json"
+        with zipfile.ZipFile(path, "w") as zf:
+            for n, data in members.items():
+                zf.writestr(n, data)
+        result, err = self._switch()
+        self.assertIsNone(result)
+        self.assertIn("do not record", err)
+
+    def test_the_plan_system_shows_names_the_same_backup(self):
+        mine = self._backup("mine", "ydom")
+        self._backup("theirs", "xdom")
+        with open(os.path.join(self.cfg, backupkit.MARKER), "w", encoding="utf-8") as fh:
+            json.dump({"domain": "ydom"}, fh)
+        self.assertEqual(self.updater._config_backups([OLDER], RUNNING)[OLDER]["name"], mine)
 
 
 if __name__ == "__main__":
