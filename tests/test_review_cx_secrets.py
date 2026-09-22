@@ -185,8 +185,8 @@ TOKEN_ATTRS = {
 class ExcludedEntityAttributesTest(unittest.TestCase):
     """F3: published, excluded by a rule and excluded through exclude_integrations must agree."""
 
-    def _rows(self, *, rule=None, exclude=()):
-        state = State("camera.hall", "idle", dict(TOKEN_ATTRS))
+    def _rows(self, *, rule=None, exclude=(), value="idle"):
+        state = State("camera.hall", value, dict(TOKEN_ATTRS))
         pub = _publisher(exclude=exclude)
         pub.config = SimpleNamespace(exclude_integrations=list(exclude), main_ha_version="")
         pub.rules = SimpleNamespace(for_entity=lambda _e: dict(rule or {}))
@@ -214,6 +214,16 @@ class ExcludedEntityAttributesTest(unittest.TestCase):
                 row = self._rows(**kwargs)[0]
                 self.assertNotIn("access_token", row["attributes"])
                 self.assertNotIn(SECRET, json.dumps(row, default=str))
+
+    def test_no_row_carries_a_token_in_the_state(self):
+        """The state of a published entity has its token masked in the document; an excluded one's row took
+        state.state as it was, so /api/entities showed the token the published row hides."""
+        url = f"/api/camera_proxy/camera.hall?token={SECRET}"
+        for name, kwargs in (("published", {}), ("rule", {"rule": {"exclude": True}}), ("integration", {"exclude": ("demo",)})):
+            with self.subTest(row=name):
+                row = self._rows(value=url, **kwargs)[0]
+                self.assertNotIn(SECRET, json.dumps(row, default=str))
+                self.assertIn("token=***", row["state"])
 
     def test_the_rest_of_the_attributes_are_still_there(self):
         """The row is sanitised, not emptied: the page still needs it to be readable."""
