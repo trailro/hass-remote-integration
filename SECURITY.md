@@ -103,7 +103,8 @@ those projects.
   and keep the volume private to Docker.
 - **`HRI_APT_PACKAGES` installs Debian packages as root inside the
   container.** They come from Debian's own repositories, through apt, at boot;
-  the names are validated and never reach a shell, but a package's maintainer
+  the names are validated, never reach a shell and are taken as exact package
+  names (never as a pattern over the archive), but a package's maintainer
   scripts run as root like any `apt-get install`. Only the operator sets this —
   it is part of the container's environment, and nothing in the UI, the API or
   an integration can change it.

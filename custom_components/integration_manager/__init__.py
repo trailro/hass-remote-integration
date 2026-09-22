@@ -245,7 +245,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     ha_updater = HaUpdater(hass)
 
-    aligner = RegistryAligner(hass)
+    aligner = await hass.async_add_executor_job(RegistryAligner, hass)  # reads import-map.json
     aligner.async_start()
     # after a downgrade with a clean start; a background task, because it waits for
     # EVENT_HOMEASSISTANT_STARTED and a tracked task would hold up that very start

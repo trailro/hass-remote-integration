@@ -78,8 +78,13 @@ automations, no recorder. It runs exactly one integration and publishes it.
 - The container holds **one integration**, with as many of its versions as you
   like in a version store. Want a second integration? Run a second container.
 - Everything the container publishes is named after the integration: MQTT base
-  topic `hass_<domain>`, discovery ids `hass_<domain>_...`. Several containers
-  share one broker and one main HA without clashing.
+  topic and client id `hass_<domain>`, discovery ids `hass_<domain>_...`.
+  Containers running different integrations share one broker and one main HA
+  without clashing. Two containers running the *same* integration cannot share
+  a broker: the names are derived from the domain and are not a setting, so
+  they would take each other's connection and clear each other's retained
+  data. Put both config entries in one container, or give each container its
+  own broker.
 
 ---
 
@@ -280,7 +285,15 @@ Choose whichever fits the integration, on the **Integration** page:
   refused while another import, or a start, stop or install, is running: the
   import decides as it goes whether the entry is stored enabled, and a stop
   finishing underneath it would leave an enabled entry behind a manager that
-  reports the integration stopped.
+  reports the integration stopped. When an import replaces a store file this
+  volume already had, the original is kept as `.storage/<store>.pre-import`
+  until the import is done, and a restart in the middle of an import puts it
+  back. The import is done as soon as its config entry is written to
+  `.storage/core.config_entries`: the manager writes that file at once (Home
+  Assistant would write it a second later) and only then removes the set-aside
+  original, before it deletes the extracted backup. A restart at any point
+  leaves either the imported entry with the imported store, or no entry and
+  the volume's own store as it was.
 
 ### 3. Start it
 
@@ -288,7 +301,10 @@ Click **Start** on the **Overview** or **Integration** page. The version is
 deployed, its requirements installed, patches applied, and the config entries
 the manager disabled (on a stop or a switch) are enabled again; an entry you
 disabled yourself stays disabled. A backup is taken first when something
-changes. Starting a version other than the deployed one runs its preflight
+changes. Each requirement gets 30 minutes to install: one that takes longer (a
+build that hangs, a download that never ends) is stopped together with
+everything it started and reported as `pip failed for: <requirement>`, so the
+manager does not stay busy until the container restarts. Starting a version other than the deployed one runs its preflight
 first (not for an integration without a GitHub repository; see
 [Updating the integration](#updating-the-integration)); blockers ask whether
 to start anyway. If a start fails after the new files went out, the files of the
@@ -350,7 +366,10 @@ container announces over MQTT with what your main HA has made of it.
    id belongs to exactly as a stranger would. The entity would otherwise arrive
    there with a `_2` id.
    The URL must not contain `user:password@`: the token
-   authenticates. The page matches the entities this container announces over
+   authenticates. Everything the page asks the main HA for is a read, and none
+   of it needs an administrator — while a long-lived token carries every right
+   of the user who created it, so create it under a dedicated user without
+   admin rights. The page matches the entities this container announces over
    MQTT with the MQTT entities your main HA created from that discovery, by
    unique id, and lists what is missing on either side and what differs in
    state, names and flags. The integration's own entities on your main HA are
@@ -1549,7 +1568,8 @@ hass_<domain>/manager/result                        outcome of a manager action,
   uninstall, nothing is sent: an identity the container published before
   (the one it recorded last) gets the same kept cleanup, the answer says
   `retained_cleanup_deferred`, and it runs once MQTT is enabled again. A kept
-  cleanup belongs to the broker it is for (host, port, TLS and username;
+  cleanup belongs to the broker it is for (its host and port: another user, or
+  TLS turned on, is the same broker holding the same data;
   `retained_cleanup_broker` in the answer and `broker` in
   `retained_cleanup_pending` of the MQTT status show its `host:port`): it is
   tried only while the
@@ -1666,6 +1686,12 @@ secret) to require a password:
   the sessions issued between that logout and the failed one are valid again
   (until they expire), and the ones issued after the failed one (a login right
   after it included) end. Log out again once the volume is fixed;
+- the key that signs the session cookies is created on the first boot with a
+  password, and again after a restore (backups leave it out). When the volume
+  cannot take it (full or read-only), the manager comes up anyway with a key
+  held in memory: the password is asked for as always, but every session ends
+  at the next restart, which tries the write again. The log and the timeline
+  say so;
 - scripts send the password as `Authorization: Bearer <password>` (the
   scheme in any case);
 - a line end at either end of `HRI_PASSWORD` (an `.env` file saved with
@@ -1815,8 +1841,11 @@ What is in place:
   backup you import is only used for that request.
 - A release is downloaded only up to 100 MB and unpacked only up to 300 MB and
   20000 files; symbolic links in the archive are skipped. A requirement in a
-  manifest that is a pip option (`--index-url …`, `-e …`) or not a valid
-  requirement blocks the preflight and refuses the install and the start.
+  manifest that is a pip option (`--index-url …`, `-e …`), a direct URL
+  (`pkg @ https://…`, `pkg @ git+https://…`, `pkg @ file://…`) or not a valid
+  requirement blocks the preflight and refuses the install and the start: it
+  would change what gets installed from where, and Home Assistant never counts
+  a URL requirement as installed, so it would go to pip again at every boot.
   The environment builder downloads exactly the commit its Check verified.
 - An imported Home Assistant backup must be the uncompressed `.tar` Home
   Assistant writes. Its configuration archive may be at most 2 GB, its
@@ -1854,7 +1883,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | `HRI_REGISTRY` | `ghcr.io/trailro` | Where Compose pulls the image from: `ghcr.io/trailro` (GitHub Container Registry) or `docker.io/trailro26` (Docker Hub); the same image either way. A `docker-compose.yml` from 0.16.0 or older ignores it and pulls from GitHub Container Registry: download the file again to use it |
 | `TZ` | `UTC` | Time zone; an unknown zone falls back to UTC, with an error in the log |
 | `HA_VERSION_LATEST` | `1` | `0` installs the image's default Home Assistant (`HA_VERSION_DEFAULT`, 2026.9.3 here) on a fresh volume instead of the newest |
-| `HRI_APT_PACKAGES` | unset | Debian packages the container installs at boot, before Home Assistant starts, for what pip cannot install (the `ffmpeg` binary, BlueZ): names separated by spaces or commas, for example `ffmpeg libpcap0.8t64`. Only Debian package names are accepted (`libc6:arm64` too); anything else — an option, a URL, a path, a shell metacharacter, or a name ending in `-` (`libturbojpeg0-`), which is apt's own *remove* operator and not part of any package name — is refused with a line in the log and nothing is installed for it, and the value never reaches a shell. A name ending in `+` (`g++`) is fine: that character really is part of Debian package names. Packages that are already installed are not installed again, so a restart costs nothing; they live in the container, not on the volume, so recreating the container or updating the image installs them again. A failure (no network, an unknown package) is recorded on **System** and does not stop the boot. The output is in `integration_manager/apt-install.log`. A `docker-compose.yml` from 0.17.2 or older does not pass it to the container: download the file again to use it |
+| `HRI_APT_PACKAGES` | unset | Debian packages the container installs at boot, before Home Assistant starts, for what pip cannot install (the `ffmpeg` binary, BlueZ): names separated by spaces or commas, for example `ffmpeg libpcap0.8t64`. Only Debian package names are accepted (`libc6:arm64` too); anything else — an option, a URL, a path, a shell metacharacter, or a name ending in `-` (`libturbojpeg0-`), which is apt's own *remove* operator and not part of any package name — is refused with a line in the log and nothing is installed for it, and the value never reaches a shell. A name ending in `+` (`g++`) is fine: that character really is part of Debian package names. Each name must be the exact name of a package: apt is told not to read one as a pattern, so a typo such as `python3.1.` fails like any unknown package instead of installing every package whose name it happens to match. Packages that are already installed are not installed again, so a restart costs nothing; they live in the container, not on the volume, so recreating the container or updating the image installs them again. A failure (no network, an unknown package) is recorded on **System** and does not stop the boot. The output is in `integration_manager/apt-install.log`. A `docker-compose.yml` from 0.17.2 or older does not pass it to the container: download the file again to use it |
 | `HRI_DEV_SRC` | `./dev-src` | Dev mode: directory mounted at `/dev-src` |
 | `HRI_DEBUGPY` | unset | Dev mode: debugger port |
 | `HRI_DEBUGPY_HOST` | `127.0.0.1` | Dev mode: address debugpy binds inside the container (the dev overlay sets `0.0.0.0`) |
@@ -1875,7 +1904,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
   integration_manager/
     state.json                  running integration, versions, pending actions, the health watchdog's ledger (its restarts of the last 24 h, the backoff step, the last action); an unreadable one is kept as state.json.corrupt-<stamp>
     settings.json               settings (backup retention, smoke test, health thresholds, health watchdog), tokens, log-file format (mode 600); a damaged one is kept as settings.json.corrupt-<stamp>
-    auth_key                    signs login sessions, only with a password set (mode 600)
+    auth_key                    signs login sessions, only with a password set (mode 600); when it cannot be written (a full or read-only volume) a key held in memory is used and every session ends at the next restart
     auth_revoked                time of the last logout: sessions from before it are invalid
     mqtt.json                   broker configuration (mode 600)
     mqtt_rules.json             per-entity MQTT rules
@@ -1929,7 +1958,8 @@ The numeric MQTT settings have ranges: `port` 1-65535, `qos` 0, 1 or 2,
 min. The MQTT page refuses a port or a qos outside them and clamps the two
 intervals. The same ranges are applied when `mqtt.json` is read, so a hand
 edit cannot keep the manager from starting: a value out of range, or not a
-number, falls back to its default (1883, 0, 300, 60) with a warning in the log.
+whole number (`8883.0`, `1.0` and `true` included), falls back to its default
+(1883, 0, 300, 60) with a warning in the log.
 So does a switch that is not `true`/`false`, a text setting that is not a
 string, and an `exclude_integrations` that is not a list of domains. A
 `main_ha_version` that is not a Home Assistant version (`yesterday`, `v2026.8`,
@@ -2005,11 +2035,11 @@ points:
 | Configuration | `POST /api/flow/start`, `GET /api/flow/progress`, `POST/DELETE /api/flow/<id>`, `POST/DELETE /api/options/<flow_id>`, `GET/POST /api/yaml/<domain>`, `GET /api/entries`, `POST /api/entries/<entry_id>/{options,reload,delete}` (an unknown entry id, there or in a `reconfigure` flow start, answers 404 with a message) |
 | Patches | `GET /api/patches/<domain>`, `POST /api/patches/<domain>/upload`, `POST /api/patches/<domain>/<name>/{apply,delete}`, `GET /api/patch_editor/<domain>?name=`, `POST /api/patch_editor/<domain>/{check,save}` |
 | MQTT | `GET/POST /api/mqtt/config`, `GET/POST /api/mqtt/rules`, `POST /api/mqtt/{reconnect,republish}`, `GET /api/mqtt/discovery`, `GET /api/mqtt/commands` |
-| Entities | `GET /api/entities` (an entity's attributes are the published ones whether or not it is published: an `access_token` and a picture URL carrying `token=` are left out of the row as well, so excluding an entity from MQTT never shows more than publishing it), `POST /api/entities/<entity_id>/{rename,name,disable,enable,delete,mqtt_exclude,mqtt_include,mqtt_name}`, `GET /api/devices`, `POST /api/devices/<device_id>/{name,delete}`, `GET /api/services`, `POST /api/services/call` |
+| Entities | `GET /api/entities` (an entity's attributes are the published ones whether or not it is published: an `access_token` and a picture URL carrying `token=` are left out of the row as well, so excluding an entity from MQTT never shows more than publishing it), `POST /api/entities/<entity_id>/{rename,name,disable,enable,delete,mqtt_exclude,mqtt_include,mqtt_name}`, `GET /api/devices`, `POST /api/devices/<device_id>/{name,delete}` (`delete` asks every config entry of the device first whether its integration can remove devices at all, and changes nothing when one cannot; an integration that refuses, or fails, after another entry was already detached answers `ok: false` with the entries detached so far in the error and `config_entries_detached`), `GET /api/services`, `POST /api/services/call` |
 | System | `GET /api/ha`, `POST /api/ha/{update,rollback,check}`, `POST /api/restart`, `GET/POST /api/settings` |
 | Backups | `GET /api/backups`, `POST /api/backups/create`, `POST /api/backups/upload`, `GET /api/backups/<name>/download`, `POST /api/backups/<name>/{restore,delete}`, `POST /api/backups/restore/cancel` (answers `cancelled`; a restore that belongs to a scheduled Home Assistant version change is refused with `for_version`, and a full rollback's restore with `rollback`, the backup it restores) |
 | Import | `POST /api/import/upload`, `GET/POST /api/import/inspect`, `POST /api/import/{apply,apply_all,clear}` |
-| Cutover | `GET /api/parity`, `POST /api/parity/{test,remove_orphans}`, `POST /api/cutover/{status,enable,undo}`; `enable` takes `force`, which skips the checks on the main Home Assistant (MQTT loaded, the integration's config entries, entity ids held there by anything but this container's own mirrors) but not the container's own (an integration running, health, MQTT connected), and the answer and the timeline say `forced`; `undo` answers `cleared_discovery_configs` and `manager_device_kept`; a check on the main HA that cannot run (unreachable, its registry unreadable) blocks the enable rather than passing. Removing an orphan while discovery is off is refused, except for the manager device while `manager_discovery` announces it. A matched row carries `state_comparable`: `button`, `scene`, `notify` and `event` are not compared by state (the command-only platforms have no state topic on the main HA, and an event entity's state is a "last triggered" timestamp each side keeps for itself), so those never count as differing; their availability, renames and disabled flag are still reported. An orphan of the manager device is removed by its component key rather than the unique id the removal form used to carry — a unique id that belongs to no component of that device is now refused instead of reported as removed |
+| Cutover | `GET /api/parity`, `POST /api/parity/{test,remove_orphans}`, `POST /api/cutover/{status,enable,undo}`; `enable` takes `force`, which skips the checks on the main Home Assistant (MQTT loaded, the integration's config entries, entity ids held there by anything but this container's own mirrors) but not the container's own (an integration running, health, MQTT connected), and the answer and the timeline say `forced`; the answer carries `checked`, false when the main HA was not checked (forced, or no main HA configured, which the timeline marks `unchecked`); `undo` answers `cleared_discovery_configs` and `manager_device_kept`; a check on the main HA that cannot run (unreachable, its registry unreadable) blocks the enable rather than passing. Removing an orphan while discovery is off is refused, except for the manager device while `manager_discovery` announces it. A matched row carries `state_comparable`: `button`, `scene`, `notify` and `event` are not compared by state (the command-only platforms have no state topic on the main HA, and an event entity's state is a "last triggered" timestamp each side keeps for itself), so those never count as differing; their availability, renames and disabled flag are still reported. An orphan of the manager device is removed by its component key rather than the unique id the removal form used to carry — a unique id that belongs to no component of that device is now refused instead of reported as removed |
 | Logs | `GET /api/logs?level=&prefix=&q=&since_id=&limit=` (`limit` 1 to 2000, `since_id` 0 to 2^63-1, otherwise `400`; the answer carries `cursor`, the next `since_id`), `GET /api/logs/loggers`, `POST /api/logs/level` (`{"logger": …, "level": …}`), `GET /api/log_files` (an `id` per file, which changes at every start), `GET /api/log_files/tail?id=&file=&lines=&q=` (`file` is the masked name, answered `409` when several files share it; a real name is not accepted), `GET /api/log_files/download?id=&file=` (the same file selection; the file masked and streamed as an attachment under its masked name, at most its last 32 MB, `X-Log-Truncated` when it was cut), `GET/POST /api/settings` (`log_format`) |
 | Diagnostics | `GET /api/diagnostics` (zip, secrets removed), `GET /api/diag/memory[?refs=<type>]` (one probe at a time: a second one meanwhile answers `429`) |
 
@@ -2193,6 +2223,11 @@ progress (50): try again later`.
 - **MQTT says the base topic is in use.** Something else left retained messages
   under `hass_<domain>/`. Remove them, or tick `force_base_topic` if they are
   yours from an earlier setup.
+- **MQTT reconnects every few seconds, "closed the connection ... after
+  accepting it".** Either a document over the broker's maximum packet size
+  (the log names it), or another client connecting with the same client id
+  `hass_<domain>`: usually a second container running the same integration on
+  that broker. The two cannot share one broker; see the start of this README.
 - **Entities appear twice in my main HA.** Discovery is on while the main HA
   still runs the same integration. Undo on **Cutover**, remove the
   integration from the main HA, enable again.
