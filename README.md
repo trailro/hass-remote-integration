@@ -611,8 +611,12 @@ rewrites `.storage` in its own format and never converts it back. A downgrade
 therefore asks what the older version starts with:
 
 - **Restore from a backup.** `.storage` comes back from the newest backup made
-  on the target version or an older one, which is the configuration in a
-  format that version understands. Changes made after that backup are lost.
+  on the target version or an older one while the integration that runs now
+  was running, which is the configuration in a format that version
+  understands. Changes made after that backup are lost. A backup made while
+  another integration ran (or none) is not used, since only `.storage` comes
+  back and the manager stays as it is; when no backup qualifies, the refusal
+  says how many were skipped for that reason, so choose rebuild or keep.
 - **Start clean and rebuild the integration**, the default when there is no
   such backup. The older version starts like a fresh install. After it boots,
   the integration's config entries are created again with their data and
@@ -629,7 +633,11 @@ therefore asks what the older version starts with:
   and then rebuilds only if the integration still runs.
 - **Keep the current configuration.** This works when the older version can
   read the newer storage formats; otherwise the boot fails and the container
-  falls back to the version you came from.
+  falls back to the version you came from. Keep is refused while a restore
+  scheduled on System, or the restore of a full rollback, brings back a
+  backup made on a newer version than the target: that version could not
+  read it and the boot would drop it. Cancel the restore (or, after a full
+  rollback, restart to finish it) first.
 
 The integration version and the manager state stay as they are in every case.
 
@@ -809,9 +817,18 @@ shows what it did, and a failure does not stop the boot.
 Taken automatically before every start that changes something, before every
 Home Assistant version change, before a restore and before replacing the
 integration; optionally daily. On **System**
-you can create, download, upload, delete and restore them. A restore is
+you can create, download, upload, delete and restore them. The label you give
+a backup is kept as typed; its file name uses the label in plain ASCII (accents
+dropped, spaces as `-`: `înainte de update` gives `…-inainte-de-update.zip`,
+letters of other alphabets are left out). A backup an older version named with
+such letters can still be downloaded, restored and deleted. A restore is
 applied at the next restart, can be partial (only `.storage`, only the manager
-state, …), and is rolled back if it fails halfway. *Cancel restore* cancels a
+state, …), and is rolled back if it fails halfway. A partial restore that
+brings back `.storage` without the manager part, or the manager part without
+`.storage`, is refused when the backup was made while another integration ran
+(or none): the config entries of one integration under the manager of another
+would run both and publish them under the wrong identity. Restore `.storage` +
+manager, or everything. *Cancel restore* cancels a
 restore scheduled by hand; a restore that belongs to a scheduled Home Assistant
 version change is cancelled together with that change (choose the running
 version under Home Assistant), and cancelling it on its own is refused; a full
@@ -849,6 +866,11 @@ most 100000 files: taking a larger one fails, and an upload or restore of one
 is refused (counted from the archive's directory before it is read, and not
 listed with its details). Backups, restored files and
 uploads are created readable by the container user only (umask 077).
+A backup holds secrets: `integration_manager/settings.json` (the GitHub token
+and the parent Home Assistant token), `integration_manager/mqtt.json` (the
+broker password), `secrets.yaml` and the credentials Home Assistant keeps in
+`.storage` (config entries, authentication). Keep downloaded backups as private
+as the volume itself.
 A backup takes regular files only: a named pipe, socket or device in the backed-up
 trees is skipped with a line in the log, and so is a symbolic link to a directory
 (`custom_components` itself included). A symbolic link to a file is stored as that
@@ -891,7 +913,10 @@ made on a newer version can only be restored together with a switch to that
 version. A backup that does not record its version (or records something that
 is not a version number, such as `unknown`) is only restored with
 `.storage` after a confirmation ("restore anyway", `"force": true` in the API
-body), since it may come from a newer version. The version only matters when `.storage` is restored: a partial restore
+body), since it may come from a newer version. A scheduled restore of such a
+backup whose schedule does not record that confirmation (an edited
+`restore-pending.json`, or one a manager older than 0.14.0 wrote and never
+booted since) is dropped at the boot with a message instead of applied. The version only matters when `.storage` is restored: a partial restore
 without it never changes Home Assistant. A switch installs the version at the restart if its venv is no longer
 on the volume (only the current and the previous one are kept), takes a backup
 of the current configuration first, and brings it back if that version does
@@ -1195,11 +1220,22 @@ hass_<domain>/manager/result                        outcome of a manager action,
   unit, icon, category, device). Access tokens are left out of the
   attributes: `access_token`, and any attribute whose URL carries a `token=`
   (the `entity_picture` of a camera, image or media player), which would open
-  this container's proxy. Every entity of the container's Home Assistant gets a
-  document, except the entities of the integrations listed in
+  this container's proxy. Every other attribute is published as the integration
+  sets it, under any name: an attribute is state the integration chose to show,
+  and the main Home Assistant needs it as it is (`code_format`, `error_code`, a
+  GPIO `pin`). The secret-name masking of the command history and the logs does
+  not apply to entity documents; an integration that puts a password in a state
+  attribute publishes it to anyone who may read the base topic. Every entity of
+  the container's Home Assistant gets a document, except the entities of the
+  integrations listed in
   `exclude_integrations` (default `["integration_manager"]`; set with `POST
-  /api/mqtt/config`, as a list or comma-separated text; their services are also
-  left out of the catalog and not callable over MQTT), entities excluded by a
+  /api/mqtt/config`, as a list or comma-separated text; services whose domain is
+  one of them are also left out of the catalog and not callable over MQTT; Home
+  Assistant does not record which integration registered a service, so what
+  such an integration registers under another domain — a legacy
+  `notify.<name>`, a `tts.<engine>_say`, a service of a platform — stays
+  callable, while an entity service reaches only published entities and so
+  never its entities), entities excluded by a
   rule, and `zone` entities: `zone.home` is the container's own home location
   (which is also why a `device_tracker` with coordinates is mirrored as
   coordinates rather than as an answer — the main Home Assistant's MQTT tracker
@@ -1460,19 +1496,36 @@ hass_<domain>/manager/result                        outcome of a manager action,
   answered `ok: null` with `state: running` and `duplicate: true`; once it
   ends, a repeat gets its final result (flagged `late` when it ended after the
   timeout). At most 50 service
-  calls and commands run at once, a timed-out call counting until its service
-  returns: beyond that a call is answered `too many calls in progress` (a
-  retry with the same `_id` runs once there is room) and a command is
-  rejected. `homeassistant`, `shell_command`, `python_script`,
+  calls and commands received over MQTT run at once, a timed-out call counting
+  until its service returns: beyond that a call is answered `too many calls in
+  progress` (a retry with the same `_id` runs once there is room) and a command
+  is rejected. The Services page and `POST /api/services/call` have 50 of their
+  own, counted apart. `homeassistant`, `shell_command`, `python_script`,
   `hassio` and `integration_manager` are never callable.
   `persistent_notification` and `notify.persistent_notification` are not
   callable over MQTT and are left out of the MQTT service catalog; the Services
-  page can still call them. `NaN`, `Infinity`, numbers too large to be finite
+  page can still call them. So are `recorder`, `logger`, `system_log`, `backup`
+  and `conversation`, which only exist here when the running integration
+  depends on them: they take no target, so the published-entity check below
+  never applies to them, and they purge history, change log levels, write or
+  clear log entries, take a full backup of `/config`, or run a sentence against
+  every entity here, published or not. Any other service that takes no target
+  (an integration's own, a legacy `notify.<name>`) is callable as registered.
+  `NaN`, `Infinity`, numbers too large to be finite
   (`1e999`), payloads larger than 256 KB, JSON nested deeper than 64 levels
   and JSON that does not parse are rejected, with an answer on `result/...`
   that still carries the `_id` when the outer object names one as a string, a
   finite number, `true`, `false` or `null` (read from at most the first 256 KB,
-  without parsing the payload). Values of keys ending in
+  without parsing the payload). Over MQTT 5 the container tells the broker the
+  largest packet it takes (320 KB: the 256 KB payload maximum plus room for the
+  topic), so a broker does not send it anything larger: such a call or command
+  is dropped by the broker and gets no answer at all, instead of being read
+  into memory whole and then refused. A broker that speaks only MQTT 3.1.1
+  cannot be told, and there a payload of any size is read before it is refused
+  — limit it on the broker (`max_packet_size` in mosquitto). The scans (the
+  base-topic check, the cleanup of stale and excluded documents) use
+  short-lived connections that announce no maximum: they have to see retained
+  documents of any size, a large foreign one included. Values of keys ending in
   `code`, `key`, `pin`, `otp` or `auth` as a word of their own (`code`, `user_code`,
   `api_key`, `user_pin`, `basic_auth`, not `zipcode`, `code_format`, `spin`,
   `author` or `oauth`), or in `usercode`, `passcode`, `pincode`, `password`,
@@ -1516,16 +1569,21 @@ hass_<domain>/manager/result                        outcome of a manager action,
   container never keeps showing an old `ok`. They also stay unavailable during a
   restart until Home Assistant in the container has started again.
 - **Manager actions** (`manager_commands`, off by default): *Install* on the
-  integration and Home Assistant update entities, plus *Restart*, *Back up now*
-  (at most every 10 minutes) and *Check for updates* (every 5 minutes) buttons. Installing the integration runs the
+  integration and Home Assistant update entities (each at most every 10
+  minutes), plus *Restart*, *Back up now* (at most every 10 minutes) and *Check
+  for updates* (every 5 minutes) buttons. Installing the integration runs the
   preflight, then installs and starts the release the way the UI does (backup,
   smoke test, automatic rollback) and restarts when the loaded code has to be
   replaced; installing Home Assistant (upgrades only) takes a backup, keeps the
-  configuration and restarts. The limits of *Back up now* and *Check for
-  updates* survive a restart (if they cannot be saved, the action still runs
+  configuration and restarts. The limits survive a restart (if they cannot be
+  saved, the action still runs
   and the limit holds until the restart), and only a run spends one: an action
   refused by what it called — an install was already running — did nothing, so
-  the next press is not made to wait for it. A restart asked for over MQTT, on its own or
+  the next press is not made to wait for it. An install whose start failed
+  because its requirements did not install still counts as a run: it took its
+  backup. A release whose smoke test fails is rolled back and stays the newest
+  known one, so without the limit every press would install it again, a backup
+  and a restart each time. A restart asked for over MQTT, on its own or
   after an install, waits up to five minutes in all for a running manager action
   (an install, a backup, a check for updates) and for an install, start or
   backup started from the UI to finish; if one is still running then, or if the
@@ -1672,7 +1730,8 @@ trusted LAN. Set `HRI_PASSWORD` (or `HRI_PASSWORD_FILE`, for example a Docker
 secret) to require a password:
 
 - a `HRI_PASSWORD_FILE` that cannot be read, or that is empty (a Docker secret
-  created but never populated), is treated as a password that failed to arrive:
+  created but never populated), and a `HRI_PASSWORD` of only spaces or tabs (a
+  template that rendered blank), are treated as a password that failed to arrive:
   nothing is accepted until it is fixed, a login attempt says why (`POST
   /api/login` answers `503` with the reason), and the reason
   is in the log and on the timeline;
@@ -1696,7 +1755,9 @@ secret) to require a password:
   scheme in any case);
 - a line end at either end of `HRI_PASSWORD` (an `.env` file saved with
   Windows line ends) is not part of the password, since no login form or header
-  can carry one; spaces are, so a password may start or end with one. The file
+  can carry one; spaces are, so a password may start or end with one. A value
+  of nothing but line ends is no password (no login); a value of nothing but
+  spaces or tabs is a password that failed to arrive (see above). The file
   of `HRI_PASSWORD_FILE` is read without the spaces and line ends around it;
 - after 5 wrong attempts from one address, that address is refused for 15
   minutes (for IPv6, the whole /64 it belongs to); after 30 wrong attempts
@@ -1827,7 +1888,8 @@ What is in place:
   or `pass`, `sig`, `key`, `code` or `session` as a word of its own (`authSig`,
   `api_key`, but not `zipcode`, `keyword` or `design`; `translation_key`,
   `sort_key` and `primary_key` stay readable), and a percent-encoded name counts
-  as its decoded one. A `-----BEGIN …-----` line with no END marker masks the
+  as its decoded one, also when the `=` after it is percent-encoded (`%3D`). A
+  `-----BEGIN …-----` line with no END marker masks the
   rest of its own line and the base64-only lines under it, and nothing else.
   A key is recognised from its `-----END …-----` marker or from the shape of
   its own lines, so a search result or a tail that starts in the middle of a
@@ -1843,7 +1905,8 @@ What is in place:
   20000 files; symbolic links in the archive are skipped. A requirement in a
   manifest that is a pip option (`--index-url …`, `-e …`), a direct URL
   (`pkg @ https://…`, `pkg @ git+https://…`, `pkg @ file://…`) or not a valid
-  requirement blocks the preflight and refuses the install and the start: it
+  requirement blocks the preflight and refuses the install (a release, or a
+  dev-mode install from a directory) and the start: it
   would change what gets installed from where, and Home Assistant never counts
   a URL requirement as installed, so it would go to pip again at every boot.
   The environment builder downloads exactly the commit its Check verified.
@@ -1891,7 +1954,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | `HRI_TRACEMALLOC` | unset | Diagnostics: allocation tracing frames (costs memory); a value that is not a number traces 25 |
 | `HRI_TRACE_IMPORT` | unset | Diagnostics: log who imports the given packages |
 | `HRI_DEBUG` | unset | Debug logging for the manager, and blocking-call detection on the event loop |
-| `HRI_PASSWORD` | unset | Password for the web UI and API; unset or empty means no login |
+| `HRI_PASSWORD` | unset | Password for the web UI and API; unset or empty means no login, only spaces or tabs keeps the UI closed until it is fixed |
 | `HRI_PASSWORD_FILE` | unset | File holding the password, for example a Docker secret; wins over `HRI_PASSWORD`, and must not be empty |
 | `HRI_COOKIE_SECURE` | unset | `1` marks the session cookie `Secure` (behind a reverse proxy with TLS) |
 
@@ -1928,7 +1991,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
     change_reports.json         what the last version switches changed
     resource_history.json       resource samples of the Overview
     hacs_catalog.json           cached HACS list for the Install page search
-    ha-install.log              pip output of the last Home Assistant version install
+    ha-install.log              the entrypoint's log since the last boot that installed Home Assistant: pip output of that boot's installs and of the manager's requirements, and every entrypoint line from then on (the container log has the same lines, without pip's output)
     apt-install.log             apt output of the last boot that installed HRI_APT_PACKAGES
     import.tar                  an uploaded Home Assistant backup, until it is inspected
     import-extracted/           what the inspection unpacked from it, until the import or Clear
@@ -1975,7 +2038,11 @@ used, with a warning in the log.
 A registry entry in `integration_manager/registry.json` has this shape; only
 `repo` is required. A file of another shape, or one that is not valid JSON (empty,
 a trailing comma), is ignored, with a line in the log saying what was expected: a
-hand edit cannot keep the container from starting. Adding an entry from the UI
+hand edit cannot keep the container from starting. An entry whose `repo` is not
+`owner/name` (a longer path, a `?` or `#`, `..`) is ignored the same way, with a
+warning in the log: the repo becomes part of a GitHub API address. An invalid
+entry in your file for a domain the bundled registry already lists leaves the
+bundled entry in use. Adding an entry from the UI
 over such a file keeps it as `registry.json.corrupt-<stamp>` first.
 The domain `integration_manager` is the manager itself: it is refused in the
 registry (an entry for it is ignored, with a warning), and never installed,
@@ -2029,7 +2096,7 @@ points:
 | Area | Endpoints |
 |---|---|
 | Status | `GET /api/status`, `GET /api/summary`, `GET /api/manager`, `GET /api/manager/history?hours=`, `GET /api/mqtt/status` (`subscribe_error`; `retained_cleanup_pending`: a list of `{base_topic, broker, other_broker, deferred, error, since}`, the configured broker's first), `GET /api/events`, `GET /api/notifications`, `POST /api/notifications/dismiss_all`, `POST /api/notifications/<id>/dismiss` |
-| Login | `POST /api/login` (`{"password": …}`, sets the session cookie; `503` with the reason while `HRI_PASSWORD_FILE` is empty or unreadable), `POST /api/logout` (ends every session; `500` with `ok: false` and the reason when the volume could not record it: every session still ends, but at the next restart the sessions from before that logout are valid again and those issued after it end) |
+| Login | `POST /api/login` (`{"password": …}`, sets the session cookie; `503` with the reason while `HRI_PASSWORD_FILE` is empty or unreadable, or `HRI_PASSWORD` holds only spaces or tabs), `POST /api/logout` (ends every session; `500` with `ok: false` and the reason when the volume could not record it: every session still ends, but at the next restart the sessions from before that logout are valid again and those issued after it end) |
 | Integration | `POST /api/install`, `GET /api/change_reports`, `POST /api/run/{start,stop,cancel_pending_start}`, `GET /api/releases`, `GET /api/releases/preview?domain=&tag=`, `POST /api/releases/preflight`, `POST /api/updates/check`, `POST /api/installed/<domain>/{uninstall,rollback_full,remove_version}` (uninstall answers `retained_cleared`, and while its MQTT cleanup waits: `retained_cleanup_failed` with `retained_cleanup_error`, or `retained_cleanup_deferred` when MQTT is disabled, plus `retained_cleanup_broker` (`host:port`) and `retained_cleanup_other_broker` when the settings name another broker), `GET/POST /api/registry` |
 | Builder / dev | `GET /api/catalog?q=`, `GET /api/build/options`, `POST /api/build/{check,prepare}`, `GET /api/dev`, `POST /api/dev/install` |
 | Configuration | `POST /api/flow/start`, `GET /api/flow/progress`, `POST/DELETE /api/flow/<id>`, `POST/DELETE /api/options/<flow_id>`, `GET/POST /api/yaml/<domain>`, `GET /api/entries`, `POST /api/entries/<entry_id>/{options,reload,delete}` (an unknown entry id, there or in a `reconfigure` flow start, answers 404 with a message) |
@@ -2117,12 +2184,16 @@ itself appears in `GET /api/status` under `smoke_test.last`, and `note` says
 when no verdict is coming (the version
 was already deployed and running, or the smoke test is off). `POST /api/backups/<name>/restore` takes `force` too: a
 backup that does not record its Home Assistant version answers `needs_force`
-when `.storage` is restored. `POST /api/services/call` refuses the same service
-domains as the MQTT path but, unlike it, is not limited to published entities
+when `.storage` is restored. `POST /api/services/call` refuses `homeassistant`,
+`shell_command`, `python_script`, `hassio` and `integration_manager`, like the
+MQTT path; the domains refused over MQTT only (`persistent_notification`,
+`recorder`, `logger`, `system_log`, `backup`, `conversation`) stay callable
+here, and, unlike MQTT, it is not limited to published entities
 (any target, `entity_id: all` included). It is bounded like the MQTT
 path: a call that has not answered within `HRI_CALL_TIMEOUT` seconds is answered
 `timeout after <n>s (service still running)` while the service goes on running,
-and at most 50 calls from this endpoint run at once, a timed-out one counting
+and at most 50 calls from this endpoint and the Services page run at once (a
+count of their own, apart from the 50 of the MQTT path), a timed-out one counting
 until its service returns; beyond that a call is answered `too many calls in
 progress (50): try again later`.
 
