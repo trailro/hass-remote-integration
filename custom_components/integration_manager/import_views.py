@@ -14,7 +14,7 @@ from aiohttp import web
 from homeassistant.core import HomeAssistant
 
 from . import ha_import
-from .diagnostics import scrub
+from .diagnostics import scrub, scrub_text
 from .http_util import ManagerView, with_body
 
 MAX_UPLOAD = 2 * 1024 * 1024 * 1024  # HA backups with media can be big; .storage is what we read
@@ -129,9 +129,10 @@ class ImportInspectView(ManagerView):
     async def get(self, request: web.Request) -> web.Response:
         cfg = self.hass.config.config_dir
         summary = await self.hass.async_add_executor_job(ha_import.load_summary, cfg)
-        # a GET anyone on the network can make: the backup's passwords and tokens stay
-        # masked (the POST inspect answers the user who gave the key in full; an import
-        # puts the stored value back wherever it receives "***")
+        # the summary saved on the volume, read back by a plain GET without the backup's key (by
+        # anyone who reaches the UI, which with no password set is anyone on the network): its
+        # passwords and tokens stay masked (the POST inspect answers the user who gave the key in
+        # full; an import puts the stored value back wherever it receives "***")
         return self.json({"uploaded": os.path.isfile(os.path.join(cfg, ha_import.IMPORT_TAR)),
                           "summary": scrub(summary) if summary else None})
 
@@ -157,7 +158,7 @@ class ImportInspectView(ManagerView):
         except ValueError as err:
             return self.json({"ok": False, "error": str(err)})
         except Exception as err:  # noqa: BLE001
-            return self.json({"ok": False, "error": f"{type(err).__name__}: {err}"})
+            return self.json({"ok": False, "error": scrub_text(f"{type(err).__name__}: {err}")})
         return self.json({"ok": True, "summary": summary})
 
 
@@ -195,7 +196,7 @@ class ImportApplyView(ManagerView):
         except ValueError as err:
             return self.json({"ok": False, "error": str(err)})
         except Exception as err:  # noqa: BLE001
-            return self.json({"ok": False, "error": f"{type(err).__name__}: {err}"})
+            return self.json({"ok": False, "error": scrub_text(f"{type(err).__name__}: {err}")})
         return self.json({"ok": True, **result})
 
 
@@ -247,5 +248,5 @@ class ImportApplyAllView(ManagerView):
         except ValueError as err:
             return self.json({"ok": False, "error": str(err)})
         except Exception as err:  # noqa: BLE001
-            return self.json({"ok": False, "error": f"{type(err).__name__}: {err}"})
+            return self.json({"ok": False, "error": scrub_text(f"{type(err).__name__}: {err}")})
         return self.json({"ok": True, **result})

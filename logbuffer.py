@@ -60,14 +60,25 @@ _LOG_SEARCH_PLAIN = {
 }
 # names ending in "key" that are known not to be secrets (diagnostics masks every other *key the same way)
 PLAIN_KEYS = r"(?:translation|sort|primary)_key"
-# elsewhere, a parameter named like a credential: a name holding one of the long words anywhere, or a word of the
-# name - cut at "_", "-", ".", a digit and a camelCase hump (authSig, APIKey) - that is one of the short ones, which
-# inside a longer word are ordinary (zipcode, keyword, design, monkey).  Each word holds a literal the Log files
-# page's search looks for before it runs the scrubber on a line: logfiles_page._RULE_LITERALS
+# The names of a credential, for every rule that masks one by its name: a URL parameter here, a dict key and a
+# name=value pair in text in diagnostics (which imports these; this module is imported before the component is, so
+# the words live here).  Kept apart, the lists drifted: "pass=" was masked in a dict and printed in a log line,
+# "?auth=" printed in a request line.  Each word holds a literal the Log files page's search looks for before it
+# runs the scrubber on a line (logfiles_page._RULE_LITERALS).  These count anywhere in a name ...
+CREDENTIAL_NAMES = ("usercode", "passcode", "pincode", "password", "passwd", "passphrase", "secret", "token", "apikey",
+                    "passkey", "bindkey", "credential", "psk", "hmac", "authorization", "signature", "webhook_id",
+                    "cloudhook_url")
+# ... and these only as a word of their own, which inside a longer word are ordinary (passed, bypass, author, oauth,
+# spin, pwm, design).  Where a word ends differs by rule: a URL parameter's name is cut at "_", "-", ".", a digit and
+# a camelCase hump (auth_x, authSig), a dict key and a name in text end with the word (user_pass, db_pw), because a
+# text rule that matched pass_count= would mask the rest of its line
+CREDENTIAL_WORDS = ("pass", "pw", "pwd", "pin", "otp", "auth", "sig", "bearer", "irk", "ltk", "csrk")
+# a parameter named like a credential: one of the names above anywhere, or a word of the name that is one of the
+# words above, or key, code or session (zipcode, keyword and monkey stay readable)
 _CREDENTIAL_PARAM = re.compile(
-    r"(?i:token|secret|passw|passphrase|credential|cookie|signature|pwd)"
+    rf"(?i:passw|pwd|cookie|{'|'.join(CREDENTIAL_NAMES)})"
     r"|(?:^|(?<=[^A-Za-z])|(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z]))"
-    r"(?i:pass|passcode|passkey|sig|key|apikey|code|session|sessionid)(?![a-z])")
+    rf"(?i:{'|'.join(CREDENTIAL_WORDS)}|key|code|session|sessionid)(?![a-z])")
 _PLAIN_PARAM = re.compile(PLAIN_KEYS, re.I)
 
 
