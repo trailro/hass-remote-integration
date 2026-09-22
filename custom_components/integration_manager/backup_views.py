@@ -326,13 +326,15 @@ class RestoreCancelView(ManagerView):
                                       "error": f"this restore belongs to a full rollback, which already selected {target or 'the version it goes back to'}"
                                                f"{', the version it goes back to' if target else ''}: restart to finish it"
                                                + (f", or start {undo[0]} {undo[1]} again on Integration to undo the rollback (that drops this restore)" if undo else "")})
-                cancelled, for_version, _name = await self.hass.async_add_executor_job(_cancel_restore_by_hand, self.hass.config.config_dir)
+                cancelled, for_version, name = await self.hass.async_add_executor_job(_cancel_restore_by_hand, self.hass.config.config_dir)
                 if for_version:
                     return self.json({"ok": False, "for_version": for_version,
                                       "error": f"this restore belongs to the scheduled switch to Home Assistant {for_version}: cancel that switch on System "
                                                "(choose the running version), which drops its restore too"})
             finally:
                 self.installer.busy = False
+        if cancelled:  # the timeline's "scheduled for the next restart" is no longer coming
+            events.emit("restore", f"{name or 'the scheduled restore'} cancelled", backup=name)
         return self.json({"ok": True, "cancelled": cancelled})
 
 

@@ -1296,6 +1296,7 @@ class Installer:
                 if self._smoke_handle is not None:
                     self._smoke_handle.cancel()
                     self._smoke_handle = None
+                self._smoke_pending = None  # that timer's record: the answer and status() would report it as still coming
                 self.state.pending_smoke = {"domain": domain, "tag": tag, "can_rollback": can_rollback}
                 self._save_state()
             # what this answer promises: ok means deployed and recorded, never "it set up"; the verdict says so
