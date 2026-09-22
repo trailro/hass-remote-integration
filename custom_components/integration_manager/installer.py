@@ -130,47 +130,63 @@ PIP_INSTALL_TIMEOUT_S = 1800  # one requirement, wall clock (uv runs --quiet: no
 _pip_deadline = threading.local()
 
 
-def _bounded_install(args: list[str], env: dict[str, str]) -> str | None:
-    """HA's util/package._install (same Popen, same args and env from install_package), with uv in its own
-    process group and a deadline: a build backend that hangs, or a download that never ends, is killed with
-    everything it started, instead of holding ``busy`` until the container restarts.  Only calls made from
-    _install_requirements carry a deadline; every other caller (HA's own requirement installs) gets HA's."""
-    deadline = getattr(_pip_deadline, "at", None)
-    if deadline is None:
-        return _bounded_install.ha_install(args, env)  # type: ignore[attr-defined]
-    with subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
-                          close_fds=False, start_new_session=True) as proc:
+class _BoundedPopen(subprocess.Popen):
+    """The ``Popen`` that homeassistant.util.package calls for install_package (every supported HA does
+    ``with Popen(...) as process: process.communicate()``, inline up to 2026.7, in ``_install`` from 2026.8).
+
+    Exactly Popen, unless the calling thread carries a deadline (_install_requirements sets one): then uv starts
+    in its own process group and communicate() waits only until the deadline.  Past it the whole group is killed
+    (uv and the build backends it started) and reaped, and communicate() answers as a failed uv would: the
+    returncode is -SIGKILL and stderr says why, in the type the caller asked for.  HA's code after it is left
+    to report the failure as it reports any other: its ERROR log, its extra-index retry (2026.8+), False."""
+
+    _hri_bounded = True
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self._hri_deadline = getattr(_pip_deadline, "at", None)
+        if self._hri_deadline is not None:
+            kwargs["start_new_session"] = True
+        super().__init__(*args, **kwargs)
+
+    def communicate(self, input: Any = None, timeout: float | None = None) -> tuple[Any, Any]:  # noqa: A002
+        if self._hri_deadline is None:
+            return super().communicate(input, timeout)
+        left = max(0.0, self._hri_deadline - time.monotonic())
         try:
-            _, stderr = proc.communicate(timeout=max(0.0, deadline - time.monotonic()))
-        except BaseException as err:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                pass
-            proc.wait()  # not communicate(): a backend that left the group could hold the pipes open
-            if isinstance(err, subprocess.TimeoutExpired):
-                return f"did not finish within {PIP_INSTALL_TIMEOUT_S}s: stopped"
+            return super().communicate(input, left if timeout is None else min(left, timeout))
+        except subprocess.TimeoutExpired:
+            if timeout is not None and timeout < left:
+                raise  # the caller's own, shorter timeout: Popen's contract, the process keeps running
+            self._hri_kill()
+            why = f"did not finish within {PIP_INSTALL_TIMEOUT_S}s: stopped"
+            return ("", why) if self.text_mode else (b"", why.encode())
+        except BaseException:
+            self._hri_kill()
             raise
-        if proc.returncode != 0:
-            return stderr.decode("utf-8", "replace").strip()
-    return None
+
+    def _hri_kill(self) -> None:
+        try:
+            os.killpg(self.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        self.wait()  # not communicate(): a backend that left the group could hold the pipes open
 
 
 _BOUND_GUARD = threading.Lock()
 
 
-def _bind_install() -> bool:
-    """Put _bounded_install in place of HA's _install (once; a reload of this module re-wraps HA's own, not the
-    previous wrapper).  False when this HA has no _install to wrap: the install then runs unbounded, as before."""
+def _bind_popen(module: Any = None) -> bool:
+    """Put _BoundedPopen in place of the ``Popen`` name of homeassistant.util.package (once; after a reload of
+    this module it replaces the previous copy's class, never wraps it).  False when that name is something
+    else than subprocess.Popen or one of ours: the install then runs without a time limit, as before."""
+    module = pkg_util if module is None else module
     with _BOUND_GUARD:
-        cur = getattr(pkg_util, "_install", None)
-        if cur is _bounded_install:
+        cur = getattr(module, "Popen", None)
+        if cur is _BoundedPopen:
             return True
-        cur = getattr(cur, "ha_install", cur)
-        if not callable(cur):
+        if cur is not subprocess.Popen and not getattr(cur, "_hri_bounded", False):
             return False
-        _bounded_install.ha_install = cur  # type: ignore[attr-defined]
-        pkg_util._install = _bounded_install
+        module.Popen = _BoundedPopen
         return True
 
 
@@ -2925,8 +2941,8 @@ class Installer:
         if failed:
             _LOGGER.error("requirements refused: %s", "; ".join(bad_requirement(r) or "" for r in failed))
         todo = [r for r in dict.fromkeys(requirements) if r not in failed and (force or not pkg_util.is_installed(r))]
-        if todo and not _bind_install():
-            _LOGGER.warning("this Home Assistant has no util.package._install: requirements install without a time limit")
+        if todo and not _bind_popen():
+            _LOGGER.warning("homeassistant.util.package.Popen is not subprocess.Popen: requirements install without a time limit")
         for req in todo:
             _pip_deadline.at = time.monotonic() + PIP_INSTALL_TIMEOUT_S  # covers install_package's own retry too
             try:
