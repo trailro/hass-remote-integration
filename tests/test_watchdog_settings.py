@@ -36,7 +36,7 @@ class DefaultsTest(unittest.TestCase):
 
     def test_off_with_sane_windows(self):
         st = Settings(self.dir)
-        self.assertEqual(st.watchdog(), {"enabled": False, "after_min": 15, "min_interval_min": 60, "max_per_day": 3})
+        self.assertEqual(st.watchdog(), {"enabled": False, "on_degraded": False, "after_min": 15, "min_interval_min": 60, "max_per_day": 3})
 
     def test_public_carries_the_four_values(self):
         pub = Settings(self.dir).public()
@@ -49,7 +49,7 @@ class DefaultsTest(unittest.TestCase):
             json.dump({"watchdog": "yes", "watchdog_after_min": 1, "watchdog_min_interval_min": 99999,
                        "watchdog_max_per_day": "lots"}, fh)
         st = Settings(self.dir)
-        self.assertEqual(st.watchdog(), {"enabled": True, "after_min": WATCHDOG_BOUNDS["watchdog_after_min"][0],
+        self.assertEqual(st.watchdog(), {"enabled": True, "on_degraded": False, "after_min": WATCHDOG_BOUNDS["watchdog_after_min"][0],
                                          "min_interval_min": WATCHDOG_BOUNDS["watchdog_min_interval_min"][1],
                                          "max_per_day": DEFAULTS["watchdog_max_per_day"]})
 
@@ -78,12 +78,12 @@ class ApiTest(unittest.TestCase):
         out = self.post({"watchdog": True, "watchdog_after_min": 20, "watchdog_min_interval_min": 90,
                          "watchdog_max_per_day": 5})
         self.assertTrue(out["ok"])
-        self.assertEqual(self.settings.watchdog(), {"enabled": True, "after_min": 20, "min_interval_min": 90, "max_per_day": 5})
+        self.assertEqual(self.settings.watchdog(), {"enabled": True, "on_degraded": False, "after_min": 20, "min_interval_min": 90, "max_per_day": 5})
         self.assertEqual(out["watchdog_after_min"], 20)
 
     def test_the_numbers_are_clamped_not_refused(self):
         self.post({"watchdog_after_min": 0, "watchdog_min_interval_min": 10 ** 9, "watchdog_max_per_day": 0})
-        self.assertEqual(self.settings.watchdog(), {"enabled": False, "after_min": 5, "min_interval_min": 1440, "max_per_day": 1})
+        self.assertEqual(self.settings.watchdog(), {"enabled": False, "on_degraded": False, "after_min": 5, "min_interval_min": 1440, "max_per_day": 1})
 
     def test_a_number_that_is_not_a_number_is_refused(self):
         out = self.post({"watchdog_after_min": "soon"})

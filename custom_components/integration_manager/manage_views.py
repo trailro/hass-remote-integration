@@ -19,7 +19,7 @@ from .installer import _DOMAIN_RE, Installer
 from .installer import save_lock as _save_lock
 from .installer import tag_ok as _tag_ok
 from .logfiles_page import clean_log_format
-from .settings import DEFAULTS, HEALTH_MODES, WATCHDOG_BOUNDS
+from .settings import DEFAULTS, HEALTH_MODES, STALE_BASES, WATCHDOG_BOUNDS
 from .mqtt_publisher import MqttPublisher
 from .http_util import ManagerView, with_body
 
@@ -432,7 +432,7 @@ class SettingsView(ManagerView):
                     new[key] = min(hi, max(lo, int(body[key])))
                 except (TypeError, ValueError, OverflowError):
                     return self.json({"ok": False, "error": f"{key} must be an integer"})
-        for key in ("auto_rollback", "release_check", "backup_daily", "watchdog"):
+        for key in ("auto_rollback", "release_check", "backup_daily", "watchdog", "watchdog_on_degraded"):
             if key in body:
                 if not isinstance(body[key], bool):
                     return self.json({"ok": False, "error": f"{key} must be true/false"})
@@ -457,6 +457,10 @@ class SettingsView(ManagerView):
                     if rules["mode"] not in HEALTH_MODES:
                         return self.json({"ok": False, "error": f"health.{dom}.mode must be one of {', '.join(HEALTH_MODES)}"})
                     r["mode"] = rules["mode"]
+                if rules.get("stale_basis"):
+                    if rules["stale_basis"] not in STALE_BASES:
+                        return self.json({"ok": False, "error": f"health.{dom}.stale_basis must be one of {', '.join(STALE_BASES)}"})
+                    r["stale_basis"] = rules["stale_basis"]
                 if r:
                     clean[str(dom)] = r
             new["health"] = clean

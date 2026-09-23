@@ -254,6 +254,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     flows = FlowDriver(hass)
 
     flows.on_entry_created = functools.partial(async_disable_foreign_entry, installer)
+    installer.reload_entry = flows.reload_entry  # the watchdog's first step is the manual Reload button's path
 
     # Entity -> MQTT translator: publishes every entity (state, attributes,
     # registry metadata, integration tag) as retained JSON; LWT on
@@ -346,7 +347,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         LoginPageView(auth),
         LoginView(auth),
         LogoutView(auth),
-        StatusView(installer),
+        StatusView(installer, publisher),
         RegistryView(installer),
         RunView(installer, publisher),
         InstalledActionView(installer, publisher),

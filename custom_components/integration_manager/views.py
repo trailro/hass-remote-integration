@@ -76,14 +76,24 @@ class StatusView(ManagerView):
 
     url = "/api/status"
 
-    def __init__(self, installer: Installer) -> None:
+    def __init__(self, installer: Installer, publisher: MqttPublisher | None = None) -> None:
         self.installer = installer
+        self.publisher = publisher
         self._lock = asyncio.Lock()
         self._cache: tuple[float, dict[str, Any]] | None = None
+
+    def _health(self) -> dict[str, Any]:
+        """The verdict the publisher last built (every minute, and at once on an entry change): the one on
+        MQTT, read from memory, nothing rebuilt here.  None before the first one (a boot still under way)."""
+        doc = (self.publisher._health_last if self.publisher is not None else None) or {}  # noqa: SLF001
+        rules = doc.get("rules") if isinstance(doc.get("rules"), dict) else {}
+        return {"state": doc.get("state"), "reason": doc.get("reason") or "", "basis": rules.get("stale_basis"),
+                "since": doc.get("since"), "updated_at": doc.get("updated_at")}
 
     async def _build(self) -> dict[str, Any]:
         data = await self.installer.status()
         data["components"] = sorted(self.installer.hass.config.components)
+        data["health"] = self._health()
         v = version_info()
         data["manager_version"], data["manager_build"] = v["version"], v["build"]
         self._cache = (time.monotonic(), data)

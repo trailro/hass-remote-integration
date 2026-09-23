@@ -245,7 +245,7 @@ class State:
     smoke_announced: str | None = None             # "at" of the failed smoke verdict already raised as a notification
     last_restore_reported: str | None = None      # "at" of the restore outcome already put on the timeline
     pending_rollback: dict[str, Any] | None = None  # {domain, tag, backup}: a full rollback whose restore is scheduled but whose start did not finish
-    watchdog: dict[str, Any] | None = None         # health watchdog: {restarts: [epoch], attempts, last, gave_up, announced}; survives its own restart
+    watchdog: dict[str, Any] | None = None         # health watchdog: {restarts: [epoch], attempts, last, gave_up, announced, reloads: [epoch], last_reload}; survives its own restart
 
 
 _NONE = type(None)
@@ -346,6 +346,8 @@ def track_delayed_stores() -> None:
 class Installer:
     # set by ManagerDevice.__init__ (manager_device.py); None while there is none, which the watchdog allows for
     manager: Any = None
+    # set by __init__: FlowDriver.reload_entry, the path of the manual Reload button; the watchdog's first step
+    reload_entry: Any = None
 
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
@@ -2172,6 +2174,7 @@ class Installer:
     # the MQTT manager actions keep their limits in manager_actions.json.
 
     WATCHDOG_BACKOFF_STEPS = 4  # the window doubles at most this often: 15 -> 30 -> 60 -> 120 -> 240 min
+    WATCHDOG_RELOADS_PER_DAY = 6  # the first step (reload the config entries) is cheap, but not free: capped on its own
     WATCHDOG_DAY_S = 86400
     watchdog_pending: dict[str, Any] | None = None  # set by the scheduler each tick: {"bad_for_s", "window_s", "reason"}
 
@@ -2181,6 +2184,7 @@ class Installer:
         now = time.time()
         cut = now - self.WATCHDOG_DAY_S
         runs = [float(t) for t in (rec.get("restarts") or []) if isinstance(t, (int, float)) and not isinstance(t, bool)]
+        reloads = [float(t) for t in (rec.get("reloads") or []) if isinstance(t, (int, float)) and not isinstance(t, bool)]
         try:  # json.load spells Infinity and NaN, and int() converts neither
             attempts = max(0, int(rec.get("attempts") or 0))
         except (TypeError, ValueError, OverflowError):
@@ -2191,7 +2195,9 @@ class Installer:
         return {"restarts": sorted(t for t in runs if cut < t <= now + self.WATCHDOG_DAY_S), "attempts": attempts,
                 "last": rec.get("last") if isinstance(rec.get("last"), dict) else None,
                 "gave_up": str(rec.get("gave_up") or ""),
-                "announced": str(rec.get("announced") or "")}
+                "announced": str(rec.get("announced") or ""),
+                "reloads": sorted(t for t in reloads if cut < t <= now + self.WATCHDOG_DAY_S),
+                "last_reload": rec.get("last_reload") if isinstance(rec.get("last_reload"), dict) else None}
 
     def _watchdog_save(self, rec: dict[str, Any]) -> None:
         """The ledger is kept whatever the disk does.  restart() already restarts on a state.json it could
@@ -2250,11 +2256,63 @@ class Installer:
         rec["attempts"], rec["gave_up"] = 0, ""
         self._watchdog_save(rec)
 
-    async def watchdog_restart(self, reason: str, unhealthy_s: int) -> dict[str, Any]:
+    def watchdog_reloadable(self) -> list[Any]:
+        """The config entries the first step reloads: the running integration's enabled ones.  None for a
+        YAML-only integration, which goes straight to the restart."""
+        if not self.state.domain or self.reload_entry is None:
+            return []
+        return [e for e in self._entries_of(self.state.domain) if not e.disabled_by and getattr(e, "entry_id", None)]
+
+    def watchdog_reload_cap_refusal(self) -> str | None:
+        """None while a reload may be tried, otherwise why not: the ladder then goes on to the restart."""
+        rec = self.watchdog_record()
+        if len(rec["reloads"]) >= self.WATCHDOG_RELOADS_PER_DAY:
+            return f"{len(rec['reloads'])} automatic reloads in the last 24 h is the maximum ({self.WATCHDOG_RELOADS_PER_DAY}/day)"
+        return None
+
+    async def watchdog_reload(self, state: str, reason: str, unhealthy_s: float, window_s: int) -> dict[str, Any]:
+        """The first step: reload the running integration's config entries, the way the Reload button
+        does (an entry reload revives an integration whose coordinator keeps writing states on a dead
+        connection in well under a second).  Recorded before it runs, like a restart."""
+        domain = self.state.domain or "the integration"
+        entries = self.watchdog_reloadable()
+        rec = self.watchdog_record()
+        now = time.time()
+        rec["reloads"] = rec["reloads"] + [now]
+        minutes = int(unhealthy_s / 60)
+        rec["last_reload"] = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "integration": self.state.domain, "state": state,
+                              "reason": reason, "unhealthy_s": int(unhealthy_s), "entries": len(entries), "result": "running"}
+        self._watchdog_save(rec)
+        left = self.WATCHDOG_RELOADS_PER_DAY - len(rec["reloads"])
+        events.emit("health", f"health watchdog: health {state} for {minutes} min ({reason}): reloading {domain}'s entries "
+                              f"({len(entries)}); if it is not ok {int(window_s / 60)} min after this, the process is restarted; "
+                              f"{left} reload{'s' if left != 1 else ''} left today",
+                    domain=self.state.domain, reason=reason)
+        _LOGGER.warning("health watchdog: %s %s for %s s (%s): reloading its %s config entr%s",
+                        domain, state, int(unhealthy_s), reason, len(entries), "y" if len(entries) == 1 else "ies")
+        results = []
+        for entry in entries:
+            try:
+                ok = await self.reload_entry(entry.entry_id)
+                results.append("ok" if ok else f"'{entry.title}' did not set up")
+            except Exception as err:  # noqa: BLE001 - one entry that cannot reload must not stop the ladder
+                results.append(f"'{entry.title}': {type(err).__name__}: {err}")
+        failed = [r for r in results if r != "ok"]
+        outcome = "reloaded" if not failed else "; ".join(failed)
+        done = self.watchdog_record()
+        if isinstance(done["last_reload"], dict) and done["last_reload"].get("at") == rec["last_reload"]["at"]:
+            done["last_reload"] = {**done["last_reload"], "result": outcome}
+            self._watchdog_save(done)
+        if failed:
+            events.emit("health", f"health watchdog: the reload of {domain} did not complete: {outcome}", domain=self.state.domain)
+        return {"ok": not failed, "result": outcome}
+
+    async def watchdog_restart(self, reason: str, unhealthy_s: int, state: str = "error") -> dict[str, Any]:
         """Act: record what was done (so the restart cannot lose it), put it on the
         timeline, then restart.  The notification is raised at the next boot
         (announce_watchdog), like the smoke test's."""
         cfg, rec = self.settings.watchdog(), self.watchdog_record()
+        was = "in error" if state == "error" else state
         now = time.time()
         rec["restarts"] = rec["restarts"] + [now]
         rec["attempts"] += 1
@@ -2264,16 +2322,16 @@ class Installer:
             # gave_up is not set here: the next tick finds the cap reached and says so once, in its own line
             plan = "no further automatic restart today: look at the integration"
         else:
-            plan = (f"if it is still in error after {next_window} min (and at least {cfg['min_interval_min']} min "
-                    f"from now), it is restarted again; {left} left today")
+            plan = (f"if it is still {was} after {next_window} min, its config entries are reloaded first (if it has any) "
+                    f"and it is restarted again after that, at least {cfg['min_interval_min']} min from now; {left} left today")
         rec["last"] = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "integration": self.state.domain, "reason": reason,
-                       "unhealthy_s": int(unhealthy_s), "attempt": rec["attempts"], "next": plan}
+                       "unhealthy_s": int(unhealthy_s), "attempt": rec["attempts"], "next": plan, "state": state}
         self._watchdog_save(rec)  # last_action is not touched: restart() sets its own, and watchdog.last is the record
-        events.emit("restart", f"health watchdog: {self.state.domain or 'the integration'} has been in error for "
+        events.emit("restart", f"health watchdog: {self.state.domain or 'the integration'} has been {was} for "
                                f"{int(unhealthy_s / 60)} min ({reason}); restarting the process (attempt {rec['attempts']}); {plan}",
                     domain=self.state.domain, attempt=rec["attempts"], reason=reason)
-        _LOGGER.error("health watchdog: %s in error for %s s (%s): restarting the process (attempt %s); %s",
-                      self.state.domain, int(unhealthy_s), reason, rec["attempts"], plan)
+        _LOGGER.error("health watchdog: %s %s for %s s (%s): restarting the process (attempt %s); %s",
+                      self.state.domain, was, int(unhealthy_s), reason, rec["attempts"], plan)
         res = await self.restart()
         if not res.get("ok"):
             # the restart itself was refused (an action started between the check and here): the attempt did
@@ -2307,8 +2365,9 @@ class Installer:
         last = rec["last"]
         if not isinstance(last, dict) or not last.get("at") or last.get("at") == rec["announced"]:
             return
+        was = "in error" if last.get("state", "error") == "error" else str(last.get("state"))
         pn.async_create(self.hass, f"The health watchdog restarted the process at {last['at']}: "
-                                   f"{last.get('integration') or 'the integration'} had been in error for "
+                                   f"{last.get('integration') or 'the integration'} had been {was} for "
                                    f"{int((last.get('unhealthy_s') or 0) / 60)} min ({last.get('reason') or 'no reason recorded'}). "
                                    f"Attempt {last.get('attempt')}. Next: {last.get('next') or '—'}.",
                         title="Health watchdog", notification_id="hri_watchdog")
@@ -2320,7 +2379,9 @@ class Installer:
         cfg, rec = self.settings.watchdog(), self.watchdog_record()
         return {**cfg, "restarts_24h": len(rec["restarts"]), "attempts": rec["attempts"],
                 "window_min": int(self.watchdog_window_s() / 60), "gave_up": rec["gave_up"],
-                "last": rec["last"], "pending": self.watchdog_pending}
+                "last": rec["last"], "pending": self.watchdog_pending,
+                "reloads_24h": len(rec["reloads"]), "max_reloads_per_day": self.WATCHDOG_RELOADS_PER_DAY,
+                "last_reload": rec["last_reload"]}
 
     async def _requirements_for(self, domain: str) -> list[str]:
         """Manifest requirements plus those of the integration's dependencies."""

@@ -30,9 +30,13 @@ DEFAULTS: dict[str, Any] = {
     "allowed_hosts": "",        # extra Host names accepted by the DNS-rebinding guard (comma separated)
     "health_stale_s": 900,      # degraded when no entity reported for this long (default for every integration)
     "health_unavailable_pct": 50,  # degraded when at least this share of the entities is unavailable
-    "health": {},               # per integration: {"<domain>": {"stale_s": 900, "mode": "periodic"|"event", "unavailable_pct": 50}}
-    # Health watchdog: restart the process when the verdict stays "error" (never degraded, stopped or unconfigured)
+    # per integration: {"<domain>": {"stale_s": 900, "mode": "periodic"|"event", "unavailable_pct": 50,
+    #                                 "stale_basis": "reported"|"updated"}}
+    "health": {},
+    # Health watchdog: when the verdict stays "error" (and, opted in, "degraded"), reload the integration's
+    # config entries first, then restart the process if that did not help (never stopped or unconfigured)
     "watchdog": False,             # off by default: an automatic restart is never a surprise
+    "watchdog_on_degraded": False,  # a lasting "degraded" counts too (a zombie that keeps writing stale states)
     "watchdog_after_min": 15,      # the verdict must be "error" for this long without interruption
     "watchdog_min_interval_min": 60,  # at most one automatic restart in this many minutes
     "watchdog_max_per_day": 3,     # and at most this many in 24 h; then it gives up and says so
@@ -45,6 +49,10 @@ DEFAULTS: dict[str, Any] = {
 # shorter would act on one or two samples.
 WATCHDOG_BOUNDS = {"watchdog_after_min": (5, 720), "watchdog_min_interval_min": (15, 1440), "watchdog_max_per_day": (1, 24)}
 HEALTH_MODES = ("periodic", "event")  # event: the integration only writes states on events, so silence is not a fault
+# what "silent" is measured on: reported = the last state write (even an unchanged value), updated = the last change
+# of a value or an attribute.  An integration whose coordinator re-writes the same states on a dead source is only
+# caught by "updated".
+STALE_BASES = ("reported", "updated")
 
 
 class Settings:
@@ -141,7 +149,7 @@ class Settings:
         """The effective health rules of one integration: its overrides on
         top of the global defaults."""
         base = {"stale_s": self.int_("health_stale_s", 60, 86400), "mode": "periodic",
-                "unavailable_pct": self.int_("health_unavailable_pct", 1, 100)}
+                "unavailable_pct": self.int_("health_unavailable_pct", 1, 100), "stale_basis": "reported"}
         per = self.data.get("health") or {}
         own = per.get(domain or "") if isinstance(per, dict) else None
         if isinstance(own, dict):
@@ -154,12 +162,14 @@ class Settings:
                 pass
             if own.get("mode") in HEALTH_MODES:
                 base["mode"] = own["mode"]
+            if own.get("stale_basis") in STALE_BASES:
+                base["stale_basis"] = own["stale_basis"]
         return base
 
     def watchdog(self) -> dict[str, Any]:
         """The effective watchdog rules.  The bounds are the ones SettingsView
         enforces, applied again here: settings.json can be edited by hand."""
-        return {"enabled": self.bool_("watchdog"),
+        return {"enabled": self.bool_("watchdog"), "on_degraded": self.bool_("watchdog_on_degraded"),
                 "after_min": self.int_("watchdog_after_min", *WATCHDOG_BOUNDS["watchdog_after_min"]),
                 "min_interval_min": self.int_("watchdog_min_interval_min", *WATCHDOG_BOUNDS["watchdog_min_interval_min"]),
                 "max_per_day": self.int_("watchdog_max_per_day", *WATCHDOG_BOUNDS["watchdog_max_per_day"])}
@@ -178,7 +188,7 @@ class Settings:
                 "health_stale_s": self.int_("health_stale_s", 60, 86400), "health_unavailable_pct": self.int_("health_unavailable_pct", 1, 100),
                 "health": self.data.get("health") if isinstance(self.data.get("health"), dict) else {},
                 "dev_source_dir": self.dev_source_dir,
-                "watchdog": self.bool_("watchdog"),
+                "watchdog": self.bool_("watchdog"), "watchdog_on_degraded": self.bool_("watchdog_on_degraded"),
                 "watchdog_after_min": self.int_("watchdog_after_min", *WATCHDOG_BOUNDS["watchdog_after_min"]),
                 "watchdog_min_interval_min": self.int_("watchdog_min_interval_min", *WATCHDOG_BOUNDS["watchdog_min_interval_min"]),
                 "watchdog_max_per_day": self.int_("watchdog_max_per_day", *WATCHDOG_BOUNDS["watchdog_max_per_day"]),
