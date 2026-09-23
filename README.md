@@ -440,8 +440,8 @@ restore](docs/backups.md).
 `stopped`. Set the thresholds on **MQTT**; mark an integration that only writes
 on events as `event`, and use the `updated` stale basis for one that keeps
 re-writing the same states on a dead source. The **health watchdog** (on
-**System**, off by default) reloads and then restarts an integration stuck in
-`error` (15 minutes by default). The Overview keeps a resource history. See
+**System**, off by default) reloads, then restarts, an integration stuck in
+`error`, or in `degraded` if you tick it (15 minutes by default). The Overview keeps a resource history. See
 [Health and the health watchdog](docs/health.md).
 
 ### Logs and log files
@@ -471,9 +471,9 @@ HRI_NAME=hri-other HRI_PORT=8088 docker compose -p hri-other up -d
 |---|---|
 | [docs/home-assistant-versions.md](docs/home-assistant-versions.md) | Changing the Home Assistant inside the container, downgrades, the image's floor, what the preflight checks |
 | [docs/backups.md](docs/backups.md) | What a backup holds and leaves out, restore, pruning, versions of backups |
-| [docs/health.md](docs/health.md) | The health verdict, stale basis, the health watchdog, resource history |
+| [docs/health.md](docs/health.md) | The health verdict and its document, stale basis, the health watchdog, resource history |
 | [docs/logs.md](docs/logs.md) | The Logs and Log files pages, downloads, the line format |
-| [docs/mqtt.md](docs/mqtt.md) | Topics, documents, discovery, commands, service calls, the manager device, MQTT rules, TLS, what the main HA needs |
+| [docs/mqtt.md](docs/mqtt.md) | Topics, the entity document, discovery, commands, service calls, the manager device, MQTT rules, TLS, what the main HA needs |
 | [docs/shadow-mode.md](docs/shadow-mode.md) | Running beside your main HA before the cutover, and the cutover checklist |
 | [docs/security.md](docs/security.md) | Password and sessions, reverse proxies, what is masked, limits on downloads and uploads |
 | [docs/files.md](docs/files.md) | Every file on the volume, hand edits, the registry format |
@@ -751,7 +751,9 @@ without it too, from a copy at most 10 seconds old. See [API](docs/api.md).
   integration from the main HA, enable again.
 - **Health says degraded although everything works.** An integration that only
   writes states on events looks silent; set its health mode to `event` on the
-  **MQTT** page.
+  **MQTT** page. With the `updated` stale basis, values that stay steady longer
+  than *stale* read as silence (`no entity value change`): raise *stale*, or go
+  back to `reported`.
 - **Something went wrong and I need help.** *Diagnostics zip* on **System**
   collects versions, statuses, the timeline and recent logs, with secrets
   removed.
@@ -810,7 +812,9 @@ to `ghcr.io/trailro/hass-remote-integration` and to Docker Hub as
 `trailro26/hass-remote-integration` (`<version>`, `<major>.<minor>` and, for
 the newest stable release, `latest`; the Docker Hub push needs the
 `DOCKERHUB_TOKEN` repository secret). The newest stable release also updates
-the Docker Hub overview from this README, up to *Everyday operation*.
+the Docker Hub overview from this README, up to *Everyday operation*. Docker
+Hub keeps 25000 bytes of the overview, and a pull request or release whose
+overview is longer fails CI.
 
 A few things that shaped the code:
 

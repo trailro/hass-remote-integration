@@ -8,22 +8,61 @@ and the resource history on **Overview**.
 
 `hass_<domain>/health` carries a verdict: `ok`, `degraded`, `error` or
 `stopped` (nothing is running), with the reason, entity counts and when the
-integration last wrote a state (the document is in [mqtt.md](mqtt.md)). With
-discovery on, your main HA gets a connectivity sensor and a health sensor for
-the container. The thresholds are on the **MQTT** page. Mark an integration
+integration last wrote a state (see [the health document](#the-health-document)).
+With discovery on, your main HA gets a connectivity sensor and a health sensor
+for the container. The thresholds are on the **MQTT** page. Mark an integration
 that only writes on events as `event`, so silence is not reported as a fault.
 
-Silence is measured on the last state *report* by default: any state write,
-even an unchanged value. A coordinator that re-writes every entity on each poll
-keeps reporting after its connection dies, so the verdict stays `ok`. For
-such an integration set the **stale basis** to `updated` on the **MQTT** page:
-silence is then measured on the last changed value or attribute, and the
-verdict turns `degraded` after *stale* seconds. Pick a *stale* longer than its
-quietest normal stretch, or steady values read as a fault. The document names
-the basis under `rules.stale_basis`, and `since` says when the verdict took its
-current value.
-A change to `degraded` or `error` is logged once at WARNING, the way back to
-`ok` once at INFO.
+Silence is judged for `periodic` integrations only: an `event` one is never
+judged on silence, whatever its stale basis. It is measured on the last state
+*report* by default: any state write, even an unchanged value. A coordinator
+that re-writes every entity on each poll keeps reporting after its connection
+dies, so the verdict stays `ok`. For such an integration set the **stale
+basis** to `updated` on the **MQTT** page: silence is then measured on the last
+changed value or attribute, and the verdict turns `degraded` after *stale*
+seconds. Pick a *stale* longer than its quietest normal stretch, or steady
+values read as a fault. The document names the basis under `rules.stale_basis`.
+
+For the first *stale* seconds after a start (at most 15 minutes), and again
+after the MQTT identity changes, the entity checks (unavailable, silence, no
+state yet) are skipped while the entities fill in; the config entries are
+still judged. An `ok` in that grace carries `"grace": true`: it says nothing
+about the entities, and the watchdog does not count it.
+
+`since` is when this process first published the current verdict: a restart
+starts it again, and it is absent while Home Assistant in the container is
+starting. A change to `degraded` or `error` is logged once at WARNING, and so
+is the first bad verdict after a boot; the way back to `ok` once at INFO.
+
+### The health document
+
+| Field | What it is |
+|---|---|
+| `integration` | The running integration's domain; `null` when none runs |
+| `tag`, `version` | The running version's tag, and the version in its manifest |
+| `loaded` | Whether Home Assistant has loaded the domain |
+| `entries` | Its config entries: `title`, `state`, `reason`, `disabled_by` |
+| `restart_required` | A change waits for a restart of the process |
+| `last_error` | The manager's last recorded error, or empty |
+| `patch` | The last computed summary of its patches, or `null` |
+| `state` | `ok`, `degraded`, `error` or `stopped` |
+| `reason` | Why the verdict is not `ok`; empty when it is |
+| `entities` | Its enabled entities, those without a unique id included |
+| `entities_with_state`, `entities_unavailable`, `entities_unknown` | Of those: how many have a state, and how many are `unavailable` or `unknown` |
+| `last_state_update`, `last_state_update_age_s` | The newest changed value or attribute (local time with its offset) and its age in seconds; `null` without a state |
+| `last_report`, `last_report_age_s` | The newest state write, even an unchanged value, and its age; `null` without a state |
+| `rules` | The health rules in use: `stale_s`, `mode`, `unavailable_pct`, `stale_basis` |
+| `grace` | `true` on an `ok` inside the grace after a start; absent otherwise |
+| `since` | When this process first published the current verdict |
+| `ha_version` | The Home Assistant version in the container |
+| `manager_uptime_s` | Seconds since the MQTT side started, or last changed identity |
+| `mqtt_published` | Messages this process has published |
+| `notifications` | Persistent notifications open in the container |
+| `base_topic` | The base topic; `null` while there is none |
+| `updated_at` | When the document was built |
+
+With nothing running, the document carries only `integration` (`null`),
+`state` (`stopped`), `reason`, `since` and the last six.
 
 ## Smoke test
 
@@ -77,14 +116,17 @@ A reload or restart it decided against puts one line on the timeline for that
 stretch, not one a minute.
 
 **It cannot loop.** A reload makes every entity write fresh states, so the
-verdict can read `ok` for a minute or two with nothing fixed. The ladder starts
-again from the reload only after a whole window of `ok`; otherwise the next
-stretch goes on to the restart. After a restart the
-clock starts from that boot, and the window doubles for each attempt (15 → 30
-→ 60 → 120 → 240 minutes, then stays). At the daily maximum it gives up, says
-so once and waits: an `ok` verdict resets the ladder and the give-up, and
-restarts age out of the 24-hour count. All of this survives the restart it
-triggers, in `state.json`.
+verdict can read `ok` for a minute or two with nothing fixed, and after a
+restart the grace reads `ok` for up to *stale* seconds. Neither is a recovery:
+only `ok` held for a whole window (`watchdog_after_min`, never doubled) resets
+the ladder, the backoff and a give-up. A grace `ok` counts as no verdict at
+all; a shorter `ok` ends the stretch, and the next stretch goes on from where
+the ladder stood: to the restart after a reload, on the doubled window after a
+restart. After a restart the clock starts from that boot, and the window
+doubles for each attempt (15 → 30 → 60 → 120 → 240 minutes, then stays). At the
+daily maximum it gives up, says so once and waits until the integration has
+been `ok` for a whole window, or until restarts age out of the 24-hour count.
+All of this survives the restart it triggers, in `state.json`.
 
 Every action is visible: a timeline entry naming the reason (a reload says
 `health degraded for 20 min (…): reloading <domain>'s entries`), the attempt
