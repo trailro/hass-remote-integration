@@ -127,10 +127,9 @@ class DeviceClassRuleTest(_Case):
 
 class ReadmeListsEveryFieldTest(unittest.TestCase):
     def test_every_rule_field_is_named(self):
-        with open(os.path.join(os.path.dirname(__file__), "..", "README.md"), encoding="utf-8") as fh:
-            readme = fh.read()
-        start = readme.index("## MQTT reference")
-        section = readme[start:readme.index("\n## ", start)]
+        # the MQTT reference moved from the README to docs/mqtt.md
+        with open(os.path.join(os.path.dirname(__file__), "..", "docs", "mqtt.md"), encoding="utf-8") as fh:
+            section = fh.read()
         for field in mqtt_rules.FIELDS:
             with self.subTest(field=field):
                 self.assertIn(f"`{field}`", section)
