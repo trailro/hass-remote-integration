@@ -93,7 +93,7 @@ unit() {
   # only the code under test: registry.json and patches/ are not copied (the tests do not read them; code that
   # does falls back to the image's /app copies)
   docker exec "$NAME" sh -c "rm -rf $dir && mkdir -p $dir/custom_components" || return 1
-  for f in tests jsonio.py backupkit.py logbuffer.py entrypoint.py run.py docker-compose.yml Dockerfile README.md; do docker cp -q "$f" "$NAME:$dir/" || return 1; done
+  for f in tests jsonio.py backupkit.py logbuffer.py entrypoint.py run.py docker-compose.yml Dockerfile README.md docs; do docker cp -q "$f" "$NAME:$dir/" || return 1; done
   docker cp -q custom_components/integration_manager "$NAME:$dir/custom_components/" || return 1
   docker cp -q .github "$NAME:$dir/" || return 1  # the workflow guard tests (tests/test_r4_web.py) read it
   # HRI_TEST_PYPI=1 adds the two tests that run a real pip against PyPI (off by default: the suite stays offline)
