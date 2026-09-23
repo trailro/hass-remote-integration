@@ -68,12 +68,15 @@ extra connection: a growing count means the integration leaks them on unload.
 - *Enable discovery* reads the main HA's config entries and entity registry to
   make sure the integration is gone there. A main HA that answers the
   config-entry query with an error (an older version) is only checked for
-  whether the integration is still loaded. A check that cannot run (the main
-  HA unreachable, its registry unreadable) refuses the enable. With no main HA
-  configured the enable goes ahead unchecked. `force: true` on
-  `POST /api/cutover/enable` skips the checks on the main HA; the answer
-  (`checked`, `forced`) and the timeline say which happened
-  ([api.md](api.md), Cutover).
+  whether the integration is still loaded. An entity id about to be announced
+  may be held only by this container's own mirror of that very entity. The
+  refusal names any other holder: an unrelated MQTT entity, a leftover of an
+  earlier identity of this container, or a mirror of this container renamed
+  onto that id, which blocks like any other holder. A check that cannot run
+  (the main HA unreachable, its registry unreadable) refuses the enable. With
+  no main HA configured the enable goes ahead unchecked. What `force` skips and
+  what the answer (`checked`, `forced`) and the timeline say is in
+  [API](api.md#cutover).
 
 ## Cutover checklist
 

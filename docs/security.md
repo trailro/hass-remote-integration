@@ -92,15 +92,15 @@ and `restore_failed: true`.
 
 The MQTT password, GitHub token and parent Home Assistant token are
 write-only in the UI, stored mode 600, never logged, and not in the diagnostics
-zip (which holds sanitized copies of `settings.json` and `mqtt.json`).
+zip (which holds sanitized copies, `settings.json` and `mqtt-config.json`).
 
 Masked: the diagnostics zip, the **Logs** page (message and traceback),
 **Log files** tails, downloads and file names, an imported backup's
 inspection, and the error text of a failed Services-page call, flow step,
 config entry action, release lookup, backup or import. The manager's own log
 lines quoting an integration's exception are masked before they are written.
-The MQTT command history, status and log use the same names with their own
-rules ([MQTT reference](mqtt.md)).
+The MQTT command history, status and log follow a rule of their own
+([below](#mqtt-command-history)).
 
 | Masked as `***` | Rule |
 |---|---|
@@ -143,6 +143,23 @@ Log searches run on the masked text: part of a key finds nothing, and neither
 `cursor`, `truncated`, how far a Log files search read nor the timing depends
 on what is masked.
 
+### MQTT command history
+
+The MQTT command history (`GET /api/mqtt/commands`), the status document and
+the log mask by the *Names anywhere* and *Names as a word* lists above, with
+four differences:
+
+- the name must end the key, in the singular (`credentials` aside):
+  `password_hint` and `passwords` are masked in a log, not here;
+- `key` and `code` count only as a word of their own (`api_key`, `user_code`;
+  not `hotkey`, `zipcode`, `code_format`);
+- `session_id`, `sessionid`, `cookie` and `set-cookie` are not masked here;
+- result codes are not exempt: `status_code` and `error_code` are masked.
+
+`translation_key`, `sort_key` and `primary_key` stay readable. The shapes that
+need no name apply only to a service's error message. What else is masked
+there (password-mode `text` values) is in the [MQTT reference](mqtt.md#masking).
+
 ### Request lines and the raw logs
 
 Every request line goes to `process.log` and the container log. Before it is
@@ -181,8 +198,8 @@ An imported Home Assistant backup must be Home Assistant's uncompressed
 most 1 MB (regular files, valid JSON), extracting at most 2 GB and decompressing
 at most 20 times the archive's size (at least 2 GB, skipped members included).
 An extended tar header over 1 MB, or more than 100000 files, in the backup or
-its configuration archive is refused. Config entries with an invalid id are
-skipped.
+its configuration archive is refused. Config entries whose id is not plain
+letters and digits are skipped.
 
 ## Releases and requirements
 
