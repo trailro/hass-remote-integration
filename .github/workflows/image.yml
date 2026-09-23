@@ -183,7 +183,7 @@ jobs:
           # the README already ends the part it keeps with a --- line: the link goes right under it
           awk '/^## Everyday operation/{exit} {print}' README.md \
             | sed -E "s#\]\(\##](${REPO_URL}/blob/${TAG}/README.md\##g; s#\]\((docs/|SECURITY\.md|LICENSE)#](${REPO_URL}/blob/${TAG}/\1#g" > "$out"
-          printf 'The rest of the documentation (everyday operation, MQTT reference, security, configuration, API, troubleshooting) is in the [full README on GitHub](%s/blob/%s/README.md#everyday-operation).\n' "$REPO_URL" "$TAG" >> "$out"
+          printf 'The rest of the documentation (everyday operation, configuration, troubleshooting, and links to the MQTT, security, API and file references in docs/) is in the [full README on GitHub](%s/blob/%s/README.md#everyday-operation).\n' "$REPO_URL" "$TAG" >> "$out"
           wc -c "$out"
           # Docker Hub keeps at most 25000 bytes and the action cuts the rest with only a warning: the first thing
           # to go would be the link above, to everything past this part.  tests/test_hub_overview.py runs this

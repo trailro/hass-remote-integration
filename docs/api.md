@@ -57,9 +57,11 @@ Exceptions:
 - `GET /api/summary` includes `manager_update`: the running release and the
   newer ones the banner shows.
 - `GET /api/status` `health`: the verdict published on MQTT (`state`,
-  `reason`, `basis` = the stale basis in use, `since`, `updated_at`; all
-  `null` before a boot's first verdict). It is the last verdict built, at most
-  a minute old, not a new check.
+  `reason`, `basis` = the stale basis in use, `since`, `updated_at`). Before a
+  boot's first verdict the fields are `null` and `reason` is empty; `basis` is
+  `null` while no integration runs, and `since` is `null` while Home Assistant
+  is starting. It is the last verdict built, at most a minute old, not a new
+  check.
 - `GET /api/status` `watchdog`: the settings below under shorter names
   (`enabled`, `on_degraded`, `after_min`, `min_interval_min`, `max_per_day`),
   plus `restarts_24h`, `attempts`, `window_min` (what the next attempt waits
