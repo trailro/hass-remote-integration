@@ -98,6 +98,18 @@ another broker ([MQTT](mqtt.md#when-the-cleanup-cannot-run)).
 An unknown entry id, in `/api/entries/<entry_id>/…` or a `reconfigure` flow
 start, answers `404` with a message.
 
+### Configuration
+
+The config flow page renders each selector as its control. A number shows as
+a box, or as a slider when it asks for one and gives both ends, with its unit
+next to the label. A text field that takes several values, and the typed
+values of a multi-select that allows them, show one box per item; an item may
+contain a comma or surrounding spaces and is sent as typed. A single custom
+select value is sent whole. A multi-select in list mode shows as checkboxes, a
+value typed into a single select replaces the one picked, and a duration part
+may be a fraction. A value the page cannot convert (a fraction in a
+whole-number field, broken JSON) is refused under its field.
+
 ### Entities and services
 
 - `GET /api/entities` shows only the published attributes, published or not:
@@ -115,6 +127,11 @@ start, answers `404` with a message.
   running)`. At most 50 calls from this endpoint and the Services page run at
   once (apart from MQTT's 50), a timed-out one counting until it returns;
   beyond that: `too many calls in progress (50): try again later`.
+- The Services page sends a list for a multiple-choice field and for a text
+  field that takes several values, one box per item. It accepts typed custom
+  values, one box per value, sent as typed: a comma or surrounding spaces stay
+  part of the value. Required fields are checked after the extra JSON is
+  merged.
 
 ### Settings
 
@@ -184,12 +201,26 @@ Assistant* refuses the same and has no force.
   timeline. It refuses the restore of a scheduled Home Assistant version change
   (`for_version`) and of a full rollback (`rollback`, the backup it restores).
 
+### Import
+
+`POST /api/import/apply` and `/apply_all` answer `alignment`; what its counts
+mean is in [Backups](backups.md#import-from-a-home-assistant-backup).
+
 ### Cutover
 
-`POST /api/cutover/enable` takes `force`; what it does to the checks on the
-main Home Assistant, and `checked`, are in [Shadow mode](shadow-mode.md).
-Those checks are MQTT loaded, the integration's config entries, and entity ids
-held there by anything but this container's mirrors. `force` also skips a
+`POST /api/cutover/enable` checks the main Home Assistant, when one is
+configured ([Shadow
+mode](shadow-mode.md#keeping-the-main-home-assistant-untouched)):
+MQTT loaded, no config entries of the integration, and no entity id about to
+be announced held by anything but this container's own mirror of that very
+entity. A mirror of another entity renamed onto the id blocks like an
+unrelated MQTT entity or a leftover of an earlier identity of this container.
+
+The answer carries `checked`: `true` after a checked enable, `false` when the
+main HA was not checked. `force: true` skips the checks on the main HA; with
+one configured, the answer says `forced: true` and the timeline `forced`. With
+no main HA configured the enable goes ahead unchecked: `checked: false`,
+`forced: false`, and the timeline says `unchecked`. `force` also skips a
 pending smoke test (the answer and the timeline say `smoke_skipped`). It never
 skips the container's own checks (an integration running, health, MQTT
 connected), an action running (install, start, import, restore, a Home

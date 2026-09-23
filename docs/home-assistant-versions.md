@@ -205,6 +205,10 @@ catches: a version that does not set up is rolled back automatically.
   ignored inside a `try` whose `except` catches `ImportError` or broader
   (`ModuleNotFoundError`, `Exception`, `BaseException`, a bare `except`), or
   when the module is installed here after all.
+- **Configuration the release cannot take over.** The preflight warns about
+  config entries here while the release has no config flow, entries at a newer
+  version than its config flow (Home Assistant cannot migrate an entry back),
+  and YAML stored here that a config-flow release will import.
 
 What pip cannot install (the `ffmpeg` binary, BlueZ and D-Bus, system
 libraries a wheel links against) goes in `HRI_APT_PACKAGES`: the entrypoint

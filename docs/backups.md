@@ -1,7 +1,7 @@
 # Backups and restore
 
-What a backup holds, how a restore is applied or refused, and pruning,
-deletion and uploads.
+What a backup holds, how a restore is applied or refused, pruning,
+deletion and uploads, and importing a Home Assistant backup.
 
 ## Taking backups
 
@@ -121,3 +121,25 @@ An upload never replaces a backup: a taken name gets a `-2`, `-3`, … suffix
 (a long name is shortened to fit). An upload that cannot be written (a full
 volume), including a Home Assistant backup uploaded for an import, answers
 with the reason and leaves no partial file.
+
+## Import from a Home Assistant backup
+
+*Import* on **System** is described in [Configure
+it](../README.md#2-configure-it); the size limits of the upload are in
+[Security](security.md#backups).
+
+A store file goes with the longest domain it is named after: `foo_bar_tokens`
+comes with `foo_bar`, never with `foo`.
+
+When an import replaces a store file the volume already had, the original is
+kept as `.storage/<store>.pre-import` until the import is done; a restart in
+the middle puts it back. The import is done once its config entry is in
+`.storage/core.config_entries`: the manager writes that file at once, then
+removes the set-aside original, then deletes the extracted backup.
+
+`POST /api/import/apply` (*Import*) and `/apply_all` (*Import all*) answer
+`alignment`: `entities` and `devices` aligned when the entry had just set up,
+and `pending_entities` and `pending_devices`, the map entries still waiting
+then. Entities created later are aligned as they appear and not counted, so a
+small `entities` with a large `pending_entities` is normal for an integration
+that adds entities after setup.

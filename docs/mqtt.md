@@ -209,14 +209,9 @@ What is masked appears as `***` in the command history (`GET
   topics, with `text.set_value` over MQTT or from the Services page, also
   inside a service error that quotes it (the result sent to the caller keeps
   it);
-- values of keys ending in `code`, `key`, `pin`, `otp` or `auth` as a word of
-  their own (`code`, `user_code`, `api_key`, `user_pin`, `basic_auth`; not
-  `zipcode`, `code_format`, `spin`, `author`, `oauth`), or in `usercode`,
-  `passcode`, `pincode`, `password`, `passwd`, `passphrase`, `secret`,
-  `token`, `apikey`, `passkey`, `bindkey`, `credential`, `credentials` or `psk`
-  (`access_token`, `api_token`, `wifi_psk`; not `token_type`).
-  `translation_key`, `sort_key` and `primary_key` stay readable. This includes
-  a rejected command's reason where it quotes the payload;
+- values of keys named like a secret, by the names and rule in
+  [Security](security.md#mqtt-command-history), also in a rejected command's
+  reason where it quotes the payload;
 - a service's error message, run through the same rules as the Logs page
   ([Security](security.md)): a password, a `?token=` URL, an `Authorization:
   Bearer …`, or a credential after an auth scheme in what the caller sent

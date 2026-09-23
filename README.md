@@ -72,9 +72,10 @@ recorder. It runs exactly one integration and publishes it.
 - Everything it publishes is named after the integration: MQTT base topic and
   client id `hass_<domain>`, discovery ids `hass_<domain>_...`. Containers of
   different integrations share one broker and one main HA without clashing.
-  Two containers of the *same* integration cannot share a broker: they would
-  take each other's connection and clear each other's retained data. Put both
-  config entries in one container, or give each its own broker.
+  Two containers of the *same* integration cannot share a broker (the names
+  are not a setting): they would take each other's connection and clear each
+  other's retained data. Put both config entries in one container, or give
+  each its own broker.
 
 ---
 
@@ -190,8 +191,8 @@ runs its build code (`setup.py`, PEP 517 hooks), as an install would.
 *Prepare* installs exactly the commit Check saw, and adds a repository you
 typed in to the registry; if a branch moved since, Check again, and if GitHub
 cannot say which commit a ref points at, Prepare refuses. A release whose
-`hacs.json` declares a newer minimum Home Assistant must be prepared together
-with that Home Assistant version.
+`hacs.json` declares a newer minimum Home Assistant cannot start on an older
+one: prepare it together with that Home Assistant version.
 
 ### 2. Configure it
 
@@ -200,8 +201,9 @@ Choose whichever fits the integration, on the **Integration** page:
 - **Config flow** runs the integration's own setup dialog, as HA's frontend
   would; start the integration first, since the flow is its code. Texts come
   from its `translations/en.json` (else raw schema keys), selectors render as
-  their control (an unknown one as a JSON textarea), and a value the page
-  cannot convert is refused under its field, with nothing sent. HA refuses a
+  their control (an unknown one as a JSON textarea; see
+  [API](docs/api.md#configuration)), and a value the page cannot convert is
+  refused under its field, with nothing sent. HA refuses a
   second flow for a device with `already_in_progress`: every flow it still
   holds, one abandoned by a page reload included, is listed with **Continue**
   and **Abort**, and *Start config flow* ends this page's flow first.
@@ -218,10 +220,12 @@ Choose whichever fits the integration, on the **Integration** page:
   "already has a config entry here" (delete that entry; the upload stays), and
   *Import all* skips such integrations, lists them under `skipped` and deletes
   the upload once nothing failed (upload again to import a skipped one). An
-  entry imported from the same backup before is skipped as "already imported".
-  An import is refused while another import, a start, stop or install runs; a
-  restart in the middle leaves either the imported entry with its store, or no
-  entry and the volume's own store.
+  entry imported from the same backup before is skipped as "already imported";
+  the integration's other entries still come over. An import is refused while
+  another import, a start, stop or install runs; a restart in the middle
+  leaves either the imported entry with its store, or no entry and the
+  volume's own store
+  ([details](docs/backups.md#import-from-a-home-assistant-backup)).
 
 ### 3. Start it
 
@@ -279,14 +283,16 @@ device shared by both instances through a TCP bridge.
    its config entries; disabling keeps its entity ids registered, and the
    Cutover page refuses then), then click *Enable discovery* on **Cutover**.
    With the main HA configured, it refuses while the integration has config
-   entries there, or while anything but this container's own mirror holds an
-   entity id about to be announced (it would arrive as `_2`), and names what
-   blocks. It also refuses while a scheduled restore, rollback, version switch,
-   import or running action would replace the configuration at the next
-   restart, or a smoke test is pending: restart or wait first. Your main HA
-   then creates the entities, and the page watches until all exist. Entity ids
-   stay the same, but the unique ids are new (`hass_<domain>_<entity id>`), so
-   areas, labels and custom names have to be set again.
+   entries there, or while an entity id about to be announced is held by
+   anything but this container's own mirror of that very entity (it would
+   arrive as `_2`; a mirror of another entity renamed onto the id blocks too),
+   and names what blocks. It also refuses while a scheduled restore,
+   rollback, version switch, import or running action would replace the
+   configuration at the next restart, or a smoke test is pending: restart or
+   wait first. Your main HA then creates the entities, and the page watches
+   until all exist. Entity ids stay the same, but the unique ids are new
+   (`hass_<domain>_<entity id>`), so areas, labels and custom names have to be
+   set again.
 4. Changed your mind? *Undo* removes every discovery config again, so your
    main HA drops the entities. The manager device stays while
    `manager_discovery` is on, and the Undo answer says `manager_device_kept`.
@@ -388,7 +394,8 @@ while nothing is recorded as running (a restore of a backup taken while it ran,
 after a stop) adopts it as running, as after a damaged `state.json`: *Stop*,
 the health verdict and the MQTT identity then describe what runs. The version
 comes from the marker next to the code, and the timeline and log say it was
-adopted. With more than one integration in that state, none is adopted.
+adopted. With more than one integration in that state, none is adopted, and
+the log says so.
 
 A downgrade after the config entries migrated to a newer format usually fails
 (`migration_error`); the preflight warns about it. Use Full rollback right
@@ -623,13 +630,13 @@ to report a problem, see [SECURITY.md](SECURITY.md).
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `HRI_PORT` | `8087` | Port of the UI, the API and the image's healthcheck; a change applies at the next boot, and one pinned in `.storage/http` by an older setup or a restored backup is dropped. A value outside 1-65535 stops the container at boot with a line in the log |
+| `HRI_PORT` | `8087` | Port of the UI, the API and the image's healthcheck; a change applies at the next boot, and one pinned in `.storage/http` by an older setup or a restored backup is dropped. A value that is not a port number (1-65535) stops the container at boot, with a line in the log |
 | `HRI_NAME` | `hass-remote-integration` | Container and volume name |
 | `HRI_VERSION` | `latest` | Image tag Compose pulls, for example `0.23.0` |
 | `HRI_REGISTRY` | `ghcr.io/trailro` | Registry Compose pulls from: `ghcr.io/trailro` or `docker.io/trailro26` (Docker Hub), the same image. A compose file from 0.16.0 or older ignores it: download it again |
 | `TZ` | `UTC` | Time zone; an unknown zone falls back to UTC, with an error in the log |
 | `HA_VERSION_LATEST` | `1` | `0` installs the image's default Home Assistant (`HA_VERSION_DEFAULT`, the version the image was built with) on a fresh volume instead of the newest |
-| `HRI_APT_PACKAGES` | unset | Debian packages installed at boot, before Home Assistant, for what pip cannot install (the `ffmpeg` binary, BlueZ): exact package names, separated by spaces or commas (`ffmpeg libpcap0.8t64`, `libc6:arm64`). Anything else (an option, a URL, a path, a shell metacharacter, a name ending in `-`) is refused with a line in the log; the value never reaches a shell. A `+` is fine where it is part of the name (`g++`), but an added one (`ffmpeg+`) makes apt run at every boot. Installed packages are skipped, so a restart costs nothing; recreating the container or updating the image installs them again. A failure shows on **System** and does not stop the boot. Output: `integration_manager/apt-install.log`. A compose file from 0.17.2 or older does not pass it: download it again |
+| `HRI_APT_PACKAGES` | unset | Debian packages installed at boot, before Home Assistant, for what pip cannot install (the `ffmpeg` binary, BlueZ): package names separated by spaces or commas (`ffmpeg libpcap0.8t64`, `libc6:arm64`). Each is taken as an exact package name, never as a pattern, so a typo such as `python3.1.` fails like any unknown package. An option, a URL, a path, a shell metacharacter or a trailing `-` (apt's remove operator) is refused with a line in the log; the value never reaches a shell. A trailing `+` is fine where it is part of the name (`g++`), but one that is not (`ffmpeg+`) makes apt run at every boot. Installed packages are skipped, so a restart costs nothing; recreating the container or updating the image installs them again. A failure shows on **System** and does not stop the boot. Output: `integration_manager/apt-install.log`. A compose file from 0.17.2 or older does not pass it: download it again |
 | `HRI_DEV_SRC` | `./dev-src` | Dev mode: directory mounted at `/dev-src` |
 | `HRI_DEBUGPY` | unset | Dev mode: debugger port |
 | `HRI_DEBUGPY_HOST` | `127.0.0.1` | Dev mode: address debugpy binds inside the container (the dev overlay sets `0.0.0.0`) |

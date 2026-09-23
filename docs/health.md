@@ -1,7 +1,8 @@
 # Health and the health watchdog
 
-How the running integration is judged, how the watchdog reloads or restarts
-it when the verdict stays bad, and the resource history on **Overview**.
+How the running integration is judged, what the smoke test after a start
+records, how the watchdog reloads or restarts it when the verdict stays bad,
+and the resource history on **Overview**.
 
 ## The health verdict
 
@@ -18,10 +19,21 @@ keeps reporting after its connection dies, so the verdict stays `ok`. For
 such an integration set the **stale basis** to `updated` on the **MQTT** page:
 silence is then measured on the last changed value or attribute, and the
 verdict turns `degraded` after *stale* seconds. Pick a *stale* longer than its
-quietest normal stretch, or steady values read as a fault. The document names the basis under
-`rules.stale_basis`, and `since` says when the verdict took its current value.
+quietest normal stretch, or steady values read as a fault. The document names
+the basis under `rules.stale_basis`, and `since` says when the verdict took its
+current value.
 A change to `degraded` or `error` is logged once at WARNING, the way back to
 `ok` once at INFO.
+
+## Smoke test
+
+The smoke test after a start ([Start it](../README.md#3-start-it)) reads the
+verdict once. An integration with no config entry and no YAML is not judged:
+the verdict is `unconfigured`, with no rollback and no notification. A health
+check that itself fails (an exception, not a verdict) is retried every minute,
+three times, then recorded as `unknown` and never rolled back. A failed,
+degraded or unknown smoke test raises a notification and stays as the last
+error until another version runs healthy, also across the rollback's restart.
 
 ## The health watchdog
 
