@@ -44,10 +44,10 @@ class Scheduler:
         self._refused = False                  # a refusal already on the timeline for this unhealthy stretch
         # The ladder: the first step of an episode reloads the config entries, the next one restarts.  A reload
         # makes the entities write fresh states, so the verdict may read ok for a minute or two after it even when
-        # nothing is fixed: the ladder is only reset once ok has held for a whole window, never by that blip,
-        # or a zombie would be reloaded again and again and never escalate.
+        # nothing is fixed: the ladder, the backoff and a give-up are only reset once ok has held for a whole
+        # window, never by that blip, or a zombie would be reloaded again and again and never escalate.
         self._reloaded_at: float | None = None  # monotonic: the reload of this episode
-        self._ok_since: float | None = None     # monotonic: when the verdict became ok after that reload
+        self._ok_since: float | None = None     # monotonic: when the verdict became ok (the one clock of a recovery)
         self._reload_skip_said = False          # "no reload: <why>" already on the timeline for this episode
         self._announced = False                # the notification of the last automatic restart, raised once per boot
 
@@ -143,7 +143,7 @@ class Scheduler:
         self.installer.watchdog_pending = None
 
     def _ladder_reset(self) -> None:
-        self._reloaded_at = self._ok_since = None
+        self._reloaded_at = None
         self._reload_skip_said = False
 
     def _live_refusal(self) -> str | None:
@@ -236,27 +236,34 @@ class Scheduler:
         if not cfg["enabled"]:
             self._watchdog_clear()
             self._ladder_reset()
+            self._ok_since = None
             return
         verdict = self._verdict()
-        if verdict is None:
-            return  # unknown: the stretch keeps running, nothing is decided on it
+        if verdict is None or (verdict.get("state") == "ok" and verdict.get("grace")):
+            # unknown, or ok only because the boot grace skipped the entity checks (a zombie reads ok for that long
+            # after every restart): the stretch keeps running, nothing is decided on it
+            return
         state = verdict.get("state")
+        now = time.monotonic()
+        if state != "ok":
+            self._ok_since = None
         if state == "error" and "no config entry, no YAML setup" in (verdict.get("reason") or ""):
             # an integration installed but never configured reports error, not the smoke test's "unconfigured":
             # a restart cannot configure it, so the watchdog leaves it alone (the Integration page says what to do)
             self._watchdog_clear()
             self._ladder_reset()
             return
-        now = time.monotonic()
         if state not in ("error", "degraded") or (state == "degraded" and not cfg["on_degraded"]):
             # degraded is kept on purpose unless the operator opted in (a version that did set up), and stopped
             # is an operator's decision: neither is acted on
             self._watchdog_clear()
             if state == "ok":
-                inst.watchdog_recovered()
-                if self._reloaded_at is not None:
-                    self._ok_since = self._ok_since or now
-                    if now - self._ok_since >= cfg["after_min"] * 60:
+                # a recovery is ok for a whole window: the fresh states of a reload or a restart read ok for a minute
+                # or two on a zombie, and must not reset the ladder, the backoff or a give-up
+                self._ok_since = self._ok_since or now
+                if now - self._ok_since >= cfg["after_min"] * 60:
+                    inst.watchdog_recovered()
+                    if self._reloaded_at is not None:
                         events.emit("health", f"health watchdog: {inst.state.domain or 'the integration'} has been ok for "
                                               f"{int((now - self._ok_since) / 60)} min since the reload; the ladder starts "
                                               "again from the reload", integration=inst.state.domain)
@@ -264,7 +271,6 @@ class Scheduler:
             elif state == "stopped":
                 self._ladder_reset()
             return
-        self._ok_since = None  # an ok blip after a reload is over: the ladder stays where it is
         if self._bad_since is None:
             self._bad_since = now
         unhealthy = now - self._bad_since
@@ -292,7 +298,7 @@ class Scheduler:
             if cap:
                 why, give_up = cap
                 if give_up:
-                    inst.watchdog_give_up(why)  # said once, then quiet until an ok verdict or the window moves on
+                    inst.watchdog_give_up(why)  # said once, then quiet until ok holds for a window or the 24 h window moves on
                 elif not self._refused:
                     self._refused = True
                     events.emit("restart", f"health watchdog: {domain} is {was} ({reason}) but nothing is restarted: {why}",

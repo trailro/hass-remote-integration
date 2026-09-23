@@ -3181,15 +3181,18 @@ class MqttPublisher:
             rules = self._rules_provider(domain)
             base["rules"] = rules
             booting = grace and now - self._started_at < min(rules["stale_s"], HEALTH_GRACE_S)  # grace: entities fill in after the first traffic
-            if base.get("state") == "ok" and not booting:
+            if base.get("state") == "ok" and booting:
+                # ok only because the checks below were skipped: no verdict on the entities (the watchdog reads it so)
+                base["grace"] = True
+            elif base.get("state") == "ok":
+                # opted in ("updated"): a coordinator that re-writes the same states on a dead source keeps
+                # last_reported moving; only a value (or attribute) that changes counts as fresh data
+                updated = rules.get("stale_basis") == "updated"
                 if states and unavailable * 100 >= len(states) * rules["unavailable_pct"]:
                     base["state"], base["reason"] = "degraded", f"{unavailable} of {len(states)} entities unavailable"
-                elif rules["mode"] == "periodic" and rules.get("stale_basis") == "updated":
-                    # opted in: a coordinator that re-writes the same states on a dead source keeps last_reported
-                    # moving; only a value (or attribute) that changes counts as fresh data
-                    if last and now - last > rules["stale_s"]:
-                        base["state"], base["reason"] = "degraded", f"no entity value change for {int(now - last)} s"
-                elif rules["mode"] == "periodic" and reported and now - reported > rules["stale_s"]:
+                elif rules["mode"] == "periodic" and updated and last and now - last > rules["stale_s"]:
+                    base["state"], base["reason"] = "degraded", f"no entity value change for {int(now - last)} s"
+                elif rules["mode"] == "periodic" and not updated and reported and now - reported > rules["stale_s"]:
                     base["state"], base["reason"] = "degraded", f"no entity report for {int(now - reported)} s"
                 elif not states and has_entities:
                     base["state"], base["reason"] = "degraded", "no entities with a state yet"
