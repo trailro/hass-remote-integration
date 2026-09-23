@@ -963,18 +963,42 @@ discovery on, your main HA gets a connectivity sensor and a health sensor for
 the container. The thresholds are on the **MQTT** page; mark an integration
 that only writes on events as `event`, so silence is not reported as a fault.
 
+Silence is measured on the last state *report* by default: any state the
+integration writes, even the same value again. Some integrations poll through a
+coordinator that re-writes every entity on each interval whether or not new
+data arrived, so when their connection dies the config entry stays `loaded`,
+the reports keep coming and the verdict stays `ok`. For those, set the
+integration's **stale basis** to `updated` on the **MQTT** page: silence is then
+measured on the last value (or attribute) that changed, and a zombie that only
+re-writes the same states turns `degraded` after *stale* seconds. Pick a
+*stale* longer than the quietest normal stretch of that integration, or steady
+values will read as a fault. The document names the basis in use under
+`rules.stale_basis`, and `since` says when the verdict took its current value.
+A change to `degraded` or `error` is logged once at WARNING, the way back to
+`ok` once at INFO.
+
 #### The health watchdog
 
 An integration that goes into `error` at three in the morning stays that way
 until somebody looks. The **health watchdog** (on **System**, *off by
-default*) restarts the process when the verdict has been `error` without
-interruption for a while: 15 minutes by default, at most once an hour and at
-most three times a day. Only `error` counts — a `degraded` version is kept on
-purpose and `stopped` is your decision. An integration that is installed but
-not configured yet also reports `error` (`not loaded (no config entry, no YAML
-setup)`); a restart cannot configure it, so the watchdog leaves that one alone.
+default*) steps in when the verdict has been `error` without interruption for a
+while: 15 minutes by default. Its first step is gentle: it reloads the running
+integration's config entries, the same path as the **Reload** button, which
+revives a stuck connection in well under a second. At most six reloads a day. If
+the verdict is still not `ok` one window after the reload, it restarts the
+process: at most once an hour and at most three times a day. An integration
+with no config entry (YAML only) has nothing to reload and goes straight to the
+restart, and so does one that has used up its reloads for the day.
 
-It never fights the rest of the manager. Nothing is restarted while an
+`error` always counts. `degraded` counts only when you tick *also on a lasting
+degraded* (`watchdog_on_degraded`): a `degraded` version is otherwise kept on
+purpose. Tick it together with the `updated` stale basis to catch an
+integration that keeps writing the same states on a dead source. `stopped` is
+your decision. An integration that is installed but not configured yet also
+reports `error` (`not loaded (no config entry, no YAML setup)`); a restart
+cannot configure it, so the watchdog leaves that one alone.
+
+It never fights the rest of the manager. Nothing is reloaded or restarted while an
 install, start, stop, backup, import, restore or full rollback is running,
 while a preflight (of an integration version or of a Home Assistant version)
 or a manager action from MQTT is running — each only for as long as it can still
@@ -985,10 +1009,14 @@ while a restore, a rebuild, a Home Assistant version change, a deferred start
 or a full rollback is waiting for the next restart, while a smoke test is
 pending or a config entry is still setting up, nor in the first 15 minutes
 after a boot — the integration gets its whole grace window to set up first. A
-restart it decided against puts one line on the timeline for that stretch, not
-one a minute.
+reload or restart it decided against puts one line on the timeline for that
+stretch, not one a minute.
 
-It cannot loop. After a restart the clock starts again from that boot, and the
+It cannot loop. A reload makes every entity write fresh states, so the verdict
+can read `ok` for a minute or two even when nothing is fixed. That blip does not
+reset anything: the ladder only starts again from the reload once the verdict
+has stayed `ok` for a whole window. Otherwise the next stretch goes on to the
+restart. After a restart the clock starts again from that boot, and the
 window doubles for the next attempt (15 → 30 → 60 → 120 → 240 minutes, where
 it stops doubling), so a
 restart that did not help is not repeated at the same rate. When the daily
@@ -997,7 +1025,8 @@ resets the ladder and the give-up, and the daily count drains as the restarts
 age out of the last 24 hours. All of that survives the restart it triggers —
 it lives in `state.json`, like the smoke test's verdict.
 
-Every action is visible: a timeline entry naming the reason it acted on, the
+Every action is visible: a timeline entry naming the reason it acted on (a
+reload says `health degraded for 20 min (…): reloading <domain>'s entries`), the
 attempt number and what it will do next; a persistent notification raised at
 the boot after the restart (the restart ends the process that would have shown
 it); and `watchdog` in `GET /api/status`, which the **System** page shows under
@@ -2055,7 +2084,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
   venv-<ha version>/            one per installed Home Assistant (venv-current links the active one)
   custom_components/<domain>/   the deployed integration
   integration_manager/
-    state.json                  running integration, versions, pending actions, the health watchdog's ledger (its restarts of the last 24 h, the backoff step, the last action); an unreadable one is kept as state.json.corrupt-<stamp>
+    state.json                  running integration, versions, pending actions, the health watchdog's ledger (its restarts and reloads of the last 24 h, the backoff step, the last restart and the last reload); an unreadable one is kept as state.json.corrupt-<stamp>
     settings.json               settings (backup retention, smoke test, health thresholds, health watchdog), tokens, log-file format (mode 600); a damaged one is kept as settings.json.corrupt-<stamp>
     auth_key                    signs login sessions, only with a password set (mode 600); when it cannot be written (a full or read-only volume) a key held in memory is used and every session ends at the next restart
     auth_revoked                time of the last logout: sessions from before it are invalid
@@ -2210,14 +2239,24 @@ exist yet (a library imported later) needs a dotted Python name, and at most
 50 of those can be created.
 
 `GET/POST /api/settings` carries the health watchdog as `watchdog` (a boolean,
-off by default), `watchdog_after_min` (5–720), `watchdog_min_interval_min`
-(15–1440) and `watchdog_max_per_day` (1–24); numbers outside the range are
-clamped, not refused. `GET /api/status` answers `watchdog` with the same rules
-under shorter names (`enabled`, `after_min`, `min_interval_min`, `max_per_day`)
+off by default), `watchdog_on_degraded` (a boolean, off by default),
+`watchdog_after_min` (5–720), `watchdog_min_interval_min` (15–1440) and
+`watchdog_max_per_day` (1–24); numbers outside the range are clamped, not
+refused. Its `health` object holds the per-integration rules: `{"<domain>":
+{"mode": "periodic"|"event", "stale_s": 60–86400, "unavailable_pct": 1–100,
+"stale_basis": "reported"|"updated"}}`, any of them left out for the default.
+`GET /api/status` answers `watchdog` with the same rules under shorter names
+(`enabled`, `on_degraded`, `after_min`, `min_interval_min`, `max_per_day`)
 plus `restarts_24h`, `attempts`, `window_min` (what the next attempt has to
-wait through), `gave_up`, `last` (`at`, `integration`, `reason`,
-`unhealthy_s`, `attempt`, `next`) and `pending` (`bad_for_s`, `window_s`,
-`reason`) while a stretch of `error` is being timed.
+wait through), `gave_up`, `last` (`at`, `integration`, `state`, `reason`,
+`unhealthy_s`, `attempt`, `next`), `reloads_24h`, `max_reloads_per_day`,
+`last_reload` (`at`, `integration`, `state`, `reason`, `unhealthy_s`,
+`entries`, `result`) and `pending` (`bad_for_s`, `window_s`, `reason`, `state`,
+`next`: `reload` or `restart`) while a stretch is being timed.
+`GET /api/status` also answers `health`: the verdict published on MQTT, as
+`state`, `reason`, `basis` (the stale basis in use), `since` and `updated_at`
+(all `null` before the first verdict of a boot). It is the last verdict built,
+at most a minute old, not a new check.
 
 `GET /api/ha` includes `apt`: what this boot did with `HRI_APT_PACKAGES`
 (`packages`, `refused`, `ok`, `note`, `error`, `at`), or `null` when the
