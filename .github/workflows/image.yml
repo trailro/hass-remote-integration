@@ -185,6 +185,14 @@ jobs:
             | sed -E "s#\]\(\##](${REPO_URL}/blob/${TAG}/README.md\##g; s#\]\((docs/|SECURITY\.md|LICENSE)#](${REPO_URL}/blob/${TAG}/\1#g" > "$out"
           printf 'The rest of the documentation (everyday operation, MQTT reference, security, configuration, API, troubleshooting) is in the [full README on GitHub](%s/blob/%s/README.md#everyday-operation).\n' "$REPO_URL" "$TAG" >> "$out"
           wc -c "$out"
+          # Docker Hub keeps at most 25000 bytes and the action cuts the rest with only a warning: the first thing
+          # to go would be the link above, to everything past this part.  tests/test_hub_overview.py runs this
+          # same script on every pull request, so this refusal is the last line, not the first.
+          size=$(wc -c < "$out")
+          if [ "$size" -gt 25000 ]; then
+            echo "::error::the Docker Hub overview is $size bytes, over the 25000 Docker Hub keeps: shorten README.md above '## Everyday operation' or move a section below it"
+            exit 1
+          fi
       - uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa  # v5.0.0
         if: steps.newest.outputs.enable == 'true'
         with:
