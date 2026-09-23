@@ -59,20 +59,25 @@ class StaleBasisTest(unittest.TestCase):
     """The reproduction: 18 min without a value change, the coordinator re-writing every
     state each minute (last_reported 30 s old), stale_s 120."""
 
-    def build(self, basis=None, mode="periodic"):
+    def build(self, basis=None, mode="periodic", started_ago=None, with_state=True, grace=True, provider_state="ok"):
         rules = {"stale_s": 120, "mode": mode, "unavailable_pct": 50}
         if basis:
             rules["stale_basis"] = basis
         pub = _publisher(rules)
-        states = {f"sensor.demo_{i}": SimpleNamespace(state="21.5", last_updated=_ts(NOW - 18 * 60), last_reported=_ts(NOW - 30))
-                  for i in range(3)}
+        if started_ago is not None:
+            pub._started_at = NOW - started_ago
+        if provider_state != "ok":
+            pub._health_provider = lambda: {"integration": DOMAIN, "state": provider_state, "reason": "config entry 'Hub' is setup_retry"}
+        ids = [f"sensor.demo_{i}" for i in range(3)]
+        states = {i: SimpleNamespace(state="21.5", last_updated=_ts(NOW - 18 * 60), last_reported=_ts(NOW - 30))
+                  for i in ids} if with_state else {}
         pub.hass.states.get.side_effect = states.get
-        reg = mock.Mock(entities={i: SimpleNamespace(entity_id=i, platform=DOMAIN, disabled=False) for i in states})
+        reg = mock.Mock(entities={i: SimpleNamespace(entity_id=i, platform=DOMAIN, disabled=False) for i in ids})
         with mock.patch.object(er, "async_get", return_value=reg), \
                 mock.patch.object(mp, "async_get_platforms", return_value=[]), \
                 mock.patch.object(mp, "_notification_count", return_value=0), \
                 mock.patch.object(mp.time, "time", return_value=NOW):
-            return pub.build_health()
+            return pub.build_health(grace=grace)
 
     def test_updated_basis_calls_the_zombie_degraded(self):
         doc = self.build("updated")
@@ -89,6 +94,25 @@ class StaleBasisTest(unittest.TestCase):
 
     def test_event_mode_is_never_stale_whatever_the_basis(self):
         self.assertEqual(self.build("updated", mode="event")["state"], "ok")
+
+    def test_no_entity_with_a_state_is_degraded_under_either_basis(self):
+        """Entities registered, none with a state: the updated basis used to stop at its own branch and read ok."""
+        for basis in ("reported", "updated"):
+            with self.subTest(basis=basis):
+                doc = self.build(basis, with_state=False)
+                self.assertEqual((doc["state"], doc["reason"]), ("degraded", "no entities with a state yet"))
+
+    def test_an_ok_that_only_the_boot_grace_allows_is_marked(self):
+        """60 s after a start, stale_s 120: the checks are skipped, so the ok says nothing about the entities."""
+        doc = self.build("updated", started_ago=60)
+        self.assertEqual(doc["state"], "ok")
+        self.assertIs(doc.get("grace"), True)
+
+    def test_a_judged_verdict_carries_no_grace_mark(self):
+        for kwargs in ({"basis": "reported"}, {"basis": "updated"}, {"basis": "updated", "started_ago": 60, "grace": False},
+                       {"basis": "updated", "started_ago": 60, "provider_state": "error"}):
+            with self.subTest(**kwargs):
+                self.assertNotIn("grace", self.build(**kwargs))
 
     def test_the_settings_carry_the_basis(self):
         d = tempfile.mkdtemp()
@@ -141,9 +165,7 @@ class SettingsApiTest(unittest.TestCase):
         self.assertFalse(self.post({"watchdog_on_degraded": "yes"})["ok"])
 
 
-class LadderTest(_Base):
-    """Reload first, restart only if a window after the reload the verdict is still not ok."""
-
+class _LadderBase(_Base):
     def installer(self, **settings):
         inst = super().installer(**settings)
         inst.reload_entry = mock.AsyncMock(return_value=True)
@@ -154,6 +176,10 @@ class LadderTest(_Base):
     def run_min(self, sch, minutes):
         for _ in range(minutes):
             self.tick(sch)
+
+
+class LadderTest(_LadderBase):
+    """Reload first, restart only if a window after the reload the verdict is still not ok."""
 
     def test_a_lasting_degraded_is_acted_on_only_when_opted_in(self):
         for opted in (False, True):
@@ -283,6 +309,128 @@ class LadderTest(_Base):
         self.assertTrue(self.lines("did not complete"))
         self.run_min(sch, 5)
         inst.restart.assert_awaited_once()
+
+
+class RecoveryTest(_LadderBase):
+    """What counts as a recovery for the backoff and the give-up: ok for a whole window, the same rule as the
+    ladder.  An ok the boot grace allows is no verdict at all, and the ok blip after a reload is not a recovery."""
+
+    GRACE_OK = {"state": "ok", "reason": "", "grace": True}
+
+    def restarted_once(self, **settings):
+        """degraded -> reload -> restart, then the process that restart leads to, on the same state.json."""
+        inst = self.installer(watchdog_after_min=5, watchdog_on_degraded=True, watchdog_min_interval_min=15, **settings)
+        sch = self.scheduler(inst)
+        self.verdict = dict(DEGRADED)
+        self.run_min(sch, 11)
+        inst.restart.assert_awaited_once()
+        self.assertEqual(inst.watchdog_record()["attempts"], 1)
+        again = self.installer(watchdog_after_min=5, watchdog_on_degraded=True, watchdog_min_interval_min=15, **settings)
+        return again, self.scheduler(again)
+
+    def test_a_grace_ok_after_the_restart_keeps_the_backoff(self):
+        inst, sch = self.restarted_once()
+        self.clock.advance(3600)  # past the minimum interval
+        self.verdict = dict(self.GRACE_OK)
+        self.run_min(sch, 5)  # stale_s 300: the whole grace reads ok, the zombie is as dead as before
+        self.assertEqual(inst.watchdog_record()["attempts"], 1)
+        self.assertEqual(inst.watchdog_window_s(), 10 * 60)
+        self.assertFalse(self.lines("healthy again"))
+        self.verdict = dict(DEGRADED)
+        self.run_min(sch, 10)
+        inst.reload_entry.assert_not_awaited()  # 10 ticks: 9 min of degraded, the doubled window has not run out
+        self.run_min(sch, 1)
+        inst.reload_entry.assert_awaited_once()
+        self.run_min(sch, 10)
+        inst.restart.assert_awaited_once()
+        self.assertEqual(inst.watchdog_record()["attempts"], 2)
+        self.assertEqual(inst.watchdog_window_s(), 20 * 60)
+
+    def test_a_grace_ok_does_not_end_the_stretch(self):
+        inst = self.installer(watchdog_after_min=5, watchdog_on_degraded=True)
+        sch = self.scheduler(inst)
+        self.verdict = dict(DEGRADED)
+        self.run_min(sch, 3)
+        self.verdict = dict(self.GRACE_OK)  # an identity move restarts the grace in the same process
+        self.run_min(sch, 1)
+        self.assertIsNotNone(sch._bad_since)
+        self.verdict = dict(DEGRADED)
+        self.run_min(sch, 2)
+        inst.reload_entry.assert_awaited_once()
+
+    def test_a_give_up_survives_a_grace_ok(self):
+        inst = self.installer(watchdog_after_min=5, watchdog_on_degraded=True, watchdog_max_per_day=1)
+        inst.state.watchdog = {"restarts": [self.clock() - 3600], "attempts": 1,
+                               "gave_up": "1 automatic restarts in the last 24 h is the maximum (1/day)"}
+        sch = self.scheduler(inst)
+        self.verdict = dict(self.GRACE_OK)
+        self.run_min(sch, 15)
+        rec = inst.watchdog_record()
+        self.assertIn("1 automatic restarts", rec["gave_up"])
+        self.assertEqual(rec["attempts"], 1)
+
+    def test_a_real_ok_resets_the_backoff_only_after_a_whole_window(self):
+        inst = self.installer(watchdog_after_min=5, watchdog_on_degraded=True, watchdog_max_per_day=1)
+        inst.state.watchdog = {"restarts": [self.clock() - 3600], "attempts": 1,
+                               "gave_up": "1 automatic restarts in the last 24 h is the maximum (1/day)"}
+        sch = self.scheduler(inst)
+        self.verdict = dict(OK)
+        self.run_min(sch, 5)  # the first ok tick starts the clock: four minutes of ok so far
+        rec = inst.watchdog_record()
+        self.assertEqual((rec["attempts"], bool(rec["gave_up"])), (1, True))
+        self.run_min(sch, 1)
+        rec = inst.watchdog_record()
+        self.assertEqual((rec["attempts"], rec["gave_up"]), (0, ""))
+        self.assertEqual(len(rec["restarts"]), 1)
+        self.assertEqual(len(self.lines("healthy again")), 1)
+        self.run_min(sch, 30)
+        self.assertEqual(len(self.lines("healthy again")), 1)
+
+    def test_a_short_ok_after_a_reload_keeps_the_backoff(self):
+        inst, sch = self.restarted_once()
+        self.clock.advance(3600)
+        self.verdict = dict(DEGRADED)
+        self.run_min(sch, 11)  # the doubled window, then the reload
+        inst.reload_entry.assert_awaited_once()
+        self.verdict = dict(OK)  # the fresh states of the reload
+        self.run_min(sch, 2)
+        self.assertEqual(inst.watchdog_record()["attempts"], 1)
+        self.assertEqual(inst.watchdog_window_s(), 10 * 60)
+        self.verdict = dict(DEGRADED)
+        self.run_min(sch, 11)
+        inst.restart.assert_awaited_once()
+        self.assertEqual(inst.reload_entry.await_count, 1)
+        self.assertEqual(inst.watchdog_record()["attempts"], 2)
+
+    def test_error_keeps_its_backoff_through_a_grace_ok_and_recovers_after_a_window(self):
+        inst = self.installer(watchdog_after_min=5, watchdog_min_interval_min=15)
+        sch = self.scheduler(inst)
+        self.verdict = dict(ERROR)
+        self.run_min(sch, 11)
+        inst.reload_entry.assert_awaited_once()
+        inst.restart.assert_awaited_once()
+        again = self.installer(watchdog_after_min=5, watchdog_min_interval_min=15)
+        sch2 = self.scheduler(again)
+        self.clock.advance(3600)
+        self.verdict = dict(self.GRACE_OK)
+        self.run_min(sch2, 3)
+        self.assertEqual(again.watchdog_record()["attempts"], 1)
+        self.verdict = dict(ERROR)
+        self.run_min(sch2, 21)  # the doubled window to the reload, then the doubled window to the restart
+        again.reload_entry.assert_awaited_once()
+        again.restart.assert_awaited_once()
+        self.assertEqual(again.watchdog_record()["attempts"], 2)
+        third = self.installer(watchdog_after_min=5, watchdog_min_interval_min=15)
+        sch3 = self.scheduler(third)
+        self.verdict = dict(OK)
+        self.run_min(sch3, 6)
+        self.assertEqual(third.watchdog_record()["attempts"], 0)
+
+    def test_the_give_up_line_says_what_brings_it_back(self):
+        inst = self.installer(watchdog_after_min=5)
+        inst.watchdog_give_up("the cap")
+        line = self.lines("not restarting any more")[0]
+        self.assertIn("ok for 5 min", line)
 
 
 class StatusApiTest(unittest.TestCase):

@@ -425,7 +425,8 @@ class BackoffTest(_Base):
             self.tick(sch)
         self.assertEqual(inst.watchdog_record()["attempts"], 1)
         self.verdict = dict(OK)
-        self.tick(sch)
+        for _ in range(6):  # ok for a whole window (5 min from the first ok tick): a recovery, not a blip
+            self.tick(sch)
         rec = inst.watchdog_record()
         self.assertEqual((rec["attempts"], rec["gave_up"]), (0, ""))
         self.assertEqual(len(rec["restarts"]), 1)  # the cap is a cap, not a score that recovery wipes

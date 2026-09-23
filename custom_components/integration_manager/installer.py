@@ -2245,7 +2245,7 @@ class Installer:
         return None
 
     def watchdog_recovered(self) -> None:
-        """An ``ok`` verdict: the backoff ladder and a give-up go, the 24 h ledger
+        """``ok`` held for a whole window: the backoff ladder and a give-up go, the 24 h ledger
         stays (it is a cap on how often the watchdog may act, not on how often the
         integration may break)."""
         rec = self.watchdog_record()
@@ -2352,8 +2352,9 @@ class Installer:
             return
         rec["gave_up"] = why
         self._watchdog_save(rec)
-        events.emit("error", f"health watchdog: not restarting any more ({why}); it tries again when the "
-                             "integration reports ok, or when the 24 h window has moved on", domain=self.state.domain)
+        events.emit("error", f"health watchdog: not restarting any more ({why}); it tries again once the integration "
+                             f"has been ok for {self.settings.watchdog()['after_min']} min, or when the 24 h window has "
+                             "moved on", domain=self.state.domain)
 
     def announce_watchdog(self) -> None:
         """The last automatic restart as a persistent notification, once per action;
