@@ -1,140 +1,224 @@
 # API
 
-## API
-
 Every page is backed by a JSON API on the same port, so everything can be
-scripted. With a password set, send it as `Authorization: Bearer <password>`. POST
-bodies are JSON (`Content-Type: application/json`). Requests that reach out to
-the internet or another server, upload files, or return patches, log file
-tails, logs or diagnostics, or run or store patch code, also need `X-Requested-With: fetch`: `/api/catalog`,
-`/api/patch_editor` (reading, *Check* and *Save*), `/api/patches/<domain>` (and its `/upload`), `/api/backups/upload`,
-`/api/import/upload`, `/api/parity`, `/api/releases/preview`,
-`/api/diagnostics`, `/api/diag/memory` (also without `refs`), `/api/logs`,
-`/api/log_files`, `/api/log_files/tail` and `/api/log_files/download`, and aborting a flow
-(`DELETE /api/flow/<id>`, `DELETE /api/options/<flow_id>`); without it they answer `400`.
-`GET /api/backups/<name>/download` does not need it: the page sends that
-header only through `fetch`, which would hold the whole backup in the
-browser's memory before saving it, so the backup link is a plain download the
-browser writes to disk as it arrives. Another page can start that download in
-your browser (while you are logged in), but cannot read it.
-`?refresh=1` on `/api/releases` and `/api/ha` is ignored without it.
-`GET /api/status` answers without the header too (for monitors and
-`verify.sh`), but then from a copy at most 10 seconds old, since building it
-runs the `status(ctx)` of `.py` patches; send the header for a fresh one. The main entry
-points:
+scripted. This file lists every endpoint, the headers they need, and the
+fields the pages do not make obvious.
+
+## Requests
+
+With a password set, send `Authorization: Bearer <password>`
+([Security](security.md)). POST bodies are JSON
+(`Content-Type: application/json`).
+
+These also need `X-Requested-With: fetch`, or they answer `400`: `/api/catalog`,
+`/api/patch_editor` (reading, *Check*, *Save*), `/api/patches/<domain>` and its
+`/upload`, `/api/backups/upload`, `/api/import/upload`, `/api/parity`,
+`/api/releases/preview`, `/api/diagnostics`, `/api/diag/memory` (with or
+without `refs`), `/api/logs`, `/api/log_files`, `/api/log_files/tail`,
+`/api/log_files/download`, and aborting a flow (`DELETE /api/flow/<id>`,
+`DELETE /api/options/<flow_id>`). Without it, `?refresh=1` on `/api/releases`
+and `/api/ha` is ignored.
+
+Exceptions:
+
+- `GET /api/backups/<name>/download` needs no header, so the browser writes
+  the backup to disk as it arrives. Another page can start that download in
+  your logged-in browser, but cannot read it.
+- `GET /api/status` answers without it (for monitors and `verify.sh`), from a
+  copy at most 10 seconds old, since building it runs the `status(ctx)` of `.py`
+  patches. Send the header for a fresh one.
+
+## Endpoints
 
 | Area | Endpoints |
 |---|---|
-| Status | `GET /api/status`, `GET /api/summary`, `GET /api/manager`, `GET /api/manager/history?hours=`, `GET /api/mqtt/status` (`subscribe_error`; `retained_cleanup_pending`: a list of `{base_topic, broker, other_broker, deferred, error, since}`, the configured broker's first), `GET /api/events`, `GET /api/notifications`, `POST /api/notifications/dismiss_all`, `POST /api/notifications/<id>/dismiss` |
-| Login | `POST /api/login` (`{"password": …}`, sets the session cookie; `503` with the reason while `HRI_PASSWORD_FILE` is empty or unreadable, or `HRI_PASSWORD` holds only spaces or tabs), `POST /api/logout` (ends every session; `500` with `ok: false` and the reason when the volume could not record it: every session still ends, but at the next restart the sessions from before that logout are valid again and those issued after it end) |
-| Integration | `POST /api/install`, `GET /api/change_reports`, `POST /api/run/{start,stop,cancel_pending_start}`, `GET /api/releases`, `GET /api/releases/preview?domain=&tag=`, `POST /api/releases/preflight`, `POST /api/updates/check`, `POST /api/installed/<domain>/{uninstall,rollback_full,remove_version}` (uninstall answers `retained_cleared`, and while its MQTT cleanup waits: `retained_cleanup_failed` with `retained_cleanup_error`, or `retained_cleanup_deferred` when MQTT is disabled, plus `retained_cleanup_broker` (`host:port`) and `retained_cleanup_other_broker` when the settings name another broker), `GET/POST /api/registry` |
+| Status | `GET /api/status`, `GET /api/summary`, `GET /api/manager`, `GET /api/manager/history?hours=`, `GET /api/mqtt/status`, `GET /api/events`, `GET /api/notifications`, `POST /api/notifications/dismiss_all`, `POST /api/notifications/<id>/dismiss` |
+| Login | `POST /api/login` (`{"password": …}`, sets the session cookie), `POST /api/logout` |
+| Integration | `POST /api/install`, `GET /api/change_reports`, `POST /api/run/{start,stop,cancel_pending_start}`, `GET /api/releases`, `GET /api/releases/preview?domain=&tag=`, `POST /api/releases/preflight`, `POST /api/updates/check`, `POST /api/installed/<domain>/{uninstall,rollback_full,remove_version}`, `GET/POST /api/registry` |
 | Builder / dev | `GET /api/catalog?q=`, `GET /api/build/options`, `POST /api/build/{check,prepare}`, `GET /api/dev`, `POST /api/dev/install` |
-| Configuration | `POST /api/flow/start`, `GET /api/flow/progress`, `POST/DELETE /api/flow/<id>`, `POST/DELETE /api/options/<flow_id>`, `GET/POST /api/yaml/<domain>`, `GET /api/entries`, `POST /api/entries/<entry_id>/{options,reload,delete}` (an unknown entry id, there or in a `reconfigure` flow start, answers 404 with a message) |
+| Configuration | `POST /api/flow/start`, `GET /api/flow/progress`, `POST/DELETE /api/flow/<id>`, `POST/DELETE /api/options/<flow_id>`, `GET/POST /api/yaml/<domain>`, `GET /api/entries`, `POST /api/entries/<entry_id>/{options,reload,delete}` |
 | Patches | `GET /api/patches/<domain>`, `POST /api/patches/<domain>/upload`, `POST /api/patches/<domain>/<name>/{apply,delete}`, `GET /api/patch_editor/<domain>?name=`, `POST /api/patch_editor/<domain>/{check,save}` |
 | MQTT | `GET/POST /api/mqtt/config`, `GET/POST /api/mqtt/rules`, `POST /api/mqtt/{reconnect,republish}`, `GET /api/mqtt/discovery`, `GET /api/mqtt/commands` |
-| Entities | `GET /api/entities` (an entity's attributes are the published ones whether or not it is published: an `access_token` and a picture URL carrying `token=` are left out of the row as well, and a token in the state is masked, so excluding an entity from MQTT never shows more than publishing it), `POST /api/entities/<entity_id>/{rename,name,disable,enable,delete,mqtt_exclude,mqtt_include,mqtt_name}`, `GET /api/devices`, `POST /api/devices/<device_id>/{name,delete}` (`delete` asks every config entry of the device first whether its integration can remove devices at all, and changes nothing when one cannot; an integration that refuses, or fails, after another entry was already detached answers `ok: false` with the entries detached so far in the error and `config_entries_detached`), `GET /api/services`, `POST /api/services/call` |
+| Entities | `GET /api/entities`, `POST /api/entities/<entity_id>/{rename,name,disable,enable,delete,mqtt_exclude,mqtt_include,mqtt_name}`, `GET /api/devices`, `POST /api/devices/<device_id>/{name,delete}`, `GET /api/services`, `POST /api/services/call` |
 | System | `GET /api/ha`, `POST /api/ha/{update,rollback,check}`, `POST /api/restart`, `GET/POST /api/settings` |
-| Backups | `GET /api/backups`, `POST /api/backups/create`, `POST /api/backups/upload`, `GET /api/backups/<name>/download`, `POST /api/backups/<name>/{restore,delete}`, `POST /api/backups/restore/cancel` (answers `cancelled`, and the timeline records the cancel; a restore that belongs to a scheduled Home Assistant version change is refused with `for_version`, and a full rollback's restore with `rollback`, the backup it restores) |
+| Backups | `GET /api/backups`, `POST /api/backups/create`, `POST /api/backups/upload`, `GET /api/backups/<name>/download`, `POST /api/backups/<name>/{restore,delete}`, `POST /api/backups/restore/cancel` |
 | Import | `POST /api/import/upload`, `GET/POST /api/import/inspect`, `POST /api/import/{apply,apply_all,clear}` |
-| Cutover | `GET /api/parity`, `POST /api/parity/{test,remove_orphans}`, `POST /api/cutover/{status,enable,undo}`; `enable` takes `force`, which skips the checks on the main Home Assistant (MQTT loaded, the integration's config entries, entity ids held there by anything but this container's own mirrors) but not the container's own (an integration running, health, MQTT connected), nor what would replace the container's configuration under the new entities: an action running (install, start, import, restore, a Home Assistant version change being prepared) or a restore, full rollback, Home Assistant version switch or backup import scheduled for the next restart; the answer and the timeline say `forced`. `force` does skip a pending smoke test, and the answer and the timeline say `smoke_skipped`; the answer carries `checked`, false when the main HA was not checked (forced, or no main HA configured, which the timeline marks `unchecked`); `undo` answers `cleared_discovery_configs` and `manager_device_kept`; a check on the main HA that cannot run (unreachable, its registry unreadable) blocks the enable rather than passing. Removing an orphan while discovery is off is refused, except for the manager device while `manager_discovery` announces it. A matched row carries `state_comparable`: `button`, `scene`, `notify` and `event` are not compared by state (the command-only platforms have no state topic on the main HA, and an event entity's state is a "last triggered" timestamp each side keeps for itself), so those never count as differing; their availability, renames and disabled flag are still reported. An orphan of the manager device is removed by its component key rather than the unique id the removal form used to carry — a unique id that belongs to no component of that device is now refused instead of reported as removed |
-| Logs | `GET /api/logs?level=&prefix=&q=&since_id=&limit=` (`limit` 1 to 2000, `since_id` 0 to 2^63-1, otherwise `400`; the answer carries `cursor`, the next `since_id`), `GET /api/logs/loggers`, `POST /api/logs/level` (`{"logger": …, "level": …}`), `GET /api/log_files` (an `id` per file, which changes at every start), `GET /api/log_files/tail?id=&file=&lines=&q=` (`file` is the masked name, answered `409` when several files share it; a real name is not accepted), `GET /api/log_files/download?id=&file=` (the same file selection; the file masked and streamed as an attachment under its masked name, at most its last 32 MB, `X-Log-Truncated` when it was cut), `GET/POST /api/settings` (`log_format`) |
-| Diagnostics | `GET /api/diagnostics` (zip, secrets removed), `GET /api/diag/memory[?refs=<type>]` (one probe at a time: a second one meanwhile answers `429`) |
+| Cutover | `GET /api/parity`, `POST /api/parity/{test,remove_orphans}`, `POST /api/cutover/{status,enable,undo}` |
+| Logs | `GET /api/logs?level=&prefix=&q=&since_id=&limit=`, `GET /api/logs/loggers`, `POST /api/logs/level`, `GET /api/log_files`, `GET /api/log_files/tail?id=&file=&lines=&q=`, `GET /api/log_files/download?id=&file=`, `GET/POST /api/settings` (`log_format`) |
+| Diagnostics | `GET /api/diagnostics` (zip, secrets removed), `GET /api/diag/memory[?refs=<type>]` |
 
-`POST /api/logs/level` accepts any existing logger; a logger that does not
-exist yet (a library imported later) needs a dotted Python name, and at most
-50 of those can be created.
+## Notes by area
 
-`GET/POST /api/settings` carries the health watchdog as `watchdog` (a boolean,
-off by default), `watchdog_on_degraded` (a boolean, off by default),
-`watchdog_after_min` (5–720), `watchdog_min_interval_min` (15–1440) and
-`watchdog_max_per_day` (1–24); numbers outside the range are clamped, not
-refused. Its `health` object holds the per-integration rules: `{"<domain>":
-{"mode": "periodic"|"event", "stale_s": 60–86400, "unavailable_pct": 1–100,
-"stale_basis": "reported"|"updated"}}`, any of them left out for the default.
-`GET /api/status` answers `watchdog` with the same rules under shorter names
-(`enabled`, `on_degraded`, `after_min`, `min_interval_min`, `max_per_day`)
-plus `restarts_24h`, `attempts`, `window_min` (what the next attempt has to
-wait through), `gave_up`, `last` (`at`, `integration`, `state`, `reason`,
-`unhealthy_s`, `attempt`, `next`), `reloads_24h`, `max_reloads_per_day`,
-`last_reload` (`at`, `integration`, `state`, `reason`, `unhealthy_s`,
-`entries`, `result`) and `pending` (`bad_for_s`, `window_s`, `reason`, `state`,
-`next`: `reload` or `restart`) while a stretch is being timed.
-`GET /api/status` also answers `health`: the verdict published on MQTT, as
-`state`, `reason`, `basis` (the stale basis in use), `since` and `updated_at`
-(all `null` before the first verdict of a boot). It is the last verdict built,
-at most a minute old, not a new check.
+### Status
 
-`GET /api/ha` includes `apt`: what this boot did with `HRI_APT_PACKAGES`
-(`packages`, `refused`, `ok`, `note`, `error`, `at`), or `null` when the
-variable is not set.
+- `GET /api/mqtt/status`: see the [MQTT reference](mqtt.md).
+  `retained_cleanup_pending` is a list of `{base_topic, broker, other_broker,
+  deferred, error, since}`, the configured broker's first.
+- `GET /api/summary` includes `manager_update`: the running release and the
+  newer ones the banner shows.
+- `GET /api/status` `health`: the verdict published on MQTT (`state`,
+  `reason`, `basis` = the stale basis in use, `since`, `updated_at`; all
+  `null` before a boot's first verdict). It is the last verdict built, at most
+  a minute old, not a new check.
+- `GET /api/status` `watchdog`: the settings below under shorter names
+  (`enabled`, `on_degraded`, `after_min`, `min_interval_min`, `max_per_day`),
+  plus `restarts_24h`, `attempts`, `window_min` (what the next attempt waits
+  through), `gave_up`, `last` (`at`, `integration`, `state`, `reason`,
+  `unhealthy_s`, `attempt`, `next`), `reloads_24h`, `max_reloads_per_day`,
+  `last_reload` (`at`, `integration`, `state`, `reason`, `unhealthy_s`,
+  `entries`, `result`), and while a stretch is timed `pending` (`bad_for_s`,
+  `window_s`, `reason`, `state`, `next`: `reload` or `restart`).
 
-`GET /api/ha` answers the version list as `versions`: the `recent_n` newest
-stable releases (`recent` is still only those) plus every installed venv, the
-running version, a scheduled one and the previous one. `versions_total` is how
-many there are in all, and `?all=1` answers every stable release plus those
-same local entries as `all_versions` — it reads the release list already in
-memory, so unlike `?refresh=1` it costs no extra PyPI call and needs no
-`X-Requested-With: fetch`. While PyPI has never answered in this process there
-is no release list, so `all_versions` and `versions_total` fall back to what
-the box has. `baseline` is the image's floor, `HA_VERSION_MIN` (`""` if the image
-has neither variable; an image built before the two were split answers its
-`HA_VERSION_DEFAULT` here): anything older is refused, which the page works out
-for itself rather than being told once per version. `default_version` is
-`HA_VERSION_DEFAULT`, what a fresh volume installs — not a floor, and nothing
-is refused for being older than it. `verdicts` maps a version to
-the `check` of `POST /api/ha/check` where that is known without resolving
-anything — a report still in the hour-long cache, or the Python a release
-needs.
+### Login
 
-`POST /api/ha/check` (`{"version": …}`) answers `check`: whether that version's
-pinned requirements resolve from wheels on this image's Python, without
-installing anything — `version`, `ok`, `checked`, `blockers`, `warnings`,
-`notes`, `missing` (the pins with no wheel), and, when pip actually ran,
-`python`, `machine`, `requirements` and `duration_s`. `checked: false` means
-the question could not be answered (pip timed out, PyPI was unreachable, the
-resolver gave up); `ok` then stays `true`, since nothing was found against the
-version. The version running now answers `checked: false` with a note and runs
-no pip, and so does a version already installed for this Python ("nothing to
-resolve"); a version the floor, `requires_python` or PyPI itself refuses
-answers `ok: false` with that refusal as the blocker rather than an error. The
-request itself answers `ok: true` in all of those: the verdict is `check.ok`.
-The answer is cached per version and image Python for an hour, and only one
-check runs at a time.
+- `POST /api/login` answers `503` with the reason while `HRI_PASSWORD_FILE` is
+  empty or unreadable, or `HRI_PASSWORD` holds only spaces or tabs.
+- `POST /api/logout` ends every session. If the volume cannot record it, the
+  answer is `500` with `ok: false` and the reason: after the next restart the
+  sessions from before the logout are valid again and later ones end.
 
-`POST /api/ha/update` runs the same check and, without `force: true`, refuses a
-version it blocks with `needs_force`, the report in `check` and the blockers in
-`error` — before it takes a backup or writes anything. `force` skips that check
-and nothing else: a version older than the image's floor (`HA_VERSION_MIN`), one this image's
-Python cannot run (`requires_python`), or one PyPI does not list is refused
-with no `needs_force`, because force cannot rebuild the image. A forced update
-puts *scheduled with the dependency check skipped (force)* on the timeline,
-whether or not the check would have passed. The manager device's *Install Home
-Assistant* action takes all of those refusals and has no force at all.
+### Integration
 
-`GET /api/summary` includes `manager_update`: the running release and the
-newer ones the banner shows. `POST /api/run/start` takes `force`; a tag that is
-not in the version store is refused without a preflight or `needs_force`. Without
-`force`, a start with preflight blockers answers `needs_force` with the report in
-`preflight`, a start whose preflight could not run says why in
-`preflight_note`, and one that passes with warnings answers with
-`preflight_warnings`. `ok: true` from a start means the version was deployed
-and recorded, not that it set up: `smoke_test` in the answer says when the
-health verdict is due (after the restart, when one is needed), the verdict
-itself appears in `GET /api/status` under `smoke_test.last`, and `note` says
-when no verdict is coming (the version
-was already deployed and running, or the smoke test is off). `POST /api/backups/<name>/restore` takes `force` too: a
-backup that does not record its Home Assistant version answers `needs_force`
-when `.storage` is restored. `POST /api/services/call` refuses `homeassistant`,
-`shell_command`, `python_script`, `hassio` and `integration_manager`, like the
-MQTT path; the domains refused over MQTT only (`persistent_notification`,
-`recorder`, `logger`, `system_log`, `backup`, `conversation`) stay callable
-here, and, unlike MQTT, it is not limited to published entities
-(any target, `entity_id: all` included). It is bounded like the MQTT
-path: a call that has not answered within `HRI_CALL_TIMEOUT` seconds is answered
-`timeout after <n>s (service still running)` while the service goes on running,
-and at most 50 calls from this endpoint and the Services page run at once (a
-count of their own, apart from the 50 of the MQTT path), a timed-out one counting
-until its service returns; beyond that a call is answered `too many calls in
-progress (50): try again later`.
+`POST /api/run/start` takes `force`
+([Updating the integration](../README.md#updating-the-integration)). Without
+it, blockers answer `needs_force` with the report in `preflight`, a preflight
+that could not run says why in `preflight_note`, and warnings come in
+`preflight_warnings`. A tag not in the version store is refused with nothing
+to force. `ok: true` means deployed and recorded, not set up: `smoke_test`
+says when the health verdict is due (after the restart, if one is needed), the
+verdict lands in `GET /api/status` `smoke_test.last`, and `note` says when none
+is coming (already running, or the smoke test is off).
 
----
+`POST /api/installed/<domain>/uninstall` answers `retained_cleared`, and while
+its MQTT cleanup waits `retained_cleanup_failed` with `retained_cleanup_error`,
+or `retained_cleanup_deferred` (MQTT disabled), plus `retained_cleanup_broker`
+(`host:port`) and `retained_cleanup_other_broker` when the settings name
+another broker ([MQTT](mqtt.md#when-the-cleanup-cannot-run)).
+
+An unknown entry id, in `/api/entries/<entry_id>/…` or a `reconfigure` flow
+start, answers `404` with a message.
+
+### Entities and services
+
+- `GET /api/entities` shows only the published attributes, published or not:
+  `access_token` and picture URLs with `token=` are left out and a token in the
+  state is masked ([MQTT](mqtt.md#entity-document)).
+- `POST /api/devices/<device_id>/delete` first asks every config entry of the
+  device whether its integration can remove devices, and changes nothing if one
+  cannot. If one refuses or fails after another entry was detached, it answers
+  `ok: false` with the entries detached so far in the error and in
+  `config_entries_detached`.
+- `POST /api/services/call` refuses only the never-callable domains
+  ([list](mqtt.md#services-that-cannot-be-called)) and takes any target,
+  `entity_id: all` and unpublished entities included. A call not answered
+  within `HRI_CALL_TIMEOUT` seconds gets `timeout after <n>s (service still
+  running)`. At most 50 calls from this endpoint and the Services page run at
+  once (apart from MQTT's 50), a timed-out one counting until it returns;
+  beyond that: `too many calls in progress (50): try again later`.
+
+### Settings
+
+`GET/POST /api/settings` carries the [health watchdog](health.md); numbers
+outside the range are clamped, not refused:
+
+| Field | Value |
+|---|---|
+| `watchdog`, `watchdog_on_degraded` | boolean, off by default |
+| `watchdog_after_min` | 5–720 |
+| `watchdog_min_interval_min` | 15–1440 |
+| `watchdog_max_per_day` | 1–24 |
+
+Its `health` object holds per-integration rules, any left out for the default:
+`{"<domain>": {"mode": "periodic"|"event", "stale_s": 60–86400,
+"unavailable_pct": 1–100, "stale_basis": "reported"|"updated"}}`.
+
+### Home Assistant versions
+
+What the floor and the check mean is in
+[Home Assistant and Python versions](home-assistant-versions.md).
+
+`GET /api/ha` answers:
+
+| Field | Content |
+|---|---|
+| `apt` | what this boot did with `HRI_APT_PACKAGES` (`packages`, `refused`, `ok`, `note`, `error`, `at`); `null` when unset |
+| `versions` | the `recent_n` newest stable releases (`recent` is only those), every installed venv, the running, a scheduled and the previous version |
+| `versions_total` | how many versions exist in all |
+| `all_versions` | with `?all=1`: every stable release plus the local entries |
+| `baseline` | the floor, `HA_VERSION_MIN`; anything older is refused |
+| `default_version` | `HA_VERSION_DEFAULT`, what a fresh volume installs; not a floor |
+| `verdicts` | version → its `check`, where known without resolving (a cached report, or the Python a release needs) |
+
+`?all=1` reads the release list in memory: no PyPI call, no
+`X-Requested-With`. While PyPI has never answered in this process,
+`all_versions` and `versions_total` fall back to what the box has. `baseline`
+is `""` if the image has neither variable, and an image from before the two
+were split answers its `HA_VERSION_DEFAULT`.
+
+`POST /api/ha/check` (`{"version": …}`) answers `check`: whether the version's
+pins resolve from wheels on this image's Python, installing nothing. Fields:
+`version`, `ok`, `checked`, `blockers`, `warnings`, `notes`, `missing` (pins
+with no wheel), and when pip ran `python`, `machine`, `requirements`,
+`duration_s`. `checked: false` means no answer (pip timed out, PyPI
+unreachable, resolver gave up) and `ok` stays `true`; the running version and
+one already installed for this Python also answer it, with a note, and run no
+pip. A version the floor, `requires_python` or PyPI refuses answers `ok: false`
+with the refusal as blocker. The request answers `ok: true` in all these cases;
+the verdict is `check.ok`. Cached per version and image Python for an hour.
+
+`POST /api/ha/update` runs the same check first and, without `force: true`,
+refuses a blocked version with `needs_force`, the report in `check` and the
+blockers in `error`, before any backup or write. `force` skips only that check:
+a version below `HA_VERSION_MIN`, one the image's Python cannot run
+(`requires_python`) or one PyPI does not list is refused without
+`needs_force`. A forced update always puts *scheduled with the dependency
+check skipped (force)* on the timeline. The manager device's *Install Home
+Assistant* refuses the same and has no force.
+
+### Backups
+
+- `POST /api/backups/<name>/restore` takes `force`: a backup that does not
+  record its Home Assistant version answers `needs_force` when `.storage` is
+  restored.
+- `POST /api/backups/restore/cancel` answers `cancelled` and records it on the
+  timeline. It refuses the restore of a scheduled Home Assistant version change
+  (`for_version`) and of a full rollback (`rollback`, the backup it restores).
+
+### Cutover
+
+`POST /api/cutover/enable` takes `force`; what it does to the checks on the
+main Home Assistant, and `checked`, are in [Shadow mode](shadow-mode.md).
+Those checks are MQTT loaded, the integration's config entries, and entity ids
+held there by anything but this container's mirrors. `force` also skips a
+pending smoke test (the answer and the timeline say `smoke_skipped`). It never
+skips the container's own checks (an integration running, health, MQTT
+connected), an action running (install, start, import, restore, a Home
+Assistant version change being prepared), or a restore, full rollback, Home
+Assistant version switch or backup import scheduled for the next restart.
+`undo` answers `cleared_discovery_configs` and `manager_device_kept`.
+
+`POST /api/parity/remove_orphans` is refused while discovery is off, except for
+the manager device while `manager_discovery` announces it. A manager-device
+orphan is removed by its component key; a unique id that is no component of
+that device is refused.
+
+A matched row of `GET /api/parity` carries `state_comparable`. `button`,
+`scene`, `notify` and `event` are never compared by state (no state topic on
+the main HA; an event's state is a per-side timestamp), only by availability,
+renames and the disabled flag.
+
+### Logs and diagnostics
+
+See [Logs and log files](logs.md).
+
+- `GET /api/logs`: `limit` 1–2000, `since_id` 0–2^63-1, otherwise `400`. The
+  answer's `cursor` is the next `since_id`.
+- `POST /api/logs/level` (`{"logger": …, "level": …}`) takes any existing
+  logger; a new one (a library imported later) needs a dotted Python name, at
+  most 50 created.
+- `GET /api/log_files` gives each file an `id` that changes at every start.
+  `tail` and `download` take `file`, the masked name (a real one is refused; a
+  name several files share answers `409`).
+- `download` streams the masked file as an attachment under its masked name,
+  at most the last 32 MB, with `X-Log-Truncated` when cut.
+- `GET /api/diag/memory` runs one probe at a time; a second answers `429`.
