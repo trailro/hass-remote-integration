@@ -42,6 +42,13 @@ class Scheduler:
         self._started = time.monotonic()
         self._bad_since: float | None = None   # monotonic: when the verdict first became "error", in this process
         self._refused = False                  # a refusal already on the timeline for this unhealthy stretch
+        # The ladder: the first step of an episode reloads the config entries, the next one restarts.  A reload
+        # makes the entities write fresh states, so the verdict may read ok for a minute or two after it even when
+        # nothing is fixed: the ladder is only reset once ok has held for a whole window, never by that blip,
+        # or a zombie would be reloaded again and again and never escalate.
+        self._reloaded_at: float | None = None  # monotonic: the reload of this episode
+        self._ok_since: float | None = None     # monotonic: when the verdict became ok after that reload
+        self._reload_skip_said = False          # "no reload: <why>" already on the timeline for this episode
         self._announced = False                # the notification of the last automatic restart, raised once per boot
 
     def start(self) -> None:
@@ -135,6 +142,10 @@ class Scheduler:
         self._bad_since, self._refused = None, False
         self.installer.watchdog_pending = None
 
+    def _ladder_reset(self) -> None:
+        self._reloaded_at = self._ok_since = None
+        self._reload_skip_said = False
+
     def _live_refusal(self) -> str | None:
         """What the manager is doing right now, from memory only (no file is read
         on a tick that is not going to act anyway).  ``busy`` covers an install,
@@ -211,8 +222,9 @@ class Scheduler:
         return None
 
     async def _watchdog_tick(self, _now=None) -> None:
-        """Once a minute: is the verdict still ``error``, for long enough, with
-        nothing in the way?  Then restart -- at most as often as the settings
+        """Once a minute: is the verdict still ``error`` (or, opted in, ``degraded``), for long
+        enough, with nothing in the way?  Then reload the integration's config entries; if the
+        verdict is still not ok a window after that, restart -- at most as often as the settings
         allow, with the window doubling after every restart that did not help."""
         inst = self.installer
         if not self._announced:
@@ -220,8 +232,10 @@ class Scheduler:
             # the boot after it raises the one recorded in state.json, whatever the setting says now
             self._announced = True
             inst.announce_watchdog()
-        if not inst.settings.watchdog()["enabled"]:
+        cfg = inst.settings.watchdog()
+        if not cfg["enabled"]:
             self._watchdog_clear()
+            self._ladder_reset()
             return
         verdict = self._verdict()
         if verdict is None:
@@ -231,42 +245,73 @@ class Scheduler:
             # an integration installed but never configured reports error, not the smoke test's "unconfigured":
             # a restart cannot configure it, so the watchdog leaves it alone (the Integration page says what to do)
             self._watchdog_clear()
+            self._ladder_reset()
             return
-        if state != "error":
-            # degraded is kept on purpose (a version that did set up) and stopped is an operator's
-            # decision: neither is acted on
+        now = time.monotonic()
+        if state not in ("error", "degraded") or (state == "degraded" and not cfg["on_degraded"]):
+            # degraded is kept on purpose unless the operator opted in (a version that did set up), and stopped
+            # is an operator's decision: neither is acted on
             self._watchdog_clear()
             if state == "ok":
                 inst.watchdog_recovered()
+                if self._reloaded_at is not None:
+                    self._ok_since = self._ok_since or now
+                    if now - self._ok_since >= cfg["after_min"] * 60:
+                        events.emit("health", f"health watchdog: {inst.state.domain or 'the integration'} has been ok for "
+                                              f"{int((now - self._ok_since) / 60)} min since the reload; the ladder starts "
+                                              "again from the reload", integration=inst.state.domain)
+                        self._ladder_reset()
+            elif state == "stopped":
+                self._ladder_reset()
             return
-        now = time.monotonic()
+        self._ok_since = None  # an ok blip after a reload is over: the ladder stays where it is
         if self._bad_since is None:
             self._bad_since = now
         unhealthy = now - self._bad_since
         window = inst.watchdog_window_s()
-        inst.watchdog_pending = {"bad_for_s": int(unhealthy), "window_s": window, "reason": verdict.get("reason") or ""}
-        if unhealthy < window:
+        reason = verdict.get("reason") or "no reason given"
+        was = "in error" if state == "error" else state
+        domain = inst.state.domain or "the integration"
+        skip = None
+        if self._reloaded_at is None:
+            # a YAML-only integration has nothing to reload, and the reloads have a daily cap of their own
+            skip = (None if inst.watchdog_reloadable() else "no config entry to reload") or inst.watchdog_reload_cap_refusal()
+        reload_step = self._reloaded_at is None and not skip
+        # the restart waits a whole window after the reload, whatever the verdict did in between
+        since_reload = None if self._reloaded_at is None else now - self._reloaded_at
+        inst.watchdog_pending = {"bad_for_s": int(unhealthy), "window_s": window, "reason": verdict.get("reason") or "",
+                                 "state": state, "next": "reload" if reload_step else "restart"}
+        if unhealthy < window or (since_reload is not None and since_reload < window):
             return
-        cap = inst.watchdog_cap_refusal()
-        if cap:
-            why, give_up = cap
-            if give_up:
-                inst.watchdog_give_up(why)  # said once, then quiet until an ok verdict or the window moves on
-            elif not self._refused:
-                self._refused = True
-                events.emit("restart", f"health watchdog: {inst.state.domain or 'the integration'} is in error "
-                                       f"({verdict.get('reason') or 'no reason given'}) but nothing is restarted: {why}",
-                            domain=inst.state.domain)
-            return
+        if skip and not self._reload_skip_said:
+            self._reload_skip_said = True
+            events.emit("health", f"health watchdog: no reload for {domain} ({skip}): the next step is a restart",
+                        domain=inst.state.domain)
+        if not reload_step:
+            cap = inst.watchdog_cap_refusal()
+            if cap:
+                why, give_up = cap
+                if give_up:
+                    inst.watchdog_give_up(why)  # said once, then quiet until an ok verdict or the window moves on
+                elif not self._refused:
+                    self._refused = True
+                    events.emit("restart", f"health watchdog: {domain} is {was} ({reason}) but nothing is restarted: {why}",
+                                domain=inst.state.domain)
+                return
         refusal = self._live_refusal() or await self.hass.async_add_executor_job(self._scheduled_refusal)
         if refusal:
             if not self._refused:  # one line for this stretch, not one a minute
                 self._refused = True
-                events.emit("restart", f"health watchdog: {inst.state.domain or 'the integration'} is in error "
-                                       f"({verdict.get('reason') or 'no reason given'}) but nothing is restarted: {refusal}",
+                events.emit("restart", f"health watchdog: {domain} is {was} ({reason}) but nothing is "
+                                       f"{'reloaded' if reload_step else 'restarted'}: {refusal}",
                             domain=inst.state.domain)
             return
         self._refused = False
-        self._bad_since = None  # the next stretch is measured from the boot this restart leads to
         inst.watchdog_pending = None
-        await inst.watchdog_restart(verdict.get("reason") or "no reason given", unhealthy)
+        if reload_step:
+            self._reloaded_at = now  # before the await: a tick that lands while it runs goes on to the restart step
+            await inst.watchdog_reload(state, reason, unhealthy, window)
+            return
+        self._bad_since = None  # the next stretch is measured from the boot this restart leads to
+        self._ladder_reset()
+        await inst.watchdog_restart(reason, unhealthy, state)

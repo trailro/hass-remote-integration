@@ -50,10 +50,10 @@
 </div>
 
 <div class="card"><h2>Health rules</h2>
- <div class="mut" style="margin-bottom:8px">The health verdict published on <code>hass_&lt;domain&gt;/health</code> (and used by the smoke test) comes from what this process sees of the running integration's entities. Defaults apply to every integration; a row overrides them for one. <b>periodic</b> integrations write states all the time (a quiet bus is a fault after <i>stale</i> seconds); <b>event</b> integrations only write on events, so silence is not a fault for them.</div>
+ <div class="mut" style="margin-bottom:8px">The health verdict published on <code>hass_&lt;domain&gt;/health</code> (and used by the smoke test) comes from what this process sees of the running integration's entities. Defaults apply to every integration; a row overrides them for one. <b>periodic</b> integrations write states all the time (a quiet bus is a fault after <i>stale</i> seconds); <b>event</b> integrations only write on events, so silence is not a fault for them. <b>stale basis</b> says what counts as a sign of life: <b>reported</b> (default) is any state write, even an unchanged value; <b>updated</b> is a value or attribute that changed. Pick <i>updated</i> for an integration whose coordinator keeps re-writing the same states after its source died (the entry stays loaded, nothing new arrives), with a <i>stale</i> longer than the quietest normal stretch.</div>
  <div class="row" style="margin-bottom:6px"><label style="margin:0;display:inline-flex;gap:6px;align-items:center">default stale <input type="number" id="hstale" min="60" max="86400" style="width:80px"> s</label>
   <label style="margin:0;display:inline-flex;gap:6px;align-items:center">unavailable ≥ <input type="number" id="hunav" min="1" max="100" style="width:64px"> % = degraded</label><button id="hsave">Save defaults</button><span id="hmsg" class="mut"></span></div>
- <table id="hrules"><tr><th>integration</th><th>mode</th><th>stale s</th><th>unavailable %</th><th></th></tr></table>
+ <table id="hrules"><tr><th>integration</th><th>mode</th><th>stale basis</th><th>stale s</th><th>unavailable %</th><th></th></tr></table>
 </div>
 
 </main><!--js--></body></html>

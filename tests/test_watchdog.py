@@ -90,6 +90,8 @@ class _Base(unittest.TestCase):
         inst.health_source = lambda grace=True: self.verdict
         inst._entries_of = lambda dom: [SimpleNamespace(state=SimpleNamespace(value="loaded"), disabled_by=None, title="Hub")]
         inst.restart = mock.AsyncMock(return_value={"ok": True})
+        # no reload path (reload_entry stays None): these tests cover the restart step, which is where a YAML-only
+        # integration (nothing to reload) starts.  The reload step before it: test_health_zombie.LadderTest
         inst._rollback_undo = None
         inst.rollback_restore_refusal = lambda: None
         return inst
@@ -106,6 +108,8 @@ class _Base(unittest.TestCase):
         sch._started = self.clock() - WATCHDOG_BOOT_GRACE_S - 1  # past the boot grace unless a test says otherwise
         sch._bad_since = None
         sch._refused = False
+        sch._reloaded_at = sch._ok_since = None
+        sch._reload_skip_said = False
         sch._announced = True  # the boot notification has its own test
         # nothing else is scheduled on the volume: the blocking checks answer "clear"
         sch._scheduled_refusal = lambda: None
@@ -487,7 +491,7 @@ class VisibilityTest(_Base):
         sch = self.scheduler(inst)
         for _ in range(16):
             self.tick(sch)
-        line = self.lines("health watchdog:")[0]
+        line = self.lines("restarting the process")[0]
         self.assertIn("in error for 15 min", line)
         self.assertIn("no route to host", line)
         self.assertIn("attempt 1", line)
@@ -502,7 +506,8 @@ class VisibilityTest(_Base):
         status = inst.watchdog_status()
         self.assertTrue(status["enabled"])
         self.assertEqual((status["after_min"], status["min_interval_min"], status["max_per_day"]), (15, 60, 3))
-        self.assertEqual(status["pending"], {"bad_for_s": 240, "window_s": 900, "reason": ERROR["reason"]})
+        self.assertEqual(status["pending"], {"bad_for_s": 240, "window_s": 900, "reason": ERROR["reason"],
+                                             "state": "error", "next": "restart"})  # nothing to reload in this fixture
         self.assertIsNone(status["last"])
         for _ in range(11):
             self.tick(sch)

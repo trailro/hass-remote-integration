@@ -618,6 +618,7 @@ class MqttPublisher:
     # the session the last CONNACK opened speaks MQTT 5: its subscription carries noLocal, so nothing this
     # process publishes comes back to it.  False until one says otherwise (the safe side: 3.1.1 echoes)
     _session_v5 = False
+    _health_since: str | None = None  # when the verdict last published first took that value
     # _calls is iterated and changed on paho's thread and changed on the loop (a call refused for the in-flight cap)
     _calls_lock = threading.Lock()
     _subscribing: list[Any] | None = None  # [client, mid, topics, online announced] of the SUBSCRIBE waiting for its SUBACK
@@ -627,7 +628,8 @@ class MqttPublisher:
     def __init__(self, hass: HomeAssistant, key_provider=None, health_provider=None, rules_provider=None) -> None:
         self._health_provider = health_provider
         # settings.health_for(domain): stale seconds, mode, unavailable share
-        self._rules_provider = rules_provider or (lambda domain: {"stale_s": HEALTH_STALE_S, "mode": "periodic", "unavailable_pct": 50})
+        self._rules_provider = rules_provider or (lambda domain: {"stale_s": HEALTH_STALE_S, "mode": "periodic", "unavailable_pct": 50,
+                                                                   "stale_basis": "reported"})
         self._pending_clears: set[str] = set()  # topics we could not clear while disconnected
         self._blocks: dict[str, dict[str, Any]] = {}  # discovery_id -> last published device block
         self._probed_ok: set[str] = set()  # "host:port/base" namespaces probed clean by this process
@@ -3182,6 +3184,11 @@ class MqttPublisher:
             if base.get("state") == "ok" and not booting:
                 if states and unavailable * 100 >= len(states) * rules["unavailable_pct"]:
                     base["state"], base["reason"] = "degraded", f"{unavailable} of {len(states)} entities unavailable"
+                elif rules["mode"] == "periodic" and rules.get("stale_basis") == "updated":
+                    # opted in: a coordinator that re-writes the same states on a dead source keeps last_reported
+                    # moving; only a value (or attribute) that changes counts as fresh data
+                    if last and now - last > rules["stale_s"]:
+                        base["state"], base["reason"] = "degraded", f"no entity value change for {int(now - last)} s"
                 elif rules["mode"] == "periodic" and reported and now - reported > rules["stale_s"]:
                     base["state"], base["reason"] = "degraded", f"no entity report for {int(now - reported)} s"
                 elif not states and has_entities:
@@ -3207,11 +3214,19 @@ class MqttPublisher:
             # connectivity and the timeline for a moment; the retained verdict of the last run stays
             # until Home Assistant has started (then _on_started publishes at once)
             return doc
-        prev = self._health_announced
-        if prev is not None and doc.get("state") != prev:
-            events.emit("health", f"{prev} → {doc.get('state')}" + (f": {doc.get('reason')}" if doc.get("reason") else ""),
-                        integration=doc.get("integration"))
-        self._health_announced = doc.get("state")
+        prev, state = self._health_announced, doc.get("state")
+        if prev is None or state != prev:
+            self._health_since = doc["updated_at"]
+            reason = f": {doc.get('reason')}" if doc.get("reason") else ""
+            if prev is not None:
+                events.emit("health", f"{prev} → {state}{reason}", integration=doc.get("integration"))
+            # once per transition (the timer republishes the same verdict every minute)
+            if state in ("degraded", "error"):
+                _LOGGER.warning("health: %s is %s%s", doc.get("integration") or "the integration", state, reason)
+            elif state == "ok" and prev in ("degraded", "error"):
+                _LOGGER.info("health: %s is ok again (was %s)", doc.get("integration") or "the integration", prev)
+        doc["since"] = self._health_since
+        self._health_announced = state
         if self._connected:
             self._publish(self._health_topic(), _dumps(doc))
             self.stats["health_published"] = doc["updated_at"]
