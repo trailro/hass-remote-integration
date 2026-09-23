@@ -1,111 +1,123 @@
 # Backups and restore
 
-## Backups
+What a backup holds, how a restore is applied or refused, and pruning,
+deletion and uploads.
 
-Taken automatically before every start that changes something, before every
-Home Assistant version change, before a restore and before replacing the
-integration; optionally daily. On **System**
-you can create, download, upload, delete and restore them. The label you give
-a backup is kept as typed; its file name uses the label in plain ASCII (accents
-dropped, spaces as `-`: `înainte de update` gives `…-inainte-de-update.zip`,
-letters of other alphabets are left out). A backup an older version named with
-such letters can still be downloaded, restored and deleted. A restore is
-applied at the next restart, can be partial (only `.storage`, only the manager
-state, …), and is rolled back if it fails halfway. A partial restore that
-brings back `.storage` without the manager part, or the manager part without
-`.storage`, is refused when the backup was made while another integration ran
-(or none): the config entries of one integration under the manager of another
-would run both and publish them under the wrong identity. Restore `.storage` +
-manager, or everything. *Cancel restore* cancels a
-restore scheduled by hand; a restore that belongs to a scheduled Home Assistant
-version change is cancelled together with that change (choose the running
-version under Home Assistant), and cancelling it on its own is refused; a full
-rollback's restore is refused too (restart to finish the rollback, or start the
-version it left to undo it). A
-restore and *Cancel restore* are refused (try again) while a Home Assistant
-version change, a full rollback, an install, a start or stop, or an import is
-being prepared or running, and a version change is refused while a restore or a
-full rollback is being scheduled or a restore is being cancelled.
-Restoring the YAML part also
-removes root `*.yaml` / `*.yml` files that are not in the backup, so a file
-created after it (a `secrets.yaml`, for example) does not survive the restore.
-A restore that fails (a full disk, a file that cannot be written) puts the
-previous configuration back and is not retried: the schedule is dropped and
-the outcome is `failed` (if even the outcome cannot be written, the next boot
-records it and still does not try again). A restore whose pre-restore backup
-cannot be recorded in the schedule does not start. A restore cut off halfway
-(`docker stop`, a power loss, Ctrl-C) stays scheduled, and the next boot
-applies it again from the same pre-restore backup, or puts that backup back
-if it fails again. If even putting the configuration back fails, Home
-Assistant is not started on the half-restored configuration: the manager port
-shows a status page naming the pre-restore backup, the restore is retried
-every 5 minutes until it applies or is put back, and that backup is kept from
-pruning and cannot be deleted. Deleting `integration_manager/restore-pending.json`
-ends the wait and starts Home Assistant on the configuration as it is. A
-restore replaces symbolic links inside the trees it restores with real files
-and directories instead of writing through them, and does not start when
-`.storage`, `custom_components` or `integration_manager`, of the parts being
-restored, is itself a symbolic link; putting the previous configuration back
-after a failed restore follows the same rule. A scheduled restore whose copy
-of the backup is gone from the volume (`integration_manager/restore-pending-*.zip`
-deleted by hand) is dropped at the next boot and recorded as failed, so it
-neither protects its backup nor holds up a version change. A backup holds at
-most 100000 files: taking a larger one fails, and an upload or restore of one
-is refused (counted from the archive's directory before it is read, and not
-listed with its details). Backups, restored files and
-uploads are created readable by the container user only (umask 077).
-A backup holds secrets: `integration_manager/settings.json` (the GitHub token
-and the parent Home Assistant token), `integration_manager/mqtt.json` (the
-broker password), `secrets.yaml` and the credentials Home Assistant keeps in
-`.storage` (config entries, authentication). Keep downloaded backups as private
-as the volume itself.
-A backup takes regular files only: a named pipe, socket or device in the backed-up
-trees is skipped with a line in the log, and so is a symbolic link to a directory
-(`custom_components` itself included). A symbolic link to a file is stored as that
-file only when it points at a file a backup holds anyway (inside `/config`, in the
-backed-up trees, not excluded); a link out of the volume, to the login key or to
-another backup is skipped with a line in the log. What a backup reads is never
-outside `/config`, and a special file never holds it up.
-Automatic pruning keeps the newest backups by the date they were made (never
-later than the file's own date), never removes the backup it runs after, and
-leaves uploaded backups, and every copy taken before a restore (`<time>-pre-restore.zip`), alone for their
-first 7 days; while that week lasts such a copy is also refused for deletion, since
-it is the only way back once the restore has succeeded and its schedule is gone.
-The backups pruning leaves alone still count toward the number kept: with
-*keep 5*, a backup made by hand is one of the 5 newest, not a sixth. The backup a
-restore came from is pruned and can be deleted like any other once that restore
-is over (applied, failed and put back, or dropped at the boot). An upload never replaces
-an existing backup: a name already taken gets a `-2`, `-3`, … suffix (a long name is
-shortened to make room for it). An upload that cannot be written (a full volume)
-answers with the reason and leaves no partial file behind; so does the upload of a
-Home Assistant backup for an import.
-A restore never rolls back the record of what happened: the timeline, the
-resource history, the change reports and the last known release versions are
-not part of backups, and neither are the login key and the logout record, the
-port Home Assistant was set up with (`.storage/http`, which would pin a foreign
-port when the backup comes from a container on another `HRI_PORT`; a restored
-one from an older archive is dropped at the next boot), a store file Home
-Assistant is writing at that moment (`.storage/tmp…`) or an original an import
-set aside (`.storage/*.pre-import`, and `*.pre-import.done` once the import
-completed). Nor are the records of what the broker holds (`mqtt_identity.json`,
-`mqtt_cleanup_pending.json`): the broker is outside the volume, so an older copy
-would forget retained data still there or clear data published since. A backup whose file
-names are not in their plain form (`./`, `//`, `..`) is refused.
+## Taking backups
 
-Every backup records the Home Assistant version it was made on (the *HA* column),
-and Home Assistant only migrates a configuration forward. Restoring a backup
-made on an older version asks what to do: keep the running Home Assistant (the
-default: the configuration is migrated forward when it starts) or go back to the
-version the backup was made on, for exactly the state of the backup. A backup
-made on a newer version can only be restored together with a switch to that
-version. A backup that does not record its version (or records something that
-is not a version number, such as `unknown`) is only restored with
-`.storage` after a confirmation ("restore anyway", `"force": true` in the API
-body), since it may come from a newer version. A scheduled restore of such a
-backup whose schedule does not record that confirmation (an edited
-`restore-pending.json`, or one a manager older than 0.14.0 wrote and never
-booted since) is dropped at the boot with a message instead of applied. The version only matters when `.storage` is restored: a partial restore
-without it never changes Home Assistant. A switch installs the version at the restart if its venv is no longer
-on the volume (only the current and the previous one are kept), takes a backup
-of the current configuration first, and brings it back if that version does
-not start.
+Backups are taken before every start that changes something, every Home
+Assistant version change, every restore and before replacing the integration;
+optionally daily. On **System** you create, download, upload, delete and
+restore them. The label is kept as typed; the file name uses it in plain
+ASCII (accents dropped, spaces as `-`, other alphabets left out: `înainte de
+update` gives `…-inainte-de-update.zip`). Older backups named with such
+letters can still be downloaded, restored and deleted.
+
+## What a backup holds
+
+**A backup holds secrets:** `integration_manager/settings.json` (the GitHub and
+parent Home Assistant tokens), `integration_manager/mqtt.json` (the broker
+password), `secrets.yaml` and the credentials in `.storage` (config entries,
+authentication). Keep downloaded backups as private as the volume. Backups,
+restored files and uploads are created readable by the container user only
+(umask 077).
+
+A backup holds at most 100000 files: taking a larger one fails, and an upload
+or restore of one is refused (counted from the archive's directory before it
+is read) and listed without its details. It takes regular files only and never
+reads outside `/config`. A named pipe, socket, device or symbolic link to a
+directory (`custom_components` itself included) is skipped with a line in the
+log. A symbolic link to a file is stored as that file only when the target is
+a file a backup holds anyway (inside `/config`, in the backed-up trees, not
+excluded); a link out of the volume, to the login key or to another backup is
+skipped with a line in the log.
+
+Not in a backup, so a restore never rolls them back:
+
+- the timeline, resource history, change reports and last known release
+  versions;
+- the login key and the logout record;
+- `.storage/http`, the port Home Assistant was set up with (it would pin a
+  foreign `HRI_PORT`; one restored from an older archive is dropped at the
+  next boot);
+- `.storage/tmp…`, a store file Home Assistant is writing at that moment;
+- `.storage/*.pre-import` (and `*.pre-import.done`), originals an import set
+  aside;
+- `mqtt_identity.json` and `mqtt_cleanup_pending.json`, since the broker is
+  outside the volume.
+
+## Restoring
+
+A restore is applied at the next restart and can be partial (only `.storage`,
+only the manager state, …). Restoring the YAML part also removes root `*.yaml`
+/ `*.yml` files not in the backup, so a `secrets.yaml` created later is gone.
+Symbolic links inside the restored trees are replaced with real files and
+directories, never written through.
+
+A restore is refused, or does not start, when:
+
+- the backup's file names are not in their plain form (`./`, `//`, `..`);
+- it brings back `.storage` without the manager part, or the reverse, from a
+  backup made while another integration ran (or none): both integrations would
+  run under the wrong identity. Restore `.storage` + manager, or everything;
+- a Home Assistant version change, full rollback, install, start, stop or
+  import is being prepared or running (try again; this also refuses *Cancel
+  restore*). A version change is refused in turn while a restore or full
+  rollback is being scheduled or a restore is being cancelled;
+- `.storage`, `custom_components` or `integration_manager`, of the parts being
+  restored, is itself a symbolic link (also when putting the previous
+  configuration back);
+- its pre-restore backup cannot be recorded in the schedule.
+
+**Home Assistant version.** Each backup records the version it was made on
+(the *HA* column). It matters only when `.storage` is restored:
+
+- made on an older version: keep the running Home Assistant (the default; the
+  configuration is migrated forward) or go back to the backup's version;
+- made on a newer version: only restored together with a switch to it;
+- no version, or not a version number (`unknown`): `.storage` is restored only
+  after a confirmation ("restore anyway", `"force": true` in the API body). A
+  scheduled one without that confirmation in its schedule (an edited
+  `restore-pending.json`, or one a manager older than 0.14.0 wrote and never
+  booted since) is dropped at the boot with a message.
+
+A switch installs the version at the restart if its venv is gone (only the
+current and previous are kept), and brings the current configuration back
+from a backup if that version does not start. See
+[Downgrading](home-assistant-versions.md#downgrading).
+
+**Cancelling.** *Cancel restore* cancels a restore scheduled by hand. One that
+belongs to a scheduled Home Assistant version change is only cancelled with
+that change (choose the running version under Home Assistant). A full
+rollback's restore cannot be cancelled: restart to finish the rollback, or
+start the version it left to undo it.
+
+**Failures.** A restore that fails (a full disk, a file that cannot be
+written) puts the previous configuration back, is not retried, and records
+`failed`; if even that cannot be written, the next boot records it. A restore
+cut off halfway (`docker stop`, power loss, Ctrl-C) stays scheduled: the next
+boot applies it again from the same pre-restore backup, or puts that backup
+back. If putting it back fails too, Home Assistant is not started: the manager
+port shows a status page naming the pre-restore backup, the restore is retried
+every 5 minutes, and that backup cannot be pruned or deleted. Deleting
+`integration_manager/restore-pending.json` ends the wait and starts Home
+Assistant on the configuration as it is. A scheduled restore whose
+`integration_manager/restore-pending-*.zip` was deleted by hand is dropped at
+the next boot as failed, and no longer protects its backup or holds up a
+version change.
+
+## Pruning, deletion and uploads
+
+Pruning keeps the newest backups by the date they were made (never later than
+the file's own date) and never removes the backup it runs after. Uploaded
+backups and pre-restore copies (`<time>-pre-restore.zip`) are left alone for 7
+days, and a pre-restore copy cannot be deleted in that week: it is the only
+way back once the restore succeeded. Protected backups still count: with
+*keep 5*, a backup made by hand is one of the 5, not a sixth. The backup a
+restore came from is pruned and deleted like any other once that restore is
+over (applied, put back or dropped).
+
+An upload never replaces a backup: a taken name gets a `-2`, `-3`, … suffix
+(a long name is shortened to fit). An upload that cannot be written (a full
+volume), including a Home Assistant backup uploaded for an import, answers
+with the reason and leaves no partial file.
