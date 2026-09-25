@@ -163,12 +163,13 @@ This repository is also an app repository:
    `https://github.com/trailro/hass-remote-integration`.
 2. Install **hass-remote-integration**, set a password on its
    **Configuration** tab, and start it.
-3. **Open Web UI**. The first start installs Home Assistant inside the app,
-   which takes a few minutes and needs internet access.
+3. **Open Web UI**, or **HRI** in the sidebar: through Home Assistant's
+   login, remote access included. The first start installs Home Assistant
+   inside the app, which takes a few minutes and needs internet access.
 
 The Mosquitto broker app is reachable as `core-mosquitto`, the broker host a
-fresh app offers. Options, backups, serial devices and updates:
-[docs/app.md](docs/app.md).
+fresh app offers. Access (`ingress_users`, the app's port), options, backups,
+serial devices and updates: [docs/app.md](docs/app.md).
 
 ---
 
@@ -486,7 +487,7 @@ HRI_NAME=hri-other HRI_PORT=8088 docker compose -p hri-other up -d
 | File | What is in it |
 |---|---|
 | [docs/home-assistant-versions.md](docs/home-assistant-versions.md) | Changing the Home Assistant inside the container, downgrades, the image's floor, what the preflight checks |
-| [docs/app.md](docs/app.md) | Running it as a Home Assistant OS / Supervised app: options, backups, serial devices, updates |
+| [docs/app.md](docs/app.md) | Running it as a Home Assistant OS / Supervised app: access through Home Assistant, options, backups, serial devices, updates |
 | [docs/backups.md](docs/backups.md) | What a backup holds and leaves out, restore, pruning, versions of backups |
 | [docs/health.md](docs/health.md) | The health verdict and its document, stale basis, the health watchdog, resource history |
 | [docs/logs.md](docs/logs.md) | The Logs and Log files pages, downloads, the line format |

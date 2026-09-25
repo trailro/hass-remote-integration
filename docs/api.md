@@ -7,8 +7,11 @@ fields the pages do not make obvious.
 ## Requests
 
 With a password set, send `Authorization: Bearer <password>`
-([Security](security.md)). POST bodies are JSON
-(`Content-Type: application/json`).
+([Security](security.md)); a page asked for without a session redirects to
+`login?next=…`, relative to it. POST bodies are JSON
+(`Content-Type: application/json`). Through Home Assistant's ingress (the app)
+there is no password: the API is at the panel's address, with Home
+Assistant's session ([Security](security.md#home-assistant-ingress-the-app)).
 
 These also need `X-Requested-With: fetch`, or they answer `400`: `/api/catalog`,
 `/api/patch_editor` (reading, *Check*, *Save*), `/api/patches/<domain>` and its

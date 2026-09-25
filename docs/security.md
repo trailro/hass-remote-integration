@@ -81,12 +81,34 @@ and `restore_failed: true`.
 
 | Protection | What it does |
 |---|---|
-| Host guard | Against DNS rebinding: serves only IP addresses, `localhost` and `.local`, `.lan`, `.home`, `.internal`, `.localdomain`, `.home.arpa` names (trailing dot allowed); add others under *allowed host names* on **System**. |
+| Host guard | Against DNS rebinding: serves only IP addresses, `localhost` and `.local`, `.lan`, `.home`, `.internal`, `.localdomain`, `.home.arpa` names (trailing dot allowed); add others under *allowed host names* on **System**. Not applied to the app's ingress requests (below). |
 | Cross-origin | State-changing requests need JSON or an explicit header, the expensive reads `X-Requested-With: fetch` ([API](api.md)); no CORS on the manager's routes. |
 | Onboarding | `/api/onboarding…` answers `403`, or an integration that loads `frontend` or `panel_custom` would let any page create the owner account. |
-| CSP | Scripts only from the manager's static files (no inline), no plugins, no framing, no `<base>`; inline style attributes and the login page's `<style>` allowed. |
+| CSP | Scripts only from the manager's static files (no inline), no plugins, framing only by the same origin (`frame-ancestors 'self'`: Home Assistant's panel, under ingress), no `<base>`; inline style attributes and the login page's `<style>` allowed. |
 | Log files | Only regular `*.log` files and rotated copies with one hard link; the listing (needs `X-Requested-With: fetch`), tail, download and zip open with `O_NOFOLLOW`, so no link or swapped path reaches another file. |
 | Service calls | Dangerous domains are refused over MQTT and from the UI. Only MQTT calls are limited to published entities; the **Services** page and `POST /api/services/call` reach any entity, `entity_id: all` and excluded ones included. |
+
+## Home Assistant ingress (the app)
+
+As a Home Assistant app ([app](app.md#access)) the UI is also served through
+Home Assistant's ingress: the Supervisor proxies the panel to the same port
+with the prefix stripped. A request counts as ingress only when both hold:
+
+- the app is running as the app (`HRI_APP`, set from the Supervisor's options
+  at boot; never on a Docker install);
+- the TCP peer of the connection is the Supervisor, `172.30.32.2`. Headers do
+  not count: an `X-Ingress-Path`, `X-Hass-Source` or `X-Remote-User-Name` sent
+  from anywhere else changes nothing.
+
+For those requests HRI drops the `X-Forwarded-*` headers before Home
+Assistant's forwarded middleware (which would answer `400`), and skips the
+host guard (the `Host` is your Home Assistant's name) and the password: Home
+Assistant's login is the gate, and `ingress_users` (`HRI_INGRESS_USERS`)
+limits it to the user names listed, from the `X-Remote-User-Name` the
+Supervisor sets (it drops the client's own). Home Assistant's http settings
+and trusted proxies are not changed. The boot status page lets the same
+requests through. Every page uses relative URLs, so the UI works under the
+prefix; `frame-ancestors 'self'` lets Home Assistant frame it.
 
 ## Secrets and masking
 

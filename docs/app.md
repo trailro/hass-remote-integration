@@ -10,11 +10,11 @@ below.
 1. **Settings > Apps > App Store**, menu **⋮ > Repositories**, add
    `https://github.com/trailro/hass-remote-integration`.
 2. Install **hass-remote-integration**.
-3. On its **Configuration** tab, set a password (the web UI port is open to
-   your network), then start it.
-4. **Open Web UI**. The first start installs Home Assistant inside the app,
-   which takes a few minutes and needs internet access; the page shows the
-   progress.
+3. On its **Configuration** tab, set a password for the app's port (open to
+   your network; see [Access](#access)), then start it.
+4. **Open Web UI**, or **HRI** in the sidebar (**Show in sidebar** on the Info
+   tab). The first start installs Home Assistant inside the app, which takes a
+   few minutes and needs internet access; the page shows the progress.
 
 For MQTT, the Mosquitto broker app is reachable as `core-mosquitto`, port
 1883, with a Home Assistant user or a login set in the Mosquitto app. That is
@@ -38,13 +38,14 @@ started with (see below).
 | `ha_version_latest` | `HA_VERSION_LATEST` | Off: a fresh app installs the image's default Home Assistant instead of the newest |
 | `debug` | `HRI_DEBUG` | Debug logging for the manager, and blocking-call detection |
 | `cookie_secure` | `HRI_COOKIE_SECURE` | Marks the session cookie `Secure`, behind a reverse proxy with TLS |
+| `ingress_users` | `HRI_INGRESS_USERS` | Home Assistant user names (the login name, any case) that may open the UI through Home Assistant; empty means every user. The variable is the list, comma separated |
 
 Not options:
 
 - the time zone is the one set in Home Assistant (**Settings > System >
   General**), which the Supervisor passes to the app;
 - the port inside the app is always 8087. Change the port on your network on
-  the app's **Network** tab; **Open Web UI** follows it;
+  the app's **Network** tab, or clear it to turn the port off;
 - `HRI_PASSWORD_FILE`, dev mode and the diagnostics variables are for Docker
   installs.
 
@@ -147,11 +148,27 @@ different USB port. Every integration in the app can open every serial device
 of the host, including a stick your main Home Assistant uses: give each stick
 to one of them only.
 
-## No ingress yet
+## Access
 
-The web UI does not work under the path prefix Home Assistant's ingress puts
-in front of it, so it is not in the sidebar. **Open Web UI** opens it on its
-own port.
+The web UI opens two ways, with a different gate each:
+
+- **Through Home Assistant (ingress)**: **Open Web UI** on the Info tab, or
+  the **HRI** sidebar panel. It works wherever your Home Assistant does,
+  remote access over HTTPS and Home Assistant Cloud (Nabu Casa) included,
+  with nothing opened on your network. Home Assistant's login is the gate:
+  HRI's password and host guard do not apply. The panel shows for
+  administrators, but any logged-in Home Assistant user who has the panel's
+  address can open it, and the UI installs code and runs service calls: set
+  `ingress_users` to the users who may (anyone else gets `403`).
+- **On the app's port** (8087 on the host by default): as a Docker install,
+  with HRI's own password, session cookie and host guard
+  ([Security](security.md)). If you use only the panel, clear the port on the
+  app's **Network** tab; nothing is then reachable without Home Assistant.
+
+A write (install, start, settings, service call) made through the panel names
+the Home Assistant user in the manager's log (`ingress: POST /api/… by Home
+Assistant user '…'`). Backup uploads and a Home Assistant import stream
+through the Supervisor, so their sizes are the same as on the port.
 
 ## Updates
 
