@@ -73,6 +73,11 @@ REBUILD_FILE = os.path.join(STATE_DIR, "rebuild-pending.json")  # custom_compone
 # Configuration tab to this file and gives the container a SUPERVISOR_TOKEN.  apply_app_options() turns each option
 # into the variable a plain Docker install sets, before anything reads it; the exec of run.py inherits them.
 APP_OPTIONS_FILE = "/data/options.json"
+# the token lets whoever holds it read and rewrite the app's options (the password among them) at http://supervisor:
+# HRI needs it for nothing once they are read, so neither Home Assistant nor an integration inherits it
+SUPERVISOR_TOKEN_VARS = ("SUPERVISOR_TOKEN", "HASSIO_TOKEN")
+# set once the options are applied: what is left of "this is an app" after the token is gone (mqtt_publisher.py reads it)
+APP_MARKER = "HRI_APP"
 # option: (variable, None for a text or number, or (value for true, value for false) for a bool; None = unset)
 APP_OPTIONS = {
     "password": ("HRI_PASSWORD", None),
@@ -1021,9 +1026,11 @@ def _phase(phase: str, version: str | None = None, title: str | None = None) -> 
 
 def apply_app_options(path: str | None = None) -> list[str] | None:
     """As a Home Assistant app (SUPERVISOR_TOKEN set and the options file there), set or unset the variable of every
-    option in APP_OPTIONS from the file and return the names set; an empty option is an unset variable.  None when
-    not an app: the environment is left as it is.  ValueError for a file that cannot be read: starting without the
-    password it may hold would open the UI to the network."""
+    option in APP_OPTIONS from the file and return the names set; an empty option is an unset variable.  Then
+    APP_MARKER is set and the token variables are removed.  None when not an app, and so when run again in an
+    environment this already cleaned: the environment is left as it is, the variables set the first time included.
+    ValueError for a file that cannot be read: starting without the password it may hold would open the UI to the
+    network."""
     path = path or APP_OPTIONS_FILE
     if not os.environ.get("SUPERVISOR_TOKEN") or not os.path.isfile(path):
         return None
@@ -1048,6 +1055,9 @@ def apply_app_options(path: str | None = None) -> list[str] | None:
             applied.append(var)
         else:
             os.environ.pop(var, None)
+    os.environ[APP_MARKER] = "1"
+    for var in SUPERVISOR_TOKEN_VARS:
+        os.environ.pop(var, None)
     return applied
 
 

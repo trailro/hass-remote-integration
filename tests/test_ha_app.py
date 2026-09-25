@@ -332,12 +332,95 @@ class AppOptionsTest(unittest.TestCase):
             "import json, os, sys; sys.path.insert(0, sys.argv[1]); import entrypoint;"
             "entrypoint.apply_app_options(sys.argv[2]);"
             "os.execv(sys.executable, [sys.executable, '-c',"
-            " 'import json, os; print(json.dumps({k: os.environ.get(k) for k in (\"HRI_PASSWORD\", \"HRI_DEBUG\")}))'])"
+            " 'import json, os; print(json.dumps({k: os.environ.get(k) for k in (\"HRI_PASSWORD\", \"HRI_DEBUG\", \"SUPERVISOR_TOKEN\", \"HASSIO_TOKEN\", \"HRI_APP\")}))'])"
         )
-        env = {**os.environ, "SUPERVISOR_TOKEN": "t0ken", "HRI_DEBUG": "from-docker", "HRI_CONFIG": self.tmp}
+        env = {**os.environ, "SUPERVISOR_TOKEN": "t0ken", "HASSIO_TOKEN": "t0ken", "HRI_DEBUG": "from-docker",
+               "HRI_CONFIG": self.tmp}
         out = subprocess.run([sys.executable, "-c", child, str(ROOT), self.options], env=env, capture_output=True,
                              text=True, timeout=60, check=True).stdout
-        self.assertEqual(json.loads(out), {"HRI_PASSWORD": "s3cret-pw", "HRI_DEBUG": None})
+        self.assertEqual(json.loads(out), {"HRI_PASSWORD": "s3cret-pw", "HRI_DEBUG": None, "SUPERVISOR_TOKEN": None,
+                                           "HASSIO_TOKEN": None, "HRI_APP": "1"})
+
+    def test_the_supervisor_token_does_not_outlive_the_options(self):
+        """F1: with the token, anything in the app (an integration) could read or rewrite the app's options through
+        http://supervisor, the password among them.  HRI needs it for nothing after reading them."""
+        with mock.patch.dict(os.environ, {"HASSIO_TOKEN": "t0ken"}):
+            applied = self._apply({"password": "s3cret", "debug": True})
+            self.assertNotIn("SUPERVISOR_TOKEN", set(os.environ))  # names only: a failure must not print values
+            self.assertNotIn("HASSIO_TOKEN", set(os.environ))
+            self.assertEqual(sorted(applied), ["HRI_DEBUG", "HRI_PASSWORD"])
+            self.assertEqual((os.environ["HRI_PASSWORD"], os.environ["HRI_DEBUG"]), ("s3cret", "1"))
+            self.assertEqual(os.environ[self.ep.APP_MARKER], "1")
+
+    def test_a_second_run_without_the_token_keeps_what_the_first_one_set(self):
+        """The gate of apply_app_options is the token: an entrypoint run again in the same environment (no token any
+        more) leaves the variables the first run set, the app marker with them."""
+        self._apply({"password": "s3cret", "apt_packages": "jq", "debug": False})
+        with open(self.options, "w", encoding="utf-8") as fh:
+            json.dump({"password": "", "apt_packages": ""}, fh)  # never read: not an app any more
+        self.assertIsNone(self.ep.apply_app_options(self.options))
+        self.assertEqual((os.environ["HRI_PASSWORD"], os.environ["HRI_APT_PACKAGES"]), ("s3cret", "jq"))
+        self.assertNotIn("HRI_DEBUG", os.environ)
+        self.assertEqual(os.environ[self.ep.APP_MARKER], "1")
+        self.assertTrue(self.ep.password_configured())
+
+    def test_not_an_app_keeps_the_token_and_sets_no_marker(self):
+        with mock.patch.dict(os.environ, {"SUPERVISOR_TOKEN": "t0ken", "HASSIO_TOKEN": "t0ken"}):
+            os.environ.pop(self.ep.APP_MARKER, None)
+            self.assertIsNone(self.ep.apply_app_options(os.path.join(self.tmp, "missing.json")))
+            self.assertEqual((os.environ["SUPERVISOR_TOKEN"], os.environ["HASSIO_TOKEN"]), ("t0ken", "t0ken"))
+            self.assertNotIn(self.ep.APP_MARKER, os.environ)
+
+    def test_unreadable_options_stop_before_anything_inherits_the_token(self):
+        with self.assertRaises(ValueError):
+            self._apply("{not json")
+        self.assertEqual(os.environ["SUPERVISOR_TOKEN"], "t0ken")  # main() exits 2 here: nothing is exec'd
+
+
+class AppMqttDefaultHostTest(unittest.TestCase):
+    """A fresh app offered "mosquitto" as the broker; the official broker app on Home Assistant OS is
+    "core-mosquitto".  Only the default changes, and only in the app: a configured host is never touched."""
+
+    def setUp(self):
+        from custom_components.integration_manager import mqtt_publisher as mp
+
+        self.mp = mp
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.pub = mp.MqttPublisher.__new__(mp.MqttPublisher)
+        self.pub.path = os.path.join(self.tmp, "mqtt.json")
+
+    def _as_app(self):
+        ep = entrypoint_for(self, self.tmp)
+        options = os.path.join(self.tmp, "options.json")
+        with open(options, "w", encoding="utf-8") as fh:
+            json.dump({"password": "pw"}, fh)
+        patch = mock.patch.dict(os.environ, {"SUPERVISOR_TOKEN": "t0ken"})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.assertIsNotNone(ep.apply_app_options(options))
+
+    def test_plain_docker_keeps_mosquitto(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("HRI_APP", None)
+            self.assertEqual(self.mp.MqttConfig().host, "mosquitto")
+            self.assertEqual(self.pub._load().host, "mosquitto")
+
+    def test_the_app_defaults_to_core_mosquitto(self):
+        self._as_app()
+        self.assertEqual(self.mp.MqttConfig().host, "core-mosquitto")
+        self.assertEqual(self.pub._load().host, "core-mosquitto")  # no mqtt.json: a fresh app
+
+    def test_a_configured_host_is_never_overridden(self):
+        self._as_app()
+        for host in ("mosquitto", "192.168.1.5"):
+            with self.subTest(host=host):
+                with open(self.pub.path, "w", encoding="utf-8") as fh:
+                    json.dump({"enabled": True, "host": host}, fh)
+                self.assertEqual(self.pub._load().host, host)
+        with open(self.pub.path, "w", encoding="utf-8") as fh:
+            json.dump({"enabled": True, "port": 1884}, fh)  # saved without a host: none was configured
+        self.assertEqual(self.pub._load().host, "core-mosquitto")
 
 
 if __name__ == "__main__":
