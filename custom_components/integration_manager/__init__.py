@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import importlib
 import logging
 import time
 from collections.abc import Callable
@@ -239,6 +240,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     install_host_guard(hass, installer)
 
     # optional password (HRI_PASSWORD / HRI_PASSWORD_FILE): checked after the host guard
+    await hass.async_add_executor_job(importlib.import_module, ".auth", __name__)  # its import reads templates/login.html
     from .auth import LoginPageView, LoginView, LogoutView, async_setup_auth
 
     auth = await async_setup_auth(hass)

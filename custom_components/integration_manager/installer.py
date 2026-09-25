@@ -2608,7 +2608,7 @@ class Installer:
         # requirements BEFORE the entries are enabled (enabling = setting up =
         # importing the libraries): otherwise the process runs the old library
         reqs = await self._requirements_for(domain)
-        missing = [r for r in reqs if not pkg_util.is_installed(r)]
+        missing = await self.hass.async_add_executor_job(lambda: [r for r in reqs if not pkg_util.is_installed(r)])  # importlib.metadata
         pip_failed: list[str] = []
         if missing:
             pip_failed = await self.hass.async_add_executor_job(self._install_requirements, reqs)

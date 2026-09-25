@@ -227,7 +227,7 @@ async def _boot() -> int:
         # store as a pending trial (see SETUP_PORT above). Defaults are fine:
         # bind 0.0.0.0, port from SETUP_PORT.  Older Home Assistant is the
         # exception, and _http_config() explains itself.
-        **_http_config(),
+        **await hass.async_add_executor_job(_http_config),  # find_spec imports homeassistant.components.http
         "integration_manager": {},
     }
 

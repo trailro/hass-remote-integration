@@ -1,7 +1,10 @@
 """The end-to-end test of the app on Home Assistant OS 18.3 / Supervisor 2026.09.2.
 
 F2  with debug on, Home Assistant's blocking-call detector reported HRI's own boot: the sweep of deploy leftovers
-    (os.listdir), the copy of the manager component and the read of state.json, all on the event loop
+    (os.listdir), the copy of the manager component and the read of state.json, all on the event loop; then, from
+    the same run: the check for the http config module in _http_config (it imports homeassistant.components.http,
+    which reads package metadata and loads the CA bundle), the reconcile's check of the running integration's
+    requirements (importlib.metadata) and the import of auth.py, which reads templates/login.html
 """
 
 import asyncio
@@ -10,12 +13,15 @@ import glob
 import json
 import os
 import shutil
+import sys
 import tempfile
 import threading
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import run
+from custom_components.integration_manager import installer as inst_mod
 
 
 class BootFileIoOffTheLoopTest(unittest.TestCase):
@@ -44,6 +50,7 @@ class BootFileIoOffTheLoopTest(unittest.TestCase):
 
     def _boot(self):
         loop_threads, on_loop, running_domain = set(), [], []
+        self.http_config_on_loop, self.setup_component = [], mock.AsyncMock(return_value=True)
 
         def watched(name, original):
             def call(*args, **kwargs):
@@ -70,6 +77,10 @@ class BootFileIoOffTheLoopTest(unittest.TestCase):
             loop_threads.add(threading.get_ident())
             return await run._boot()
 
+        def http_config():
+            self.http_config_on_loop.append(threading.get_ident() in loop_threads)
+            return {"http": {"server_port": run.HTTP_PORT}}
+
         patches = [
             mock.patch.object(run, "CONFIG_DIR", self.cfg),
             mock.patch.object(run, "MANAGER_SRC", self.src),
@@ -81,9 +92,9 @@ class BootFileIoOffTheLoopTest(unittest.TestCase):
             mock.patch.object(run.conf_util, "process_ha_config_upgrade", lambda _hass: None),
             mock.patch.object(run.config_entries, "ConfigEntries", mock.MagicMock()),
             mock.patch.object(run, "_mount_local_lib_path", mock.AsyncMock(return_value="")),
-            mock.patch.object(run, "_http_config", lambda: {}),
+            mock.patch.object(run, "_http_config", http_config),
             mock.patch.object(run, "_load_base_functionality", mock.AsyncMock(return_value=True)),
-            mock.patch.object(run, "async_setup_component", mock.AsyncMock(return_value=True)),
+            mock.patch.object(run, "async_setup_component", self.setup_component),
             mock.patch.object(run, "async_process_ha_core_config", mock.AsyncMock()),
             mock.patch.object(run, "_yaml_config_for", lambda _hass, _domain: None),
             mock.patch.object(run, "drop_foreign_http_port", lambda *a: None),
@@ -105,6 +116,11 @@ class BootFileIoOffTheLoopTest(unittest.TestCase):
         self.assertEqual(on_loop, [])
         self.assertEqual(running_domain, ["foo", "foo"])  # state.json was still read, twice as before
 
+    def test_the_http_section_is_worked_out_off_the_loop(self):
+        self._boot()
+        self.assertEqual(self.http_config_on_loop, [False])  # once, in a thread: find_spec imports homeassistant.components.http
+        self.assertEqual(self.setup_component.await_args_list[0].args[2]["http"], {"server_port": run.HTTP_PORT})  # what it returned still goes in
+
     def test_the_sweep_and_the_copy_still_run_in_order(self):
         self._boot()
         cc = os.path.join(self.cfg, "custom_components")
@@ -118,6 +134,106 @@ class BootFileIoOffTheLoopTest(unittest.TestCase):
         shutil.rmtree(os.path.join(self.cfg, "custom_components", "integration_manager.replaced"))
         with self.assertRaises(OSError):
             self._boot()
+
+
+class ReconcileRequirementsOffTheLoopTest(unittest.TestCase):
+    """The boot reconcile asks importlib.metadata whether each requirement of the running integration is
+    installed (listdir, read_text, open): in a thread, not on the loop."""
+
+    def test_the_requirements_are_checked_off_the_loop(self):
+        cfg = tempfile.mkdtemp(prefix="hri-reconcile-")
+        self.addCleanup(shutil.rmtree, cfg, True)
+        os.makedirs(os.path.join(cfg, "integration_manager"))
+        with open(os.path.join(cfg, "integration_manager", "state.json"), "w", encoding="utf-8") as fh:
+            json.dump({"domain": "hub", "installed": {"hub": {"versions": {"v1": {}}, "running_tag": "v1"}}}, fh)
+        loop_threads, checked = set(), []
+
+        async def executor(fn, *args):
+            return await asyncio.get_running_loop().run_in_executor(None, fn, *args)
+
+        async def nothing(*args, **kwargs):
+            return []
+
+        async def requirements(domain):
+            return ["foo==1", "bar>=2"]
+
+        def is_installed(req):
+            checked.append((req, threading.get_ident() in loop_threads))
+            return True
+
+        inst = inst_mod.Installer(SimpleNamespace(config=SimpleNamespace(config_dir=cfg, components=set()),
+                                                  async_add_executor_job=executor))
+        inst._ensure_deployed = lambda domain, tag, force=False: False
+        inst._requirements_for = requirements
+        inst._install_requirements = mock.Mock(side_effect=AssertionError("nothing is missing"))
+        inst._enable_entries = nothing
+        inst._patch_rows = lambda domain: []
+        inst._notify_patches = lambda domain, rows: None
+        inst._tree_hash = lambda domain: None
+
+        async def reconcile():
+            loop_threads.add(threading.get_ident())
+            await inst.async_reconcile()
+
+        with mock.patch.object(inst_mod.pkg_util, "is_installed", is_installed):
+            asyncio.run(reconcile())
+        self.assertEqual(checked, [("foo==1", False), ("bar>=2", False)])
+
+
+class AuthImportOffTheLoopTest(unittest.TestCase):
+    """async_setup imports auth.py, whose import reads templates/login.html: in a thread, not on the loop."""
+
+    NAME = "custom_components.integration_manager.auth"
+
+    def test_login_html_is_read_off_the_loop(self):
+        import custom_components.integration_manager as im
+        from custom_components.integration_manager import events, hostguard, ui
+
+        old = sys.modules.pop(self.NAME, None)  # a fresh import, as at boot
+        old_attr = im.__dict__.pop("auth", None)
+
+        def restore():
+            sys.modules.pop(self.NAME, None)
+            im.__dict__.pop("auth", None)
+            if old is not None:
+                sys.modules[self.NAME] = old
+            if old_attr is not None:
+                im.auth = old_attr
+        self.addCleanup(restore)
+
+        loop_threads, opened = set(), []
+        real_open = builtins.open
+
+        def spy_open(file, *args, **kwargs):
+            if str(file).endswith(os.path.join("templates", "login.html")):
+                opened.append(threading.get_ident() in loop_threads)
+            return real_open(file, *args, **kwargs)
+
+        class Stop(Exception):
+            pass
+
+        async def executor(fn, *args):
+            if getattr(fn, "__name__", "") == "_configured_password":
+                raise Stop  # async_setup_auth's first step: the import is done by then
+            return await asyncio.get_running_loop().run_in_executor(None, fn, *args)
+
+        hass = mock.MagicMock()
+        hass.async_add_executor_job = executor
+
+        async def setup():
+            loop_threads.add(threading.get_ident())
+            await im.async_setup(hass, {})
+
+        with mock.patch.object(im, "Installer", lambda _hass: mock.MagicMock()), \
+                mock.patch.object(im, "track_delayed_stores", lambda: None), \
+                mock.patch.object(im.writer, "async_register", lambda _hass: None), \
+                mock.patch.object(events, "Events", mock.MagicMock()), mock.patch.object(events, "EVENTS", None), \
+                mock.patch.object(hostguard, "install_host_guard", lambda *a: None), \
+                mock.patch.object(builtins, "open", spy_open), self.assertRaises(Stop):
+            asyncio.run(setup())
+        self.assertEqual(opened, [False])
+        with open(os.path.join(ui.TEMPLATE_DIR, "login.html"), encoding="utf-8") as fh:
+            self.assertEqual(sys.modules[self.NAME].LOGIN_HTML, fh.read())  # the page serves the template unchanged
 
 
 if __name__ == "__main__":
