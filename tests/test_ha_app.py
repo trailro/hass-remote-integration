@@ -207,8 +207,8 @@ class AppVersionStepTest(unittest.TestCase):
     def _run(self, tag, releases=(("v0.24.0", False), ("v0.25.0", False), ("v0.26.0b1", True))):
         # what GitHub says about the releases (image.yml asks `gh release list`), not what the event payload said
         stubs = Stubs(self, {"releases": [{"tagName": t, "isPrerelease": pre, "isDraft": False} for t, pre in releases]})
-        env = stubs.env(**{k: v for k, v in self.env.items() if k != "PATH"}, TAG=tag, BRANCH="main",
-                        GITHUB_REPOSITORY="trailro/hass-remote-integration")
+        env = stubs.env(**{**{k: v for k, v in self.env.items() if k != "PATH"}, "TAG": tag, "BRANCH": "main",
+                           "GITHUB_REPOSITORY": "trailro/hass-remote-integration"})
         proc = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", self.script], cwd=self.work, env=env,
                               capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
