@@ -800,7 +800,9 @@ sh verify.sh unit      # unit tests (tests/, stdlib unittest) in the container's
 
 `verify.sh` reads `HRI_NAME`, `HRI_PORT`, `HRI_IMAGE`, `HRI_NETWORK`,
 `HRI_PASSWORD` (or `HRI_PASSWORD_FILE`, which wins) and `TZ` from the
-environment or `.env`. `start` exits non-zero when the API does not come up (a
+environment or `.env`. `HRI_NAME`, the container and its volume, defaults to
+`hri-verify`: `recreate` removes that container, so set it only to a container
+you mean to replace. `start` exits non-zero when the API does not come up (a
 timeout or a restart loop). `HRI_ENV="K=V K2=V2"` passes more variables to the
 container; CI boots a version other than the newest that way
 (`HA_VERSION_LATEST=0 HA_VERSION_DEFAULT=<version>`). Inside the container the
