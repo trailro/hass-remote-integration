@@ -1,0 +1,35 @@
+# labgrid environment of the app canary's Home Assistant OS job: Home Assistant OS's own tests/qemu-strategy.yaml
+# (operating-system repository), with the memory an app that installs Home Assistant needs, the host's CPU, and the
+# app's port forwarded to the runner.  Copied into the operating-system checkout's tests/ folder, next to the
+# qemu_shell_strategy.py it imports.
+targets:
+  main:
+    resources: []
+
+    drivers:
+      - QEMUDriver:
+          qemu_bin: qemu-x86_64
+          machine: pc
+          cpu: host
+          memory: 4G
+          extra_args: "-snapshot -accel kvm -smp 4"
+          nic: user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:8087-:8087
+          disk: disk-image
+          bios: bios
+      - CustomTimeoutShellDriver:
+          login_prompt: 'homeassistant login: '
+          username: 'root'
+          prompt: '# '
+          login_timeout: 600
+          command_timeout: 300
+      - QEMUShellStrategy: {}
+
+tools:
+  qemu-x86_64: /usr/bin/qemu-system-x86_64
+
+images:
+  disk-image: ./haos.qcow2
+  bios: /usr/share/ovmf/OVMF.fd
+
+imports:
+  - qemu_shell_strategy.py

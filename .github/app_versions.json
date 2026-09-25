@@ -1,0 +1,8 @@
+{
+  "supervisor": "2026.09.3",
+  "haos": "18.3",
+  "core": "2026.9.3",
+  "linter": "v2.21.1",
+  "linter_sha": "b9cfd1bc62ba60d2c4fc96317b5f7ada5923f4a7",
+  "configuration_md_sha256": "cd96ca608923e9de66084773d2b927554654574336c205e3bd76a7acf7f8ef31"
+}
