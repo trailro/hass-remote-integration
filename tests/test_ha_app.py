@@ -413,7 +413,7 @@ class AppMqttDefaultHostTest(unittest.TestCase):
 
     def test_a_configured_host_is_never_overridden(self):
         self._as_app()
-        for host in ("mosquitto", "192.168.1.5"):
+        for host in ("mosquitto", "192.0.2.10"):
             with self.subTest(host=host):
                 with open(self.pub.path, "w", encoding="utf-8") as fh:
                     json.dump({"enabled": True, "host": host}, fh)
