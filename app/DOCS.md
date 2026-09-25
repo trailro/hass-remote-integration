@@ -2,7 +2,9 @@
 
 Runs one Home Assistant integration in its own container and mirrors its
 entities to your Home Assistant over MQTT. The integration is installed and
-managed from this app's web UI: **Open Web UI** on the Info tab.
+managed from this app's web UI: **Open Web UI** on the Info tab, or **HRI** in
+the sidebar. It works through Home Assistant's login (remote access and Home
+Assistant Cloud included); the app's port 8087 keeps its own password.
 
 - Options, backups, serial devices and updates of the app:
   [docs/app.md](https://github.com/trailro/hass-remote-integration/blob/main/docs/app.md)
@@ -19,6 +21,9 @@ minutes; the web UI shows the progress. It needs internet access.
 - Restoring a Home Assistant backup deletes the manager's own backups (they
   are not in it), the one a Full rollback needs included: download the ones
   you want to keep first.
+- Any logged-in Home Assistant user can open the UI through Home Assistant:
+  the `ingress_users` option narrows it to the user names listed. Clear the
+  port on the Network tab if you use only the sidebar.
 - Uninstalling leaves the app's folder (about 800 MB) unless you also delete
   its data.
 - Stopping waits up to 240 seconds for Home Assistant inside; a clean stop
