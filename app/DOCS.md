@@ -13,3 +13,13 @@ managed from this app's web UI: **Open Web UI** on the Info tab.
 
 The first start installs Home Assistant inside the app and takes a few
 minutes; the web UI shows the progress. It needs internet access.
+
+- MQTT: the Mosquitto broker app is `core-mosquitto`, port 1883, the host a
+  fresh app offers.
+- Restoring a Home Assistant backup deletes the manager's own backups (they
+  are not in it), the one a Full rollback needs included: download the ones
+  you want to keep first.
+- Uninstalling leaves the app's folder (about 800 MB) unless you also delete
+  its data.
+- Stopping waits up to 240 seconds for Home Assistant inside; a clean stop
+  takes well under a second.

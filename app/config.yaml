@@ -38,7 +38,9 @@ schema:
   debug: bool
   cookie_secure: bool
 # what HRI's own backups leave out too (backupkit.py DISPOSABLE_GLOBS), matched the way the Supervisor matches:
-# against the end of the full path, so "*_hass_remote_integration/" ties a name to the top of this app's folder
+# against the end of the full path, so "*_hass_remote_integration/" ties a name to the top of this app's folder.
+# That part is the slug above: a fork or a local build with another slug must change it in every entry, or its
+# Home Assistant backups hold the venv (about 800 MB)
 backup_exclude:
   - "*_hass_remote_integration/integration_manager/auth_key"
   - "*_hass_remote_integration/integration_manager/auth_key.tmp"

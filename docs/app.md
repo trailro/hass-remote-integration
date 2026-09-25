@@ -17,8 +17,10 @@ below.
    progress.
 
 For MQTT, the Mosquitto broker app is reachable as `core-mosquitto`, port
-1883, with a Home Assistant user or a login set in the Mosquitto app. A broker
-elsewhere on your network is reached by its IP address.
+1883, with a Home Assistant user or a login set in the Mosquitto app. That is
+the host a fresh app offers on **MQTT** until you save another one (a Docker
+install offers `mosquitto`). A broker elsewhere on your network is reached by
+its IP address.
 
 ## Options
 
@@ -48,12 +50,30 @@ An options file the app cannot read stops it at boot, with a line in its log,
 rather than starting without the password it may hold. The log names the
 variables set from the options, never their values.
 
+## The Supervisor token
+
+The Supervisor gives the app a token (`SUPERVISOR_TOKEN`, and the older name
+`HASSIO_TOKEN`). With it, anything in the app could read the app's options,
+the password included, and change them. HRI reads the options with it at boot
+and then removes both variables from its environment, so Home Assistant inside
+the app and the integration it runs do not inherit them.
+
+This keeps the token out of reach of ordinary code; it is not a sandbox. The
+container's init process (PID 1, Docker's init) still holds the token in its
+own environment, and everything in the container runs as root, so an
+integration determined to read it can. Install integrations you trust.
+
 ## Files
 
 The app's folder is its `/config`: `/addon_configs/<id>_hass_remote_integration`
 on the host (the `addon_configs` share of the Samba app). The layout is the
 one in [Files on the volume](files.md). Stopping the app gives Home Assistant
-inside up to 240 seconds to save its registries.
+inside up to 240 seconds to save its registries. That is a ceiling, not a
+wait: a clean stop takes well under a second.
+
+Uninstalling the app leaves this folder on the host, about 800 MB with the
+installed Home Assistant, unless you tick the option to delete the app's data
+when you uninstall it.
 
 ## Backups
 
@@ -77,6 +97,19 @@ resource history, `.storage/http`, `.storage/core.uuid` and the MQTT ledgers
 (`mqtt_identity.json`, `mqtt_cleanup_pending.json`) as they were when the
 backup was taken. The manager's own backups work as before and are the way to
 move an integration to another install.
+
+That restore also deletes the manager's own backups: `backups/` is not in the
+Home Assistant backup, and the folder it restores has none. **System** then
+lists no backups, and the backup taken before the last integration update goes
+too, while the integration's state may still name it. A **Full rollback** is
+refused with the reason (the backup no longer exists); a plain start of the
+previous version still works. Download the backups you want to keep before
+you restore a Home Assistant backup, and upload them again after.
+
+`backup_exclude` in `app/config.yaml` names every entry below
+`*_hass_remote_integration/`, the folder of this app's slug. If you build the
+app yourself under another slug, change that part of every entry, or Home
+Assistant backups will include the installed Home Assistant (about 800 MB).
 
 ## Serial devices
 
