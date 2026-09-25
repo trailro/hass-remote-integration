@@ -2,15 +2,22 @@
 # What the weekly canary does with its result.  A failure is something to investigate, so it becomes an
 # issue (one per pair of versions, commented on rather than repeated).  A pass on a stable release newer
 # than the one the image installs is something to approve, so it becomes a pull request that moves
-# HA_VERSION_DEFAULT there - never HA_VERSION_MIN, which is a measured floor and not a moving target.
-# Reads RESULT (the boot job's conclusion), STABLE, PRERELEASE, DEFAULT, RUN, GH_SERVER, GH_REPO and GH_TOKEN.
+# HA_VERSION_DEFAULT there - never HA_VERSION_MIN, which is a measured floor and not a moving target.  The two
+# are decided apart: a pre-release that breaks the manager is an issue, and the stable release that passed is still
+# proposed.  One pull request per version, ever: an open one, or one closed without merging, is not opened again; a
+# newer one closes the older canary pull requests still open.
+# Reads STABLE_RESULT and PRERELEASE_RESULT (each boot leg's conclusion), STABLE, PRERELEASE, DEFAULT, RUN,
+# GH_SERVER, GH_REPO and GH_TOKEN.
 set -eu
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-if [ "$RESULT" = "failure" ]; then
-  title="[canary] Home Assistant $STABLE${PRERELEASE:+ / $PRERELEASE} breaks the manager"
+broken=""
+[ "$STABLE_RESULT" = failure ] && broken="$STABLE"
+[ "$PRERELEASE_RESULT" = failure ] && [ -n "$PRERELEASE" ] && broken="${broken:+$broken / }$PRERELEASE"
+if [ -n "$broken" ]; then
+  title="[canary] Home Assistant $broken breaks the manager"
   cat > "$tmp/body.md" <<EOF
 The weekly canary failed.
 
@@ -31,11 +38,10 @@ EOF
   else
     gh issue create --title "$title" --body-file "$tmp/body.md"
   fi
-  exit 0
 fi
 
-if [ "$RESULT" != "success" ]; then
-  echo "the boot job was $RESULT: nothing to report"
+if [ "$STABLE_RESULT" != "success" ]; then
+  echo "the stable leg was $STABLE_RESULT: nothing to propose"
   exit 0
 fi
 if [ "$STABLE" = "$DEFAULT" ]; then
@@ -43,11 +49,11 @@ if [ "$STABLE" = "$DEFAULT" ]; then
   exit 0
 fi
 branch="canary/ha-$STABLE"
-open=$(gh pr list --head "$branch" --state open --json number --jq 'length')
-if [ "$open" != "0" ]; then
-  echo "a pull request for $STABLE is already open"
-  exit 0
-fi
+states=$(gh pr list --head "$branch" --state all --json state --jq 'map(.state) | join(" ")')
+case " $states " in
+  *" OPEN "*) echo "a pull request for $STABLE is already open"; exit 0 ;;
+  *" CLOSED "*) echo "a pull request for $STABLE was closed without merging: not proposing it again"; exit 0 ;;
+esac
 
 git config user.name "github-actions[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -87,6 +93,17 @@ else
   git push -q origin "$branch"
 fi
 if gh pr create --head "$branch" --base main --title "install Home Assistant $STABLE on a fresh volume" --body-file "$tmp/pr.md"; then
+  created=1
+else
+  created=0
+fi
+# a pull request opened with GITHUB_TOKEN starts no workflow; a workflow_dispatch run is the exception
+gh workflow run ci.yml --ref "$branch" || echo "could not start CI on $branch" >&2
+if [ "$created" = 1 ]; then
+  for older in $(gh pr list --state open --limit 100 --json number,headRefName \
+      --jq "map(select((.headRefName | startswith(\"canary/ha-\")) and .headRefName != \"$branch\")) | .[].number"); do
+    gh pr close "$older" --comment "Superseded by the canary's pull request for Home Assistant $STABLE."
+  done
   exit 0
 fi
 
