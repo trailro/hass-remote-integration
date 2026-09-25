@@ -16,6 +16,7 @@ from unittest import mock
 
 import backupkit
 from tests.fakes import entrypoint_for
+from tests.ghstub import Stubs
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 APP_CONFIG = ROOT / "app" / "config.yaml"
@@ -173,7 +174,8 @@ class AppDiscoveryTest(unittest.TestCase):
 @unittest.skipUnless(shutil.which("git") and shutil.which("bash") and sys.platform.startswith("linux"),
                      "needs git, bash and the sed of the Linux runner")
 class AppVersionStepTest(unittest.TestCase):
-    """image.yml's own "Set app/config.yaml version" script (not a copy), run on a scratch repository with a remote."""
+    """image.yml's own "Set app/config.yaml version" script (not a copy), run on a scratch repository with a remote and
+    a `gh` that answers with a list of releases."""
 
     def setUp(self):
         wf_path = ROOT / ".github" / "workflows" / "image.yml"
@@ -202,9 +204,13 @@ class AppVersionStepTest(unittest.TestCase):
             git("tag", tag, cwd=self.work)
         git("push", "-q", "origin", "HEAD:main", "--tags", cwd=self.work)
 
-    def _run(self, tag, prerelease="false"):
-        env = {**self.env, "TAG": tag, "PRERELEASE": prerelease, "BRANCH": "main"}
-        proc = subprocess.run(["bash", "-e", "-c", self.script], cwd=self.work, env=env, capture_output=True, text=True)
+    def _run(self, tag, releases=(("v0.24.0", False), ("v0.25.0", False), ("v0.26.0b1", True))):
+        # what GitHub says about the releases (image.yml asks `gh release list`), not what the event payload said
+        stubs = Stubs(self, {"releases": [{"tagName": t, "isPrerelease": pre, "isDraft": False} for t, pre in releases]})
+        env = stubs.env(**{k: v for k, v in self.env.items() if k != "PATH"}, TAG=tag, BRANCH="main",
+                        GITHUB_REPOSITORY="trailro/hass-remote-integration")
+        proc = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", self.script], cwd=self.work, env=env,
+                              capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         shown = subprocess.run(["git", "--git-dir", str(self.remote), "show", "main:app/config.yaml"], env=self.env,
                                capture_output=True, text=True, check=True).stdout
@@ -212,7 +218,7 @@ class AppVersionStepTest(unittest.TestCase):
 
     def test_newest_stable_moves_the_version_once(self):
         self.assertEqual(self._run("v0.24.0")[0], "0.24.0")  # not the newest: stays
-        self.assertEqual(self._run("v0.25.0", prerelease="true")[0], "0.24.0")
+        self.assertEqual(self._run("v0.25.0", releases=(("v0.24.0", False), ("v0.25.0", True)))[0], "0.24.0")
         version, _ = self._run("v0.25.0")
         self.assertEqual(version, "0.25.0")
         log = subprocess.run(["git", "--git-dir", str(self.remote), "log", "-1", "--format=%s", "main"], env=self.env,
@@ -226,6 +232,23 @@ class AppVersionStepTest(unittest.TestCase):
         original = _yaml(APP_CONFIG)
         original.pop("version")
         self.assertEqual(rest, original)  # only the version line changed
+
+    def test_a_stable_patch_after_a_newer_prerelease_moves_the_version(self):
+        """v0.26.0 is a pre-release with a plain tag: by the raw tags it was the newest, and v0.25.1 was skipped."""
+        releases = (("v0.24.0", False), ("v0.25.1", False), ("v0.26.0", True))
+        self.assertEqual(self._run("v0.26.0", releases=releases)[0], "0.24.0")
+        self.assertEqual(self._run("v0.25.1", releases=releases)[0], "0.25.1")
+
+    def test_the_version_never_moves_back(self):
+        """The file already names a newer version (set by hand, or by a release since retracted to a pre-release):
+        publishing the newest stable release again must not lower it."""
+        path = self.work / "app" / "config.yaml"
+        path.write_text(path.read_text(encoding="utf-8").replace('version: "0.24.0"', 'version: "0.26.0"'), encoding="utf-8")
+        self.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "c", cwd=self.work)
+        self.git("push", "-q", "origin", "HEAD:main", cwd=self.work)
+        version, out = self._run("v0.25.0")
+        self.assertEqual(version, "0.26.0")
+        self.assertIn("newer than 0.25.0", out)
 
 
 def _yaml_text(text):
