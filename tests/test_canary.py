@@ -8,7 +8,15 @@ blast radius of the job that writes: it may move what a fresh volume installs, n
 
 import importlib.util
 import os
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
+
+import yaml
+
+from tests.ghstub import Stubs
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -79,7 +87,7 @@ class CanaryWorkflowTest(unittest.TestCase):
 
     def test_it_proposes_nothing_unless_the_boot_passed(self):
         before_pr = self.report.split("git checkout -q -b", 1)[0]
-        self.assertIn('[ "$RESULT" != "success" ]', before_pr)
+        self.assertIn('[ "$STABLE_RESULT" != "success" ]', before_pr)  # the stable leg's own result
         self.assertIn('[ "$STABLE" = "$DEFAULT" ]', before_pr)  # nothing to propose
         self.assertIn("gh pr list --head", before_pr)           # and never twice for the same version
 
@@ -94,3 +102,89 @@ class CanaryWorkflowTest(unittest.TestCase):
         self.assertIn("gh issue list", self.report)
         self.assertIn("gh issue comment", self.report)
         self.assertLess(self.report.index("gh issue comment"), self.report.index("gh issue create"))
+
+
+@unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("sh"), "needs the sed -i of the Linux runner")
+class ReportScriptTest(unittest.TestCase):
+    """canary_report.sh itself, with `gh` and `git` answering from a state and logging what it would do."""
+
+    def setUp(self):
+        script = os.path.join(ROOT, ".github", "canary_report.sh")
+        if not os.path.isfile(script):
+            self.skipTest("the workflows are not copied next to the tests")
+        self.script = script
+        self.work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.work, True)
+        with open(os.path.join(self.work, "Dockerfile"), "w", encoding="utf-8") as fh:
+            fh.write("FROM x\nARG HA_VERSION=2026.9.3\n")
+
+    def _run(self, state=None, **env):
+        self.stubs = Stubs(self, state or {}, git=True)
+        base = {"STABLE_RESULT": "success", "PRERELEASE_RESULT": "success", "STABLE": "2026.10.0",
+                "PRERELEASE": "2026.11.0b1", "DEFAULT": "2026.9.3", "RUN": "https://example.invalid/run",
+                "GH_SERVER": "https://github.com", "GH_REPO": "trailro/hass-remote-integration", "GH_TOKEN": "x",
+                # the combined matrix result the workflow passed before each leg reported its own
+                "RESULT": "failure" if "failure" in (env.get("STABLE_RESULT"), env.get("PRERELEASE_RESULT")) else "success"}
+        proc = subprocess.run(["sh", self.script], cwd=self.work, env=self.stubs.env(**{**base, **env}),
+                              capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return proc.stdout + proc.stderr
+
+    def test_a_failing_prerelease_does_not_hold_back_the_passing_stable(self):
+        self._run(PRERELEASE_RESULT="failure")
+        created = self.stubs.called("gh", "issue", "create")
+        self.assertEqual(len(created), 1)
+        title = created[0][created[0].index("--title") + 1]
+        self.assertEqual(title, "[canary] Home Assistant 2026.11.0b1 breaks the manager")
+        self.assertEqual(len(self.stubs.called("gh", "pr", "create")), 1)
+
+    def test_a_failing_stable_proposes_nothing(self):
+        self._run(STABLE_RESULT="failure")
+        self.assertEqual(len(self.stubs.called("gh", "issue", "create")), 1)
+        self.assertEqual(self.stubs.called("gh", "pr", "create"), [])
+        self.assertEqual(self.stubs.called("git", "push"), [])
+
+    def test_a_closed_unmerged_pull_request_is_not_opened_again(self):
+        out = self._run({"prs": [{"number": 7, "headRefName": "canary/ha-2026.10.0", "state": "CLOSED"}]})
+        self.assertEqual(self.stubs.called("gh", "pr", "create"), [])
+        self.assertEqual(self.stubs.called("git", "push"), [])
+        self.assertIn("closed without merging", out)
+
+    def test_an_open_pull_request_is_left_alone(self):
+        self._run({"prs": [{"number": 7, "headRefName": "canary/ha-2026.10.0", "state": "OPEN"}]})
+        self.assertEqual(self.stubs.called("gh", "pr", "create"), [])
+        self.assertEqual(self.stubs.called("gh", "workflow", "run"), [])
+
+    def test_a_new_pull_request_closes_the_older_ones_and_starts_ci(self):
+        prs = [{"number": 3, "headRefName": "canary/ha-2026.9.4", "state": "OPEN"},
+               {"number": 4, "headRefName": "canary/ha-2026.9.3", "state": "CLOSED"},
+               {"number": 5, "headRefName": "dependabot/x", "state": "OPEN"}]
+        self._run({"prs": prs})
+        self.assertEqual(len(self.stubs.called("gh", "pr", "create")), 1)
+        self.assertEqual([c[3] for c in self.stubs.called("gh", "pr", "close")], ["3"])
+        self.assertEqual(self.stubs.called("gh", "workflow", "run"),
+                         [["gh", "workflow", "run", "ci.yml", "--ref", "canary/ha-2026.10.0"]])
+        with open(os.path.join(self.work, "Dockerfile"), encoding="utf-8") as fh:
+            self.assertIn("ARG HA_VERSION=2026.10.0", fh.read())
+
+    def test_a_refused_pull_request_still_starts_ci_on_the_pushed_branch(self):
+        self._run({"pr_create_rc": 1})
+        self.assertEqual(len(self.stubs.called("gh", "workflow", "run")), 1)
+        self.assertEqual(self.stubs.called("gh", "pr", "close"), [])
+        self.assertEqual(len(self.stubs.called("gh", "issue", "create")), 1)
+
+
+class CanaryLegsTest(unittest.TestCase):
+    def test_the_report_reads_each_leg(self):
+        path = os.path.join(ROOT, ".github", "workflows", "canary.yml")
+        if not os.path.isfile(path):
+            self.skipTest("the workflows are not copied next to the tests")
+        with open(path, encoding="utf-8") as fh:
+            wf = yaml.safe_load(fh)
+        boot = [s.get("uses", "") + str(s.get("with", "")) for s in wf["jobs"]["boot"]["steps"]]
+        self.assertTrue(any("upload-artifact" in s and "canary-${{ matrix.kind }}" in s for s in boot))
+        report = wf["jobs"]["report"]
+        self.assertEqual(report["permissions"].get("actions"), "write")  # gh workflow run
+        step = report["steps"][-1]
+        self.assertIn("STABLE_RESULT=$(leg stable)", step["run"])
+        self.assertNotIn("RESULT", step["env"])  # the combined matrix result no longer decides anything

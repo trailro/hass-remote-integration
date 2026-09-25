@@ -85,6 +85,17 @@ jobs:
       - name: Container log
         if: always() && env.VERSION != ''
         run: docker logs hri-canary 2>&1 | tail -n 200
+      # the job's result is one for both legs (a failing pre-release makes it "failure"): each leg says its own, so a
+      # broken beta still leaves the stable release to be proposed
+      - name: Record this leg's result
+        if: always()
+        run: mkdir -p leg && echo "${{ job.status }}" > leg/result
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: canary-${{ matrix.kind }}
+          path: leg/result
+          retention-days: 7
 
   report:
     name: Say what happened
@@ -95,16 +106,24 @@ jobs:
       contents: write        # the branch a version bump is proposed on
       issues: write          # a Home Assistant release that breaks the manager
       pull-requests: write   # a newer stable that passes
+      actions: write         # CI on that branch: a pull request opened with GITHUB_TOKEN starts no workflow
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: canary-*
+          path: legs
       - name: An issue when it broke, a pull request when a newer stable passed
         env:
           GH_TOKEN: ${{ github.token }}
-          RESULT: ${{ needs.boot.result }}
+          BOOT_RESULT: ${{ needs.boot.result }}
           STABLE: ${{ needs.versions.outputs.stable }}
           PRERELEASE: ${{ needs.versions.outputs.prerelease }}
           DEFAULT: ${{ needs.versions.outputs.default }}
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GH_SERVER: ${{ github.server_url }}
           GH_REPO: ${{ github.repository }}
-        run: sh .github/canary_report.sh
+        run: |
+          # each leg's own result; a leg that wrote none (cancelled, or the job never ran) has the job's
+          leg() { cat "legs/canary-$1/result" 2>/dev/null || echo "$BOOT_RESULT"; }
+          STABLE_RESULT=$(leg stable) PRERELEASE_RESULT=$(leg prerelease) sh .github/canary_report.sh
