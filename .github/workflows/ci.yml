@@ -39,6 +39,28 @@ jobs:
       - name: Compose files
         run: docker compose -f docker-compose.yml -f docker-compose.build.yml -f docker-compose.dev.yml config -q
 
+  app:
+    name: Home Assistant app
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: app/config.yaml against the Supervisor's app schema
+        uses: frenck/action-app-linter@b9cfd1bc62ba60d2c4fc96317b5f7ada5923f4a7  # v2.21.1
+        with:
+          path: app
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: The only app in the repository, and the release's version commit
+        # on the whole checkout, with git: the unit tests in the container see only the folders copied there, and
+        # the image has no git to run image.yml's version step with
+        run: |
+          python -m pip install --quiet pyyaml==6.0.3
+          python -m unittest tests.test_ha_app.AppDiscoveryTest tests.test_ha_app.AppVersionStepTest -v
+
   boot:
     name: ${{ matrix.name }}
     needs: checks

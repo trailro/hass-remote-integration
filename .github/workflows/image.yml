@@ -201,3 +201,46 @@ jobs:
           repository: trailro26/hass-remote-integration
           short-description: Run one Home Assistant integration in its own container, mirrored to your HA over MQTT
           readme-filepath: ${{ runner.temp }}/hub/README.md
+
+  app-version:
+    # Home Assistant OS offers an app update as soon as app/config.yaml on the default branch names a new version,
+    # and then pulls that tag: the version moves here, after the image is pushed, and never in the release PR
+    # (the update would be offered minutes before the image could be pulled).  Newest stable releases only, the
+    # overview's condition.
+    name: App version on the default branch
+    needs: image
+    if: needs.image.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write   # the one commit below
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0   # the tags, to tell whether this is the newest stable release
+      - name: Set app/config.yaml version
+        env:
+          PRERELEASE: ${{ github.event_name == 'release' && github.event.release.prerelease }}
+        run: |
+          newest=$(git tag -l 'v[0-9]*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
+          if [ "$PRERELEASE" = true ] || [ "$TAG" != "$newest" ]; then
+            echo "tag $TAG is not the newest stable release ($newest): the app version stays as it is"
+            exit 0
+          fi
+          version="${TAG#v}"
+          current=$(sed -nE 's/^version: "?([^"]*)"?$/\1/p' app/config.yaml)
+          if [ "$current" = "$version" ]; then
+            echo "app/config.yaml already names $version"
+            exit 0
+          fi
+          sed -i -E "s/^version: .*/version: \"$version\"/" app/config.yaml
+          git diff --stat
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q -m "app: version $version, the image of $TAG is published" -- app/config.yaml
+          git pull -q --rebase origin "$BRANCH"   # a merge since the checkout
+          git push origin "HEAD:$BRANCH"

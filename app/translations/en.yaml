@@ -1,0 +1,21 @@
+configuration:
+  password:
+    name: Password
+    description: Password for the web UI and API (HRI_PASSWORD). Empty means no login.
+  apt_packages:
+    name: Debian packages
+    description: Installed at boot, before Home Assistant, for what pip cannot install, such as ffmpeg (HRI_APT_PACKAGES). Names separated by spaces or commas.
+  call_timeout:
+    name: Service call timeout
+    description: Seconds a service call or command may take before it is reported as a timeout (HRI_CALL_TIMEOUT). Empty means 60.
+  ha_version_latest:
+    name: Newest Home Assistant on first boot
+    description: Off installs the image's default Home Assistant on a fresh app instead of the newest (HA_VERSION_LATEST).
+  debug:
+    name: Debug logging
+    description: Debug logging for the manager, and blocking-call detection (HRI_DEBUG).
+  cookie_secure:
+    name: Secure session cookie
+    description: Mark the session cookie Secure, behind a reverse proxy with TLS (HRI_COOKIE_SECURE).
+network:
+  8087/tcp: Web UI and API

@@ -15,7 +15,7 @@ Operator-specific values (container names, hosts, ports, local paths) live in `C
 Unit tests run inside a Home Assistant container with the HA venv, in a private directory per task (`TEST_CONTAINER` and `HA_PYTHON` come from `CLAUDE.local.md`):
 ```bash
 D=/tmp/hri-tests-<topic>; docker exec "$TEST_CONTAINER" sh -c "rm -rf $D && mkdir -p $D/custom_components"
-for f in tests jsonio.py backupkit.py logbuffer.py entrypoint.py run.py verify.sh docker-compose.yml Dockerfile README.md SECURITY.md docs .github tools test_components.py; do docker cp -q "$f" "$TEST_CONTAINER:$D/"; done && docker cp -q custom_components/integration_manager "$TEST_CONTAINER:$D/custom_components/"
+for f in tests jsonio.py backupkit.py logbuffer.py entrypoint.py run.py verify.sh docker-compose.yml Dockerfile README.md SECURITY.md docs .github tools test_components.py app repository.yaml; do docker cp -q "$f" "$TEST_CONTAINER:$D/"; done && docker cp -q custom_components/integration_manager "$TEST_CONTAINER:$D/custom_components/"
 docker exec -w $D -e PYTHONPATH=$D -e PYTHONDONTWRITEBYTECODE=1 "$TEST_CONTAINER" "$HA_PYTHON" -m unittest discover -s tests -t .
 ```
 (Tests read the README, the workflows and the Dockerfile too: with fewer files about two dozen modules fail to import.)
