@@ -46,6 +46,11 @@ Not in a backup, so a restore never rolls them back:
 - `mqtt_identity.json` and `mqtt_cleanup_pending.json`, since the broker is
   outside the volume.
 
+A backup of the Docker volume made with other tools can leave out `venv-*`
+the same way: each is about 800 MB, and the boot installs the one it needs
+again (with internet access). The app's Supervisor backups already do this
+([app backups](app.md#backups)).
+
 ## Restoring
 
 A restore is applied at the next restart and can be partial (only `.storage`,
