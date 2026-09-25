@@ -69,6 +69,19 @@ LOG_FILE = os.path.join(STATE_DIR, "ha-install.log")
 APT_LOG_FILE = os.path.join(STATE_DIR, "apt-install.log")  # what apt wrote at the last boot that ran it
 APT_LISTS_DIR = "/var/lib/apt/lists"
 REBUILD_FILE = os.path.join(STATE_DIR, "rebuild-pending.json")  # custom_components/integration_manager/ha_import.py
+# Home Assistant OS runs this image as an app (app/config.yaml): the Supervisor writes the options set on the app's
+# Configuration tab to this file and gives the container a SUPERVISOR_TOKEN.  apply_app_options() turns each option
+# into the variable a plain Docker install sets, before anything reads it; the exec of run.py inherits them.
+APP_OPTIONS_FILE = "/data/options.json"
+# option: (variable, None for a text or number, or (value for true, value for false) for a bool; None = unset)
+APP_OPTIONS = {
+    "password": ("HRI_PASSWORD", None),
+    "apt_packages": ("HRI_APT_PACKAGES", None),
+    "call_timeout": ("HRI_CALL_TIMEOUT", None),
+    "ha_version_latest": ("HA_VERSION_LATEST", ("1", "0")),
+    "debug": ("HRI_DEBUG", ("1", None)),  # run.py takes any value as on, "0" too
+    "cookie_secure": ("HRI_COOKIE_SECURE", ("1", None)),
+}
 CONSTRAINTS_URL = "https://raw.githubusercontent.com/home-assistant/core/{version}/homeassistant/package_constraints.txt"
 PYPI_URL = "https://pypi.org/pypi/homeassistant/json"
 
@@ -1006,10 +1019,49 @@ def _phase(phase: str, version: str | None = None, title: str | None = None) -> 
     _status.update(phase=phase, version=version, kind="install", title=title or f"Starting Home Assistant{' ' + version if version else ''} …")
 
 
+def apply_app_options(path: str | None = None) -> list[str] | None:
+    """As a Home Assistant app (SUPERVISOR_TOKEN set and the options file there), set or unset the variable of every
+    option in APP_OPTIONS from the file and return the names set; an empty option is an unset variable.  None when
+    not an app: the environment is left as it is.  ValueError for a file that cannot be read: starting without the
+    password it may hold would open the UI to the network."""
+    path = path or APP_OPTIONS_FILE
+    if not os.environ.get("SUPERVISOR_TOKEN") or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            options = json.load(fh)
+    except (OSError, ValueError) as err:
+        raise ValueError(f"{path} is not readable JSON ({type(err).__name__})") from None
+    if not isinstance(options, dict):
+        raise ValueError(f"{path} does not hold an object")
+    applied = []
+    for name, (var, flag) in APP_OPTIONS.items():
+        value = options.get(name)
+        if flag is not None:
+            value = flag[0] if value is True else flag[1] if value is False else None
+        elif value is not None and not isinstance(value, bool):
+            value = str(value)
+        else:
+            value = None
+        if value:
+            os.environ[var] = value
+            applied.append(var)
+        else:
+            os.environ.pop(var, None)
+    return applied
+
+
 def main() -> None:
     global _boot_server
     restrict_umask()  # first: inherited by everything created from here on, and by the exec'd Home Assistant
     os.makedirs(STATE_DIR, exist_ok=True)  # before the first log() call
+    try:
+        applied = apply_app_options()
+    except ValueError as err:
+        log(f"app options: {err}; not starting")
+        sys.exit(2)
+    if applied is not None:  # names only: an option can be the password
+        log(f"running as a Home Assistant app; from its options: {', '.join(applied) or 'nothing set'}")
     if PORT is None:
         log(f"HRI_PORT={os.environ.get('HRI_PORT')!r} is not a TCP port (1-65535): fix the container's environment; not starting")
         sys.exit(2)

@@ -13,6 +13,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+import yaml
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 
@@ -243,8 +244,12 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("git rev-parse HEAD", wf)
         self.assertIn("HRI_BUILD=${{ steps.commit.outputs.sha }}", wf)
         top = wf.split("\njobs:", 1)[0]
-        self.assertNotIn("contents: write", top)  # only the upload job may write releases
-        self.assertEqual(wf.count("contents: write"), 1)
+        self.assertNotIn("contents: write", top)
+        # only the release upload and the commit of the app's version write, each in its own job
+        jobs = yaml.safe_load(wf)["jobs"]
+        writers = sorted(name for name, job in jobs.items() if (job.get("permissions") or {}).get("contents") == "write")
+        self.assertEqual(writers, ["app-version", "compose"])
+        self.assertEqual(wf.count("contents: write"), 2)
         # a stable release (published + released) is built once, on released; a pre-release on published;
         # a manual run builds unless it only updates the Docker Hub overview
         self.assertIn("if: (github.event_name != 'release' && !inputs.readme_only) || github.event.action == 'released' || github.event.release.prerelease", wf)
