@@ -60,6 +60,21 @@ jobs:
         run: |
           python -m pip install --quiet pyyaml==6.0.3
           python -m unittest tests.test_ha_app.AppDiscoveryTest tests.test_ha_app.AppVersionStepTest -v
+      - id: pin
+        name: The Supervisor the app was last reviewed on (.github/app_versions.json; the app canary proposes moving it)
+        run: echo "supervisor=$(python -c 'import json; print(json.load(open(".github/app_versions.json"))["supervisor"])')" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: home-assistant/supervisor
+          ref: ${{ steps.pin.outputs.supervisor }}
+          path: .supervisor   # a dot folder: the discovery check skips it, as the Supervisor does
+          persist-credentials: false
+      - name: The Supervisor's own validation of the app, not a copy of its schema
+        # the linter above follows a JSON schema kept by hand; this runs the Supervisor's code (its requirements
+        # only: "pip install supervisor" would install supervisord)
+        run: |
+          python -m pip install --quiet -r .supervisor/requirements.txt pyyaml
+          python .github/app_supervisor_check.py .supervisor
 
   boot:
     name: ${{ matrix.name }}

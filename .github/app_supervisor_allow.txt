@@ -1,0 +1,6 @@
+# Supervisor warnings app_supervisor_check.py lets through, one per line: a line matches a warning when the warning's
+# text contains it.  Every other warning the Supervisor logs while it reads the app fails the check.
+#
+# app/config.yaml still maps addon_config, the only name Supervisors before 2026.07 know; the switch to app_config
+# removes this line.
+uses legacy map type 'addon_config'; use 'app_config' instead

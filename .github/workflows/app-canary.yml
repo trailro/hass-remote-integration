@@ -1,0 +1,244 @@
+# What this catches that CI cannot: the app (app/config.yaml, repository.yaml) is read by the Supervisor, and the
+# Supervisor, Home Assistant OS and the app linter ship on their own schedules.  CI validates the app against the
+# Supervisor recorded in .github/app_versions.json; this asks weekly where the stable and beta channels are, runs the
+# Supervisor's own validation of the app on the stable and beta Supervisor and on its main branch, runs the newest
+# release of the linter, reads the release notes since the record, and - when something moved - boots the newest
+# stable Home Assistant OS in a VM, installs the app from this repository, backs it up and restores it.  The report
+# turns that into an issue when something fails or the notes need reading, and a pull request that moves the record
+# when everything passed on the new versions.
+name: App canary
+
+on:
+  schedule:
+    - cron: "41 6 * * 1"  # Monday morning, after the Home Assistant canary; GitHub runs scheduled workflows late when busy
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print the issues, comments and pull requests instead of writing them"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-canary
+  cancel-in-progress: false
+
+jobs:
+  versions:
+    name: Ask which versions to test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      changed: ${{ steps.pick.outputs.changed }}
+      moved: ${{ steps.pick.outputs.moved }}
+      schema: ${{ steps.pick.outputs.schema }}
+      proposed: ${{ steps.pick.outputs.proposed }}
+      branch: ${{ steps.pick.outputs.branch }}
+      supervisor: ${{ steps.pick.outputs.supervisor }}
+      supervisor_beta: ${{ steps.pick.outputs.supervisor_beta }}
+      haos: ${{ steps.pick.outputs.haos }}
+      core: ${{ steps.pick.outputs.core }}
+      linter: ${{ steps.pick.outputs.linter }}
+      linter_sha: ${{ steps.pick.outputs.linter_sha }}
+      configuration_md_sha256: ${{ steps.pick.outputs.configuration_md_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - id: pick
+        name: The stable and beta channels, the newest linter and the docs, against .github/app_versions.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/app_canary_versions.py >> "$GITHUB_OUTPUT"
+
+  schema:
+    name: Supervisor ${{ matrix.kind }} (${{ matrix.ref }}) reads the app
+    needs: versions
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.versions.outputs.schema) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: home-assistant/supervisor
+          ref: ${{ matrix.ref }}
+          path: .supervisor  # a dot folder: the discovery check skips it, as the Supervisor does
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: The Supervisor's requirements (never "pip install supervisor", which is supervisord)
+        run: python -m pip install --quiet -r .supervisor/requirements.txt pyyaml
+      - name: The Supervisor's own validation of the app
+        run: python .github/app_supervisor_check.py .supervisor
+      - name: Record this leg's result
+        if: always()
+        run: mkdir -p leg && echo "${{ job.status }}" > leg/result
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: app-canary-schema-${{ matrix.kind }}
+          path: leg/result
+          retention-days: 7
+
+  lint:
+    name: The newest app linter (${{ needs.versions.outputs.linter }})
+    needs: versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      # the release is resolved at run time (CI pins one; Dependabot moves that pin): uses: cannot take an expression,
+      # so the action is checked out at the resolved commit and run from its folder
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: frenck/action-app-linter
+          ref: ${{ needs.versions.outputs.linter_sha }}
+          path: .app-linter
+          persist-credentials: false
+      - name: app/config.yaml against the linter's schema
+        uses: ./.app-linter
+        with:
+          path: app
+
+  haos:
+    name: Home Assistant OS ${{ needs.versions.outputs.haos }} installs, backs up and restores the app
+    needs: versions
+    # a VM boot and two Home Assistant installs: only when a version moved, or by hand
+    if: needs.versions.outputs.changed == 'true' || github.event_name != 'schedule'
+    runs-on: ubuntu-latest  # amd64: the OVA is an x86-64 image and the runners have KVM
+    timeout-minutes: 45
+    env:
+      HAOS: ${{ needs.versions.outputs.haos }}
+      # the Supervisor clones the repository at this ref and pulls the image app/config.yaml names there: the last
+      # release (ghcr.io/trailro/hass-remote-integration:<version>), not an image of this commit - for a canary of the
+      # app's packaging, that is the image a user gets
+      REPO_URL: ${{ github.server_url }}/${{ github.repository }}#${{ github.ref_name }}
+      HRI_PORT: "8087"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      # Home Assistant OS's own test harness (labgrid over the serial console), at the release under test
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: home-assistant/operating-system
+          ref: ${{ needs.versions.outputs.haos }}
+          path: os
+          sparse-checkout: tests
+          persist-credentials: false
+      - name: QEMU and UEFI firmware
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q qemu-system-x86 ovmf
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"  # what the harness's own workflow runs
+      - name: The harness's requirements
+        run: python -m pip install --quiet -r os/tests/requirements.txt
+      - name: The OVA image of Home Assistant OS ${{ env.HAOS }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$HAOS" --repo home-assistant/operating-system --pattern "haos_ova-$HAOS.qcow2.xz" --dir "$RUNNER_TEMP"
+          xz -dc "$RUNNER_TEMP/haos_ova-$HAOS.qcow2.xz" > os/tests/haos.qcow2
+          rm "$RUNNER_TEMP/haos_ova-$HAOS.qcow2.xz"
+          ls -l os/tests/haos.qcow2
+      - name: KVM for the runner's user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Boot, install the app, back it up, restore it
+        working-directory: os/tests
+        run: |
+          cp ../../.github/haos/strategy.yaml app-canary-strategy.yaml
+          cp ../../.github/haos/test_app_canary.py .
+          python -m pytest --lg-env app-canary-strategy.yaml --lg-log=lg_logs -o log_cli=true -o log_cli_level=INFO \
+            --durations=0 -v test_app_canary.py
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: app-canary-haos-logs
+          path: os/tests/lg_logs/**
+          retention-days: 14
+          if-no-files-found: ignore
+
+  notes:
+    name: Release notes since the record
+    needs: versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      found: ${{ steps.scan.outputs.found }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - id: scan
+        name: Breaking changes and app-relevant lines of the Supervisor and Home Assistant OS
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DOCS_SHA: ${{ needs.versions.outputs.configuration_md_sha256 }}
+        run: |
+          mkdir -p notes
+          python3 .github/app_release_scan.py notes/notes.md "$DOCS_SHA" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: steps.scan.outputs.found == 'true'
+        with:
+          name: app-canary-notes
+          path: notes/notes.md
+          retention-days: 7
+
+  report:
+    name: Say what happened
+    needs: [versions, schema, lint, haos, notes]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write        # the branch a new record is proposed on
+      issues: write          # a failure, or release notes to read
+      pull-requests: write   # the new record, when everything passed
+      actions: write         # CI on that branch: a pull request opened with GITHUB_TOKEN starts no workflow
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: app-canary-*
+          path: results
+      - name: Issues, and a pull request when the stable path passed on new versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+          VERSIONS_RESULT: ${{ needs.versions.result }}
+          SCHEMA_JOB: ${{ needs.schema.result }}
+          LINT_RESULT: ${{ needs.lint.result }}
+          HAOS_RESULT: ${{ needs.haos.result }}
+          NOTES_FOUND: ${{ needs.notes.outputs.found }}
+          CHANGED: ${{ needs.versions.outputs.changed }}
+          MOVED: ${{ needs.versions.outputs.moved }}
+          PROPOSED: ${{ needs.versions.outputs.proposed }}
+          BRANCH: ${{ needs.versions.outputs.branch }}
+          SUPERVISOR: ${{ needs.versions.outputs.supervisor }}
+          SUPERVISOR_BETA: ${{ needs.versions.outputs.supervisor_beta }}
+          HAOS: ${{ needs.versions.outputs.haos }}
+          CORE: ${{ needs.versions.outputs.core }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GH_SERVER: ${{ github.server_url }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # each schema leg's own result (a failing beta or main must not hide a passing stable), else the job's
+          leg() { cat "results/app-canary-schema-$1/result" 2>/dev/null || echo "$SCHEMA_JOB"; }
+          SCHEMA_STABLE=$(leg stable) SCHEMA_BETA=$(leg beta) SCHEMA_MAIN=$(leg main) \
+            NOTES_FILE=results/app-canary-notes/notes.md sh .github/app_canary_report.sh
