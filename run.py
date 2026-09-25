@@ -181,8 +181,9 @@ async def _boot() -> int:
     booted: list = []  # the HomeAssistant object, once it exists
     _install_boot_signal_handlers(asyncio.current_task(), lambda: booted[0] if booted else None)
     os.makedirs(os.path.join(CONFIG_DIR, "custom_components"), exist_ok=True)
-    _sweep_deploy_leftovers()
-    _sync_manager_component()
+    # a thread, in this order: listing and copying on the loop is what block_async_io reports (HRI_DEBUG)
+    await asyncio.to_thread(_sweep_deploy_leftovers)
+    await asyncio.to_thread(_sync_manager_component)
     # Like the stock image (WORKDIR /config): the loader imports the
     # namespace package `custom_components` once and then drops the config
     # dir from sys.path, so its __path__ re-resolves against cwd ('').
@@ -235,7 +236,7 @@ async def _boot() -> int:
     _LOGGER.info("custom components found: %s", sorted(custom))
     # Regression guard for the namespace-package shadowing bug: the files
     # are on disk but the loader cannot see them.
-    wanted = _running_domain()
+    wanted = await hass.async_add_executor_job(_running_domain)  # reads state.json
     if wanted and os.path.isdir(os.path.join(CONFIG_DIR, "custom_components", wanted)) and wanted not in custom:
         _LOGGER.error(
             "%s is installed on disk but the loader did not find it; "
@@ -260,7 +261,7 @@ async def _boot() -> int:
     # works the standard way.  Before integration_manager: its reconcile may
     # enable (= set up) entries, and config entries are set up with this
     # same dict (hass.config_entries._hass_config).
-    running = _running_domain()
+    running = await hass.async_add_executor_job(_running_domain)
     yaml_cfg = await hass.async_add_executor_job(_yaml_config_for, hass, running) if running else None
     if yaml_cfg is not None:
         config[running] = yaml_cfg
