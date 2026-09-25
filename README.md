@@ -81,7 +81,8 @@ recorder. It runs exactly one integration and publishes it.
 
 ## Requirements
 
-- Docker with Compose.
+- Docker with Compose, or Home Assistant OS / Supervised (as an app, see
+  [below](#home-assistant-os--supervised)).
 - An MQTT broker reachable from the container (mosquitto or any other).
 - For the entities to appear in your main Home Assistant: its MQTT
   integration, on **2025.10 or newer** (2026.5 for `date`, `time` and
@@ -153,6 +154,20 @@ docker compose up -d
 
 Open `http://<docker-host>:8087`. On the very first start the page shows the
 Home Assistant installation progress; it takes a few minutes.
+
+### Home Assistant OS / Supervised
+
+This repository is also an app repository:
+
+1. **Settings > Apps > App Store**, menu **⋮ > Repositories**, add
+   `https://github.com/trailro/hass-remote-integration`.
+2. Install **hass-remote-integration**, set a password on its
+   **Configuration** tab, and start it.
+3. **Open Web UI**. The first start installs Home Assistant inside the app,
+   which takes a few minutes and needs internet access.
+
+The Mosquitto broker app is reachable as `core-mosquitto`. Options, backups,
+serial devices and updates: [docs/app.md](docs/app.md).
 
 ---
 
@@ -470,6 +485,7 @@ HRI_NAME=hri-other HRI_PORT=8088 docker compose -p hri-other up -d
 | File | What is in it |
 |---|---|
 | [docs/home-assistant-versions.md](docs/home-assistant-versions.md) | Changing the Home Assistant inside the container, downgrades, the image's floor, what the preflight checks |
+| [docs/app.md](docs/app.md) | Running it as a Home Assistant OS / Supervised app: options, backups, serial devices, updates |
 | [docs/backups.md](docs/backups.md) | What a backup holds and leaves out, restore, pruning, versions of backups |
 | [docs/health.md](docs/health.md) | The health verdict and its document, stale basis, the health watchdog, resource history |
 | [docs/logs.md](docs/logs.md) | The Logs and Log files pages, downloads, the line format |
