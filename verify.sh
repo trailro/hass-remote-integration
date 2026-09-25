@@ -6,12 +6,14 @@
 #   verify.sh test      discovery components against HA's MQTT schemas (after any discovery change)
 #   verify.sh unit      unit tests (tests/) in the container's HA venv, against the repo's copy of the code
 # Reads HRI_NAME, HRI_PORT, HRI_IMAGE, HRI_NETWORK, HRI_PASSWORD (or HRI_PASSWORD_FILE, which wins) and TZ
-# from the environment or a .env file.  HRI_ENV="K=V K2=V2" passes more to the container, which is how CI
+# from the environment or a .env file.  HRI_NAME (container and volume) defaults to hri-verify, a throwaway name:
+# recreate stops and removes it, so it is never the production container's name unless .env says so.
+# HRI_ENV="K=V K2=V2" passes more to the container, which is how CI
 # boots a version other than the newest (HA_VERSION_LATEST=0, HA_VERSION_DEFAULT=<version>).  start exits non-zero when the API does not come up (timeout, restart loop).
 set -u
 cd "$(dirname "$0")"
 [ -f .env ] && . ./.env
-NAME=${HRI_NAME:-hass-remote-integration}
+NAME=${HRI_NAME:-hri-verify}
 PORT=${HRI_PORT:-8087}
 IMAGE=${HRI_IMAGE:-hass-remote-integration:local}
 URL=http://127.0.0.1:$PORT/api/status
@@ -38,12 +40,18 @@ start() {
     set --
   fi
   for kv in ${HRI_ENV:-}; do set -- "$@" -e "$kv"; done
-  docker run -d --name "$NAME" --restart unless-stopped --init --stop-timeout 240 \
+  # the id through a variable, not a pipe: a pipe's status is its last command's, and a failed run (name taken,
+  # port in use, no such image) would go on to wait 15 minutes for an API that never comes
+  if ! id=$(docker run -d --name "$NAME" --restart unless-stopped --init --stop-timeout 240 \
     ${HRI_NETWORK:+--network "$HRI_NETWORK"} -p "$PORT:$PORT" \
     -v "$NAME:/config" \
     -e TZ="${TZ:-UTC}" -e HRI_PORT="$PORT" "$@" \
     --add-host host.docker.internal:host-gateway \
-    "$IMAGE" | cut -c1-12 | sed 's/^/  id: /'
+    "$IMAGE"); then
+    echo "  docker run failed"
+    return 1
+  fi
+  echo "  id: $(printf '%s' "$id" | cut -c1-12)"
   echo "=== waiting for the manager API on $URL (a fresh volume installs Home Assistant first) ==="
   t0=$(date +%s)
   until api_get 2 "$URL" | python3 -c "import json,sys; sys.exit(0 if 'ha_version' in json.load(sys.stdin) else 1)" 2>/dev/null; do
