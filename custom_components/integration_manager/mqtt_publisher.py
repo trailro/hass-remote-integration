@@ -3027,6 +3027,10 @@ class MqttPublisher:
         manager_topic = self._discovery_topic(f"{base}_manager")
         groups, _ = self._group_by_device() if self.config.discovery_enabled else ({}, {})
         live_topics = set(self._topics.values())  # once: the loop below runs over every retained topic
+        # an entity announced now under another device (it moved while the container was down): the old config must
+        # drop it, or the consumer keeps it there and ignores it in the config of the device it moved to
+        owner = {eid: did for did, (_block, comps) in groups.items() for eid in comps}
+        moved_to: set[str] = set()
         removed_components, cleared_devices, docs = 0, 0, []
         for topic, payload in found.items():
             if not self._is_ours(topic, payload, base):
@@ -3044,11 +3048,22 @@ class MqttPublisher:
                 gone = {key: c.get("platform") for key, c in comps.items()
                         if isinstance(c, dict) and str(c.get("unique_id") or "").startswith(self.prefix)
                         and (self._entity_gone(eid := str(c["unique_id"])[len(self.prefix):]) or self._excluded_now(eid))}
-                live = {key for key, c in comps.items() if isinstance(c, dict) and c.get("unique_id") and key not in gone}
                 did = topic.split("/")[-2]
+                moved = {key: c.get("platform") for key, c in comps.items()
+                         if key not in gone and isinstance(c, dict) and str(c.get("unique_id") or "").startswith(self.prefix)
+                         and owner.get(str(c["unique_id"])[len(self.prefix):]) not in (None, did)}
+                moved_to |= {owner[str(comps[key]["unique_id"])[len(self.prefix):]] for key in moved}
+                gone |= moved
+                live = {key for key, c in comps.items() if isinstance(c, dict) and c.get("unique_id") and key not in gone}
                 if did not in groups:
                     if gone and not live and self._publish(topic, None, qos=1):
                         cleared_devices += 1
+                    elif moved and live:
+                        # entities still setting up keep the config: only the moved ones get their removal form
+                        doc["components"] = {**comps, **{key: {"platform": p} for key, p in moved.items() if p}}
+                        self._last_hash.pop(topic, None)
+                        if self._publish(topic, _dumps(doc), qos=1):
+                            removed_components += len(moved)
                     continue
                 current = {_comp_key(eid) for eid in groups[did][1]}
                 extra = {key: platform for key, platform in gone.items() if key not in current and platform}
@@ -3062,6 +3077,11 @@ class MqttPublisher:
                     docs.append(topic)
         self._boot_components = {}  # decided: from here on configs carry only what exists
         self._boot_removed = set()
+        if moved_to:
+            # announced again once the old configs have dropped them (as a move seen live, _publish_discovery_all)
+            for did in moved_to:
+                self._last_hash.pop(self._discovery_topic(did), None)
+            self.hass.loop.call_later(5, self._publish_discovery_all, False)
         if docs:
             if removed_components or cleared_devices:
                 await asyncio.sleep(2)  # the removal forms reach the consumer before the documents empty (no "Erroneous JSON")
