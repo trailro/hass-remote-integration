@@ -428,10 +428,17 @@ def _no_constant(name: str) -> Any:
     raise ValueError(f"{name} is not a number a service accepts")
 
 
+def _default_host() -> str:
+    """The broker a fresh install offers: the official broker app's name when running as a Home Assistant app
+    (entrypoint.py apply_app_options sets HRI_APP), the compose service name otherwise.  A default only: a host
+    in mqtt.json always wins."""
+    return "core-mosquitto" if os.environ.get("HRI_APP") else "mosquitto"
+
+
 @dataclass
 class MqttConfig:
     enabled: bool = False
-    host: str = "mosquitto"
+    host: str = field(default_factory=_default_host)
     port: int = 1883
     username: str = ""
     password: str = ""
