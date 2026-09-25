@@ -62,19 +62,29 @@ SECRET_FILES = (f"{STATE_DIR}/settings.json", f"{STATE_DIR}/mqtt.json")  # mode 
 # relative to the config dir; directories are recursed
 INCLUDE_DIRS = (".storage", "custom_components", STATE_DIR)
 INCLUDE_ROOT_GLOBS = ("*.yaml", "*.yml")
-EXCLUDE_GLOBS = (
-    f"{STATE_DIR}/auth_key", f"{STATE_DIR}/auth_key.tmp", f"{STATE_DIR}/auth_revoked", f"{STATE_DIR}/auth_revoked.tmp",  # a restore must not revive logged-out sessions
+# What no backup holds, here or in the Supervisor's backup of the app (app/config.yaml backup_exclude is derived
+# from this tuple, and tests/test_ha_app.py checks it): what the boot rebuilds (the Home Assistant venvs, ~700 MB
+# each), logs, caches, the backups themselves, files being written, a restore or an import in flight, and the
+# login key with its revocations (a restore must not revive logged-out sessions; a new key is made at first use).
+DISPOSABLE_GLOBS = (
+    f"{STATE_DIR}/auth_key", f"{STATE_DIR}/auth_key.tmp", f"{STATE_DIR}/auth_revoked", f"{STATE_DIR}/auth_revoked.tmp",
     "venv-*", "venv-current", "backups", "backups/*", "*.log",
     "*.log.*", "__pycache__", "*/__pycache__", "*/__pycache__/*", "*.pyc", "deps", "deps/*", "tts", "tts/*",
     f"{STATE_DIR}/restore-pending*.zip", f"{STATE_DIR}/restore-pending.json", f"{STATE_DIR}/restore-applied.json", f"{STATE_DIR}/restore-failed.json", f"{STATE_DIR}/*.tmp", f"{STATE_DIR}/pre-restore-*", f"{STATE_DIR}/ha-install.log",
     f"{STATE_DIR}/staging-*", f"{STATE_DIR}/staging-*/*", f"{STATE_DIR}/backups", f"{STATE_DIR}/backups/*",
     f"{STATE_DIR}/import.tar", f"{STATE_DIR}/import.tar.tmp", f"{STATE_DIR}/import-extracted", f"{STATE_DIR}/import-extracted/*",
-    ".storage/*.log", ".storage/core.uuid",
+    ".storage/*.log",
+    # a store being written (HA's temporary file: tmp + 8 random characters) and an import's set-aside original
+    ".storage/tmp" + "[a-z0-9_]" * 8, ".storage/*.pre-import", ".storage/*.pre-import.done",
+)
+# Left out of a backup made here only so that a restore, which writes over what the archive holds and leaves the
+# rest alone, keeps the live copy.  A Supervisor restore replaces the app's whole folder instead: its backup keeps
+# these, since leaving them out there would delete them.
+KEEP_LIVE_GLOBS = (
+    ".storage/core.uuid",
     # the port Home Assistant was set up with: a backup from a container on another HRI_PORT (a second
     # container) would pin a foreign port here and every boot would stop at run.py's port check
     ".storage/http",
-    # a store being written (HA's temporary file: tmp + 8 random characters) and an import's set-aside original
-    ".storage/tmp" + "[a-z0-9_]" * 8, ".storage/*.pre-import", ".storage/*.pre-import.done",
     # the record of what happened (timeline, resource history, change reports) must survive a restore
     f"{STATE_DIR}/events.jsonl*", f"{STATE_DIR}/resource_history.json*", f"{STATE_DIR}/change_reports.json*",
     f"{STATE_DIR}/latest_versions.json*", f"{STATE_DIR}/mqtt_undiscover.json",  # a restore must not bring back older "latest" versions
@@ -82,6 +92,7 @@ EXCLUDE_GLOBS = (
     # on the broker (the main HA keeps those entities) or clear data published since
     f"{STATE_DIR}/mqtt_identity.json*", f"{STATE_DIR}/mqtt_cleanup_pending.json*",
 )
+EXCLUDE_GLOBS = DISPOSABLE_GLOBS + KEEP_LIVE_GLOBS
 KEEP_DEFAULT = 5
 _LOGGER = logging.getLogger(__name__)
 UNKNOWN_DOMAIN = object()  # backup_domain: the archive does not say which integration ran
