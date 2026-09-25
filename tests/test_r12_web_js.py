@@ -40,12 +40,12 @@ class PagesTest(unittest.TestCase):
 
     def test_a_logout_the_volume_refused_says_so_before_leaving(self):
         refused = self.out["logout"]["refused"]
-        self.assertEqual(refused["sent"], ["/api/logout"])
+        self.assertEqual(refused["sent"], ["api/logout"])
         self.assertEqual(refused["alerts"], ["logged out, but the logout could not be recorded on the volume (No space left on device)"])
-        self.assertEqual(refused["href"], "/login")
+        self.assertEqual(refused["href"], "login")  # relative: the ingress prefix
 
     def test_a_recorded_logout_leaves_without_a_word(self):
-        self.assertEqual(self.out["logout"]["recorded"], {"alerts": [], "sent": ["/api/logout"], "href": "/login"})
+        self.assertEqual(self.out["logout"]["recorded"], {"alerts": [], "sent": ["api/logout"], "href": "login"})
 
     def test_a_refused_subscription_shows_while_connected(self):
         refused = self.out["mqconn"]["refused"]

@@ -61,7 +61,7 @@ function render(){
      <div><div class="k">registry / MQTT</div><pre>${esc(JSON.stringify(meta,null,1))}</pre></div></div></td>`;
    x.querySelectorAll('input,button').forEach(el=>el.onclick=e=>e.stopPropagation());
    const act=async(action,body,confirmMsg)=>{ if(confirmMsg&&!confirm(confirmMsg)) return;
-     const res=await (await fetch('/api/entities/'+encodeURIComponent(r.entity_id)+'/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})})).json();
+     const res=await (await fetch('api/entities/'+encodeURIComponent(r.entity_id)+'/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})})).json();
      const m=x.querySelector('.act-msg'); m.textContent=res.ok?'ok':('ERROR: '+(res.error||res.message||'')); m.className='act-msg '+(res.ok?'ok':'bad');
      if(res.ok){ if(res.entity_id&&res.entity_id!==r.entity_id){open.delete(r.entity_id);open.add(res.entity_id);} await load(); } };
    if(canEdit){
@@ -83,7 +83,7 @@ function chips(){
  sel.innerHTML='<option value="">all integrations</option>'+integs.map(i=>`<option ${i===cur?'selected':''}>${esc(i)}</option>`).join('');
 }
 async function load(){
- try{const r=await fetch('/api/entities');rows=await r.json();$('#ts').textContent=new Date().toLocaleTimeString();chips();render();}
+ try{const r=await fetch('api/entities');rows=await r.json();$('#ts').textContent=new Date().toLocaleTimeString();chips();render();}
  catch(e){$('#ts').textContent='error: '+e}
 }
 ['#q','#integ','#stateFilter','#onlyDisc'].forEach(s=>$(s).addEventListener('input',render));

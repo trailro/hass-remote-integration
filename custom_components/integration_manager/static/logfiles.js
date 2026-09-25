@@ -4,7 +4,7 @@ const EXAMPLE={pattern:'^(?P<time>\\S+ \\S+) (?P<level>[A-Z]+) \\((?P<thread>[^)
  hide:['thread'], dim:['time','logger'], color_by:'level', colors:{WARNING:'warn',ERROR:'bad',CRITICAL:'bad',DEBUG:'muted'}};
 async function loadFiles(){
  const sel=$('#file'), cur=sel.value, was=files.find(f=>f.id===cur);
- files=await (await fetch('/api/log_files',{headers:{'X-Requested-With':'fetch'}})).json();
+ files=await (await fetch('api/log_files',{headers:{'X-Requested-With':'fetch'}})).json();
  // the value is the file's id: two names can mask to the same label.  Ids are new after a restart: the file chosen
  // before is found again by its label, which only says which file it was while no other file shows that label
  let pick=files.find(f=>f.id===cur);
@@ -18,12 +18,12 @@ async function loadFiles(){
 }
 // the whole file, masked as the table is: fetchDownload (hri.js) sends the header the endpoint requires, which a
 // plain link cannot.  By id, so the file saved is the file shown even when another file carries the same label
-$('#download').onclick=()=>fetchDownload($('#download'),'/api/log_files/download?id='+encodeURIComponent($('#file').value),'Download','log.txt');
+$('#download').onclick=()=>fetchDownload($('#download'),'api/log_files/download?id='+encodeURIComponent($('#file').value),'Download','log.txt');
 let LOADING=false, AGAIN=false;
 async function load(){ if(LOADING){ AGAIN=true; return; } LOADING=true; try{ do{ AGAIN=false; await loadNow(); }while(AGAIN); } finally { LOADING=false; } }  // no overlapping polls; a change made meanwhile loads right after
 async function loadNow(){
  const was=$('#file').value, p=new URLSearchParams({id:was,lines:$('#lines').value,q:$('#q').value});
- const resp=await fetch('/api/log_files/tail?'+p,{headers:{'X-Requested-With':'fetch'}}), r=await resp.json();
+ const resp=await fetch('api/log_files/tail?'+p,{headers:{'X-Requested-With':'fetch'}}), r=await resp.json();
  // ids are new after a restart and a file can go away: list the files again, and load once more if the selection changed
  if(resp.status===404){ await loadFiles(); if($('#file').value!==was) AGAIN=true; }
  $('#path').textContent=r.path||'—'; $('#size').textContent=r.bytes!=null?`${(r.bytes/1024).toFixed(0)} KB · ${r.total_lines_scanned} lines read`:'';
@@ -38,13 +38,13 @@ async function loadNow(){
  if(atBottom) wrap.scrollTop=wrap.scrollHeight;
 }
 async function loadFormat(){
- const s=await (await fetch('/api/settings')).json(); const f=s.log_format||{};
+ const s=await (await fetch('api/settings')).json(); const f=s.log_format||{};
  $('#fmt').value=Object.keys(f).length?JSON.stringify(f,null,2):'';
 }
 $('#fmtsave').onclick=async()=>{
  const text=$('#fmt').value.trim(); let fmt=null;
  if(text){ try{ fmt=JSON.parse(text); }catch(e){ $('#fmtmsg').textContent='not valid JSON: '+e.message; return; } }
- const r=await post('/api/settings',{log_format:fmt});
+ const r=await post('api/settings',{log_format:fmt});
  $('#fmtmsg').textContent=r.ok?(fmt?'saved':'cleared: lines are shown whole'):(r.error||'error');
  if(r.ok){ await loadFormat(); load(); }
 };

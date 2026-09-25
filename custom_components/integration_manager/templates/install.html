@@ -4,14 +4,14 @@
 <title>hass-remote-integration · install</title>
 <!--css--></head><body><main>
 <h1>Install</h1>
-<div style="color:var(--mut);margin-bottom:12px">Getting code into the version store: a release of a registry integration, any GitHub ref with a chosen Home Assistant version (checked first), or a directory you are working on. Nothing runs until you start it from the <a href="/">Overview</a> or the <a href="/config">Integration</a> page.<div id="flash" class="warn" style="min-height:1.2em"></div></div>
+<div style="color:var(--mut);margin-bottom:12px">Getting code into the version store: a release of a registry integration, any GitHub ref with a chosen Home Assistant version (checked first), or a directory you are working on. Nothing runs until you start it from the <a href="./">Overview</a> or the <a href="config">Integration</a> page.<div id="flash" class="warn" style="min-height:1.2em"></div></div>
 
 <div class="card"><h2>Quick install from the registry</h2>
  <div class="mut" style="margin-bottom:6px">One integration per container: choosing a different one than the installed <b id="curdom">…</b> <b>replaces</b> it (its config entries, patches, YAML and retained MQTT documents are removed after a backup <code>pre-replace-…</code>; restoring that backup brings it back). Another integration alongside = another container (<code>HRI_NAME</code>, <code>HRI_PORT</code>).</div>
  <div class="row"><label>integration <select id="regsel"></select></label><button id="reginstall" class="primary">Install latest stable</button><span id="regrepo" class="mut"></span></div>
  <details style="margin-top:8px"><summary class="mut" style="cursor:pointer">add a repo to the registry</summary>
   <div class="row" style="margin-top:6px"><input id="regdom" placeholder="domain (e.g. my_integration)"><input id="regrepo_in" placeholder="GitHub owner/repo"><input id="regname" placeholder="display name"><button id="regadd">Add</button></div>
-  <div class="mut">The repo must publish releases containing <code>custom_components/&lt;domain&gt;/</code>. Private repositories need the GitHub token (<a href="/system">System</a>).</div>
+  <div class="mut">The repo must publish releases containing <code>custom_components/&lt;domain&gt;/</code>. Private repositories need the GitHub token (<a href="system">System</a>).</div>
  </details>
 </div>
 
@@ -34,7 +34,7 @@
 </div>
 
 <div class="card"><h2>Dev mode · install from a directory</h2>
- <div class="mut" style="margin-bottom:8px">A directory bind-mounted into the container (<code>docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d</code> mounts <code>./dev-src</code> read-only at <code>/dev-src</code>; the directory itself, <code>&lt;dir&gt;/&lt;domain&gt;/</code> or <code>&lt;dir&gt;/custom_components/&lt;domain&gt;/</code> must hold a <code>manifest.json</code>). It lands in the version store as <b>local</b> and is started like any version; "Reinstall + restart" refreshes the running copy from the directory. <code>HRI_DEBUGPY=5678</code> in the environment makes the process listen for a debugger on that port (VS Code: attach to <code>localhost:5678</code>). Exceptions: the <a href="/logs?level=ERROR">Logs page</a>.</div>
+ <div class="mut" style="margin-bottom:8px">A directory bind-mounted into the container (<code>docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d</code> mounts <code>./dev-src</code> read-only at <code>/dev-src</code>; the directory itself, <code>&lt;dir&gt;/&lt;domain&gt;/</code> or <code>&lt;dir&gt;/custom_components/&lt;domain&gt;/</code> must hold a <code>manifest.json</code>). It lands in the version store as <b>local</b> and is started like any version; "Reinstall + restart" refreshes the running copy from the directory. <code>HRI_DEBUGPY=5678</code> in the environment makes the process listen for a debugger on that port (VS Code: attach to <code>localhost:5678</code>). Exceptions: the <a href="logs?level=ERROR">Logs page</a>.</div>
  <div class="row" style="margin-bottom:6px"><span id="devdir" class="mut"></span><button id="devrefresh">Refresh</button><span id="devdbg" class="mut"></span></div>
  <table id="devlist"><tr><th>directory</th><th>domain</th><th>version</th><th>config flow</th><th>state</th><th></th></tr></table>
  <div class="row" style="margin-top:6px"><label class="mut" style="margin:0;display:inline-flex;gap:6px;align-items:center"><input type="checkbox" id="devrestart" checked> restart the process after reinstalling the running copy</label><span id="devmsg" class="mut"></span></div>

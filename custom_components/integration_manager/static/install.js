@@ -97,7 +97,7 @@ async function catSearch(){
 }
 $('#catq').addEventListener('input',()=>{ clearTimeout(CATTIMER); CATTIMER=setTimeout(catSearch,300); });
 $('#bprepare').onclick=()=>prepare(false); $('#bstart').onclick=()=>prepare(true);
-$('#brestart').onclick=async()=>{ if(!confirm('Restart the process now?')) return; const r=await post('api/restart'); if(!r.ok){ $('#bmsg').textContent='restart refused: '+r.error; return; } $('#bmsg').textContent='restarting…'; setTimeout(()=>location.href='/',10000); };
+$('#brestart').onclick=async()=>{ if(!confirm('Restart the process now?')) return; const r=await post('api/restart'); if(!r.ok){ $('#bmsg').textContent='restart refused: '+r.error; return; } $('#bmsg').textContent='restarting…'; setTimeout(()=>location.href='./',10000); };
 
 
 
