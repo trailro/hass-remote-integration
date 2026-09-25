@@ -17,5 +17,8 @@ configuration:
   cookie_secure:
     name: Secure session cookie
     description: Mark the session cookie Secure, behind a reverse proxy with TLS (HRI_COOKIE_SECURE).
+  ingress_users:
+    name: Home Assistant users (sidebar panel)
+    description: Only these Home Assistant users (their user names) may open the sidebar panel (HRI_INGRESS_USERS). Empty means every Home Assistant user. The app's port keeps its own password.
 network:
   8087/tcp: Web UI and API

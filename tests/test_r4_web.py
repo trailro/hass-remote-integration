@@ -172,7 +172,7 @@ class HostGuardTest(unittest.TestCase):
 
         with self.assertRaises(web.HTTPNotFound) as ctx:
             asyncio.run(guard(_get("/nothing"), handler))
-        self.assertIn("frame-ancestors 'none'", ctx.exception.headers.get("Content-Security-Policy", ""))
+        self.assertIn("frame-ancestors 'self'", ctx.exception.headers.get("Content-Security-Policy", ""))
 
     def test_onboarding_api_is_blocked(self):
         """U1: an integration depending on frontend/panel_custom loads HA's onboarding, whose user creation is

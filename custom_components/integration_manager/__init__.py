@@ -235,8 +235,11 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     # DNS rebinding guard: the JSON/CORS gates only stop cross-origin pages; a
     # page whose hostname is re-pointed at this LAN IP is same-origin.  Only
     # Host values that cannot be an attacker's public name are served.
-    from .hostguard import install_host_guard
+    from .hostguard import CSP, install_host_guard
+    from .ingress import install_ingress
 
+    # as the Home Assistant app: Home Assistant's ingress panel, let through before HA's forwarded middleware
+    install_ingress(hass, CSP)
     install_host_guard(hass, installer)
 
     # optional password (HRI_PASSWORD / HRI_PASSWORD_FILE): checked after the host guard

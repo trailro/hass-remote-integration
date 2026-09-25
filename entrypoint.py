@@ -86,6 +86,7 @@ APP_OPTIONS = {
     "ha_version_latest": ("HA_VERSION_LATEST", ("1", "0")),
     "debug": ("HRI_DEBUG", ("1", None)),  # unset rather than "0": the variable a Docker install reads
     "cookie_secure": ("HRI_COOKIE_SECURE", ("1", None)),
+    "ingress_users": ("HRI_INGRESS_USERS", None),  # a list of Home Assistant user names: comma separated
 }
 # The Supervisor starts a stopped or crashed app again only with the app's Watchdog toggle on, which is off by default:
 # HRI turns it on once per volume (the marker records that it did), so an operator who turns it off later is not
@@ -93,6 +94,8 @@ APP_OPTIONS = {
 # /addons/self/...), and the options handler only stores the flag (api/apps.py APIApps.options): the app is not restarted.
 SUPERVISOR_OPTIONS_URL = "http://supervisor/addons/self/options"
 APP_WATCHDOG_MARKER = os.path.join(STATE_DIR, "app-watchdog-enabled")
+# the Supervisor, the transport peer of every request Home Assistant's ingress proxies (as ingress.py SUPERVISOR_IP)
+SUPERVISOR_IP = "172.30.32.2"
 CONSTRAINTS_URL = "https://raw.githubusercontent.com/home-assistant/core/{version}/homeassistant/package_constraints.txt"
 PYPI_URL = "https://pypi.org/pypi/homeassistant/json"
 
@@ -350,7 +353,15 @@ class _StatusHandler(http.server.BaseHTTPRequestHandler):
     timeout = 30
 
     def do_GET(self) -> None:  # noqa: N802
-        if not status_host_ok(self.headers.get("Host", "")):
+        # Home Assistant's ingress (as the app): the Supervisor proxies with the browser's Host of Home Assistant and
+        # sets the user (ingress.py).  X-Forwarded-For is not read here, so it needs no stripping
+        ingress = bool(os.environ.get(APP_MARKER)) and self.client_address[0] == SUPERVISOR_IP
+        if ingress:
+            users = {u.strip().casefold() for u in os.environ.get("HRI_INGRESS_USERS", "").split(",") if u.strip()}
+            if users and self.headers.get("X-Remote-User-Name", "").casefold() not in users:
+                self.send_error(403, "This Home Assistant user may not open hass-remote-integration (ingress_users)")
+                return
+        elif not status_host_ok(self.headers.get("Host", "")):
             self.send_error(403, "Host not allowed (DNS rebinding guard)")
             return
         # Nothing here is the manager API: while Home Assistant installs, /api/status, /api/diag/health and
@@ -1074,6 +1085,8 @@ def apply_app_options(path: str | None = None) -> list[str] | None:
         value = options.get(name)
         if flag is not None:
             value = flag[0] if value is True else flag[1] if value is False else None
+        elif isinstance(value, list):
+            value = ",".join(str(x).strip() for x in value if str(x).strip())
         elif value is not None and not isinstance(value, bool):
             value = str(value)
         else:

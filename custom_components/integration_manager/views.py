@@ -27,6 +27,7 @@ from homeassistant.helpers.http import HomeAssistantView
 
 from .diagnostics import scrub_text
 from .http_util import BadRequest, ManagerView, with_body, _json_object
+from .ingress import is_ingress
 
 from . import events, ha_import, notifications
 from .flow_page import FLOW_HTML
@@ -127,7 +128,8 @@ class SummaryView(ManagerView):
             "health": h.get("state") or ("stopped" if not d else None),
             "mqtt": {"enabled": self.publisher.config.enabled, "connected": bool(self.publisher.stats.get("connected"))},
             "notifications": notifications.count(self.installer.hass),
-            "auth": bool(getattr(self.installer.hass.data.get("integration_manager_auth"), "enabled", False)),
+            # the log-out chip: not through ingress, where Home Assistant's login is the one there is
+            "auth": bool(getattr(self.installer.hass.data.get("integration_manager_auth"), "enabled", False)) and not is_ingress(request),
             "manager": version_info(),
             # releases newer than this container (the banner under the top bar), from the manager's last GitHub check
             "manager_update": {"installed": version_info()["version"],

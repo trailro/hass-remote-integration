@@ -39,6 +39,7 @@ from homeassistant.core import HomeAssistant
 
 from . import events
 from .http_util import ManagerView, with_body
+from .ingress import is_ingress
 from .ui import load_template
 
 _LOGGER = logging.getLogger(__name__)
@@ -300,7 +301,8 @@ async def async_setup_auth(hass: HomeAssistant) -> Auth:
 
     @web.middleware
     async def password_guard(request: web.Request, handler):
-        if request.path in OPEN_PATHS or auth.valid_session(request.cookies.get(COOKIE, "")):
+        # through Home Assistant's ingress, Home Assistant's login (and ingress_users) is the gate
+        if is_ingress(request) or request.path in OPEN_PATHS or auth.valid_session(request.cookies.get(COOKIE, "")):
             return await handler(request)
         legacy = request.cookies.get(LEGACY_COOKIE, "")
         if legacy and auth.valid_session(legacy):  # a session from before the port-specific name: moved over once
@@ -340,7 +342,7 @@ class LoginPageView(ManagerView):
         self.auth = auth
 
     async def get(self, request: web.Request) -> web.Response:
-        if not self.auth.enabled:
+        if not self.auth.enabled or is_ingress(request):
             raise web.HTTPFound("./")
         return web.Response(text=LOGIN_HTML, content_type="text/html")
 

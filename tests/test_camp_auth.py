@@ -210,12 +210,12 @@ class HostGuard403Test(unittest.TestCase):
         request = make_mocked_request("GET", "/", headers={"Host": "attacker.example.com"})
         resp = asyncio.run(self._guard()(request, self._never))
         self.assertEqual(resp.status, 403)
-        self.assertIn("frame-ancestors 'none'", resp.headers.get("Content-Security-Policy", ""))
+        self.assertIn("frame-ancestors 'self'", resp.headers.get("Content-Security-Policy", ""))
 
     def test_the_onboarding_answer_carries_the_policy(self):
         resp = asyncio.run(self._guard()(_get("/api/onboarding/users"), self._never))
         self.assertEqual(resp.status, 403)
-        self.assertIn("frame-ancestors 'none'", resp.headers.get("Content-Security-Policy", ""))
+        self.assertIn("frame-ancestors 'self'", resp.headers.get("Content-Security-Policy", ""))
 
 
 # ----- m7 -----------------------------------------------------------------------------------------
