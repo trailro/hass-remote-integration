@@ -289,12 +289,12 @@ class AppOptionsTest(unittest.TestCase):
 
     def test_options_become_the_variables(self):
         applied = self._apply({"password": "s3cret", "apt_packages": "ffmpeg jq", "call_timeout": 90,
-                               "ha_version_latest": False, "debug": True, "cookie_secure": True, "ingress_users": ["florin", "bob"],
+                               "ha_version_latest": False, "debug": True, "cookie_secure": True, "ingress_users": ["alice", "bob"],
                                "other": "x"})
         self.assertEqual(sorted(applied), sorted(VARS))
         self.assertEqual({var: os.environ[var] for var in VARS}, {
             "HRI_PASSWORD": "s3cret", "HRI_APT_PACKAGES": "ffmpeg jq", "HRI_CALL_TIMEOUT": "90",
-            "HA_VERSION_LATEST": "0", "HRI_DEBUG": "1", "HRI_COOKIE_SECURE": "1", "HRI_INGRESS_USERS": "florin,bob"})
+            "HA_VERSION_LATEST": "0", "HRI_DEBUG": "1", "HRI_COOKIE_SECURE": "1", "HRI_INGRESS_USERS": "alice,bob"})
 
     def test_empty_and_false_are_unset(self):
         applied = self._apply({"password": "", "apt_packages": "", "ha_version_latest": True, "debug": False,

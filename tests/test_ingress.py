@@ -43,8 +43,8 @@ INGRESS_HEADERS = {
     "X-Ingress-Path": "/api/hassio_ingress/tok3n",
     "X-Hass-Source": "core.ingress",
     "X-Remote-User-Id": "abc123",
-    "X-Remote-User-Name": "florin",
-    "X-Remote-User-Display-Name": "Florin",
+    "X-Remote-User-Name": "alice",
+    "X-Remote-User-Display-Name": "Alice",
 }
 
 
@@ -122,13 +122,13 @@ class IngressStackTest(unittest.TestCase):
         out, names, seen = self._run([("GET", "/", INGRESS_HEADERS), ("GET", "/config", INGRESS_HEADERS)], HRI_APP="1")
         self.assertEqual(out, [200, 200])
         self.assertEqual(names[:3], ["security_filter_middleware", "hri_ingress", "forwarded_middleware"])
-        self.assertEqual(seen[0], {"xff": None, "xfh": None, "ingress": True, "user": "florin"})
+        self.assertEqual(seen[0], {"xff": None, "xfh": None, "ingress": True, "user": "alice"})
 
     def test_a_state_changing_ingress_request_is_logged_with_the_user(self):
         with self.assertLogs(ingress.__name__ if ingress else "x", logging.INFO) as logs:
             out, _, _ = self._run([("POST", "/api/run/stop", INGRESS_HEADERS)], HRI_APP="1")
         self.assertEqual(out, [200])
-        self.assertTrue(any("POST /api/run/stop" in line and "'florin'" in line for line in logs.output), logs.output)
+        self.assertTrue(any("POST /api/run/stop" in line and "'alice'" in line for line in logs.output), logs.output)
 
     def test_without_hri_app_nothing_changes(self):
         out, names, seen = self._run([("GET", "/", INGRESS_HEADERS)])
@@ -139,7 +139,7 @@ class IngressStackTest(unittest.TestCase):
     def test_another_peer_gets_no_pass(self):
         """HRI_APP set, but the request does not come from the Supervisor's address (the port on the host)."""
         lan = {"Host": "10.0.0.2:8087"}
-        spoofed = {**lan, "X-Ingress-Path": "/api/hassio_ingress/x", "X-Hass-Source": "core.ingress", "X-Remote-User-Name": "florin"}
+        spoofed = {**lan, "X-Ingress-Path": "/api/hassio_ingress/x", "X-Hass-Source": "core.ingress", "X-Remote-User-Name": "alice"}
         out, _, seen = self._run([
             ("GET", "/", INGRESS_HEADERS),  # X-Forwarded-For from a peer HA does not trust: HA's 400
             ("GET", "/", {"Host": "ha.example.com"}),  # a public name: the host guard's 403
@@ -156,7 +156,7 @@ class IngressStackTest(unittest.TestCase):
             ("GET", "/", {**INGRESS_HEADERS, "X-Remote-User-Name": "Bob"}),
             ("GET", "/", {**INGRESS_HEADERS, "X-Remote-User-Name": "carol"}),
             ("GET", "/", {k: v for k, v in INGRESS_HEADERS.items() if k != "X-Remote-User-Name"}),
-        ], HRI_APP="1", HRI_INGRESS_USERS=" florin , bob,,")
+        ], HRI_APP="1", HRI_INGRESS_USERS=" alice , bob,,")
         self.assertEqual(out, [200, 200, 403, 403])
 
     def test_empty_ingress_users_is_every_user(self):
@@ -240,8 +240,8 @@ class StatusServerTest(unittest.TestCase):
         self.assertEqual(self._get(HRI_APP="1"), 403)
 
     def test_ingress_users(self):
-        self.assertEqual(self._get(supervisor="127.0.0.1", HRI_APP="1", HRI_INGRESS_USERS="florin"), 503)
-        self.assertEqual(self._get(supervisor="127.0.0.1", HRI_APP="1", HRI_INGRESS_USERS="alice"), 403)
+        self.assertEqual(self._get(supervisor="127.0.0.1", HRI_APP="1", HRI_INGRESS_USERS="alice"), 503)
+        self.assertEqual(self._get(supervisor="127.0.0.1", HRI_APP="1", HRI_INGRESS_USERS="dave"), 403)
 
 
 class AppIngressConfigTest(unittest.TestCase):
@@ -273,7 +273,7 @@ class AppIngressConfigTest(unittest.TestCase):
         tmp = _tmp(self)
         ep = entrypoint_for(self, tmp)
         options = os.path.join(tmp, "options.json")
-        for value, want in ((["florin", " bob ", ""], "florin,bob"), ([], None), (None, None)):
+        for value, want in ((["alice", " bob ", ""], "alice,bob"), ([], None), (None, None)):
             with open(options, "w", encoding="utf-8") as fh:
                 json.dump({} if value is None else {"ingress_users": value}, fh)
             with self.subTest(value=value), mock.patch.dict(os.environ, {"SUPERVISOR_TOKEN": "t", "HRI_INGRESS_USERS": "old"}):
