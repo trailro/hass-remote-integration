@@ -3,7 +3,9 @@
 Allowed: IP literals, localhost, the container's hostname, names under
 .local/.lan/.home/.internal/.home.arpa (never resolvable from the public
 DNS an attacker controls), and settings["allowed_hosts"] (comma list) for
-custom names.  Everything else gets 403 with an explanation."""
+custom names.  Everything else gets 403 with an explanation.  A request the
+Supervisor proxied from Home Assistant's ingress (ingress.py) carries the
+browser's Host of Home Assistant and is not checked."""
 
 from __future__ import annotations
 
@@ -15,12 +17,15 @@ import socket
 from aiohttp import web
 from homeassistant.core import HomeAssistant
 
+from .ingress import is_ingress
+
 _LOGGER = logging.getLogger(__name__)
 SAFE_SUFFIXES = (".local", ".lan", ".home", ".internal", ".home.arpa", ".localdomain")
 # every script is a static file (no inline script or handler); style attributes and the login page's <style> element
-# remain, hence 'unsafe-inline' for styles
+# remain, hence 'unsafe-inline' for styles.  frame-ancestors 'self': Home Assistant's ingress panel frames the UI from
+# its own origin, which is this page's origin there; on the app's port no other site may frame it
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
-       "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+       "object-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'")
 
 
 @functools.cache
@@ -65,7 +70,7 @@ def install_host_guard(hass: HomeAssistant, installer) -> None:
     async def host_guard(request: web.Request, handler):
         extra = _allowed(str(installer.settings.data.get("allowed_hosts") or ""))  # the Host header is compared without its port
         # the two refusals below answer before the handler, so they carry the policy themselves
-        if not _host_ok(request.headers.get("Host", ""), extra):
+        if not is_ingress(request) and not _host_ok(request.headers.get("Host", ""), extra):
             return web.Response(status=403, content_type="text/plain", headers={"Content-Security-Policy": CSP},
                                 text=f"Host {request.headers.get('Host', '')!r} is not allowed (DNS rebinding guard). "
                                      "Use the IP address, a .local/.lan name, or add the name to allowed_hosts in the settings.")

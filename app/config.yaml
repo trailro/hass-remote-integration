@@ -18,11 +18,20 @@ map:
   # about this name; older Supervisors know only this one
   - type: addon_config
     read_only: false
+# the sidebar panel: the Supervisor proxies Home Assistant's ingress to the same port as the one published below,
+# with the prefix stripped (ingress.py).  Streamed: backup uploads (up to 200 MiB) and a Home Assistant import (up to
+# 2 GiB) are more than the 16 MiB the Supervisor buffers otherwise.  No webui: the linter refuses it next to ingress,
+# and "Open web UI" opens the panel
+ingress: true
+ingress_port: 8087
+ingress_stream: true
+panel_icon: mdi:transit-connection-variant
+panel_title: HRI
+# the same UI straight on the host, with HRI's own password and host guard; can be turned off on the Network tab
 ports:
   8087/tcp: 8087
 ports_description:
   8087/tcp: Web UI and API
-webui: http://[HOST]:[PORT:8087]
 # serial sticks (/dev/ttyUSB*, /dev/ttyACM*, /dev/serial/by-id/*) for the integrations that need one
 uart: true
 options:
@@ -37,6 +46,7 @@ schema:
   ha_version_latest: bool
   debug: bool
   cookie_secure: bool
+  ingress_users: ["str?"]
 # what HRI's own backups leave out too (backupkit.py DISPOSABLE_GLOBS), matched the way the Supervisor matches:
 # against the end of the full path, so "*_hass_remote_integration/" ties a name to the top of this app's folder.
 # That part is the slug above: a fork or a local build with another slug must change it in every entry, or its

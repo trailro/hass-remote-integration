@@ -29,7 +29,8 @@ RE_SCHEMA_ELEMENT = re.compile(
     r"|password(?:\((?P<p_min>\d+)?,(?P<p_max>\d+)?\))?|int(?:\((?P<i_min>-?\d+)?,(?P<i_max>-?\d+)?\))?"
     r"|float(?:\((?P<f_min>-?\d*\.?\d+)?,(?P<f_max>-?\d*\.?\d+)?\))?|match\((?P<match>.*)\)|list\((?P<list>.+)\))\??$"
 )
-VARS = ("HRI_PASSWORD", "HRI_APT_PACKAGES", "HRI_CALL_TIMEOUT", "HA_VERSION_LATEST", "HRI_DEBUG", "HRI_COOKIE_SECURE")
+VARS = ("HRI_PASSWORD", "HRI_APT_PACKAGES", "HRI_CALL_TIMEOUT", "HA_VERSION_LATEST", "HRI_DEBUG", "HRI_COOKIE_SECURE",
+        "HRI_INGRESS_USERS")
 
 
 def _yaml(path):
@@ -89,6 +90,10 @@ class AppConfigTest(unittest.TestCase):
         variables = [var for var, _ in ep.APP_OPTIONS.values()]
         self.assertEqual(len(variables), len(set(variables)))
         for name, kind in self.cfg["schema"].items():
+            if isinstance(kind, list):  # a list of one element type (supervisor apps/options.py _nested_validate_list)
+                self.assertEqual(len(kind), 1, name)
+                self.assertEqual(ep.APP_OPTIONS[name][1], None, f"{name}: a list is text, comma separated")
+                kind = kind[0]
             self.assertRegex(kind, RE_SCHEMA_ELEMENT, name)
             is_bool = ep.APP_OPTIONS[name][1] is not None
             self.assertEqual(kind == "bool", is_bool, name)
@@ -104,8 +109,9 @@ class AppConfigTest(unittest.TestCase):
         self.assertLessEqual(self.cfg["timeout"], 300)  # the Supervisor's limit
         self.assertEqual(self.cfg["map"], [{"type": "addon_config", "read_only": False}])
         self.assertEqual(self.cfg["ports"], {"8087/tcp": 8087})
-        self.assertEqual(self.cfg["webui"], "http://[HOST]:[PORT:8087]")
-        self.assertNotIn("ingress", self.cfg)  # the UI does not work under a path prefix
+        # the panel (ingress) and the port serve one UI; no webui next to ingress (the app linter refuses it)
+        self.assertNotIn("webui", self.cfg)
+        self.assertEqual((self.cfg["ingress"], self.cfg["ingress_port"]), (True, 8087))
         self.assertNotIn("init", self.cfg)  # Docker's init, the default, as the compose file's init: true
         self.assertNotIn("environment", self.cfg)  # options go through /data/options.json
         self.assertEqual(sorted(self.cfg["arch"]), ["aarch64", "amd64"])
@@ -283,18 +289,20 @@ class AppOptionsTest(unittest.TestCase):
 
     def test_options_become_the_variables(self):
         applied = self._apply({"password": "s3cret", "apt_packages": "ffmpeg jq", "call_timeout": 90,
-                               "ha_version_latest": False, "debug": True, "cookie_secure": True, "other": "x"})
+                               "ha_version_latest": False, "debug": True, "cookie_secure": True, "ingress_users": ["florin", "bob"],
+                               "other": "x"})
         self.assertEqual(sorted(applied), sorted(VARS))
         self.assertEqual({var: os.environ[var] for var in VARS}, {
             "HRI_PASSWORD": "s3cret", "HRI_APT_PACKAGES": "ffmpeg jq", "HRI_CALL_TIMEOUT": "90",
-            "HA_VERSION_LATEST": "0", "HRI_DEBUG": "1", "HRI_COOKIE_SECURE": "1"})
+            "HA_VERSION_LATEST": "0", "HRI_DEBUG": "1", "HRI_COOKIE_SECURE": "1", "HRI_INGRESS_USERS": "florin,bob"})
 
     def test_empty_and_false_are_unset(self):
         applied = self._apply({"password": "", "apt_packages": "", "ha_version_latest": True, "debug": False,
-                               "cookie_secure": False})
+                               "cookie_secure": False, "ingress_users": []})
         self.assertEqual(applied, ["HA_VERSION_LATEST"])
         self.assertEqual(os.environ["HA_VERSION_LATEST"], "1")
-        for var in ("HRI_PASSWORD", "HRI_APT_PACKAGES", "HRI_CALL_TIMEOUT", "HRI_DEBUG", "HRI_COOKIE_SECURE"):
+        for var in ("HRI_PASSWORD", "HRI_APT_PACKAGES", "HRI_CALL_TIMEOUT", "HRI_DEBUG", "HRI_COOKIE_SECURE",
+                    "HRI_INGRESS_USERS"):
             self.assertNotIn(var, os.environ, var)  # unset, as a Docker install without them
         self.assertFalse(self.ep.password_configured())
 
@@ -329,7 +337,8 @@ class AppOptionsTest(unittest.TestCase):
                 self.ep.main()
         self.assertEqual(ctx.exception.code, 7)
         self.assertEqual(seen, {"HRI_PASSWORD": "s3cret-pw", "HRI_APT_PACKAGES": "jq", "HRI_CALL_TIMEOUT": None,
-                                "HA_VERSION_LATEST": "1", "HRI_DEBUG": None, "HRI_COOKIE_SECURE": None, "configured": True})
+                                "HA_VERSION_LATEST": "1", "HRI_DEBUG": None, "HRI_COOKIE_SECURE": None, "HRI_INGRESS_USERS": None,
+                                "configured": True})
         self.assertTrue(any("Home Assistant app" in line and "HRI_PASSWORD" in line for line in lines), lines)
         self.assertFalse([line for line in lines if "s3cret-pw" in line])
 

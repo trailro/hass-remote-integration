@@ -238,7 +238,7 @@ class ContentSecurityPolicyTest(unittest.TestCase):
 
         resp = asyncio.run(app.middlewares[0](_request(headers={"Host": "10.0.0.2:8087"}), handler))
         csp = resp.headers["Content-Security-Policy"]
-        for part in ("default-src 'self'", "script-src 'self'", "frame-ancestors 'none'", "object-src 'none'", "base-uri 'none'"):
+        for part in ("default-src 'self'", "script-src 'self'", "frame-ancestors 'self'", "object-src 'none'", "base-uri 'none'"):
             self.assertIn(part, csp)
         self.assertNotIn("unsafe-inline'; img", csp.split("script-src", 1)[1].split(";", 1)[0] + ";")
 

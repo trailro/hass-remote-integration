@@ -289,7 +289,7 @@ class DownloadTest(unittest.TestCase):
     def test_the_answer_carries_the_policy_and_is_not_sniffed_or_cached(self):
         self.write("app.log", "line\n")
         _, headers, _ = self.download(id=self.only_id()["id"])
-        self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
+        self.assertIn("frame-ancestors 'self'", headers["Content-Security-Policy"])
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
         self.assertEqual(headers["Cache-Control"], "no-store")
 
