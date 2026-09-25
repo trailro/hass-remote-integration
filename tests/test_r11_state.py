@@ -434,6 +434,18 @@ class FullRollbackChecksItsBackupOffTheLoopTest(unittest.TestCase):
         self.assertFalse(self.views._HA_CHANGE_LOCK.locked())
         self.assertFalse(backupkit.pending(self.cfg))
 
+    def test_backups_gone_with_a_home_assistant_restore_is_refused_too(self):
+        """A restore from a Home Assistant backup replaces the app's folder without backups/ (the HA backup leaves
+        it out) while state.json still names the pre-update backup: refused with the reason, nothing changed."""
+        shutil.rmtree(os.path.join(self.cfg, backupkit.BACKUP_DIR))
+        result, _ = self.run_rollback()
+        self.assertFalse(result["ok"])
+        self.assertIn("pre.zip no longer exists", result["error"])
+        self.assertFalse(self.installer.busy)
+        self.assertFalse(self.views._HA_CHANGE_LOCK.locked())
+        self.assertFalse(backupkit.pending(self.cfg))
+        self.assertIsNone(self.installer.state.pending_rollback)
+
 
 class DroppedCleanStartSetAsideCopyTest(unittest.TestCase):
     """The clean-start orphan fix (_drop_set_aside, storage_restored): what test_r9_boot's F15 tests leave out.  A

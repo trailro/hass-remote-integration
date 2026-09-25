@@ -166,8 +166,9 @@ This repository is also an app repository:
 3. **Open Web UI**. The first start installs Home Assistant inside the app,
    which takes a few minutes and needs internet access.
 
-The Mosquitto broker app is reachable as `core-mosquitto`. Options, backups,
-serial devices and updates: [docs/app.md](docs/app.md).
+The Mosquitto broker app is reachable as `core-mosquitto`, the broker host a
+fresh app offers. Options, backups, serial devices and updates:
+[docs/app.md](docs/app.md).
 
 ---
 
