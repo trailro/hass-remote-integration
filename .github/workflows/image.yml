@@ -62,24 +62,38 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ env.TAG }}
-          fetch-depth: 0   # the tags, to tell whether this is the newest stable release
+          fetch-depth: 0
           persist-credentials: false
       - id: commit
         name: Commit of the tag
         # github.sha is the dispatching branch's head on a manual run, not the tag that is built
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - id: latest
-        name: Is this the newest stable release?
+        name: Is this the newest stable release, and the newest of its X.Y series?
+        # from the releases, not from the event or the tags: a manual run knows nothing of the release it builds, and
+        # a pre-release can carry a plain vX.Y.Z tag (then a stable patch published after it would not be "newest")
         env:
-          PRERELEASE: ${{ github.event_name == 'release' && github.event.release.prerelease }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          newest=$(git tag -l 'v[0-9]*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
-          if [ "$GITHUB_EVENT_NAME" = release ] && [ "$PRERELEASE" != true ] && [ "$TAG" = "$newest" ]; then
+          stable=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName,isPrerelease,isDraft \
+            | python3 -c 'import json, re, sys; print("\n".join(r["tagName"] for r in json.load(sys.stdin) if not r["isPrerelease"] and not r["isDraft"] and re.fullmatch(r"v\d+\.\d+\.\d+", r["tagName"])))' \
+            | sort -V)
+          newest=$(printf '%s\n' "$stable" | tail -n1)
+          series=$(printf '%s\n' "$stable" | { grep -F "${TAG%.*}." || true; } | tail -n1)  # the shell runs with pipefail
+          # :latest only from a release event (a manual run publishes a tag again and never moves it)
+          if [ "$GITHUB_EVENT_NAME" = release ] && [ "$TAG" = "$newest" ]; then
             echo "enable=true" >> "$GITHUB_OUTPUT"
           else
             echo "enable=false" >> "$GITHUB_OUTPUT"
           fi
-          echo "tag $TAG, newest stable $newest, latest: $(tail -n1 "$GITHUB_OUTPUT")"
+          # :X.Y only for the highest stable release of that series: an older patch published again must not take it back
+          if [ -n "$series" ] && [ "$TAG" = "$series" ]; then
+            echo "minor=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "minor=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag $TAG, newest stable $newest, newest of ${TAG%.*}: ${series:-none}"
+          cat "$GITHUB_OUTPUT"
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1  # v4.4.0
       - uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003  # v4.4.0
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
@@ -102,7 +116,7 @@ jobs:
           flavor: latest=false
           tags: |
             type=semver,pattern={{version}},value=${{ env.TAG }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ env.TAG }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.TAG }},enable=${{ steps.latest.outputs.minor }}
             type=raw,value=latest,enable=${{ steps.latest.outputs.enable }}
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         with:
@@ -163,11 +177,14 @@ jobs:
           persist-credentials: false
       - id: newest
         name: Is this the newest stable release?
+        # from the releases (see the image job): a manual run on a pre-release is not stable either
         env:
-          PRERELEASE: ${{ github.event_name == 'release' && github.event.release.prerelease }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          newest=$(git tag -l 'v[0-9]*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
-          if [ "$PRERELEASE" != true ] && [ "$TAG" = "$newest" ]; then
+          newest=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName,isPrerelease,isDraft \
+            | python3 -c 'import json, re, sys; print("\n".join(r["tagName"] for r in json.load(sys.stdin) if not r["isPrerelease"] and not r["isDraft"] and re.fullmatch(r"v\d+\.\d+\.\d+", r["tagName"])))' \
+            | sort -V | tail -n1)
+          if [ "$TAG" = "$newest" ]; then
             echo "enable=true" >> "$GITHUB_OUTPUT"
           else
             echo "enable=false" >> "$GITHUB_OUTPUT"
@@ -221,20 +238,27 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ github.event.repository.default_branch }}
-          fetch-depth: 0   # the tags, to tell whether this is the newest stable release
+          fetch-depth: 0
       - name: Set app/config.yaml version
+        # newest stable from the releases (see the image job), and never lower than what the file names already
         env:
-          PRERELEASE: ${{ github.event_name == 'release' && github.event.release.prerelease }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          newest=$(git tag -l 'v[0-9]*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
-          if [ "$PRERELEASE" = true ] || [ "$TAG" != "$newest" ]; then
-            echo "tag $TAG is not the newest stable release ($newest): the app version stays as it is"
+          newest=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName,isPrerelease,isDraft \
+            | python3 -c 'import json, re, sys; print("\n".join(r["tagName"] for r in json.load(sys.stdin) if not r["isPrerelease"] and not r["isDraft"] and re.fullmatch(r"v\d+\.\d+\.\d+", r["tagName"])))' \
+            | sort -V | tail -n1)
+          if [ "$TAG" != "$newest" ]; then
+            echo "tag $TAG is not the newest stable release (${newest:-none}): the app version stays as it is"
             exit 0
           fi
           version="${TAG#v}"
           current=$(sed -nE 's/^version: "?([^"]*)"?$/\1/p' app/config.yaml)
           if [ "$current" = "$version" ]; then
             echo "app/config.yaml already names $version"
+            exit 0
+          fi
+          if [ "$(printf '%s\n%s\n' "$current" "$version" | sort -V | tail -n1)" = "$current" ]; then
+            echo "app/config.yaml names $current, newer than $version: the app version stays as it is"
             exit 0
           fi
           sed -i -E "s/^version: .*/version: \"$version\"/" app/config.yaml
