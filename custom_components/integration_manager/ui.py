@@ -2,7 +2,9 @@
 active page, live chips from /api/summary) and the static assets under
 ``static/`` (shared css/js plus one css file per page), served by
 ``StaticView`` with immutable cache headers keyed by content hash.
-``render()`` injects the links and the bar into a page's HTML."""
+``render()`` injects the links and the bar into a page's HTML.  Every URL
+a page uses is relative: Home Assistant's ingress serves the UI under a
+prefix (no <base>: the policy has base-uri 'none')."""
 
 from __future__ import annotations
 
@@ -73,23 +75,29 @@ class StaticView(ManagerView):
         return web.FileResponse(os.path.join(STATIC_DIR, name), headers={**headers, "Content-Type": _TYPES[ext]})
 
 
+def page_href(path: str) -> str:
+    """A page's route as a link relative to a page (every page is one level deep): it works on the app's port and
+    under Home Assistant's ingress prefix, which the request never shows."""
+    return path.lstrip("/") or "./"
+
+
 def topbar(active: str) -> str:
-    links = "".join(f'<a class="nav{" active" if path == active else ""}" href="{path}"'
+    links = "".join(f'<a class="nav{" active" if path == active else ""}" href="{page_href(path)}"'
                     f'{" id=\"nav-logfiles\" hidden" if path == "/logfiles" else ""}>{label}</a>' for path, label, _ in PAGES)
     v = version_info()
     href = f"{RELEASES_URL}/tag/v{v['version']}" if v["version"] else RELEASES_URL
     ver = (f'<a class="ver" href="{html.escape(href)}" target="_blank" rel="noopener" '
            f'title="hass-remote-integration {html.escape(v["version"])}, build {html.escape(v["build"])}">'
            f'v{html.escape(v["version"])} · {html.escape(v["build_short"])}</a>')
-    return (f'<nav class="topbar"><a class="brand" href="/">hass<b>-remote-</b>integration</a>{ver}{links}'
+    return (f'<nav class="topbar"><a class="brand" href="./">hass<b>-remote-</b>integration</a>{ver}{links}'
             f'<span class="spacer"></span><span id="tb-chips"></span></nav>')
 
 
 def render(page_html: str, active: str) -> str:
     """Inject the stylesheets, the shared script and the bar into a page."""
     page = next((p for path, _, p in PAGES if path == active), "index")
-    links = (f'<link rel="stylesheet" href="/static/hri.css?v={ASSET_VERSION}">'
-             f'<link rel="stylesheet" href="/static/{page}.css?v={ASSET_VERSION}">')
+    links = (f'<link rel="stylesheet" href="static/hri.css?v={ASSET_VERSION}">'
+             f'<link rel="stylesheet" href="static/{page}.css?v={ASSET_VERSION}">')
     out = page_html.replace("<!--css-->", links, 1)
-    out = out.replace("<!--js-->", f'<script src="/static/{page}.js?v={ASSET_VERSION}"></script>', 1)
-    return out.replace("<body>", f'<body><script src="/static/hri.js?v={ASSET_VERSION}"></script>' + topbar(active), 1)
+    out = out.replace("<!--js-->", f'<script src="static/{page}.js?v={ASSET_VERSION}"></script>', 1)
+    return out.replace("<body>", f'<body><script src="static/hri.js?v={ASSET_VERSION}"></script>' + topbar(active), 1)

@@ -42,7 +42,7 @@ function render(){
      <div><div class="k">registry / discovery</div><pre>${esc(JSON.stringify(meta,null,1))}</pre></div></div></td>`;
    x.querySelectorAll('input,button').forEach(el=>el.onclick=e=>e.stopPropagation());
    const act=async(action,body,confirmMsg)=>{ if(confirmMsg&&!confirm(confirmMsg)) return;
-     const res=await (await fetch('/api/devices/'+encodeURIComponent(r.id)+'/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})})).json();
+     const res=await (await fetch('api/devices/'+encodeURIComponent(r.id)+'/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})})).json();
      const m=x.querySelector('.act-msg'); m.textContent=res.ok?'ok':('ERROR: '+(res.error||res.message||'')); m.className='act-msg '+(res.ok?'ok':'bad'); if(res.ok) await load(); };
    x.querySelector('.act-name-save').onclick=()=>act('name',{name:x.querySelector('.act-name').value.trim()||null});
    x.querySelector('.act-delete').onclick=()=>act('delete',{},`Delete device ${r.name}? Its entities of this integration are removed (others are detached); the integration may refuse, like in HA. If it still provides the device, it comes back at restart.`);
@@ -56,7 +56,7 @@ function chips(){
  const sel=$('#integ'), cur=sel.value, integs=[...new Set(rows.flatMap(r=>r.integrations))].sort();
  sel.innerHTML='<option value="">all integrations</option>'+integs.map(i=>`<option ${i===cur?'selected':''}>${esc(i)}</option>`).join('');
 }
-async function load(){try{const r=await fetch('/api/devices');rows=await r.json();$('#ts').textContent=new Date().toLocaleTimeString();chips();render()}
+async function load(){try{const r=await fetch('api/devices');rows=await r.json();$('#ts').textContent=new Date().toLocaleTimeString();chips();render()}
  catch(e){$('#ts').textContent='error: '+e}}
 ['#q','#integ','#tree'].forEach(s=>$(s).addEventListener('input',render));
 document.querySelectorAll('th').forEach(th=>th.onclick=()=>{const k=th.dataset.k;sortD=(sortK===k)?-sortD:1;sortK=k;render()});

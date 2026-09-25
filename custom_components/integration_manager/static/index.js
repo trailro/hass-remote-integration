@@ -13,7 +13,7 @@ async function status(){
   const ps=s.state.pending_start; $('#ov-pending-row').hidden=!ps;
   if(ps){ $('#ov-pending').innerHTML=`${esc(ps.domain)} ${esc(ps.tag||'')} on Home Assistant ${esc(ps.ha||'(any)')} at the next boot${ps.blocked?` · <span class="bad">blocked: ${esc(ps.blocked)}</span>`:''} <button id="ov-cancel-pending">Cancel</button>`;
     $('#ov-cancel-pending').onclick=async()=>{ if(!confirm('Cancel the deferred start?')) return; const r=await post('api/run/cancel_pending_start'); log(r.ok?'deferred start cancelled':'ERROR: '+r.error); status(); }; }
-  const r=s.running||{}; $('#ov-run').innerHTML=r.domain?`<b>${esc(r.domain)}</b> ${esc(r.running_tag||'')}${r.loaded_as_integration?'':' <span class="warn">not loaded</span>'} · entries: ${(r.entries||[]).map(e=>`${esc(e.title)} <span class="${e.disabled_by?'mut':e.state==='loaded'?'ok':'warn'}">${e.disabled_by?'disabled':esc(e.state)}</span>`).join(', ')||'<span class="mut">none</span>'} · patches: ${esc(r.patch||'—')} · <a href="/config?domain=${encodeURIComponent(r.domain)}">Integration</a>`:'<span class="mut">nothing running</span>';
+  const r=s.running||{}; $('#ov-run').innerHTML=r.domain?`<b>${esc(r.domain)}</b> ${esc(r.running_tag||'')}${r.loaded_as_integration?'':' <span class="warn">not loaded</span>'} · entries: ${(r.entries||[]).map(e=>`${esc(e.title)} <span class="${e.disabled_by?'mut':e.state==='loaded'?'ok':'warn'}">${e.disabled_by?'disabled':esc(e.state)}</span>`).join(', ')||'<span class="mut">none</span>'} · patches: ${esc(r.patch||'—')} · <a href="config?domain=${encodeURIComponent(r.domain)}">Integration</a>`:'<span class="mut">nothing running</span>';
   $('#restart').disabled=s.busy;
   $('#restartnote').textContent=s.state.restart_required?'restart required (new code for an already loaded integration)':'';
   return s;
@@ -22,16 +22,16 @@ let LAST_FP=null;
 function renderIntegrations(s){
   const fp=JSON.stringify([s.installed,s.running&&s.running.domain,s.updates]); if(fp===LAST_FP) return; LAST_FP=fp;  // no rebuild (and no dropdown reset) when nothing changed
   const t=$('#inst'); t.querySelectorAll('tr:not(:first-child)').forEach(e=>e.remove());
-  const doms=Object.entries(INSTALLED); $('#instnote').innerHTML=doms.length?'':'no integration installed yet: pick one on the <a href="/install">Install</a> page';
+  const doms=Object.entries(INSTALLED); $('#instnote').innerHTML=doms.length?'':'no integration installed yet: pick one on the <a href="install">Install</a> page';
   for(const [d,x] of doms){
     const tr=document.createElement('tr');
-    const upd=x.update_available?` <a href="/config?domain=${encodeURIComponent(d)}" style="text-decoration:none"><span class="tag warn" title="newer stable release on GitHub (weekly check)">update ${esc(x.update_available)}</span></a>`:'';
+    const upd=x.update_available?` <a href="config?domain=${encodeURIComponent(d)}" style="text-decoration:none"><span class="tag warn" title="newer stable release on GitHub (weekly check)">update ${esc(x.update_available)}</span></a>`:'';
     const vers=upd+Object.keys(x.versions||{}).sort(vcmp).map(v=>`<span class="tag ${x.running&&x.running_tag===v?'ok':''}" title="${esc((x.versions[v]||{}).version||'')}">${esc(v)}${x.running&&x.running_tag===v?' · running':x.running_tag===v?' · last run':''}</span>`).join(' ')||'<span class="mut">none in store</span>';
     const ents=(x.entries||[]).length?(x.entries.map(e=>`${esc(e.title)} <span class="${e.disabled_by?'mut':e.state==='loaded'?'ok':'warn'}">${e.disabled_by?'disabled':esc(e.state)}</span>`).join(', ')):'<span class="mut">none (use its Config page)</span>';
     const st=x.running?`<span class="ok">running ${esc(x.running_tag||'')}</span>${x.loaded_as_integration?'':' <span class="warn">not loaded</span>'}`:'<span class="mut">stopped</span>';
     const sel=`<select data-sel="${esc(d)}">${Object.keys(x.versions||{}).sort(vcmp).reverse().map(v=>`<option ${v===(x.running_tag||x.newest_tag)?'selected':''}>${esc(v)}</option>`).join('')}</select>`;
     tr.innerHTML=`<td><b>${esc(d)}</b><br><span class="mut">${esc(x.name||'')}</span></td><td>${vers}</td><td>${ents}</td><td>${st}</td>
-      <td>${x.running?`<button data-a="stop" data-d="${esc(d)}">Stop</button>`:`${sel} <button data-a="start" data-d="${esc(d)}">Start</button>`} <a href="/config?domain=${encodeURIComponent(d)}"><button>Config</button></a> ${x.running?'':`<button data-a="uninstall" data-d="${esc(d)}">Uninstall</button>`}</td>`;
+      <td>${x.running?`<button data-a="stop" data-d="${esc(d)}">Stop</button>`:`${sel} <button data-a="start" data-d="${esc(d)}">Start</button>`} <a href="config?domain=${encodeURIComponent(d)}"><button>Config</button></a> ${x.running?'':`<button data-a="uninstall" data-d="${esc(d)}">Uninstall</button>`}</td>`;
     t.appendChild(tr);
   }
   t.querySelectorAll('button[data-a]').forEach(b=>b.onclick=async()=>{const d=b.dataset.d, a=b.dataset.a;

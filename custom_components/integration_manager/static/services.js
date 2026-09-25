@@ -86,13 +86,13 @@ function wireCall(x,domain,s){const go=x.querySelector('#ct_go'); if(!go) return
   const body={domain,service:s.name,data}; const tEl=x.querySelector('#ct_entity'); if(tEl&&tEl.value.trim()) body.target={entity_id:tEl.value.split(',').map(t=>t.trim()).filter(Boolean)};
   if(!confirm(`Call ${domain}.${s.name} now with ${JSON.stringify(body.data)}${body.target?' on '+body.target.entity_id.join(', '):''}?`)) return;
   go.disabled=true; msg.textContent='calling…'; out.textContent='';
-  try{const r=await fetch('/api/services/call',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}); const j=await r.json();
+  try{const r=await fetch('api/services/call',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}); const j=await r.json();
    msg.innerHTML=j.ok?`<span class="ok">ok</span> in ${j.ms} ms${j.response!==undefined?' · response below':''}`:'<span class="bad">'+esc(j.error)+'</span>'; if(j.ok&&j.response!==undefined) out.textContent=JSON.stringify(j.response,null,1);}
   catch(e){msg.innerHTML='<span class="bad">'+esc(e.message)+'</span>';} finally{go.disabled=false;} };}
 function chips(){
  chipBar('#domains',Object.fromEntries(data.map(d=>[d.domain,d.services.length])),domOn,()=>{chips();render()});
 }
-async function load(){try{const r=await fetch('/api/services');data=await r.json();$('#ts').textContent=new Date().toLocaleTimeString();chips();render()}
+async function load(){try{const r=await fetch('api/services');data=await r.json();$('#ts').textContent=new Date().toLocaleTimeString();chips();render()}
  catch(e){$('#ts').textContent='error: '+e}}
 ['#q','#onlyCustom'].forEach(s=>$(s).addEventListener('input',render));
 load();

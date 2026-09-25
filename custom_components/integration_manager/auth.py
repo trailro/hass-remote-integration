@@ -266,6 +266,14 @@ def _client(request: web.Request) -> str:
     return client_key(request.remote)
 
 
+def login_location(path_qs: str) -> str:
+    """The login page relative to ``path_qs`` and ``next`` relative to the login page: the same answer reaches the
+    page on the app's port and under an ingress prefix the request never saw."""
+    path = path_qs.split("?", 1)[0]
+    up = "../" * max(0, path.count("/") - 1)
+    return f"{up}login?next=" + quote(path_qs.lstrip("/"), safe="")
+
+
 def _set_session_cookie(response: web.StreamResponse, request: web.Request, value: str, max_age: int) -> None:
     response.set_cookie(COOKIE, value, max_age=max_age, path="/", httponly=True, samesite="Strict",
                         secure=request.secure or os.environ.get("HRI_COOKIE_SECURE", "") == "1")  # behind a TLS proxy the request looks plain
@@ -314,7 +322,7 @@ async def async_setup_auth(hass: HomeAssistant) -> Auth:
             await asyncio.sleep(1)
         if request.path.startswith("/api/"):
             return web.json_response({"message": "login required (session cookie from /login, or Authorization: Bearer <password>)"}, status=401)
-        raise web.HTTPFound("/login?next=" + quote(request.path_qs, safe=""))
+        raise web.HTTPFound(login_location(request.path_qs))
 
     try:
         hass.http.app.middlewares.append(password_guard)
@@ -333,7 +341,7 @@ class LoginPageView(ManagerView):
 
     async def get(self, request: web.Request) -> web.Response:
         if not self.auth.enabled:
-            raise web.HTTPFound("/")
+            raise web.HTTPFound("./")
         return web.Response(text=LOGIN_HTML, content_type="text/html")
 
 

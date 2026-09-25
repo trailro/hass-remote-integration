@@ -208,7 +208,7 @@ class RedirectRaisedTest(unittest.TestCase):
         req = SimpleNamespace(headers={}, query={}, cookies={}, path="/logs", path_qs="/logs", secure=False, remote="10.0.0.9")
         with self.assertRaises(web.HTTPFound) as ctx:
             asyncio.run(guard(req, None))
-        self.assertTrue(ctx.exception.location.startswith("/login?next="))
+        self.assertTrue(ctx.exception.location.startswith("login?next="))
         with self.assertRaises(web.HTTPFound):
             asyncio.run(auth_mod.LoginPageView(auth_mod.Auth("")).get(req))
 

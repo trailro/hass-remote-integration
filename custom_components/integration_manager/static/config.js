@@ -3,7 +3,7 @@ let DOM=new URLSearchParams(location.search).get('domain')||'', ST=null, flow=nu
 async function load(){
   ST=await (await fetch('api/status',{headers:{'X-Requested-With':'fetch'}})).json();
   DOM=ST.integration||'';  // one integration per container
-  $('#domnote').innerHTML=DOM?'the integration of this container (several versions of it can be in the store, one runs)':'no integration installed yet: <a href="/install">Install</a> one';
+  $('#domnote').innerHTML=DOM?'the integration of this container (several versions of it can be in the store, one runs)':'no integration installed yet: <a href="install">Install</a> one';
   const x=(ST.installed||{})[DOM]; $('#domtitle').textContent=DOM||'no integration';
   $('#runstate').innerHTML=x?(x.running?`<span class="ok">running ${esc(x.running_tag||'')}</span>`:'<span class="mut">stopped</span>'):'';
   renderVersions(x); loadReleases(); loadChanges(); loadPatches(); loadYaml(); flowNote(x); entries();

@@ -9,7 +9,7 @@ async function fetchLogs(reset, more=0){
  const mine=gen; if(!reset) following=true;
  const p=new URLSearchParams({level:$('#level').value,q:$('#q').value,limit:MAX_ROWS,since_id:reset?0:lastId});
  prefixes().forEach(x=>p.append('prefix',x));
- let r; try{ r=await (await fetch('/api/logs?'+p,{headers:{'X-Requested-With':'fetch'}})).json(); } finally { if(reset) resetting--; else following=false; }
+ let r; try{ r=await (await fetch('api/logs?'+p,{headers:{'X-Requested-With':'fetch'}})).json(); } finally { if(reset) resetting--; else following=false; }
  if(mine!==gen) return;
  if(reset) lastId=0;
  $('#cap').textContent=r.capacity; $('#path').textContent=r.path||''; $('#ts').textContent=new Date().toLocaleTimeString();
@@ -27,7 +27,7 @@ async function fetchLogs(reset, more=0){
  if(again) return fetchLogs(false, more+1);  // at once: a follower far behind would otherwise gain one read every 3 s
 }
 async function loadGroups(){
- groups=await (await fetch('/api/logs/loggers')).json();
+ groups=await (await fetch('api/logs/loggers')).json();
  $('#groups').innerHTML=groups.map(g=>`<span class="tag ${gOn.has(g.name)?'on':''}" data-g="${esc(g.name)}" title="${esc(g.loggers.join(', '))}">${esc(g.name)} ${g.count}</span>`).join('');
  document.querySelectorAll('#groups .tag').forEach(t=>t.onclick=()=>{const g=t.dataset.g;gOn.has(g)?gOn.delete(g):gOn.add(g);loadGroups();fetchLogs(true)});
  const t=$('#loggers'); t.querySelectorAll('tr:not(:first-child)').forEach(e=>e.remove());
@@ -38,7 +38,7 @@ async function loadGroups(){
   tr.querySelector('select').onchange=async e=>{
     // a refused level (the root logger, an unknown level, the 50-logger cap) would otherwise revert with no
     // explanation -- and the refusal carries its reason in "message" (json_message), not in "error"
-    const r=await fetch('/api/logs/level',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({logger:lg,level:e.target.value==='(inherited)'?null:e.target.value})});
+    const r=await fetch('api/logs/level',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({logger:lg,level:e.target.value==='(inherited)'?null:e.target.value})});
     if(!r.ok){const j=await r.json().catch(()=>({})); log('error: '+(j.error||j.message||r.status));}
     loadGroups();};
   t.appendChild(tr);

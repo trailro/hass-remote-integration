@@ -454,7 +454,7 @@ class RenderKeepsTheHtmlModuleTest(unittest.TestCase):
     def test_the_page_argument_does_not_shadow_the_module(self):
         self.assertNotIn("html", inspect.signature(ui.render).parameters)
         out = ui.render("<head><!--css--></head><body><!--js-->", "/logs")
-        self.assertIn('/static/logs.js?v=', out)
+        self.assertIn('"static/logs.js?v=', out)
         self.assertIn('<nav class="topbar">', out)
 
 

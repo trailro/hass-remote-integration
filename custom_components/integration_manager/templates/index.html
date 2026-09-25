@@ -18,7 +18,7 @@
   <tr id="ov-pending-row" hidden><th>deferred start</th><td id="ov-pending" class="warn"></td></tr>
  </table>
  <div class="row" style="margin-top:10px"><button id="restart" class="primary" disabled>Restart process</button><span id="restartnote" class="warn"></span>
-  <span class="mut">· <a href="/install">install</a> a version, <a href="/config">configure</a> the integration, <a href="/mqtt">MQTT</a>, <a href="/system">HA version, backups, settings</a></span></div>
+  <span class="mut">· <a href="install">install</a> a version, <a href="config">configure</a> the integration, <a href="mqtt">MQTT</a>, <a href="system">HA version, backups, settings</a></span></div>
 </div>
 
 <div class="card"><h2>Resources</h2>
@@ -28,7 +28,7 @@
 </div>
 
 <div class="card"><h2>Integration <span class="tag">one per container</span></h2>
- <div class="mut" style="margin-bottom:8px">This container holds one integration, with as many of its versions in the store as you like. <b>Start</b> deploys the chosen version (files to <code>custom_components</code>, requirements into the venv, patches applied, config entries the manager disabled enabled again; an entry you disabled stays disabled); another version runs its preflight first, and blockers ask before starting anyway. Switching versions keeps the config entries. Versions come from the <a href="/install">Install</a> page; installing a different integration there replaces this one (after a backup). Another integration = another container.</div>
+ <div class="mut" style="margin-bottom:8px">This container holds one integration, with as many of its versions in the store as you like. <b>Start</b> deploys the chosen version (files to <code>custom_components</code>, requirements into the venv, patches applied, config entries the manager disabled enabled again; an entry you disabled stays disabled); another version runs its preflight first, and blockers ask before starting anyway. Switching versions keeps the config entries. Versions come from the <a href="install">Install</a> page; installing a different integration there replaces this one (after a backup). Another integration = another container.</div>
  <table id="inst"><tr><th>integration</th><th>versions</th><th>entries</th><th>state</th><th></th></tr></table>
  <div id="instnote" class="warn" style="margin-top:6px"></div>
 </div>

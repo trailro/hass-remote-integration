@@ -1,7 +1,8 @@
 // shared helpers (loaded synchronously at the top of <body>) + the top bar
-// with a password set, an expired session (or a changed password) answers 401: back to the login page
+// with a password set, an expired session (or a changed password) answers 401: back to the login page.  Every URL is
+// relative (every page is one level deep): Home Assistant's ingress serves the UI under a prefix
 const _hriFetch=window.fetch.bind(window);
-window.fetch=async(...a)=>{const r=await _hriFetch(...a); if(r.status===401&&location.pathname!=='/login') location.href='/login?next='+encodeURIComponent(location.pathname+location.search); return r;};
+window.fetch=async(...a)=>{const r=await _hriFetch(...a); const page=location.pathname.split('/').pop(); if(r.status===401&&page!=='login') location.href='login?next='+encodeURIComponent(page+location.search); return r;};
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 // X-Requested-With on every call: the endpoints that run or store code (the patch editor) refuse a request without it.
@@ -62,12 +63,12 @@ async function startIntegration(body){
 }
 
 // a logout the volume could not record still ended every session, until a restart: said before leaving the page
-async function logout(e){e.preventDefault(); const r=await post('/api/logout'); if(!r.ok) alert(r.error||r.message||'log out failed'); location.href='/login';}
+async function logout(e){e.preventDefault(); const r=await post('api/logout'); if(!r.ok) alert(r.error||r.message||'log out failed'); location.href='login';}
 
 // top bar chips + the integration-specific log-files item
 document.addEventListener('DOMContentLoaded',()=>{
 (async()=>{try{
- const s=await fetch('/api/summary').then(r=>r.json());
+ const s=await fetch('api/summary').then(r=>r.json());
  try{releaseBanner(s.manager_update);}catch(e){}
  const r=s.running, h=s.health||'stopped', m=s.mqtt||{};
  const el=document.getElementById('tb-chips'); if(!el) return;
@@ -75,14 +76,14 @@ document.addEventListener('DOMContentLoaded',()=>{
   +`<span class="chip ${h==='ok'?'ok':h==='degraded'?'warn':h==='stopped'?'':'bad'}"><span class="dot"></span>health <b>${esc(h)}</b></span>`
   +`<span class="chip ${m.enabled?(m.connected?'ok':'bad'):''}"><span class="dot"></span>MQTT <b>${m.enabled?(m.connected?'connected':'disconnected'):'off'}</b></span>`
   +(s.restart_required?'<span class="chip warn"><span class="dot"></span><b>restart required</b></span>':'')
-  +(s.notifications?`<a class="chip warn" href="/" style="text-decoration:none" title="persistent notifications of the integration"><span class="dot"></span><b>${s.notifications}</b> notification${s.notifications>1?'s':''}</a>`:'');
+  +(s.notifications?`<a class="chip warn" href="./" style="text-decoration:none" title="persistent notifications of the integration"><span class="dot"></span><b>${s.notifications}</b> notification${s.notifications>1?'s':''}</a>`:'');
  if(s.auth){ el.insertAdjacentHTML('beforeend','<a class="chip" href="#" id="tb-logout" title="end this browser session" style="text-decoration:none">log out</a>'); document.getElementById('tb-logout').onclick=logout; }
 }catch(e){}})();
 (async()=>{try{
  // the log-files item is integration-specific: show it only when the running
  // integration writes log files, labelled with the newest one
  const a=document.getElementById('nav-logfiles'); if(!a) return;
- const files=await fetch('/api/log_files',{headers:{'X-Requested-With':'fetch'}}).then(r=>r.json());
+ const files=await fetch('api/log_files',{headers:{'X-Requested-With':'fetch'}}).then(r=>r.json());
  if(!Array.isArray(files)||!files.length) return;
  const f=files[0]; const base=f.name.split('/').pop();
  a.textContent=base+(files.length>1?' +'+(files.length-1):''); a.title=`log files written by the running integration (${files.length})${f.active?', active':''}`; a.hidden=false;

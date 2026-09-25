@@ -30,7 +30,7 @@ class LogDownloadButtonTest(unittest.TestCase):
         """A plain link cannot send X-Requested-With, and two files can share a
         label: the id is what says which file is saved."""
         asked = self.out["download"]["asked"]
-        self.assertEqual([a["url"] for a in asked], ["/api/log_files/download?id=id-beta"])
+        self.assertEqual([a["url"] for a in asked], ["api/log_files/download?id=id-beta"])  # relative: the ingress prefix
         self.assertEqual(asked[0]["headers"], {"X-Requested-With": "fetch"})
         self.assertTrue(asked[0]["disabled"], "the button is held while the file is being fetched")
 
