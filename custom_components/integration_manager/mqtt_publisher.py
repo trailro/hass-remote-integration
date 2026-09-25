@@ -239,8 +239,9 @@ def password_value(hass: HomeAssistant, domain: str, service: str, data: dict[st
     for a target by area, device, floor or label, any entity of `reachable` in that mode.  The MQTT calls and the
     Services page mask it with this, so what is sent to such an entity never shows in a history or a log."""
     value = data.get("value")
-    if (domain, service) != ("text", "set_value") or not isinstance(value, str) or not value:
+    if (domain, service) != ("text", "set_value") or value is None or value == "":
         return None
+    value = value if isinstance(value, str) else str(value)  # text's schema turns a number into the text it quotes
     ids = data.get("entity_id")
     named = [ids] if isinstance(ids, str) else ids if isinstance(ids, list) else []
     candidates = {p.strip().lower() for x in named if isinstance(x, str) for p in x.split(",")}
@@ -2278,10 +2279,18 @@ class MqttPublisher:
         id_problem = _call_id_problem(sent_id)
         if id_problem is not None:
             sent_id = _short_call_id(sent_id)
+        # read before anything is remembered, so a refused call masks the value too: a text.set_value that does not
+        # parse cannot tell which entity it was for, and is kept masked whole
+        set_value = len(parts) == 2 and (parts[0].lower(), parts[1].lower()) == ("text", "set_value")
+        secret = self._password_value("text", "set_value", parsed) if set_value and isinstance(parsed, dict) else None
 
         def remember(what: str) -> dict[str, Any]:
+            if secret:
+                return self._remember("call", what, {**parsed, "value": "***"}, sent_id)
             if isinstance(parsed, (dict, list)):
                 return self._remember("call", what, parsed, sent_id)
+            if set_value and parsed is None:
+                return self._remember("call", what, "***", sent_id, unparsable=True)
             return self._remember("call", what, payload, sent_id, unparsable=bad is not None and parsed is None)
 
         if len(parts) != 2:
@@ -2309,7 +2318,6 @@ class MqttPublisher:
             return
         data: dict[str, Any] = parsed
         call_id = data.pop("_id", None)
-        secret = self._password_value(domain, service, data)
         shown = {**data, "value": "***"} if secret else data
         # an _id is unique per service for the consumer (a counter that restarts, one per automation)
         call_key = _call_key(domain, service, call_id) if call_id not in (None, "") else None
