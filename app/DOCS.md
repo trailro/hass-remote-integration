@@ -24,8 +24,11 @@ minutes; the web UI shows the progress. It needs internet access.
 - Any logged-in Home Assistant user can open the UI through Home Assistant:
   the `ingress_users` option narrows it to the user names listed. Clear the
   port on the Network tab if you use only the sidebar.
-- Uninstalling leaves the app's folder (about 800 MB) unless you also delete
-  its data.
+- Uninstalling leaves the app's folder
+  (`app_configs/<id>_hass_remote_integration`, about 800 MB) unless you also
+  delete its data, but drops the app's options, the password included: a
+  reinstall reuses the folder and starts with no password until you set one
+  again on the Configuration tab.
 - Stopping waits up to 240 seconds for Home Assistant inside; a clean stop
   takes well under a second.
 - Keep the app's **Watchdog** (Info tab) on: HRI turns it on once at the

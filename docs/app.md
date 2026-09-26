@@ -127,7 +127,9 @@ second.
 
 Uninstalling the app leaves this folder on the host, about 800 MB with the
 installed Home Assistant, unless you tick the option to delete the app's data
-when you uninstall it.
+when you uninstall it. The app's options go either way, the password among
+them: a reinstall reuses the folder's state and starts with no password until
+you set one again on the **Configuration** tab.
 
 ## Backups
 
