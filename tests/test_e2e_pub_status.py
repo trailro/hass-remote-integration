@@ -62,7 +62,7 @@ class NoIdentityTest(unittest.TestCase):
     def test_the_connect_error_after_a_stop(self):
         pub = _publisher(None)
         pub._connect()
-        self.assertEqual(pub.stats["connect_error"], "no integration is running: MQTT has no identity (hass_<domain>) until one starts")
+        self.assertEqual(pub.stats["connect_error"], "no integration is running: MQTT has no identity (hass_<domain>, or hass_<domain>-<instance>) until one starts")
 
 
 class PendingCleanupReasonTest(unittest.TestCase):

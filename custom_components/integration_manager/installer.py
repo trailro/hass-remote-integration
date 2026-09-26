@@ -14,7 +14,9 @@ Model
   installed into the venv, its patches applied, its config entries enabled.
   Starting another integration stops the running one (entries disabled).
   Everything published derives its identity from the running domain
-  (``hass_<domain>``); with nothing running there is no MQTT identity.
+  (``hass_<domain>``, or ``hass_<domain>-<instance>`` with HRI_INSTANCE, or the
+  one this volume already published it under: MqttIdentity); with nothing
+  running there is no MQTT identity.
 * Config entries belong to the domain, so switching versions keeps the
   settings; a downgrade after a config migration needs the pre-update
   backup (taken automatically before starting a different version).
@@ -2067,7 +2069,7 @@ class Installer:
     async def _remove_domain(self, domain: str) -> None:
         """Everything of one integration: stop it, drop its config entries,
         its deployed files, every version in the store, its user patches,
-        its YAML, and its retained MQTT documents (identity hass_<domain>)."""
+        its YAML, and its retained MQTT documents (its identity: identity_for)."""
         self.dismiss_patch_notification(domain)
         if isinstance(self.state.pending_change, dict) and self.state.pending_change.get("domain") == domain:
             self.state.pending_change = None
