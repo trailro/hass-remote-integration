@@ -215,5 +215,46 @@ class CookieSecureTest(unittest.TestCase):
         self.assertTrue(resp.cookies[auth_mod.COOKIE]["secure"])
 
 
+# ----- S4-6 ---------------------------------------------------------------------------------------
+
+class RevokedRecordTest(unittest.TestCase):
+    def _auth(self):
+        return Auth("pw", b"k" * 32, os.path.join(_tmp(self), "integration_manager", "auth_revoked"))
+
+    def test_a_logout_is_synced_to_the_disk(self):
+        auth = self._auth()
+        os.makedirs(os.path.dirname(auth.revoked_path))
+        real = os.fsync
+        synced = []
+        with mock.patch("os.fsync", side_effect=lambda fd: (synced.append(fd), real(fd))):
+            auth.revoke_all()
+        self.assertGreaterEqual(len(synced), 2)  # the file, then its directory (the rename)
+        again = Auth("pw", b"k" * 32, auth.revoked_path)
+        again.load_revoked()
+        self.assertEqual(again.generation, auth.generation)
+        with open(auth.revoked_path, encoding="utf-8") as fh:
+            self.assertEqual(int(fh.read().strip()), auth.generation)  # what an older image reads
+
+    def test_an_unparsable_record_fails_closed(self):
+        for content in ("garbage", "", "12\x00"):
+            with self.subTest(content=content):
+                auth = self._auth()
+                os.makedirs(os.path.dirname(auth.revoked_path))
+                old = auth.new_session()  # issued at generation 0, before the logout the file recorded
+                with open(auth.revoked_path, "w", encoding="utf-8") as fh:
+                    fh.write(content)
+                before = int(time.time())
+                with self.assertLogs(auth_mod._LOGGER, logging.WARNING):
+                    auth.load_revoked()
+                self.assertGreaterEqual(auth.generation, before)
+                self.assertFalse(auth.valid_session(old))
+                self.assertTrue(auth.valid_session(auth.new_session()))
+
+    def test_no_record_is_generation_zero(self):
+        auth = self._auth()
+        auth.load_revoked()
+        self.assertEqual(auth.generation, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
