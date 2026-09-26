@@ -127,7 +127,9 @@ Pruning keeps the newest backups by the date they were made (never later than
 the file's own date) and never removes the backup it runs after. Uploaded
 backups and pre-restore copies (`<time>-pre-restore.zip`) are left alone for 7
 days, and a pre-restore copy cannot be deleted in that week: it is the only
-way back once the restore succeeded. Protected backups still count: with
+way back once the restore succeeded. A pre-restore copy whose name carries no
+valid date is never pruned and cannot be deleted from the UI: remove it by
+hand if you do not need it. Protected backups still count: with
 *keep 5*, a backup made by hand is one of the 5, not a sixth. The backup a
 restore came from is pruned and deleted like any other once that restore is
 over (applied, put back or dropped).
