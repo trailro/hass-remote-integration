@@ -140,6 +140,25 @@ def _read_text(path: str) -> str:
         return fh.read()
 
 
+def _read_target(path: str) -> str:
+    """A file a .patch edits, exactly as it is: newline="" keeps its line endings, and bytes that are not
+    UTF-8 raise UnicodeDecodeError (the patch is refused) rather than coming back as U+FFFD."""
+    with open(path, encoding="utf-8", newline="") as fh:
+        return fh.read()
+
+
+def _split_target(text: str) -> tuple[list[str], list[bool]]:
+    """The lines hunks are matched against (without a CR before the newline: the diff has none) and, per
+    line, whether it had one, so that joining them back gives the same bytes."""
+    lines = text.split("\n")
+    cr = [line.endswith("\r") for line in lines]
+    return [line[:-1] if c else line for line, c in zip(lines, cr)], cr
+
+
+def _join_target(lines: list[str], cr: list[bool]) -> str:
+    return "\n".join(line + "\r" if c else line for line, c in zip(lines, cr))
+
+
 _LOAD_SEQ = itertools.count()
 # (patch, domain, running tag, site-packages, patch mtime, deployed dir mtime, site-packages mtime) -> status(ctx) of a
 # .py patch: /api/status polls every few seconds and must not import and run each module each time; any apply_all starts
@@ -470,11 +489,12 @@ def _locate(lines: list[str], h: _Hunk, hint: int) -> tuple[str, int]:
     return "not applicable", -1
 
 
-def _walk(lines: list[str], hunks: list[_Hunk], apply: bool = False) -> list[tuple[_Hunk, str, int, int]]:
+def _walk(lines: list[str], hunks: list[_Hunk], apply: bool = False, cr: list[bool] | None = None) -> list[tuple[_Hunk, str, int, int]]:
     """Locate every hunk in order, as GNU patch does: each one is searched
     from its own line moved by where the previous one was found and by the
     lines that one added or removed.  With ``apply`` the pending hunks are
-    applied to ``lines`` as they are found.  Returns (hunk, state, index, hint)."""
+    applied to ``lines`` as they are found (and ``cr``, the line endings, kept
+    in step: new lines end as the first line they replace).  Returns (hunk, state, index, hint)."""
     out = []
     offset = 0
     for h in hunks:
@@ -482,6 +502,8 @@ def _walk(lines: list[str], hunks: list[_Hunk], apply: bool = False) -> list[tup
         state, at = _locate(lines, h, hint)
         if state == "pending" and apply:
             lines[at:at + len(h.old_lines)] = h.new_lines
+            if cr is not None:
+                cr[at:at + len(h.old_lines)] = [cr[at]] * len(h.new_lines)
             state = "patched"
         if state in ("pending", "applied", "patched"):
             offset = at - (h.old_start - 1) + (0 if state == "pending" else len(h.new_lines) - len(h.old_lines))
@@ -495,7 +517,10 @@ def _diff_status(text: str, ctx: PatchContext) -> str:
         target = _resolve(fp.path, ctx)
         if target is None:
             return f"absent ({fp.path} not found)"
-        lines = _read_text(target).split("\n")
+        try:
+            lines = _split_target(_read_target(target))[0]
+        except UnicodeDecodeError:
+            return f"not applicable ({fp.path} is not UTF-8)"
         states.extend(state for _h, state, _at, _hint in _walk(lines, fp.hunks))
     if not states:
         return "empty"
@@ -515,29 +540,29 @@ def _diff_apply(text: str, ctx: PatchContext) -> str:
         target = _resolve(fp.path, ctx)
         if target is None:
             return f"absent ({fp.path} not found)"
-        original = prepared[target][1] if target in prepared else _read_text(target)  # two sections for one file
-        lines = original.split("\n")
-        for _h, state, _at, _hint in _walk(lines, fp.hunks, apply=True):
+        original = prepared[target][1] if target in prepared else _read_target(target)  # two sections for one file
+        lines, cr = _split_target(original)
+        for _h, state, _at, _hint in _walk(lines, fp.hunks, apply=True, cr=cr):
             if state == "ambiguous":
                 return f"not applicable (a hunk matches more than one place in {fp.path})"
             if state not in ("applied", "patched"):
                 return f"not applicable (context changed in {fp.path})"
-        prepared[target] = (prepared[target][0] if target in prepared else original, "\n".join(lines))
+        prepared[target] = (prepared[target][0] if target in prepared else original, _join_target(lines, cr))
     for target, (_orig, patched) in prepared.items():
         if target.endswith(".py"):
             compile(patched, target, "exec")  # never leave broken Python behind, in any of the files
-    for target, (_orig, patched) in prepared.items():
-        with open(target + ".tmp", "w", encoding="utf-8") as fh:
-            fh.write(patched)
     done: list[str] = []
     try:
+        for target, (_orig, patched) in prepared.items():
+            with open(target + ".tmp", "w", encoding="utf-8", newline="") as fh:
+                fh.write(patched)
         for target in prepared:
             os.replace(target + ".tmp", target)
             done.append(target)
     except OSError:
         for target in done:  # all or nothing: files that depend on each other stay consistent
             try:
-                with open(target, "w", encoding="utf-8") as fh:
+                with open(target, "w", encoding="utf-8", newline="") as fh:
                     fh.write(prepared[target][0])
             except OSError:
                 _LOGGER.error("patch rollback failed for %s", target)
