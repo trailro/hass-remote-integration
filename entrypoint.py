@@ -111,9 +111,15 @@ HOST_NETWORK_VAR = "HRI_HOST_NETWORK"
 # the Supervisor's hassio bridge on the host: an address the container owns only when it shares the host's network
 HASSIO_GATEWAY = "172.30.32.1"
 # an HRI Manager instance's slug (local app hri_<name>; the manager's names.NAME_RE): <name> goes to Home Assistant as
-# HRI_INSTANCE, which keeps two instances of one integration apart on the broker.  Nothing else in a slug is passed on
+# HRI_INSTANCE, which keeps two instances of one integration apart on the broker.  Nothing else in a slug is passed on.
+# HRI_INSTANCE_UNKNOWN=1 goes instead when the app's info could not be read at all (and HRI_INSTANCE is not set
+# explicitly): the app may be a manager instance whose name is unknown, so nothing may take "no instance" as the answer
+# (the MQTT identity must not be pinned from it)
 INSTANCE_VAR = "HRI_INSTANCE"
+INSTANCE_UNKNOWN_VAR = "HRI_INSTANCE_UNKNOWN"
 INSTANCE_SLUG_RE = re.compile(r"local_hri_([a-z][a-z0-9_]{0,19})")
+# GET /addons/self/info is asked again after these pauses (seconds) before it counts as unreadable
+APP_INFO_RETRY_DELAYS = (1, 2, 4)
 # the port HRI listens on, for the image's HEALTHCHECK: Docker runs it with the image's environment (HRI_PORT=8087),
 # not with the one this process sets from the Supervisor's answer.  In the container, not on the volume
 PORT_FILE = "/run/hri-port"
@@ -1225,20 +1231,24 @@ def enable_app_watchdog(token: str) -> None:
 
 def read_app_info(token: str) -> dict | None:
     """The app's own info from the Supervisor (supervisor/api/apps.py info_data: watchdog, ingress_port, host_network,
-    slug), None when it cannot be read; asked once per boot, fail-soft, never logs the token."""
+    slug), None when it cannot be read, after APP_INFO_RETRY_DELAYS; fail-soft, never logs the token."""
     if not token:
         return None
     request = urllib.request.Request(SUPERVISOR_INFO_URL, headers={"Authorization": f"Bearer {token}"})
-    try:
-        with urllib.request.urlopen(request, timeout=5) as resp:
-            info = json.loads(resp.read(1 << 20))["data"]
-        if not isinstance(info, dict):
-            raise TypeError("data is not an object")
-    except Exception as err:  # noqa: BLE001 - every value it gives has a fallback, see apply_app_info
-        log(f"the app's info could not be read from the Supervisor ({type(err).__name__}): the Watchdog setting is "
-            f"unknown (a restart from HRI restarts in place) and HRI listens on HRI_PORT ({os.environ.get('HRI_PORT')})")
-        return None
-    return info
+    for delay in (*APP_INFO_RETRY_DELAYS, None):
+        try:
+            with urllib.request.urlopen(request, timeout=5) as resp:
+                info = json.loads(resp.read(1 << 20))["data"]
+            if not isinstance(info, dict):
+                raise TypeError("data is not an object")
+            return info
+        except Exception as err:  # noqa: BLE001 - what an unreadable answer means is main's and apply_app_info's
+            error = type(err).__name__
+        if delay is not None:
+            time.sleep(delay)
+    log(f"the app's info could not be read from the Supervisor ({error}, {len(APP_INFO_RETRY_DELAYS) + 1} tries): the "
+        f"Watchdog setting is unknown (a restart from HRI restarts in place), so are the app's port and instance name")
+    return None
 
 
 def owns_address(address: str) -> bool:
@@ -1254,8 +1264,9 @@ def owns_address(address: str) -> bool:
 def apply_app_info(info: dict | None) -> None:
     """Export what the app's info says, before anything reads it; the exec of run.py and a restart in place (which
     has no token to ask again) inherit it.  A value missing or of another type keeps the fallback: the Watchdog
-    unknown, HRI_PORT as the image sets it, no instance name.  The network is never guessed open: without a readable
-    host_network, an address only the host has (the hassio bridge) decides."""
+    unknown, HRI_PORT as the image sets it, no instance name (no info at all: INSTANCE_UNKNOWN_VAR; main never gets
+    here with no info on the host network).  The network is never guessed open: without a readable host_network, an
+    address only the host has (the hassio bridge) decides."""
     watchdog = info.get("watchdog") if info is not None else None
     if isinstance(watchdog, bool):
         os.environ[APP_WATCHDOG_VAR] = "1" if watchdog else "0"
@@ -1281,6 +1292,11 @@ def apply_app_info(info: dict | None) -> None:
     match = INSTANCE_SLUG_RE.fullmatch(slug) if isinstance(slug, str) else None
     if match and INSTANCE_VAR not in os.environ:
         os.environ[INSTANCE_VAR] = match.group(1)
+    if info is None and INSTANCE_VAR not in os.environ:
+        os.environ[INSTANCE_UNKNOWN_VAR] = "1"
+        log(f"HRI listens on HRI_PORT ({os.environ.get('HRI_PORT')}); the instance name is unknown ({INSTANCE_UNKNOWN_VAR}=1)")
+    else:
+        os.environ.pop(INSTANCE_UNKNOWN_VAR, None)
     log(f"app: port {os.environ.get('HRI_PORT')}, {'host network' if host_network else 'app network'}"
         + (f", instance {os.environ[INSTANCE_VAR]}" if os.environ.get(INSTANCE_VAR) else ""))
 
@@ -1307,8 +1323,16 @@ def main() -> None:
         sys.exit(2)
     if applied is not None:  # names only: an option can be the password
         log(f"running as a Home Assistant app; from its options: {', '.join(applied) or 'nothing set'}")
-        enable_app_watchdog(token)
-        apply_app_info(read_app_info(token))
+        enable_app_watchdog(token)  # first: the exit below is started again only with the Watchdog on
+        info = read_app_info(token)
+        if info is None and owns_address(HASSIO_GATEWAY):
+            # the host network, and not the port the Supervisor gave this app: the image's 8087 there is a port on the
+            # LAN, perhaps another app's.  The Supervisor starts a fresh container, with a fresh token, with the Watchdog on
+            log(f"the app runs on the host network and its port could not be read from the Supervisor: not listening "
+                f"on HRI_PORT ({os.environ.get('HRI_PORT')}); exiting (with the app's Watchdog on the Supervisor starts "
+                f"it again, otherwise start it on its Info tab)")
+            sys.exit(1)
+        apply_app_info(info)
     token = ""
     PORT = _parse_port(os.environ.get("HRI_PORT", "8087"))  # the app's own port, when apply_app_info set it
     if PORT is None:

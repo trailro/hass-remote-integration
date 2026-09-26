@@ -304,9 +304,12 @@ class AppWatchdogRestartModeTest(unittest.TestCase):
             with self.subTest(answer=answer):
                 self.lines.clear()
                 kwargs = {"side_effect": answer} if isinstance(answer, BaseException) else {"return_value": answer}
-                with mock.patch.object(self.ep.urllib.request, "urlopen", **kwargs):
+                with mock.patch.object(self.ep.urllib.request, "urlopen", **kwargs) as urlopen, \
+                        mock.patch.object(self.ep.time, "sleep") as sleep:
                     info = self.ep.read_app_info("t0ken-secret")  # never raises
                 self.assertIsNone(info)
+                self.assertEqual(urlopen.call_count, len(self.ep.APP_INFO_RETRY_DELAYS) + 1, "asked again first")
+                self.assertEqual([c.args[0] for c in sleep.call_args_list], list(self.ep.APP_INFO_RETRY_DELAYS))
                 self.assertIsNone(self._watchdog(info))
                 self.assertTrue(any("the Watchdog setting is unknown" in line for line in self.lines), self.lines)
                 self.assertFalse([line for line in self.lines if "t0ken" in line])

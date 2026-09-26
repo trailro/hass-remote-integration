@@ -39,7 +39,7 @@ NOT_HOST = {"HRI_HOST_NETWORK": ""}  # "" is not "1": the container the tests ru
 
 
 class AppInfoTest(unittest.TestCase):
-    VARS = ("HRI_PORT", "HRI_HOST_NETWORK", "HRI_INSTANCE", "HRI_APP_WATCHDOG")
+    VARS = ("HRI_PORT", "HRI_HOST_NETWORK", "HRI_INSTANCE", "HRI_APP_WATCHDOG", "HRI_INSTANCE_UNKNOWN")
 
     def setUp(self):
         self.tmp = _tmp(self)
@@ -66,11 +66,13 @@ class AppInfoTest(unittest.TestCase):
 
     def test_the_supervisors_port_host_network_and_instance(self):
         got = self._apply({"ingress_port": 62345, "host_network": True, "slug": "local_hri_garage", "watchdog": True})
-        self.assertEqual(got, {"HRI_PORT": "62345", "HRI_HOST_NETWORK": "1", "HRI_INSTANCE": "garage", "HRI_APP_WATCHDOG": "1"})
+        self.assertEqual(got, {"HRI_PORT": "62345", "HRI_HOST_NETWORK": "1", "HRI_INSTANCE": "garage", "HRI_APP_WATCHDOG": "1",
+                               "HRI_INSTANCE_UNKNOWN": None})
 
     def test_the_stock_app_changes_nothing(self):
         got = self._apply({"ingress_port": 8087, "host_network": False, "slug": "5c53de3b_hass_remote_integration"})
-        self.assertEqual(got, {"HRI_PORT": "8087", "HRI_HOST_NETWORK": None, "HRI_INSTANCE": None, "HRI_APP_WATCHDOG": None})
+        self.assertEqual(got, {"HRI_PORT": "8087", "HRI_HOST_NETWORK": None, "HRI_INSTANCE": None, "HRI_APP_WATCHDOG": None,
+                               "HRI_INSTANCE_UNKNOWN": None})
 
     def test_a_port_that_is_not_one_keeps_hri_port(self):
         for port in (0, 65536, -1, "62345", True, 62345.0, None):
@@ -104,36 +106,45 @@ class AppInfoTest(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(self._apply({"slug": "local_hri_garage"}, HRI_INSTANCE=value)["HRI_INSTANCE"], value)
 
-    def _main(self, env, info):
+    def _main(self, env, info, owns=False, order=None):
         options = os.path.join(self.tmp, "options.json")
         with open(options, "w", encoding="utf-8") as fh:
             json.dump({}, fh)
         seen = {}
+        order = [] if order is None else order
 
         def prepare():
             seen.update(port=self.ep.PORT, env={v: os.environ.get(v) for v in ("HRI_PORT", "HRI_HOST_NETWORK", "HRI_INSTANCE")})
+            if os.environ.get("HRI_INSTANCE_UNKNOWN"):
+                seen["unknown"] = os.environ["HRI_INSTANCE_UNKNOWN"]
             raise SystemExit(7)
+
+        def read(token):
+            order.append("read")
+            return info
 
         with mock.patch.dict(os.environ, env), \
                 mock.patch.object(self.ep, "APP_OPTIONS_FILE", options), \
-                mock.patch.object(self.ep, "enable_app_watchdog", lambda token: None), \
-                mock.patch.object(self.ep, "read_app_info", mock.Mock(return_value=info)) as read, \
-                mock.patch.object(self.ep, "owns_address", lambda address: False), \
+                mock.patch.object(self.ep, "enable_app_watchdog", lambda token: order.append("watchdog")), \
+                mock.patch.object(self.ep, "read_app_info", mock.Mock(side_effect=read)) as read_mock, \
+                mock.patch.object(self.ep, "owns_address", lambda address: owns), \
                 mock.patch.object(self.ep, "_prepare", prepare), \
-                mock.patch.object(self.ep, "start_status_server", lambda: None), \
+                mock.patch.object(self.ep, "start_status_server", lambda: order.append("listen")), \
                 mock.patch.object(self.ep, "restrict_umask", lambda: 0):
-            if "SUPERVISOR_TOKEN" not in env:
-                os.environ.pop("SUPERVISOR_TOKEN", None)
-                os.environ.pop("HASSIO_TOKEN", None)
-            with self.assertRaises(SystemExit):
+            for var in ("SUPERVISOR_TOKEN", "HASSIO_TOKEN", "HRI_INSTANCE", "HRI_INSTANCE_UNKNOWN"):
+                if var not in env:
+                    os.environ.pop(var, None)
+            with self.assertRaises(SystemExit) as ctx:
                 self.ep.main()
-        return seen, read
+        seen["exit"] = ctx.exception.code
+        return seen, read_mock
 
     def test_main_listens_on_the_supervisors_port_and_writes_it_for_the_healthcheck(self):
         info = {"ingress_port": 62345, "host_network": True, "slug": "local_hri_garage", "watchdog": True}
         seen, read = self._main({"SUPERVISOR_TOKEN": "t0ken"}, info)
         read.assert_called_once_with("t0ken")
-        self.assertEqual(seen, {"port": 62345, "env": {"HRI_PORT": "62345", "HRI_HOST_NETWORK": "1", "HRI_INSTANCE": "garage"}})
+        self.assertEqual(seen, {"port": 62345, "env": {"HRI_PORT": "62345", "HRI_HOST_NETWORK": "1", "HRI_INSTANCE": "garage"},
+                                "exit": 7})
         with open(self.ep.PORT_FILE, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "62345\n")
         self.assertTrue(any("host network without a password" in line for line in self.lines), self.lines)
@@ -144,7 +155,8 @@ class AppInfoTest(unittest.TestCase):
         inherited = {"HRI_APP": "1", "HRI_PORT": "62345", "HRI_HOST_NETWORK": "1", "HRI_INSTANCE": "garage"}
         seen, read = self._main(inherited, None)
         read.assert_not_called()
-        self.assertEqual(seen, {"port": 62345, "env": {"HRI_PORT": "62345", "HRI_HOST_NETWORK": "1", "HRI_INSTANCE": "garage"}})
+        self.assertEqual(seen, {"port": 62345, "env": {"HRI_PORT": "62345", "HRI_HOST_NETWORK": "1", "HRI_INSTANCE": "garage"},
+                                "exit": 7})
         self.assertFalse(os.path.exists(self.ep.PORT_FILE), "the first start's file stays as it is")
 
     def test_docker_writes_no_port_file(self):
@@ -152,6 +164,43 @@ class AppInfoTest(unittest.TestCase):
         read.assert_not_called()
         self.assertEqual(seen["port"], 8090)
         self.assertFalse(os.path.exists(self.ep.PORT_FILE))
+
+    def test_the_info_is_asked_again_before_it_counts_as_unreadable(self):
+        answer = mock.MagicMock()
+        answer.__enter__.return_value.read.return_value = json.dumps({"data": {"ingress_port": 62345}}).encode()
+        with mock.patch.object(self.ep.urllib.request, "urlopen", side_effect=[TimeoutError(), OSError(), answer]) as urlopen, \
+                mock.patch.object(self.ep.time, "sleep") as sleep:
+            self.assertEqual(self.ep.read_app_info("t0ken"), {"ingress_port": 62345})
+        self.assertEqual(urlopen.call_count, 3)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], list(self.ep.APP_INFO_RETRY_DELAYS[:2]))
+        self.assertLessEqual(sum(self.ep.APP_INFO_RETRY_DELAYS), 10, "short: the Supervisor waits for the app to start")
+        self.assertEqual(self.lines, [])
+
+    def test_unreadable_info_on_the_host_network_exits_before_listening(self):
+        """The image's 8087 is a port on the LAN there, and not the one the Supervisor proxies ingress to: nothing
+        listens, and the exit is after the Watchdog was turned on, so the Supervisor starts a fresh container."""
+        order = []
+        seen, read = self._main({"SUPERVISOR_TOKEN": "t0ken"}, None, owns=True, order=order)
+        self.assertEqual(seen, {"exit": 1})
+        self.assertEqual(order, ["watchdog", "read"], "nothing listens")
+        self.assertFalse(os.path.exists(self.ep.PORT_FILE))
+        self.assertTrue(any("host network" in line and "not listening" in line and "exiting" in line
+                            for line in self.lines), self.lines)
+        self.assertFalse([line for line in self.lines if "t0ken" in line])
+
+    def test_unreadable_info_off_the_host_network_runs_with_the_instance_unknown(self):
+        order = []
+        seen, _ = self._main({"SUPERVISOR_TOKEN": "t0ken"}, None, owns=False, order=order)
+        self.assertEqual(seen, {"port": 8087, "env": {"HRI_PORT": "8087", "HRI_HOST_NETWORK": None, "HRI_INSTANCE": None},
+                                "unknown": "1", "exit": 7})
+        self.assertEqual(order, ["watchdog", "read", "listen"])
+        seen, _ = self._main({"SUPERVISOR_TOKEN": "t0ken", "HRI_INSTANCE": "kitchen"}, None)
+        self.assertEqual((seen["env"]["HRI_INSTANCE"], seen.get("unknown")), ("kitchen", None), "set explicitly: known")
+
+    def test_readable_info_clears_the_instance_unknown(self):
+        for info in ({"slug": "local_hri_garage"}, {"slug": "5c53de3b_hass_remote_integration"}, {}):
+            with self.subTest(info=info):
+                self.assertIsNone(self._apply(info, HRI_INSTANCE_UNKNOWN="1")["HRI_INSTANCE_UNKNOWN"])
 
     def test_an_unwritable_port_file_is_logged_not_fatal(self):
         self.ep.PORT_FILE = os.path.join(self.tmp, "missing", "hri-port")
