@@ -372,11 +372,12 @@ class _StatusHandler(http.server.BaseHTTPRequestHandler):
         # sets the user (ingress.py).  X-Forwarded-For is not read here, so it needs no stripping
         ingress = bool(os.environ.get(APP_MARKER)) and self.client_address[0] == SUPERVISOR_IP
         if ingress:
-            # the user headers as the Supervisor spells them, or a client's copy it forwarded (ingress.user_headers_exact)
+            # the user headers as the Supervisor spells them, none (a session without user data), or a client's copy
+            # it forwarded: refused (ingress.user_headers)
             names = [name for name, _ in self.headers.items()]
             ids = [n for n in names if n.casefold() == "x-remote-user-id"]
             user_names = [n for n in names if n.casefold() == "x-remote-user-name"]
-            if ids != ["X-Remote-User-Id"] or user_names not in ([], ["X-Remote-User-Name"]):
+            if (ids or user_names) and (ids != ["X-Remote-User-Id"] or user_names not in ([], ["X-Remote-User-Name"])):
                 self.send_error(403, "The user headers are not the Supervisor's own (ingress)")
                 return
             users = {u.strip().casefold() for u in os.environ.get("HRI_INGRESS_USERS", "").split(",") if u.strip()}

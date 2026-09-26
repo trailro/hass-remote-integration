@@ -200,7 +200,8 @@ class IngressStackTest(unittest.TestCase):
                                          HRI_APP="1", HRI_INGRESS_USERS=users)
                 self.assertEqual(dict(zip([*SPOOFED, "exact"], out)), {**dict.fromkeys(SPOOFED, 403), "exact": 200})
                 self.assertEqual(seen, [{"xff": None, "xfh": None, "ingress": True, "user": "alice"}])
-                self.assertEqual(sum("refused GET /" in line for line in logs.output), len(SPOOFED), logs.output)
+                self.assertEqual(sum("a user header not spelled or sent as the Supervisor sends it: refused GET /" in line
+                                     for line in logs.output), len(SPOOFED), logs.output)
 
     def test_without_a_user_name_the_exact_id_is_enough(self):
         out, _, seen = self._run([("GET", "/", BASE + [USER_ID])], HRI_APP="1")
@@ -208,6 +209,17 @@ class IngressStackTest(unittest.TestCase):
         self.assertEqual(seen, [{"xff": None, "xfh": None, "ingress": True, "user": ""}])
         out, _, _ = self._run([("GET", "/", BASE + [USER_ID])], HRI_APP="1", HRI_INGRESS_USERS="alice")
         self.assertEqual(out, [403])
+
+    def test_a_session_without_a_user(self):
+        """The Supervisor opens a session without user data when it cannot find the user, and sends no user header at
+        all: let through while ingress_users is empty, as in 0.25.0, and refused with that reason when it is set."""
+        out, _, seen = self._run([("GET", "/", BASE)], HRI_APP="1")
+        self.assertEqual(out, [200])
+        self.assertEqual(seen, [{"xff": None, "xfh": None, "ingress": True, "user": ""}])
+        with self.assertLogs(ingress.__name__ if ingress else "x", logging.WARNING) as logs:
+            out, _, seen = self._run([("GET", "/", BASE)], HRI_APP="1", HRI_INGRESS_USERS="alice")
+        self.assertEqual((out, seen), ([403], []))
+        self.assertTrue(any("no user in the ingress session: refused GET /" in line for line in logs.output), logs.output)
 
     def test_empty_ingress_users_is_every_user(self):
         out, _, _ = self._run([("GET", "/", {**INGRESS_HEADERS, "X-Remote-User-Name": "anyone"})], HRI_APP="1", HRI_INGRESS_USERS=" , ")
@@ -302,6 +314,10 @@ class StatusServerTest(unittest.TestCase):
                     want = 503 if case == "exact" else 403
                     self.assertEqual(self._get(supervisor="127.0.0.1", headers=headers, HRI_APP="1", HRI_INGRESS_USERS=users), want)
         self.assertEqual(self._get(supervisor="127.0.0.1", headers=BASE + [USER_ID], HRI_APP="1"), 503)
+
+    def test_a_session_without_a_user(self):
+        self.assertEqual(self._get(supervisor="127.0.0.1", headers=BASE, HRI_APP="1"), 503)
+        self.assertEqual(self._get(supervisor="127.0.0.1", headers=BASE, HRI_APP="1", HRI_INGRESS_USERS="alice"), 403)
 
 
 class AppIngressConfigTest(unittest.TestCase):
