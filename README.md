@@ -72,10 +72,10 @@ recorder. It runs exactly one integration and publishes it.
 - Everything it publishes is named after the integration: MQTT base topic and
   client id `hass_<domain>`, discovery ids `hass_<domain>_...`. Containers of
   different integrations share one broker and one main HA without clashing.
-  Two containers of the *same* integration cannot share a broker (the names
-  are not a setting): they would take each other's connection and clear each
-  other's retained data. Put both config entries in one container, or give
-  each its own broker.
+  Two containers of the *same* integration share them only with different
+  `HRI_INSTANCE` values (`hass_<domain>_<instance>`); with the same names they
+  would take each other's connection and clear each other's retained data. A
+  container that already published keeps its names ([Identity](docs/mqtt.md#identity)).
 
 ---
 
@@ -628,7 +628,8 @@ raises, as in a regular Home Assistant.
 
 ## MQTT reference
 
-Everything goes under `hass_<domain>/`: `status` (online/offline, retained),
+Everything goes under `hass_<domain>/` (`hass_<domain>_<instance>/` with
+`HRI_INSTANCE`): `status` (online/offline, retained),
 `health`, one retained document per entity, the service catalog under
 `services/<domain>`, commands under `cmd/...`, service calls on
 `call/<domain>/<service>` with results on `result/...`, and the manager device
@@ -677,6 +678,7 @@ limit it with `ingress_users` ([app](docs/app.md#access)). See
 | `HRI_DEBUG` | unset | `1` turns on debug logging for the manager and blocking-call detection on the event loop; unset, empty, `0`, `false`, `no` or `off` (any case) leaves them off, and any other value turns them on |
 | `HRI_PASSWORD` | unset | Password for the web UI and API; unset or empty means no login, only spaces or tabs (or bytes that are not UTF-8) keeps the UI closed until it is fixed. One that ends with a space or tab works in the login form but never as `Authorization: Bearer` (HTTP drops it from the header) |
 | `HRI_PASSWORD_FILE` | unset | File holding the password, for example a Docker secret; wins over `HRI_PASSWORD`. Empty, unreadable or not UTF-8 keeps the UI closed until it is fixed |
+| `HRI_INSTANCE` | unset | MQTT identity `hass_<domain>_<instance>` instead of `hass_<domain>`, for a second container of the same integration on one broker: 1 to 32 of `a`-`z`, `0`-`9` and `_`, not starting with `_`; any other value keeps MQTT disconnected, with the reason on the MQTT page. An integration this volume already published keeps the identity it published under ([Identity](docs/mqtt.md#identity)). HRI Manager sets it for its instances. A compose file from 0.25.x or older does not pass it: download it again |
 | `HRI_COOKIE_SECURE` | unset | `1`, `true`, `yes` or `on` (any case) marks the session cookie `Secure` (behind a reverse proxy with TLS); any other value does not, with a warning in the log unless it is `0`, `false`, `no` or `off` |
 
 ### Files on the volume
@@ -785,7 +787,7 @@ without it too, from a copy at most 10 seconds old. See [API](docs/api.md).
   accepting it".** Either a document is over the broker's maximum packet size
   (the log names it), or another client connects with the same client id
   `hass_<domain>`: usually a second container running the same integration on
-  that broker, which cannot work (see [How it works](#how-it-works)).
+  that broker without its own `HRI_INSTANCE` (see [How it works](#how-it-works)).
 - **Entities appear twice in my main HA.** Discovery is on while the main HA
   still runs the same integration. *Undo* on **Cutover**, remove the
   integration from the main HA, enable again.

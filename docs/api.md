@@ -41,7 +41,7 @@ Exceptions:
 | Builder / dev | `GET /api/catalog?q=`, `GET /api/build/options`, `POST /api/build/{check,prepare}`, `GET /api/dev`, `POST /api/dev/install` |
 | Configuration | `POST /api/flow/start`, `GET /api/flow/progress`, `POST/DELETE /api/flow/<id>`, `POST/DELETE /api/options/<flow_id>`, `GET/POST /api/yaml/<domain>`, `GET /api/entries`, `POST /api/entries/<entry_id>/{options,reload,delete}` |
 | Patches | `GET /api/patches/<domain>`, `POST /api/patches/<domain>/upload`, `POST /api/patches/<domain>/<name>/{apply,delete}`, `GET /api/patch_editor/<domain>?name=`, `POST /api/patch_editor/<domain>/{check,save}` |
-| MQTT | `GET/POST /api/mqtt/config`, `GET/POST /api/mqtt/rules`, `POST /api/mqtt/{reconnect,republish}`, `GET /api/mqtt/discovery`, `GET /api/mqtt/commands` |
+| MQTT | `GET/POST /api/mqtt/config`, `GET/POST /api/mqtt/rules`, `POST /api/mqtt/{reconnect,republish,move_identity}`, `GET /api/mqtt/discovery`, `GET /api/mqtt/commands` |
 | Entities | `GET /api/entities`, `POST /api/entities/<entity_id>/{rename,name,disable,enable,delete,mqtt_exclude,mqtt_include,mqtt_name}`, `GET /api/devices`, `POST /api/devices/<device_id>/{name,delete}`, `GET /api/services`, `POST /api/services/call` |
 | System | `GET /api/ha`, `POST /api/ha/{update,rollback,check}`, `POST /api/restart`, `GET/POST /api/settings` |
 | Backups | `GET /api/backups`, `POST /api/backups/create`, `POST /api/backups/upload`, `GET /api/backups/<name>/download`, `POST /api/backups/<name>/{restore,delete}`, `POST /api/backups/restore/cancel` |
@@ -61,7 +61,14 @@ Exceptions:
   The probe takes any answer below `500` as alive.
 - `GET /api/mqtt/status`: see the [MQTT reference](mqtt.md).
   `retained_cleanup_pending` is a list of `{base_topic, broker, other_broker,
-  deferred, error, since}`, the configured broker's first.
+  deferred, error, since}`, the configured broker's first. `identity_source`,
+  `identity_instance`, `identity_problem` and `identity_move_to` say where the
+  base topic comes from ([Identity](mqtt.md#identity)).
+- `POST /api/mqtt/move_identity` `{"to": "<identity>"}`: moves the running
+  integration to `identity_move_to`, which `to` must repeat; only while MQTT is
+  connected. The main HA deletes and re-creates the entities
+  ([Two instances](mqtt.md#two-instances-of-the-same-integration)). Answers
+  `{ok, from, to}` or `{ok: false, error}`.
 - `GET /api/summary` includes `manager_update`: the running release and the
   newer ones the banner shows.
 - `GET /api/status` `health`: the verdict published on MQTT (`state`,
