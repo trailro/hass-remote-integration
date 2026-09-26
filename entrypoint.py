@@ -248,7 +248,7 @@ def save_state(state: dict) -> bool:
     """Atomic: a torn ha.json would read as {} and silently reinstall the
     image default version (and prune the one that was running)."""
     try:
-        write_json(HA_FILE, {k: v for k, v in state.items() if k != "_corrupt"})
+        write_json(HA_FILE, {k: v for k, v in state.items() if k not in ("_corrupt", "_config_for")})
         return True
     except OSError as err:
         log(f"ha.json not written ({err}): booting anyway")
@@ -937,6 +937,10 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
     change = state.get("change")
     recovery = state.get("recovery")
     last = state.get("last_restore") if isinstance(state.get("last_restore"), dict) else {}
+    if restored and last.get("ok") and "storage" in (last.get("parts") or []):
+        # .storage is now a backup's, made on a version that boots here (a newer one's restore is dropped above):
+        # _prepare's guard against booting an older version on a newer configuration does not apply (never saved)
+        state["_config_for"] = wanted
     # a fallback's recovery; a switch the user scheduled to this version is not one (and a leftover must not stop it)
     if isinstance(recovery, dict) and recovery.get("for") == wanted and not (isinstance(change, dict) and change.get("to") == wanted):
         # the restore applied at an earlier boot that was killed after its outcome was recorded (which happens
@@ -950,6 +954,8 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
                           and str(last.get("at") or "") >= str(recovery.get("at") or ""))
         if (restored and bool(last.get("ok"))) or applied_before:
             state.pop("recovery", None)
+            if applied_before:
+                state["_config_for"] = wanted
         else:
             back = recovery.get("from")
             if back and back != wanted and venv_ok(back):
@@ -963,6 +969,8 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
     # a restore that failed and was put back changed nothing: it does not stand in for the clean start
     reset = reset_storage_for_rebuild(wanted, restored and bool(last.get("ok")), restored and bool(last.get("ok")) and "storage" in (last.get("parts") or []),
                                       restore_failed=restored and not last.get("ok"))
+    if reset or _rebuild_stage(wanted) == "import":
+        state["_config_for"] = wanted  # emptied for this version's clean start, now or at an earlier boot
     if not isinstance(change, dict):
         return wanted
     if change.get("to") != wanted:
@@ -975,6 +983,8 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
     own_before = (not restored and last.get("ok") and last.get("for_version") == wanted and "storage" in (last.get("parts") or [])
                   and str(last.get("at") or "") >= str(change.get("at") or ""))
     done = (mode == "restore" and bool(own_now or own_before)) or (mode == "rebuild" and (reset or _rebuild_stage(wanted) == "import"))
+    if own_before:
+        state["_config_for"] = wanted
     if mode in ("restore", "rebuild") and not done:
         what = "configuration restore" if mode == "restore" else "clean start"
         if current and current != wanted and venv_ok(current):
@@ -988,6 +998,18 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
     # from here on a crash loop must bring back the pre-change backup
     change["applied"] = True
     return wanted
+
+
+def config_written_by(state: dict) -> str | None:
+    """The Home Assistant version that last wrote this configuration: .HA_VERSION, which Home Assistant itself
+    rewrites whenever another version boots here and which travels with the folder (a Supervisor backup of the app
+    too, unlike ha.json's venvs); the version recorded as proven when that file says nothing."""
+    try:
+        with open(os.path.join(CONFIG_DIR, ".HA_VERSION"), encoding="utf-8") as fh:
+            written = backupkit.known_ha_version(fh.readline().strip())
+    except (OSError, ValueError):
+        written = None
+    return written or backupkit.known_ha_version(state.get("proven"))
 
 
 def merge_applied_restore(state: dict) -> None:
@@ -1260,6 +1282,25 @@ def _prepare() -> str:
     ensure_extra_requirements(wanted)
     _phase("applying a scheduled restore or clean start, if any", wanted)
     wanted = apply_config_changes(state, wanted, current)
+    # Home Assistant migrates its configuration forward only.  Whatever chose ``wanted`` above (a switch whose restore
+    # or clean start did not happen - a Supervisor restore of a backup taken while one was scheduled -, the newest
+    # release for an older image's Python, the fallback after a failed install), it is not started on a configuration
+    # a newer version wrote, unless that configuration was just put there for it or the operator chose to keep it.
+    writer = config_written_by(state)
+    change = state.get("change") if isinstance(state.get("change"), dict) else {}
+    kept = change.get("to") == wanted and change.get("mode") == "keep"  # a downgrade asked for as it is, with its warning
+    if writer and ha_vkey(wanted) < ha_vkey(writer) and state.get("_config_for") != wanted and not kept:
+        reason = (f"Home Assistant {wanted} was not started: the configuration on this volume was last written by Home "
+                  f"Assistant {writer}, which an older version cannot read. Run {writer} or newer (the image that ran it, "
+                  f"or \"desired\": \"{writer}\" in integration_manager/ha.json), or restore a backup made on Home "
+                  f"Assistant {wanted} or older")
+        log(f"{reason}; exiting")
+        # only the reason is recorded: what this boot chose instead (a substitute version, a switch marked applied)
+        # is not, so the next boot decides again from what the operator asked for
+        refused = load_state()
+        refused["last_error"] = reason
+        save_state(refused)
+        sys.exit(1)
 
     if current and current != wanted and venv_ok(current) and not fell_back and failures < MAX_BOOT_FAILURES:
         # (a version that just crashed its way into a fallback is not a rollback target)
