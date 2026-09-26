@@ -137,10 +137,62 @@ class IdentityRuleTest(_Dir):
         self.assertEqual(ident.key("hri_probe"), "hass_hri_probe")
         self.assertIsNone(ident.describe()["identity_move_to"])
 
-    def test_a_damaged_record_is_no_record(self):
-        for record in ([], {"base": 3}, {"base": "hass_hri_probe-Bad", "domain": "hri_probe"}):
-            ident = self.identity("garage", record)
-            self.assertEqual(ident.key("hri_probe"), "hass_hri_probe-garage", record)
+    def test_only_a_missing_record_is_a_fresh_volume(self):
+        ident = self.identity("garage")
+        self.assertEqual((ident.record_problem, ident.blocking()), (None, None))
+        self.assertEqual(ident.key("hri_probe"), "hass_hri_probe-garage")
+
+    def damaged(self, write):
+        write()
+        with _env("garage"), mock.patch.object(inst_mod.events, "emit") as emit, self.assertLogs(inst_mod._LOGGER, "ERROR"):
+            ident = MqttIdentity(self.path, lambda: self.domain)
+            ident.load()
+        emit.assert_called_once_with("mqtt", ident.record_problem)
+        return ident
+
+    def test_a_damaged_record_moves_nothing(self):
+        """A record that cannot be read, or that no version wrote, gives no identity at all: never the fresh volume's."""
+        records = ([], {}, {"base": 3}, {"prefix": "homeassistant"}, {"base": "hass_hri_probe-Bad", "domain": "hri_probe"},
+                   {"base": "hass_hri_probe", "domain": "Bad"}, {"base": "hass_other", "domain": "hri_probe"},
+                   {"base": "hass_hri_probe", "domain": "hri_probe", "released": "yes"},
+                   # no domain: only what 0.25.x wrote (its plain name, prefix, broker) is a record of an older version
+                   {"base": "hass_hri_probe-garage"}, {**LEGACY, "released": True}, {**LEGACY, "base": "hass_Bad"})
+        texts = ("", "{", '{"base": "hass_hri_probe"', "\x00\xff")
+        cases = [lambda r=r: mp.write_json(self.path, r) for r in records]
+        cases += [lambda t=t: open(self.path, "w", encoding="latin-1").write(t) for t in texts]
+        cases.append(lambda: (os.remove(self.path), os.makedirs(self.path)))  # cannot be read at all
+        for i, write in enumerate(cases):
+            with self.subTest(i):
+                if os.path.isdir(self.path):
+                    os.rmdir(self.path)
+                ident = self.damaged(write)
+                self.assertIn("mqtt_identity.json", ident.record_problem)
+                self.assertIn("MQTT stays disconnected", ident.record_problem)
+                self.assertIsNone(ident.key("hri_probe"))
+                self.assertIsNone(ident.key("other"))
+                self.assertEqual(ident.source("hri_probe"), "invalid")
+                self.assertEqual(ident.describe()["identity_problem"], ident.record_problem)
+                self.assertEqual(ident.blocking(), ident.record_problem)
+                self.assertIsNone(ident.describe()["identity_move_to"])
+
+    def test_a_corrected_record_is_read_again(self):
+        ident = self.damaged(lambda: mp.write_json(self.path, {"base": 3}))
+        mp.write_json(self.path, LEGACY)
+        ident.load()
+        self.assertEqual((ident.record_problem, ident.key("hri_probe")), (None, "hass_hri_probe"))
+
+    def test_a_record_is_written_synced_and_only_when_it_changed(self):
+        ident = self.identity("garage", LEGACY)
+        record = {**LEGACY, "domain": "hri_probe"}
+        with mock.patch.object(inst_mod, "write_json", wraps=inst_mod.write_json) as write:
+            ident.write(record)
+            ident.write(dict(record))
+            ident.release()
+            ident.release()
+        self.assertEqual([c.args[1] for c in write.call_args_list], [record, {**record, "released": True}])
+        self.assertTrue(all(c.kwargs.get("fsync") is True for c in write.call_args_list))
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), {**record, "released": True})
 
 
 class InstallerIdentityTest(unittest.TestCase):
@@ -341,6 +393,39 @@ class PublisherIdentityTest(_Case):
         self.assertEqual(self.record()["domain"], "hri_probe")
         self.assertEqual(ident.source("hri_probe"), "remembered")
         self.assertEqual(self.identity(None).key("hri_probe"), "hass_hri_probe-garage")  # HRI_INSTANCE removed later: kept
+
+    async def test_a_damaged_record_never_connects_until_corrected(self):
+        path = os.path.join(self.dir, "integration_manager", "mqtt_identity.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write('{"base": "hass_hri_pro')
+        with mock.patch.object(inst_mod.events, "emit"):
+            ident = self.identity("garage")
+        pub = self.pub_with(ident, force_base_topic=True)
+        pub._client, pub._connected, pub.stats = None, False, {}
+        with mock.patch.object(mp.mqtt, "Client") as client, mock.patch.object(mp.MqttPublisher, "_sweep_old_identity") as sweep:
+            await pub.hass.async_add_executor_job(pub._connect)
+        client.assert_not_called()
+        sweep.assert_not_called()
+        self.assertEqual(pub.stats["connect_error"], f"not connecting: {ident.record_problem}")
+        self.assertEqual(ident.describe()["identity_problem"], ident.record_problem)  # what status() shows
+        self.assertIsNone(pub.wanted_base_topic)
+        # corrected: the next reconnect (a save of the settings, Reconnect) reads it again and connects under it
+        mp.write_json(path, {**LEGACY, "broker": {**BROKER, "port": self.port}})
+        self.moving(pub)
+        pub._connected, pub._live_base, pub._live_prefix = False, None, None
+        await pub._async_reconnect_locked()
+        self.assertIsNone(ident.record_problem)
+        pub._connect.assert_called_once()
+        self.assertEqual(pub.wanted_base_topic, "hass_hri_probe")
+
+    async def test_the_record_is_rewritten_only_when_it_changed(self):
+        mp.write_json(os.path.join(self.dir, "integration_manager", "mqtt_identity.json"), {**LEGACY, "broker": {**BROKER, "port": self.port}})
+        pub = self.pub_with(self.identity("garage"))
+        with mock.patch.object(inst_mod, "write_json", wraps=inst_mod.write_json) as write:
+            for _ in range(3):
+                await pub.hass.async_add_executor_job(pub._remember_identity, pub.wanted_base_topic, "homeassistant")
+        self.assertEqual(write.call_count, 1)
+        self.assertIs(write.call_args.kwargs["fsync"], True)
 
     async def test_an_invalid_instance_never_connects(self):
         mp.write_json(os.path.join(self.dir, "integration_manager", "mqtt_identity.json"), LEGACY)

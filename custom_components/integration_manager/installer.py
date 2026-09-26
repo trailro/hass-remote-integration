@@ -239,6 +239,34 @@ def configured_instance() -> tuple[str | None, str | None]:
                   "MQTT stays disconnected until it is corrected or removed")
 
 
+# what 0.25.x and older recorded: the plain identity of the integration they ran, the discovery prefix and the broker
+_LEGACY_RECORD_KEYS = frozenset({"base", "prefix", "broker"})
+_LEGACY_BASE_RE = re.compile(r"hass_[a-z0-9_]{1,64}")
+IDENTITY_FILE = "integration_manager/mqtt_identity.json"
+
+
+def _record_shape_problem(rec: Any) -> str | None:
+    """Why ``rec`` is no record any version wrote; None when it is one."""
+    if not isinstance(rec, dict):
+        return f"is not a JSON object ({type(rec).__name__})"
+    base = rec.get("base")
+    if not isinstance(base, str) or not base:
+        return "names no base topic"
+    if "domain" not in rec:
+        if set(rec) - _LEGACY_RECORD_KEYS or not _LEGACY_BASE_RE.fullmatch(base):
+            return f"names no integration for {base[:80]!r} and is not what 0.25.x or older recorded"
+        return None
+    domain = rec["domain"]
+    if not isinstance(domain, str) or not _DOMAIN_RE.match(domain):
+        return f"names no valid integration ({str(domain)[:80]!r})"
+    plain = instance_key(domain)
+    if base != plain and not (base.startswith(plain + INSTANCE_SEP) and INSTANCE_RE.fullmatch(base[len(plain) + 1:])):
+        return f"holds {base[:80]!r}, which is no identity of {domain}"
+    if not isinstance(rec.get("released", False), bool):
+        return "has a released flag that is not true or false"
+    return None
+
+
 class MqttIdentity:
     """The identity the MQTT side of an integration uses: base topic, client id, discovery ids, manager device.
 
@@ -250,6 +278,10 @@ class MqttIdentity:
     it counts only for the integration whose plain hass_<domain> it holds.  ``release`` (the MQTT page's Move) drops the
     record's claim, and the publisher's move clears the old names and records the new ones.
 
+    Only a missing record is a volume that never published.  One that cannot be read or has a shape no version wrote
+    (``record_problem``) gives no identity at all: MQTT stays disconnected and says why, since a new identity would
+    leave the old names on the broker and re-create every entity on the main Home Assistant.
+
     An invalid HRI_INSTANCE is never used and never dropped silently: the publisher refuses to connect and says why."""
 
     def __init__(self, path: str, domain_provider: Any) -> None:
@@ -257,37 +289,61 @@ class MqttIdentity:
         self._domain = domain_provider
         self.instance, self.problem = configured_instance()
         self.record: dict[str, Any] = {}  # mqtt_identity.json as last read or written: replaced as a whole, never in place
+        self.record_problem: str | None = None
 
     def load(self) -> None:
-        """Blocking."""
-        rec = jsonio.read_json(self.path, {})
-        self.record = rec if isinstance(rec, dict) else {}
+        """Blocking.  A record that cannot be used is logged and put on the timeline."""
+        try:
+            with open(self.path, encoding="utf-8") as fh:
+                rec = json.load(fh)
+        except FileNotFoundError:
+            self.record, self.record_problem = {}, None
+            return
+        except (OSError, ValueError, RecursionError) as err:
+            self._unusable(f"cannot be read ({type(err).__name__}: {err})")
+            return
+        if why := _record_shape_problem(rec):
+            self._unusable(why)
+            return
+        self.record, self.record_problem = rec, None
+
+    def _unusable(self, why: str) -> None:
+        self.record = {}
+        self.record_problem = (f"{IDENTITY_FILE} {why}: the identity this volume published under is unknown, so MQTT stays "
+                               "disconnected. Correct the file, or remove it to publish as a volume that never published "
+                               "(what was published before stays on the broker, and the main Home Assistant keeps those "
+                               "entities)")
+        _LOGGER.error("MQTT: %s", self.record_problem)
+        events.emit("mqtt", self.record_problem)
 
     def remembered(self, domain: str | None) -> str | None:
         rec = self.record
-        base = rec.get("base")
-        if not domain or not isinstance(base, str) or rec.get("released"):
+        if not domain or self.record_problem or not rec or rec.get("released"):
             return None
-        plain = instance_key(domain)
-        if "domain" not in rec:
-            return base if base == plain else None
-        if rec["domain"] != domain:
-            return None
-        if base == plain or (base.startswith(plain + INSTANCE_SEP) and INSTANCE_RE.fullmatch(base[len(plain) + 1:])):
-            return base
-        return None
+        base = rec["base"]
+        if "domain" not in rec:  # 0.25.x or older: its plain identity
+            return base if base == instance_key(domain) else None
+        return base if rec["domain"] == domain else None
 
     def target(self, domain: str | None) -> str | None:
         """What the rule gives an integration that never published from here; None for an invalid HRI_INSTANCE."""
         return None if self.problem else instance_key(domain, self.instance)
 
     def key(self, domain: str | None) -> str | None:
+        if self.record_problem:
+            return None
         return self.remembered(domain) or self.target(domain)
+
+    def blocking(self) -> str | None:
+        """Why the running integration has no identity to connect with; None when it has one (or nothing runs)."""
+        return self.record_problem or self.problem
 
     def source(self, domain: str | None) -> str | None:
         """remembered, instance, default, invalid; None with nothing running."""
         if not domain:
             return None
+        if self.record_problem:
+            return "invalid"
         if self.remembered(domain):
             return "remembered"
         if self.problem:
@@ -297,23 +353,28 @@ class MqttIdentity:
     def describe(self) -> dict[str, Any]:
         domain = self._domain()
         base, target = self.key(domain), self.target(domain)
-        return {"identity_source": self.source(domain), "identity_instance": self.instance, "identity_problem": self.problem,
+        return {"identity_source": self.source(domain), "identity_instance": self.instance, "identity_problem": self.blocking(),
                 "identity_move_to": target if base and target and target != base else None}
 
     def stamp(self, base: str) -> dict[str, Any]:
-        """What a record of ``base`` says besides the names: the integration it belongs to."""
+        """What a record of ``base`` says besides the names: the integration it belongs to (empty when ``base`` is not
+        the running integration's identity: such a record is not written)."""
         domain = self._domain()
         return {"domain": domain} if domain and base == self.key(domain) else {}
 
-    def adopt(self, record: dict[str, Any]) -> None:
-        self.record = dict(record)
+    def write(self, record: dict[str, Any]) -> None:
+        """Blocking: ``record`` becomes the file, synced with its directory (a torn or lost record would stop MQTT
+        until it is fixed); skipped when the file already says it."""
+        if record == self.record and not self.record_problem:
+            return
+        write_json(self.path, record, fsync=True)
+        self.record, self.record_problem = dict(record), None
 
     def release(self) -> None:
         """Blocking: the record stops holding the running integration's identity.  Its names stay (the publisher's
-        move clears what they left retained, and a failed sweep is retried from them)."""
-        rec = {**self.record, "released": True}
-        write_json(self.path, rec, fsync=False)
-        self.record = rec
+        move clears what they left retained, and a failed sweep is retried from them).  A record of 0.25.x gets the
+        integration it held: released, it would name none."""
+        self.write({**self.record, "domain": self._domain(), "released": True})
 
 
 @dataclass
