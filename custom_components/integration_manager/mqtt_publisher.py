@@ -2877,6 +2877,20 @@ class MqttPublisher:
                 self._publish_device_discovery(gone, block, {})  # entities still setting up: removal forms, not a clear
             elif self._publish(self._discovery_topic(gone), None, qos=1):
                 self._note_boot_removed(gone, self._discovery_map.pop(gone))
+        # A clean start gave every device a new id: a config an earlier process left retained, for a device not announced
+        # now, whose every component is announced now under another device, is cleared before the new configs go out, or
+        # the consumer refuses their unique ids until the orphan sweep.  One that still holds anything not announced now
+        # (an entity still setting up) is left to the sweep.
+        if self._orphan_sweep_due and self._boot_components:
+            uid_owner = {comp.get("unique_id"): did for did, (_b, comps) in groups.items() for comp in comps.values()}
+            for old in list(self._boot_components):
+                carried = self._boot_carried(old)
+                if old in groups or old in self._discovery_map or not carried:
+                    continue
+                owners = {uid_owner.get(comp.get("unique_id")) for comp in carried.values()}
+                if None not in owners and self._publish(self._discovery_topic(old), None, qos=1):
+                    self._boot_removed |= {(old, key) for key in carried}
+                    moved_in |= owners  # announced again once the old config is gone, as a move seen live
         for disc_id in sorted(groups, key=lambda d: (d not in with_removals, depth(d))):
             block, comps = groups[disc_id]
             self._publish_device_discovery(disc_id, block, comps)

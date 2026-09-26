@@ -3,6 +3,8 @@
 E1  with HRI_DEBUG=1 Home Assistant 2026.5.0 could not boot: run.py turned on the blocking-call detector before the
     HomeAssistant object existed, and creating it imports dateutil.relativedelta on the loop; reporting that import
     looks the integration up in hass.data, which the loader had not set up yet (KeyError: 'integrations').
+E2  after a downgrade with a clean start every device has a new id: the new configs went out while the old ones were
+    still retained with the same unique ids, and the main HA refused them until the orphan sweep, five minutes later.
 """
 
 import asyncio
@@ -94,6 +96,90 @@ class DetectorAfterHassTest(unittest.TestCase):
 
     def test_off_without_debug(self):
         self.assertEqual(self._boot(False), ["hass", "loader", "config", "upgrade"])
+
+
+class SupersededBootConfigsTest(StartWindowCase):
+    """E2: the configs of the old device ids A and B are retained; the registry now announces the same unique ids under
+    the devices C (demo) and D (other).  At the first publish A and B are cleared before C and D go out, without waiting
+    for the orphan sweep."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.registry.entities["sensor.c"] = _entry("sensor.c")
+        self.registry.entities["sensor.c"].platform = "other"
+        self.states["sensor.c"] = State("sensor.c", "5", {"unit_of_measurement": "W"})
+        self.pub.hass.config.components = {"demo", "other"}
+        self.c, self.d = self.did, disc.device_block(self.pub.hass, None, "other", self.pub.prefix)[0]
+        self.a, self.b = f"{self.pub.prefix}olda", f"{self.pub.prefix}oldb"
+
+    def _retained(self, did, *eids, base=None):
+        comps = {mp._comp_key(eid): {"platform": "sensor", "unique_id": f"{self.pub.prefix}{eid}", "state_topic": "x"} for eid in eids}
+        origin = disc.origin(self.pub.prefix if base is None else base)
+        return json.dumps({"device": {"identifiers": [did]}, "origin": origin, "components": comps}).encode()
+
+    def _topic(self, did):
+        return self.pub._discovery_topic(did)
+
+    def _last(self, did):
+        return [p for t, p in self.published if t == self._topic(did)]
+
+    def _first(self, did):
+        return next(i for i, (t, _p) in enumerate(self.published) if t == self._topic(did))
+
+    async def _first_publish(self, found):
+        """A new process: nothing announced yet, the broker replays what earlier processes left retained."""
+        self.pub._discovery_map, self.pub._blocks, self.pub._last_hash, self.published[:] = {}, {}, {}, []
+        self.pub._boot_components, self.pub._boot_removed = None, set()
+        self.pub.hass.async_add_executor_job = mock.AsyncMock(return_value=found)
+        await self.pub.async_republish_all()
+
+    async def test_cleared_before_the_new_ones_are_announced(self):
+        await self._first_publish({self._topic(self.a): self._retained(self.a, "sensor.a", "sensor.b"),
+                                   self._topic(self.b): self._retained(self.b, "sensor.c")})
+        self.assertEqual((self._last(self.a), self._last(self.b)), ([None], [None]))
+        self.assertLess(max(self._first(self.a), self._first(self.b)), min(self._first(self.c), self._first(self.d)))
+        self.assertTrue(self.pub._orphan_sweep_due, "no wait for the sweep: it has not run")
+        self.published[:] = []
+        await self.run_debounced()  # announced again a moment later, as a move seen live
+        self.assertEqual(set(json.loads(self._last(self.c)[-1])["components"]), {"sensor_a", "sensor_b"})
+        self.assertEqual(set(json.loads(self._last(self.d)[-1])["components"]), {"sensor_c"})
+        self.assertEqual((self._last(self.a), self._last(self.b)), ([], []))  # cleared once, and not carried back
+
+    async def test_once_the_entities_are_in_the_registry(self):
+        """A clean start: at the first publish the integration has not added its entities yet, so nothing of A is
+        announced and A stays; when they are added, A goes before the device they are now on."""
+        moved = {eid: (self.registry.entities.pop(eid), self.states.pop(eid)) for eid in ("sensor.a", "sensor.b")}
+        await self._first_publish({self._topic(self.a): self._retained(self.a, "sensor.a", "sensor.b")})
+        self.assertEqual(self._last(self.a), [])
+        for eid, (entry, state) in moved.items():
+            self.registry.entities[eid], self.states[eid] = entry, state
+        self.published[:] = []
+        self.pub._publish_discovery_all()  # the registry burst of the integration adding them
+        self.assertEqual(self._last(self.a), [None])
+        self.assertLess(self._first(self.a), self._first(self.c))
+
+    async def test_an_entity_still_setting_up_keeps_the_config_for_the_sweep(self):
+        self.registry.entities["sensor.slow"] = _entry("sensor.slow")
+        self.registry.entities["sensor.slow"].platform = "slow"  # in the registry, its integration still setting up
+        await self._first_publish({self._topic(self.a): self._retained(self.a, "sensor.a", "sensor.slow"),
+                                   self._topic(self.b): self._retained(self.b, "sensor.c")})
+        self.assertEqual(self._last(self.a), [])
+        self.assertEqual(self._last(self.b), [None])
+
+    async def test_an_entity_not_in_the_registry_keeps_the_config_for_the_sweep(self):
+        await self._first_publish({self._topic(self.a): self._retained(self.a, "sensor.a", "sensor.notyet")})
+        self.assertEqual(self._last(self.a), [])
+
+    async def test_a_live_config_is_never_cleared(self):
+        await self._first_publish({self._topic(self.c): self._retained(self.c, "sensor.a", "sensor.c"),
+                                   self._topic(self.a): self._retained(self.a, "sensor.b")})
+        self.assertNotIn(None, self._last(self.c))
+        self.assertNotIn(None, self._last(self.d))
+        self.assertEqual(self._last(self.a), [None])
+
+    async def test_someone_elses_config_is_left_alone(self):
+        await self._first_publish({self._topic(self.a): self._retained(self.a, "sensor.a", "sensor.b", base="hass_other_")})
+        self.assertEqual(self._last(self.a), [])
 
 
 if __name__ == "__main__":

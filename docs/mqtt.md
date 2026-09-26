@@ -573,10 +573,13 @@ removed from the main HA five minutes after Home Assistant in the container has
 started (only entities that exist neither as a state nor in its entity
 registry by then). An entity that moved to another device while the
 container was down (a clean start gives every device a new id) is dropped
-from its old device's config at the same time. A config of a device no longer
-announced is cleared, or, when entities still setting up are left in it,
-keeps them with a removal form for every other one. The devices the entities
-moved to are announced again a few seconds later.
+from its old device's config. When every entity in the config of a device no
+longer announced is now announced under another device, that config is
+cleared at once, before the new configs go out, so the main HA takes them
+without waiting. Otherwise it waits for the sweep: a config of a device no
+longer announced is cleared then, or, when entities still setting up are left
+in it, keeps them with a removal form for every other one. Either way the
+devices the entities moved to are announced again a few seconds later.
 
 ## What the main Home Assistant needs
 
