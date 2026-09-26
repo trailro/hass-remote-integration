@@ -1639,7 +1639,7 @@ class MqttPublisher:
         base = self.wanted_base_topic
         if not base:
             # nothing running -> no identity -> nothing to publish under
-            self.stats["connect_error"] = "no integration is running: MQTT has no identity (hass_<domain>) until one starts"
+            self.stats["connect_error"] = "no integration is running: MQTT has no identity (hass_<domain>, or hass_<domain>-<instance>) until one starts"
             _LOGGER.info("MQTT: %s", self.stats["connect_error"])
             return
         if (key := self._pending_key(base, self._broker_identity())) in self._cleanup_pending:
