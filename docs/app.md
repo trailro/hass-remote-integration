@@ -166,6 +166,14 @@ different USB port. Every integration in the app can open every serial device
 of the host, including a stick your main Home Assistant uses: give each stick
 to one of them only.
 
+## Raw sockets
+
+The app asks for no extra capabilities. The Supervisor plans to drop
+`NET_RAW` from app containers by default (a flag since 2026.09.3): from then
+on, integrations that need raw sockets, such as ARP/DHCP scanners and
+nmap-style device trackers, may not work in the app. A plain Docker install
+is not affected.
+
 ## Access
 
 The web UI opens two ways, with a different gate each:
