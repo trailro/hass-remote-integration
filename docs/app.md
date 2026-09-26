@@ -247,7 +247,14 @@ the app from this repository never does). What changes then:
   sends the sidebar panel there. HRI asks the Supervisor for that port at
   every start of a fresh container and listens on it, the healthcheck
   included; the app's log names it (`app: port …, host network`). Two
-  instances on one host never share a port.
+  instances on one host never share a port. If the Supervisor cannot be
+  asked (HRI tries four times in about 7 seconds), HRI does not fall back to
+  the image's 8087, a port on your network there and perhaps another app's:
+  the app exits with a log line saying so (`not listening on HRI_PORT`). HRI
+  turns the Watchdog on before it asks, so on the first start too the
+  Supervisor starts a fresh container, unless the Watchdog could not be
+  turned on either or you turned it off ([Restarts and the
+  Watchdog](#restarts-and-the-watchdog)): then start the app on its Info tab.
 - **The port is on your network.** On the host network it listens on every
   interface of the host, the Network tab has nothing to turn off, and a port
   without a password would be HRI open to anyone on the LAN. So without the
