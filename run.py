@@ -231,6 +231,7 @@ async def _boot() -> int:
         block_async_io.enable()
     await hass.async_add_executor_job(conf_util.process_ha_config_upgrade, hass)
     await _mount_local_lib_path(CONFIG_DIR)
+    await hass.async_add_executor_job(_suppress_zeroconf_announcement)  # imports zeroconf: not on the loop
 
     config = {
         "homeassistant": {
@@ -797,6 +798,36 @@ def _malloc_trim() -> None:
         ctypes.CDLL("libc.so.6").malloc_trim(0)
     except Exception:  # noqa: BLE001
         pass
+
+
+ZEROCONF_ANNOUNCE = "_async_register_hass_zc_service"  # homeassistant/components/zeroconf/__init__.py, 2026.5.0 to 2026.9.3
+
+
+def _suppress_zeroconf_announcement() -> bool:
+    """On the host network (HRI_HOST_NETWORK, entrypoint.apply_app_info): Home Assistant's zeroconf component, which
+    an integration that browses mDNS sets up, announces the Home Assistant it runs in as `_home-assistant._tcp.local.`
+    on the LAN, and the companion apps and a new Home Assistant's onboarding would offer this headless one as a server.
+    The announcement is one function of the component, ZEROCONF_ANNOUNCE, which its async_setup calls by its module
+    name once Home Assistant starts; it is replaced by one that announces nothing.  Browsing, and any service an
+    integration registers itself, are left alone.  True when replaced; logged when it cannot be (a Home Assistant
+    that no longer has it announces itself)."""
+    if os.environ.get("HRI_HOST_NETWORK") != "1":
+        return False
+    try:
+        from homeassistant.components import zeroconf
+    except Exception as err:  # noqa: BLE001 - the boot goes on; nothing can announce without the component either
+        _LOGGER.error("zeroconf not importable (%s: %s): its announcement of this Home Assistant is not suppressed", type(err).__name__, err)
+        return False
+    if not callable(getattr(zeroconf, ZEROCONF_ANNOUNCE, None)):
+        _LOGGER.error("Home Assistant %s has no zeroconf.%s: if an integration sets zeroconf up, this Home Assistant "
+                      "announces itself on the network", HA_VERSION, ZEROCONF_ANNOUNCE)
+        return False
+
+    async def _not_announced(*_args, **_kwargs) -> None:
+        _LOGGER.info("zeroconf: this Home Assistant is not announced on the network (the app runs on the host network)")
+
+    setattr(zeroconf, ZEROCONF_ANNOUNCE, _not_announced)
+    return True
 
 
 def _install_import_tracer() -> None:
