@@ -103,7 +103,10 @@ APP_WATCHDOG_VAR = "HRI_APP_WATCHDOG"
 # The same answer gives the port and the network.  An app with `ingress_port: 0` (what HRI Manager stamps for an
 # instance on the host network, where two instances cannot both listen on 8087) gets a port the Supervisor picks once
 # per slug (supervisor/ingress.py get_dynamic_port) and proxies ingress to: HRI listens there, whatever HRI_PORT the
-# image sets.  HRI Manager looks for this line in a release's entrypoint.py to know that the release reads its port.
+# image sets.  HRI Manager looks for this line in a release's entrypoint.py before it offers the host network, and
+# takes it as a promise of both halves its gate relies on: this entrypoint reads its dynamic port, AND, on the host
+# network, refuses every request that is not ingress while the app has no password (lan_refused here, the guard in
+# auth.py).  A release that has the line must have both.
 APP_DYNAMIC_PORT = True
 # "1" when the app shares the host's network namespace (host_network): its port is then on every interface of the host,
 # the LAN included, and the web UI refuses anything but ingress until the app has a password (auth.py, the status page)
