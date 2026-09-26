@@ -295,7 +295,7 @@ class AppOptionsTest(unittest.TestCase):
         self.assertEqual(applied, ["HA_VERSION_LATEST"])
         self.assertEqual(os.environ["HA_VERSION_LATEST"], "1")
         for var in ("HRI_PASSWORD", "HRI_APT_PACKAGES", "HRI_CALL_TIMEOUT", "HRI_DEBUG", "HRI_COOKIE_SECURE"):
-            self.assertNotIn(var, os.environ, var)  # "0" would turn HRI_DEBUG on: run.py tests only that it is set
+            self.assertNotIn(var, os.environ, var)  # unset, as a Docker install without them
         self.assertFalse(self.ep.password_configured())
 
     def test_a_password_of_spaces_is_kept(self):

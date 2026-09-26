@@ -82,5 +82,31 @@ class UnreadableSettingsTest(unittest.TestCase):
         self.assertEqual(self.settings.data["backup_keep"], settings_mod.DEFAULTS["backup_keep"], "the change is rolled back")
 
 
+class DebugFlagTest(unittest.TestCase):
+    """S1-4: HRI_DEBUG is read the way settings.bool_ reads a word: 0, false, no, off and empty are off."""
+
+    def _debug(self, value):
+        logger = logging.getLogger("custom_components.integration_manager")
+        level = logger.level
+        self.addCleanup(logger.setLevel, level)
+        logger.setLevel(logging.NOTSET)
+        with mock.patch.dict(os.environ, {"HRI_DEBUG": value}), \
+                mock.patch.object(run, "_run_loop", return_value=0), \
+                mock.patch.object(run, "_quiet_loggers", return_value=[]), \
+                mock.patch("homeassistant.block_async_io.enable") as enable:
+            run._boot_with_logging()
+        return enable.called, logger.level == logging.DEBUG
+
+    def test_off_however_it_is_spelled(self):
+        for value in ("", "0", "false", "no", "off", " OFF ", "False"):
+            with self.subTest(value=value):
+                self.assertEqual(self._debug(value), (False, False))
+
+    def test_on(self):
+        for value in ("1", "true", "yes", "on"):
+            with self.subTest(value=value):
+                self.assertEqual(self._debug(value), (True, True))
+
+
 if __name__ == "__main__":
     unittest.main()

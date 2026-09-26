@@ -660,7 +660,7 @@ to report a problem, see [SECURITY.md](SECURITY.md).
 | `HRI_CALL_TIMEOUT` | `60` | Seconds a service call (over MQTT, from the Services page or `POST /api/services/call`) or a command may take before it is reported as a timeout; a whole number, else a warning and 60; below 1 uses 1 |
 | `HRI_TRACEMALLOC` | unset | Diagnostics: allocation tracing frames (costs memory); a value that is not a number traces 25 |
 | `HRI_TRACE_IMPORT` | unset | Diagnostics: log who imports the given packages |
-| `HRI_DEBUG` | unset | Debug logging for the manager, and blocking-call detection on the event loop |
+| `HRI_DEBUG` | unset | `1` turns on debug logging for the manager and blocking-call detection on the event loop; unset, empty, `0`, `false`, `no` or `off` leaves them off |
 | `HRI_PASSWORD` | unset | Password for the web UI and API; unset or empty means no login, only spaces or tabs keeps the UI closed until it is fixed |
 | `HRI_PASSWORD_FILE` | unset | File holding the password, for example a Docker secret; wins over `HRI_PASSWORD`, and must not be empty |
 | `HRI_COOKIE_SECURE` | unset | `1` marks the session cookie `Secure` (behind a reverse proxy with TLS) |
