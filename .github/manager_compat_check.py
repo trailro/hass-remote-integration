@@ -1,12 +1,20 @@
-"""The app, stamped by the newest released HRI Manager, with the manager's own code.
+r"""The app, stamped by the newest released HRI Manager, with the manager's own code.
 
     python .github/manager_compat_check.py <manager checkout> [<repository root>]
+
+The checkout is of the tag CI picks (ci.yml, job "manager"): the highest vX.Y.Z of the manager's releases that are
+neither drafts nor prereleases, not releases/latest.  By hand, the same tag:
+
+    gh api --paginate repos/trailro/hass-remote-integration-manager/releases \
+        --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' \
+        | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' | sort -V | tail -n 1
+    git clone --quiet --depth 1 --branch <that tag> https://github.com/trailro/hass-remote-integration-manager <dir>
 
 HRI Manager (trailro/hass-remote-integration-manager) creates HRI instances as local apps from app/config.yaml, and
 refuses a template with a key, or a value shape, it has not vetted (hrimgr.stamp.vet_template): the manager writes app
 definitions with the Supervisor's manager role, so a new key needs a manager release that knows it.  0.1.1 refused
 0.25.2's backup_pre, and every instance update stopped until the manager caught up.  This imports hrimgr.stamp from a
-checkout of the manager (CI: its latest release; it needs PyYAML only) and runs, on this repository's app/config.yaml:
+checkout of the manager (CI: its newest release, as above; it needs PyYAML only) and runs, on this repository's app/config.yaml:
 
   - vet_template on each key alone, so the failure names every key the manager refuses;
   - parse_template, the manager's whole check of a template (vet_template among it);

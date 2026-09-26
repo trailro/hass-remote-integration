@@ -7,6 +7,7 @@ import io
 import os
 import pathlib
 import shutil
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -102,6 +103,57 @@ class ManagerCompatTest(unittest.TestCase):
                     self.assertIn(f"release a manager that accepts {self.keys[0]} first", err.getvalue())
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(self.mod.main(["x"]), 2)
+
+
+WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+FAKE_GH = """#!/bin/sh
+printf '%s\\n' "$@" > "$GH_ARGS"
+[ -n "$GH_FAIL" ] && { echo "gh: HTTP 503" >&2; exit 1; }
+printf '%s' "$GH_TAGS"
+"""
+
+
+@unittest.skipUnless(WORKFLOW.is_file() and shutil.which("bash") and shutil.which("sort"), ".github not copied, or no bash")
+class ManagerTagTest(unittest.TestCase):
+    """The CI step that picks the manager release to check against, run as GitHub runs it (bash -e) with a stand-in
+    for gh."""
+
+    def _pick(self, tags, fail=False):
+        steps = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]["manager"]["steps"]
+        script = next(step for step in steps if step.get("id") == "release")["run"]
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        gh = tmp / "gh"
+        gh.write_text(FAKE_GH, encoding="utf-8")
+        gh.chmod(0o755)
+        env = {**os.environ, "PATH": f"{tmp}:{os.environ.get('PATH', '/usr/bin:/bin')}", "GITHUB_OUTPUT": str(tmp / "out"),
+               "GH_ARGS": str(tmp / "args"), "GH_TAGS": "".join(f"{t}\n" for t in tags), "GH_FAIL": "1" if fail else ""}
+        proc = subprocess.run(["bash", "-e", "-c", script], env=env, capture_output=True, text=True, timeout=30)
+        out = (tmp / "out").read_text(encoding="utf-8") if (tmp / "out").exists() else ""
+        self.args = (tmp / "args").read_text(encoding="utf-8").splitlines()
+        return proc.returncode, out, proc.stderr
+
+    def test_the_highest_version_not_the_latest_mark(self):
+        rc, out, _ = self._pick(["v0.2.0", "v0.10.0", "v0.9.9", "v0.1.1"])
+        self.assertEqual((rc, out), (0, "tag=v0.10.0\n"))
+        self.assertIn("--paginate", self.args)
+        self.assertIn("repos/trailro/hass-remote-integration-manager/releases", self.args)
+        self.assertIn(".[] | select(.draft == false and .prerelease == false) | .tag_name", self.args)
+
+    def test_only_an_exact_vxyz_tag(self):
+        near = ["v1.0.0-rc1", "v1.0", "1.2.3", "v1.2.3.4", "v01.2.3", "xv9.9.9", "v9.9.9 ", "v9.9.*", "v2.0.0beta"]
+        rc, out, _ = self._pick(near + ["v0.3.0"])
+        self.assertEqual((rc, out), (0, "tag=v0.3.0\n"))
+        rc, out, err = self._pick(near)
+        self.assertEqual((rc, out), (1, ""))
+        self.assertIn("no vX.Y.Z release of HRI Manager", err)
+
+    def test_an_api_that_cannot_be_asked_is_red(self):
+        for fail, tags in ((True, ["v0.3.0"]), (False, [])):
+            with self.subTest(fail=fail):
+                rc, out, _ = self._pick(tags, fail=fail)
+                self.assertNotEqual(rc, 0)
+                self.assertEqual(out, "")
 
 
 if __name__ == "__main__":
