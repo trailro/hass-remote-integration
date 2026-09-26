@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import faulthandler
+import importlib.abc
 import logging
 import os
 import signal
@@ -232,6 +233,7 @@ async def _boot() -> int:
     await hass.async_add_executor_job(conf_util.process_ha_config_upgrade, hass)
     await _mount_local_lib_path(CONFIG_DIR)
     await hass.async_add_executor_job(_suppress_zeroconf_announcement)  # imports zeroconf: not on the loop
+    _suppress_ssdp_announcement()  # a hook: imports nothing
 
     config = {
         "homeassistant": {
@@ -828,6 +830,85 @@ def _suppress_zeroconf_announcement() -> bool:
 
     setattr(zeroconf, ZEROCONF_ANNOUNCE, _not_announced)
     return True
+
+
+SSDP_SERVER_MODULE = "homeassistant.components.ssdp.server"  # 2026.5.0 to 2026.9.3
+SSDP_ANNOUNCE = "_async_start_upnp_servers"  # a method of its Server, 2026.5.0 to 2026.9.3
+
+
+def _suppress_ssdp_announcement() -> bool:
+    """On the host network (HRI_HOST_NETWORK): Home Assistant's ssdp component, which an integration that discovers
+    UPnP/SSDP devices sets up, also starts UPnP servers once Home Assistant has started, one per source address: they
+    announce this Home Assistant on the LAN (SSDP alive notices and answers to searches for the device type
+    urn:home-assistant.io:device:HomeAssistant:1) and serve its description, presentation_url included, over HTTP.
+    One method of the component's Server starts them all, SSDP_ANNOUNCE, which Server.async_start registers for
+    Home Assistant's start through self, by its name; it is replaced on the class by one that starts nothing.  The
+    component's Scanner, which searches for and listens to devices for the integrations, is left alone.  The module
+    imports async-upnp-client, which Home Assistant installs only for an integration that needs ssdp, so it cannot
+    be imported here: an import hook replaces the method as the module is first imported (at once, if it already
+    is).  True when replaced or hooked; logged when the method is not there (that Home Assistant announces itself)."""
+    if os.environ.get("HRI_HOST_NETWORK") != "1":
+        return False
+    module = sys.modules.get(SSDP_SERVER_MODULE)
+    if module is not None:
+        return _replace_ssdp_announcement(module)
+    if not any(isinstance(finder, _SsdpServerHook) for finder in sys.meta_path):
+        sys.meta_path.insert(0, _SsdpServerHook())
+    return True
+
+
+def _replace_ssdp_announcement(module) -> bool:
+    server = getattr(module, "Server", None)
+    if not isinstance(server, type) or not callable(getattr(server, SSDP_ANNOUNCE, None)):
+        _LOGGER.error("Home Assistant %s has no ssdp Server.%s: this Home Assistant announces itself on the network "
+                      "over SSDP", HA_VERSION, SSDP_ANNOUNCE)
+        return False
+
+    async def _not_announced(self, *_args, **_kwargs) -> None:
+        _LOGGER.info("ssdp: this Home Assistant is not announced on the network (the app runs on the host network)")
+
+    setattr(server, SSDP_ANNOUNCE, _not_announced)
+    return True
+
+
+class _SsdpServerLoader(importlib.abc.Loader):
+    """The module's own loader, and the replacement once the module has run; everything else is the loader's."""
+
+    def __init__(self, loader) -> None:
+        self._loader = loader
+
+    def __getattr__(self, name):
+        return getattr(self._loader, name)  # get_source, get_filename...: tracebacks and inspect read the module
+
+    def create_module(self, spec):
+        return self._loader.create_module(spec)
+
+    def exec_module(self, module) -> None:
+        self._loader.exec_module(module)
+        _replace_ssdp_announcement(module)
+
+
+class _SsdpServerHook(importlib.abc.MetaPathFinder):
+    """Finds SSDP_SERVER_MODULE as the other finders do, with its loader wrapped; nothing else."""
+
+    def find_spec(self, fullname, path, target=None):
+        if fullname != SSDP_SERVER_MODULE:
+            return None
+        for finder in sys.meta_path:
+            find = getattr(finder, "find_spec", None)
+            if isinstance(finder, _SsdpServerHook) or find is None:
+                continue
+            spec = find(fullname, path, target)
+            if spec is not None:
+                break
+        else:
+            return None
+        if spec.loader is None or not hasattr(spec.loader, "exec_module"):
+            _LOGGER.error("ssdp's server module has no loader to wrap: this Home Assistant announces itself on the "
+                          "network over SSDP")
+            return spec
+        spec.loader = _SsdpServerLoader(spec.loader)
+        return spec
 
 
 def _install_import_tracer() -> None:

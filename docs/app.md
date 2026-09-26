@@ -257,9 +257,15 @@ the app from this repository never does). What changes then:
   `/api/alive`, the healthcheck, still answers there. With a password the
   port works as the app's port always does, behind HRI's login.
 - **Home Assistant is not announced.** The Home Assistant inside does not
-  announce itself on the LAN (`_home-assistant._tcp`), so the companion apps
-  and a new Home Assistant's onboarding never offer it as a server; the
-  integration's own zeroconf browsing works.
+  announce itself on the LAN by either of the two ways Home Assistant does:
+  not over mDNS (zeroconf's `_home-assistant._tcp` service), and not over
+  SSDP (the UPnP servers the ssdp component starts on every address, which
+  advertise the device `urn:home-assistant.io:device:HomeAssistant:1` and
+  serve its description with a presentation URL). The companion apps, a new
+  Home Assistant's onboarding and UPnP tools never offer it. Only these two
+  self-announcements are off: the integration's own discovery works (zeroconf
+  browsing, SSDP searches and listening), and a service an integration
+  announces itself is announced.
 
 What it costs: the app shares the host's network namespace. The integration
 sees and can use every interface of the host and reaches every service the
