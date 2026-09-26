@@ -46,7 +46,7 @@ class EscapedQuoteMaskingTest(unittest.TestCase):
         self.assertMasked('x code=\\"a\nSECRET MORE')
 
     def test_the_reported_forms(self):
-        self.assertEqual(mp._mask_text("{'code': '12\\'SYNTHQ'}"), "{'code': \"***\"}")
+        self.assertEqual(mp._mask_text("{'code': '12\\'SYNTHQ'}"), "{'code': '***'}")  # its own quotes (b4cd1a1 review)
         self.assertEqual(mp._mask_text('{\\"code\\": \\"12\\\\\\"SYNTHD\\"}'), '{\\"code\\": \\"***\\"}')
 
     def test_a_value_never_closed_is_masked_to_the_end(self):

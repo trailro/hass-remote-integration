@@ -271,7 +271,25 @@ def _mask_text(text: str, limit: int | None = None) -> str:
     rule = _CODE_VALUE
     if limit is not None and len(text) > limit:
         text, rule = text[:limit], _CODE_VALUE_CUT
-    return rule.sub(lambda m: m.group(1) + (f'{m.group(2)}{m.group(3)}***{m.group(2)}{m.group(3)}' if m.group(2) else '"***"'), text)
+    return rule.sub(_masked_match, text)
+
+
+def _masked_match(m: re.Match) -> str:
+    """A value the text rule found, as ***: in the quotes it had (an escaped one keeps its escapes), and quoted like
+    its key after a quoted key (a JSON number: the document stays JSON).  An unquoted value after a bare name
+    (token=X, "Authorization: Bearer X" inside a message) stays unquoted, and no quote is ever changed: a quote
+    added or swapped there would end the JSON string around it, and the history showed token=\"***\".  The quotes
+    (and their escapes) an unquoted value ran into at its end are the string's that holds it: they stay."""
+    if m.group(2):
+        return m.group(1) + f'{m.group(2)}{m.group(3)}***{m.group(2)}{m.group(3)}'
+    if (quote := m.group(0)[len(m.group(1)):][:1]) in ('"', "'"):
+        return m.group(1) + f"{quote}***{quote}"
+    head = m.group(1).rstrip()[:-1].rstrip()  # the name and what closes it, without the separator
+    if (quote := head[-1:]) in ('"', "'"):
+        escapes = head[:-1][len(head[:-1].rstrip("\\")):]
+        return m.group(1) + f"{escapes}{quote}***{escapes}{quote}"
+    value = m.group(0)[len(m.group(1)):]
+    return m.group(1) + "***" + value[len(value.rstrip("\"'\\")):]
 
 
 def _masked(value: Any, limit: int | None = None) -> tuple[Any, bool]:

@@ -156,8 +156,11 @@ four differences:
 - `session_id`, `sessionid`, `cookie` and `set-cookie` are not masked here;
 - result codes are not exempt: `status_code` and `error_code` are masked.
 
-`translation_key`, `sort_key` and `primary_key` stay readable. The shapes that
-need no name apply only to a service's error message. What else is masked
+`translation_key`, `sort_key` and `primary_key` stay readable. The names count
+as JSON keys and also inside a data field's text (`password=x` or
+`Authorization: Bearer x` in a `message`); the value becomes `***` in the
+quotes it had, none added (`token=***`). The shapes that need no name (a lone
+`Bearer` token, a password in a URL) apply only to a service's error message. What else is masked
 there (password-mode `text` values) is in the [MQTT reference](mqtt.md#masking).
 
 ### Request lines and the raw logs
