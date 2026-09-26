@@ -106,6 +106,11 @@ WATCHDOG_DRAIN_S = 5
 _stop_watchdog: threading.Thread | None = None  # armed once, by whichever of the two paths gets there first
 _boot_settled = False  # this boot's boot_failures count is resolved: marked ok, or taken back after a stop
 _boot_signalled = False  # the boot signal handler stopped this boot (a cancelled boot task is then a clean stop)
+# The Home Assistant app: the Supervisor runs it with no restart policy and starts it again only with the app's Watchdog
+# toggle on (off by default), so a restart asked for from the manager that ends the process left the app stopped.
+# There it starts over in the same container instead, as the image does (Dockerfile CMD, WORKDIR = its folder).
+ENTRYPOINT_ARGV = ("python", "/app/entrypoint.py")
+_restart_asked: core.HomeAssistant | None = None  # the instance whose stop installer.restart asked for
 
 
 def _sync_manager_component() -> None:
@@ -275,6 +280,8 @@ async def _boot() -> int:
     # and takes this boot's failure count back through the same helper as the stop path: one boot, one
     # increment, taken back once, so the crashes of earlier boots stay counted towards the fallback
     hass.data["hri_undo_boot_failure"] = _undo_boot_failure
+    # and says the stop it asks for is a restart: see _restart_in_place
+    hass.data["hri_restart_in_place"] = lambda: _ask_restart(hass)
 
     for domain in ("http", "integration_manager"):
         if not await async_setup_component(hass, domain, config):
@@ -367,6 +374,22 @@ async def _boot() -> int:
         sorted(hass.config.components),
     )
     return await hass.async_run(attach_signals=False)  # _on_started attaches them
+
+
+def _ask_restart(hass: core.HomeAssistant) -> None:
+    global _restart_asked
+    _restart_asked = hass
+
+
+def _restart_in_place() -> bool:
+    """A restart asked for from the manager, in the Home Assistant app, with no stop signal since: a SIGTERM is the
+    Supervisor (or docker) stopping the app, which must stop.  Home Assistant's own handler records every signal
+    under KEY_HA_STOP, also one that arrives while the restart's stop runs (async_stop then ignores it); the boot's
+    handler sets _boot_signalled.  A signal after the loop closed finds the default action: the process ends there."""
+    from homeassistant.helpers.signal import KEY_HA_STOP
+
+    return (_restart_asked is not None and not _boot_signalled and _restart_asked.data.get(KEY_HA_STOP) is None
+            and bool(os.environ.get("HRI_APP")))
 
 
 def _time_zone() -> str:
@@ -918,7 +941,11 @@ def _boot_with_logging() -> int:
 
 def _exit(rc: int) -> None:
     """What is still queued goes out first, bounded: the manager's JSON
-    saves, then the log lines (the last "stopping" ones among them)."""
+    saves, then the log lines (the last "stopping" ones among them).  Then
+    the process ends, or in the app starts over (_restart_in_place)."""
+    again = _restart_in_place()
+    if again:
+        _LOGGER.warning("restarting in place: the Home Assistant app is not started again when its process ends")
     writer = sys.modules.get("custom_components.integration_manager.writer")  # only if the manager was ever set up
     if writer is not None and not writer.drain(WRITER_DRAIN_S):
         _LOGGER.error("JSON saves still pending %s s after the loop ended: exiting without them", WRITER_DRAIN_S)
@@ -929,6 +956,15 @@ def _exit(rc: int) -> None:
         logging.shutdown()  # skipped when a handler is stuck (a blocked stderr): flushing it would hang the exit
         sys.stdout.flush()
         sys.stderr.flush()  # the same stuck stderr would hang here too
+    if again:
+        try:
+            # nothing of this process may reach the next one: what Python opens is close-on-exec already, a
+            # descriptor a C library left inheritable (a serial port, a socket on the manager port) would not be
+            os.closerange(3, os.sysconf("SC_OPEN_MAX"))
+            os.chdir(os.path.dirname(ENTRYPOINT_ARGV[1]))
+            os.execvp(ENTRYPOINT_ARGV[0], list(ENTRYPOINT_ARGV))  # the environment as it is: HRI_APP and the options stay
+        except OSError as err:
+            print(f"restart in place failed ({err}): exiting", file=sys.stderr, flush=True)  # the log queue is stopped
     os._exit(rc)  # a thread stuck in C code would otherwise still block interpreter exit
 
 

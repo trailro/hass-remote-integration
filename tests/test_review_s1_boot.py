@@ -44,6 +44,214 @@ def _tmp(test):
     return tmp
 
 
+class InPlaceRestartTest(unittest.TestCase):
+    """S1-1 (a): run.py starts the image's entrypoint again instead of exiting, only for a restart asked for from the
+    manager, only in the app, never after a stop signal."""
+
+    def setUp(self):
+        for name, value in (("_restart_asked", None), ("_boot_signalled", False)):
+            patch = mock.patch.object(run, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_what_runs_again_is_the_images_cmd(self):
+        with open(os.path.join(ROOT, "Dockerfile"), encoding="utf-8") as fh:
+            cmd = re.search(r"^CMD (\[.*\])$", fh.read(), re.M).group(1)
+        self.assertEqual(json.loads(cmd), list(run.ENTRYPOINT_ARGV))
+
+    def test_only_an_asked_restart_in_the_app_with_no_stop_signal(self):
+        from homeassistant.helpers.signal import KEY_HA_STOP
+
+        hass = SimpleNamespace(data={})
+        with mock.patch.dict(os.environ, {"HRI_APP": "1"}):
+            self.assertFalse(run._restart_in_place(), "nothing asked for a restart: a plain stop")
+            run._ask_restart(hass)
+            self.assertTrue(run._restart_in_place())
+            hass.data[KEY_HA_STOP] = object()  # Home Assistant's signal handler ran: the Supervisor stops the app
+            self.assertFalse(run._restart_in_place())
+            hass.data.clear()
+            with mock.patch.object(run, "_boot_signalled", True):
+                self.assertFalse(run._restart_in_place())
+        with mock.patch.dict(os.environ):
+            os.environ.pop("HRI_APP", None)
+            self.assertFalse(run._restart_in_place(), "Docker: the restart policy starts the container again")
+
+    def _exit(self, app):
+        calls = []
+        with mock.patch.dict(os.environ, {"HRI_APP": "1"} if app else {}), \
+                mock.patch.object(run.os, "closerange", lambda *a: calls.append(("closerange",) + a)), \
+                mock.patch.object(run.os, "chdir", lambda d: calls.append(("chdir", d))), \
+                mock.patch.object(run.os, "execvp", lambda f, argv: calls.append(("execvp", f, argv))), \
+                mock.patch.object(run.os, "_exit", lambda rc: calls.append(("_exit", rc))), \
+                mock.patch.object(run.logbuffer, "stop_queue", return_value=False):
+            if not app:
+                os.environ.pop("HRI_APP", None)
+            run._ask_restart(SimpleNamespace(data={}))
+            run._exit(0)
+        return calls
+
+    def test_the_app_execs_the_entrypoint(self):
+        calls = self._exit(app=True)
+        self.assertEqual([c[0] for c in calls], ["closerange", "chdir", "execvp", "_exit"])  # _exit only if the exec fails
+        self.assertEqual(calls[1], ("chdir", "/app"))
+        self.assertEqual(calls[2], ("execvp", "python", ["python", "/app/entrypoint.py"]))
+
+    def test_docker_still_exits(self):
+        self.assertEqual(self._exit(app=False), [("_exit", 0)])
+
+    def test_the_new_process_gets_the_environment_and_no_descriptor(self):
+        """A real exec: the listening socket and the files of the old process are gone, one a C library left
+        inheritable too; HRI_APP and the options stay, and it starts in the entrypoint's folder."""
+        tmp = _tmp(self)
+        probe = os.path.join(tmp, "probe.py")
+        with open(probe, "w", encoding="utf-8") as fh:
+            fh.write(
+                "import json, os, sys\n"
+                "def is_open(fd):\n"
+                "    try:\n"
+                "        os.fstat(fd)\n"
+                "        return True\n"
+                "    except OSError:\n"
+                "        return False\n"
+                "print(json.dumps({'open': [fd for fd in map(int, sys.argv[1:]) if is_open(fd)], 'cwd': os.getcwd(),"
+                " 'env': {k: os.environ.get(k) for k in ('HRI_APP', 'HRI_PASSWORD', 'SUPERVISOR_TOKEN')}}))\n")
+        child = (
+            "import os, socket, sys; from types import SimpleNamespace; sys.path.insert(0, sys.argv[1]); import run\n"
+            "srv = socket.socket(); srv.bind(('127.0.0.1', 0)); srv.listen()\n"
+            "kept = open(sys.argv[2], 'rb')\n"
+            "leaky = os.open(sys.argv[2], os.O_RDONLY); os.set_inheritable(leaky, True)\n"
+            "run.ENTRYPOINT_ARGV = (sys.executable, sys.argv[2], str(srv.fileno()), str(kept.fileno()), str(leaky))\n"
+            "run._ask_restart(SimpleNamespace(data={}))\n"
+            "run._exit(0)\n"
+        )
+        env = {**os.environ, "HRI_APP": "1", "HRI_PASSWORD": "pw-from-the-options", "HRI_CONFIG": tmp}
+        env.pop("SUPERVISOR_TOKEN", None)
+        proc = subprocess.run([sys.executable, "-c", child, ROOT, probe], env=env, capture_output=True, text=True,
+                              timeout=120, cwd=ROOT)
+        self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
+        self.assertNotIn("restart in place failed", proc.stderr)
+        out = json.loads(proc.stdout.strip().splitlines()[-1])
+        self.assertEqual(out["open"], [], "a descriptor of the old process reached the new one")
+        self.assertEqual(out["cwd"], os.path.realpath(tmp))
+        self.assertEqual(out["env"], {"HRI_APP": "1", "HRI_PASSWORD": "pw-from-the-options", "SUPERVISOR_TOKEN": None})
+
+
+class RestartAsksForInPlaceTest(unittest.IsolatedAsyncioTestCase):
+    """S1-1 (a): installer.restart - the one path every restart HRI asks for takes (UI, API, MQTT, the health
+    watchdog, the restart after a version change) - tells run.py, before the stop starts."""
+
+    def setUp(self):
+        _events(self)
+
+    async def test_restart_says_it_is_a_restart(self):
+        order = []
+        hass = _hass(data={"hri_restart_in_place": lambda: order.append("asked")})
+        stop = hass.async_stop
+
+        async def async_stop():
+            order.append("stop")
+            await stop()
+
+        hass.async_stop = async_stop
+        ins = _installer(self, hass)
+        self.assertTrue((await asyncio.wait_for(ins.restart(), 5))["ok"])
+        await asyncio.sleep(0)
+        self.assertEqual(order, ["asked", "stop"])
+
+    async def test_run_py_publishes_the_hook(self):
+        with open(os.path.join(ROOT, "run.py"), encoding="utf-8") as fh:
+            self.assertIn('hass.data["hri_restart_in_place"] = lambda: _ask_restart(hass)', fh.read())
+
+
+class AppWatchdogTest(unittest.TestCase):
+    """S1-1 (b): the entrypoint turns the app's Watchdog on once per volume, with the app's own token, before it
+    drops the token; a failure is logged and never stops the boot."""
+
+    def setUp(self):
+        self.tmp = _tmp(self)
+        self.ep = entrypoint_for(self, self.tmp)
+        os.makedirs(self.ep.STATE_DIR)
+        self.lines = []
+        patch = mock.patch.object(self.ep, "log", self.lines.append)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_first_start_turns_it_on_and_records_it(self):
+        resp = mock.MagicMock()
+        resp.__enter__.return_value.read.return_value = b'{"result": "ok", "data": {}}'
+        with mock.patch.object(self.ep.urllib.request, "urlopen", return_value=resp) as urlopen:
+            self.ep.enable_app_watchdog("t0ken-secret")
+            self.ep.enable_app_watchdog("t0ken-secret")  # once per volume: the marker stops the second call
+        urlopen.assert_called_once()
+        request = urlopen.call_args.args[0]
+        self.assertEqual((request.full_url, request.get_method()), ("http://supervisor/addons/self/options", "POST"))
+        self.assertEqual(json.loads(request.data), {"watchdog": True})  # nothing else: the options stay as they are
+        self.assertEqual(request.get_header("Authorization"), "Bearer t0ken-secret")
+        self.assertLessEqual(urlopen.call_args.kwargs["timeout"], 10)
+        self.assertTrue(os.path.isfile(self.ep.APP_WATCHDOG_MARKER))
+        self.assertFalse([line for line in self.lines if "t0ken" in line])
+
+    def test_turned_off_later_stays_off(self):
+        with open(self.ep.APP_WATCHDOG_MARKER, "w", encoding="utf-8") as fh:
+            fh.write("2026-09-26T10:00:00\n")
+        with mock.patch.object(self.ep.urllib.request, "urlopen") as urlopen:
+            self.ep.enable_app_watchdog("t0ken-secret")
+        urlopen.assert_not_called()
+
+    def test_a_failure_is_logged_and_tried_at_the_next_start(self):
+        refused = urllib.error.HTTPError("http://supervisor/addons/self/options", 403, "Forbidden", {}, None)
+        self.addCleanup(refused.close)
+        for err in (urllib.error.URLError("Name or service not known"), TimeoutError("timed out"), refused):
+            with self.subTest(err=type(err).__name__):
+                self.lines.clear()
+                with mock.patch.object(self.ep.urllib.request, "urlopen", side_effect=err):
+                    self.ep.enable_app_watchdog("t0ken-secret")  # never raises
+                self.assertFalse(os.path.exists(self.ep.APP_WATCHDOG_MARKER))
+                self.assertTrue(any("Watchdog could not be turned on" in line for line in self.lines), self.lines)
+                self.assertFalse([line for line in self.lines if "t0ken" in line])
+
+    def test_main_uses_the_token_before_it_is_gone(self):
+        options = os.path.join(self.tmp, "options.json")
+        with open(options, "w", encoding="utf-8") as fh:
+            json.dump({"password": "pw"}, fh)
+        seen = []
+
+        def enable(token):
+            seen.append((token, os.environ.get("SUPERVISOR_TOKEN")))
+
+        with mock.patch.dict(os.environ, {"SUPERVISOR_TOKEN": "t0ken-secret"}), \
+                mock.patch.object(self.ep, "APP_OPTIONS_FILE", options), \
+                mock.patch.object(self.ep, "enable_app_watchdog", enable), \
+                mock.patch.object(self.ep, "_prepare", mock.Mock(side_effect=SystemExit(7))), \
+                mock.patch.object(self.ep, "start_status_server", lambda: None), \
+                mock.patch.object(self.ep, "restrict_umask", lambda: 0):
+            with self.assertRaises(SystemExit):
+                self.ep.main()
+        self.assertEqual(seen, [("t0ken-secret", None)], "called with the token, which the environment no longer holds")
+
+    def test_the_restarted_entrypoint_is_still_the_app_and_asks_nothing(self):
+        """The in-place restart runs the entrypoint again in the environment the first run cleaned: no token, the
+        options' variables and HRI_APP kept; apply_app_options returns None and main goes on."""
+        options = os.path.join(self.tmp, "options.json")
+        with open(options, "w", encoding="utf-8") as fh:
+            json.dump({"password": ""}, fh)
+        env = {"HRI_APP": "1", "HRI_PASSWORD": "pw"}
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(self.ep, "APP_OPTIONS_FILE", options), \
+                mock.patch.object(self.ep, "enable_app_watchdog") as enable, \
+                mock.patch.object(self.ep, "_prepare", mock.Mock(side_effect=SystemExit(7))) as prepare, \
+                mock.patch.object(self.ep, "start_status_server", lambda: None), \
+                mock.patch.object(self.ep, "restrict_umask", lambda: 0):
+            os.environ.pop("SUPERVISOR_TOKEN", None)
+            os.environ.pop("HASSIO_TOKEN", None)
+            with self.assertRaises(SystemExit) as ctx:
+                self.ep.main()
+            self.assertEqual((os.environ["HRI_APP"], os.environ["HRI_PASSWORD"]), ("1", "pw"))
+        self.assertEqual(ctx.exception.code, 7, "reached the boot, not an exit of its own")
+        prepare.assert_called_once()
+        enable.assert_not_called()
+
+
 def _venv(cfg, version):
     venv = os.path.join(cfg, f"venv-{version}")
     ha_pkg = os.path.join("lib", f"python{sys.version_info[0]}.{sys.version_info[1]}", "site-packages", "homeassistant")

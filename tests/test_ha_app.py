@@ -321,6 +321,7 @@ class AppOptionsTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"SUPERVISOR_TOKEN": "t0ken"}), \
                 mock.patch.object(self.ep, "APP_OPTIONS_FILE", self.options), \
                 mock.patch.object(self.ep, "_prepare", prepare), \
+                mock.patch.object(self.ep, "enable_app_watchdog", lambda token: None), \
                 mock.patch.object(self.ep, "start_status_server", lambda: None), \
                 mock.patch.object(self.ep, "log", lines.append), \
                 mock.patch.object(self.ep, "restrict_umask", lambda: 0):
