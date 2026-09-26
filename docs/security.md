@@ -59,9 +59,11 @@ password.
 As the Home Assistant app on the host network ([app](app.md#host-network)),
 the port is on every interface of the host. There, with no password set,
 every request that is not the app's ingress gets `403` and a line saying to
-set the app's password: pages, the API, webhooks and the boot status page
-(only `/api/alive` still answers there, for the healthcheck). With a password
-the rules above apply. A Docker install with `network_mode: host` is not
+set the app's password: pages, the API, webhooks and the boot status page.
+`/api/alive` answers only while Home Assistant installs; once it runs, every
+request that is not ingress, `/api/alive` included, gets `403`, which the
+healthcheck accepts (any answer below `500` is alive). With a password the
+rules above apply. A Docker install with `network_mode: host` is not
 detected: set a password there.
 
 Browsers send cookies to every port of a host name, so another service on

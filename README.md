@@ -723,9 +723,14 @@ without it too, from a copy at most 10 seconds old. See [API](docs/api.md).
   answered on the port, or it answered `5xx`. `docker
   inspect --format '{{json .State.Health}}' <name>` shows what the probe got,
   and `docker logs <name>` why. A password changes nothing: a `401` is the
-  manager answering. To see the probe's own error, run it by hand:
-  `docker exec <name> python -c "import http.client, os;
-  c = http.client.HTTPConnection('127.0.0.1', int(os.environ.get('HRI_PORT') or 8087));
+  manager answering, and so is the `403` of the Home Assistant app on the
+  host network without a password. To see the probe's own error, run it by
+  hand; like the healthcheck it asks the port in `/run/hri-port` (written by
+  the Home Assistant app, whose port the Supervisor may choose), else
+  `HRI_PORT`:
+  `docker exec <name> python -c "import http.client, os; f = '/run/hri-port';
+  p = int(open(f).read()) if os.path.isfile(f) else int(os.environ.get('HRI_PORT') or 8087);
+  c = http.client.HTTPConnection('127.0.0.1', p);
   c.request('GET', '/api/alive'); print(c.getresponse().status)"`.
 - **The page says Home Assistant is not started: a restore failed and could not
   be put back.** The configuration is half restored, and the page (with a
