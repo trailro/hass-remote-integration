@@ -5,6 +5,10 @@ Every version's changes are in the
 
 ## 0.25.0
 
+- **The options apply:** until now the app ran the 0.24.0 image, which does
+  not read them, so a password set on the **Configuration** tab was not asked
+  for on the app's port. From this version every option applies; check that
+  the password is the one you want.
 - **Sidebar panel (ingress):** the web UI opens from **HRI** in the sidebar
   or **Open Web UI**, behind Home Assistant's login, so it also works through
   remote access and Home Assistant Cloud (Nabu Casa). The new
@@ -22,7 +26,7 @@ Every version's changes are in the
   it, then dropped. The docs now say plainly that the password stays
   readable by the integration inside the app: it guards the web UI and API
   from the network.
-- **One new login:** the session cookie is now named after the app's host
-  name, so two HRI apps on one host no longer log each other out.
+- **Session cookie:** named after the app's host name, so two HRI apps on
+  one host do not log each other out.
 - **Smaller backups:** the cached HACS list is left out of Home Assistant
   backups and HRI's own.

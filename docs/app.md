@@ -42,14 +42,16 @@ its IP address.
 ## Options
 
 Each option becomes the environment variable a Docker install sets (see
-[Environment variables](../README.md#environment-variables)). An empty option
-is the same as an unset variable. A change applies when you restart the app
-from its **Info** tab; a restart from the web UI keeps the options the app
-started with (see below).
+[Environment variables](../README.md#environment-variables);
+`HRI_INGRESS_USERS` exists only in the app). An empty option
+is the same as an unset variable. A change applies when the app starts a
+fresh container: a restart from its **Info** tab, or a restart from HRI while
+the Watchdog is on. A restart in place, with the Watchdog off, keeps the
+options the app started with (see below).
 
 | Option | Variable | Meaning |
 |---|---|---|
-| `password` | `HRI_PASSWORD` | Password for the web UI and API; empty means no login |
+| `password` | `HRI_PASSWORD` | Password for the web UI and API on the app's port; empty means no login there (the sidebar panel uses Home Assistant's login) |
 | `apt_packages` | `HRI_APT_PACKAGES` | Debian packages installed at boot, for what pip cannot install (`ffmpeg`) |
 | `call_timeout` | `HRI_CALL_TIMEOUT` | Seconds a service call or command may take; empty means 60 |
 | `ha_version_latest` | `HA_VERSION_LATEST` | Off: a fresh app installs the image's default Home Assistant instead of the newest |
@@ -74,7 +76,10 @@ variables set from the options, never their values.
 
 The Supervisor starts a stopped app again only when the app's **Watchdog**
 toggle, on its **Info** tab, is on; it is off by default. A Docker install has
-its restart policy (`restart: unless-stopped`) for that.
+its restart policy (`restart: unless-stopped`) for that. With the Watchdog on,
+the Supervisor also restarts the app when its healthcheck (`GET /api/alive`,
+liveness only) fails three times in a row, about 90 s; an install in progress
+answers it, so an install is never cut short that way.
 
 - **A restart asked for from HRI** (**Restart** in the web UI or the API, the
   MQTT restart, the health watchdog, and the restart after a Home Assistant
@@ -215,8 +220,10 @@ through the Supervisor, so their sizes are the same as on the port.
 
 ## Updates
 
-The App Store offers an update once a release's image is published: the
-release workflow sets the app's version only after the image is pushed.
+The App Store offers an update once the image of a new stable release is
+published: the Image workflow sets the app's version only after that image is
+pushed, and only for the newest stable release (a pre-release is never
+offered, and the version never goes back).
 Updating the app replaces the image and keeps the folder, like pulling a new
 image for a Docker install. The Home Assistant inside the app is updated from
 the web UI, as in [Home Assistant versions](home-assistant-versions.md).
