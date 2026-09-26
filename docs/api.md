@@ -82,7 +82,8 @@ Exceptions:
 ### Login
 
 - `POST /api/login` answers `503` with the reason while `HRI_PASSWORD_FILE` is
-  empty or unreadable, or `HRI_PASSWORD` holds only spaces or tabs.
+  empty, unreadable or not UTF-8 text, or `HRI_PASSWORD` holds only spaces or
+  tabs or bytes that are not UTF-8.
 - `POST /api/logout` ends every session. If the volume cannot record it, the
   answer is `500` with `ok: false` and the reason: after the next restart the
   sessions from before the logout are valid again and later ones end.

@@ -25,10 +25,14 @@ neither is a password read from plain HTTP traffic. These are:
 - with a password set, any use of the UI or API without it: a path the check
   misses, a session forged or replayed after a password change or a logout,
   guessing faster than the lockout allows, or any password accepted while
-  `HRI_PASSWORD_FILE` is empty or unreadable or `HRI_PASSWORD` holds only
-  spaces or tabs. The sessions that a logout the volume could not record gives
-  back at a restart are a documented limit;
-- a way around the Host header guard, the JSON requirement for state-changing
+  `HRI_PASSWORD_FILE` is empty, unreadable or not UTF-8 text, or `HRI_PASSWORD`
+  holds only spaces or tabs or bytes that are not UTF-8. Through the Home
+  Assistant app's ingress, Home Assistant's login is the gate by design; a
+  request taken for ingress that did not come from the Supervisor, or one that
+  gets past `ingress_users`, is a vulnerability. The sessions that a logout the
+  volume could not record gives back at a restart are a documented limit;
+- a way around the Host header guard (which the app's ingress requests skip
+  by design), the JSON requirement for state-changing
   requests, the `X-Requested-With: fetch` requirement on the requests
   [API](docs/api.md) lists, or the absence of CORS on the manager's routes;
 - a secret (MQTT password, GitHub token, main Home Assistant token, backup
