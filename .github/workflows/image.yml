@@ -2,8 +2,8 @@ name: Image
 
 # Publishes the image for amd64 and arm64 to GitHub Container Registry and Docker Hub:
 # ghcr.io/<owner>/<repo> and docker.io/trailro26/hass-remote-integration, each
-# :<version> and :<major>.<minor>, plus :latest when a published, non-prerelease
-# release carries the highest stable tag.  One build pushes the same digest to
+# :<version>, :<major>.<minor> when it is the highest stable release of that series,
+# plus :latest when a published, non-prerelease release carries the highest stable tag.  One build pushes the same digest to
 # both.  Docker Hub needs the DOCKERHUB_TOKEN secret, a Docker Hub access token
 # of trailro26 with Read, Write & Delete (the overview update needs more than
 # Read & Write); without it the run fails before building.  Runs when a release

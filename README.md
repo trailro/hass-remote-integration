@@ -100,8 +100,10 @@ about 800 MB of disk per installed Home Assistant version.
 ## Quick start
 
 The image is built for `amd64` and `arm64` (a Raspberry Pi with a 64-bit OS,
-Apple silicon, most NAS boxes). Both registries get every release with the same
-tags (`<version>`, `<major>.<minor>`, `latest`) and the same digest:
+Apple silicon, most NAS boxes). Both registries get the same tags and the same
+digest: every release as `<version>`, the newest stable release of each
+`<major>.<minor>` series also under that tag, and the newest stable release as
+`latest`:
 
 | Registry | Image |
 |---|---|
@@ -347,13 +349,13 @@ in `.env` does nothing. Download the file again (the command in [Quick
 start](#quick-start)) when you update, or fix `stop_grace_period` by hand.
 
 The image carries a healthcheck, so `docker ps` says `healthy` once the port
-answers and `unhealthy` when nothing does. It is liveness only: a container
-that is installing Home Assistant is healthy (the install page answers it), so
-`depends_on: condition: service_healthy` waits for the container to be up, not
-for the manager API. It needs no new compose file: a service without its own
-`healthcheck:` inherits the image's. It asks `GET /api/alive` on `HRI_PORT`
-every 30 s with the image's Python, and holds off for the first 20 minutes (see
-[Troubleshooting](#troubleshooting)).
+answers and `unhealthy` when nothing does (or it answers `5xx`). It is liveness
+only: a container that is installing Home Assistant is healthy (the install
+page answers it), so `depends_on: condition: service_healthy` waits for the
+container to be up, not for the manager API. It needs no new compose file: a
+service without its own `healthcheck:` inherits the image's. It asks `GET
+/api/alive` on `HRI_PORT` every 30 s with the image's Python, and holds off for
+the first 20 minutes (see [Troubleshooting](#troubleshooting)).
 
 The top bar shows the running version and the commit its image was built from
 (`v0.25.0 · 1a2b3c4`), linking to that release. When GitHub has newer releases
@@ -840,12 +842,20 @@ Home Assistant and the newest pre-release, opening an issue when one breaks the
 manager and a pull request moving `HA_VERSION_DEFAULT` when a newer stable
 passes. Publishing a release builds the `amd64` and `arm64` image and pushes it
 to `ghcr.io/trailro/hass-remote-integration` and to Docker Hub as
-`trailro26/hass-remote-integration` (`<version>`, `<major>.<minor>` and, for
-the newest stable release, `latest`; the Docker Hub push needs the
-`DOCKERHUB_TOKEN` repository secret). The newest stable release also updates
-the Docker Hub overview from this README, up to *Everyday operation*. Docker
-Hub keeps 25000 bytes of the overview, and a pull request or release whose
-overview is longer fails CI.
+`trailro26/hass-remote-integration` (`<version>`; `<major>.<minor>` for the
+newest stable release of that series; `latest` for the newest stable release;
+the Docker Hub push needs the `DOCKERHUB_TOKEN` repository secret). The newest
+stable release also updates the Docker Hub overview from this README, up to
+*Everyday operation*. Docker Hub keeps 25000 bytes of the overview, and a pull
+request or release whose overview is longer fails CI. The app in `app/` is
+checked by CI with the app linter and with the Supervisor's own validation, at
+the versions in `.github/app_versions.json`; a weekly app canary repeats that
+on the stable and beta Supervisors, its `main` branch and the newest linter,
+installs, backs up and restores the app on Home Assistant OS in a VM when a
+version moved, and opens an issue or a pull request moving that record. After
+the image of the newest stable release is pushed, the Image workflow sets
+`version` in `app/config.yaml` on `main`, which is when the App Store offers
+the update.
 
 A few things that shaped the code:
 
