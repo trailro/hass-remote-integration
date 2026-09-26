@@ -26,7 +26,9 @@ its IP address.
 
 Each option becomes the environment variable a Docker install sets (see
 [Environment variables](../README.md#environment-variables)). An empty option
-is the same as an unset variable. A change applies when the app restarts.
+is the same as an unset variable. A change applies when you restart the app
+from its **Info** tab; a restart from the web UI keeps the options the app
+started with (see below).
 
 | Option | Variable | Meaning |
 |---|---|---|
@@ -49,6 +51,31 @@ Not options:
 An options file the app cannot read stops it at boot, with a line in its log,
 rather than starting without the password it may hold. The log names the
 variables set from the options, never their values.
+
+## Restarts and the Watchdog
+
+The Supervisor starts a stopped app again only when the app's **Watchdog**
+toggle, on its **Info** tab, is on; it is off by default. A Docker install has
+its restart policy (`restart: unless-stopped`) for that.
+
+- **A restart asked for from HRI** (**Restart** in the web UI or the API, the
+  MQTT restart, the health watchdog, and the restart after a Home Assistant
+  version change, a restore, a clean start or an integration update) starts
+  HRI over inside the running app, with or without the Watchdog. What the
+  Supervisor stops (**Stop** or **Restart** on the Info tab, an update of the
+  app, a host shutdown) is left to the Supervisor.
+- **Everything else ends the app's process**, and only the Watchdog starts it
+  again: a crash, a stop that hangs (HRI ends it hard after about 225
+  seconds), the kernel ending it for lack of memory, a new Home Assistant
+  version that crashes at boot (the fallback to the previous version needs
+  three boots), and a boot that cannot go on (no version can be installed, or
+  the one it would install is older than the configuration: see [Home
+  Assistant versions](home-assistant-versions.md)).
+
+Keep the Watchdog on. HRI turns it on at the first start as an app, once for
+its folder (`integration_manager/app-watchdog-enabled` records that it did):
+if you turn it off afterwards, it stays off. If that first attempt fails, the
+log says so and the next start tries again.
 
 ## The Supervisor token
 

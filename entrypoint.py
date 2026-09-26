@@ -87,6 +87,12 @@ APP_OPTIONS = {
     "debug": ("HRI_DEBUG", ("1", None)),  # unset rather than "0": the variable a Docker install reads
     "cookie_secure": ("HRI_COOKIE_SECURE", ("1", None)),
 }
+# The Supervisor starts a stopped or crashed app again only with the app's Watchdog toggle on, which is off by default:
+# HRI turns it on once per volume (the marker records that it did), so an operator who turns it off later is not
+# overruled.  An app may change its own options with its own token (supervisor/api/middleware/security.py api_bypass,
+# /addons/self/...), and the options handler only stores the flag (api/apps.py APIApps.options): the app is not restarted.
+SUPERVISOR_OPTIONS_URL = "http://supervisor/addons/self/options"
+APP_WATCHDOG_MARKER = os.path.join(STATE_DIR, "app-watchdog-enabled")
 CONSTRAINTS_URL = "https://raw.githubusercontent.com/home-assistant/core/{version}/homeassistant/package_constraints.txt"
 PYPI_URL = "https://pypi.org/pypi/homeassistant/json"
 
@@ -1083,10 +1089,32 @@ def apply_app_options(path: str | None = None) -> list[str] | None:
     return applied
 
 
+def enable_app_watchdog(token: str) -> None:
+    """Turn the app's Watchdog on, once per volume; fail-soft: a failure is logged (never the token) and the next
+    start tries again.  docs/app.md says what it covers and how to do it by hand."""
+    if not token or os.path.exists(APP_WATCHDOG_MARKER):
+        return
+    request = urllib.request.Request(SUPERVISOR_OPTIONS_URL, data=json.dumps({"watchdog": True}).encode(), method="POST",
+                                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=5) as resp:
+            resp.read()
+    except Exception as err:  # noqa: BLE001 - the boot goes on either way
+        log(f"the app's Watchdog could not be turned on ({type(err).__name__}: {err}); turn it on on the app's Info tab")
+        return
+    try:
+        with open(APP_WATCHDOG_MARKER, "w", encoding="utf-8") as fh:
+            fh.write(time.strftime("%Y-%m-%dT%H:%M:%S\n"))
+    except OSError as err:
+        log(f"app watchdog marker not written ({err})")
+    log("turned the app's Watchdog on (once for this volume: turning it off on the Info tab is respected)")
+
+
 def main() -> None:
     global _boot_server
     restrict_umask()  # first: inherited by everything created from here on, and by the exec'd Home Assistant
     os.makedirs(STATE_DIR, exist_ok=True)  # before the first log() call
+    token = os.environ.get("SUPERVISOR_TOKEN", "")  # apply_app_options removes it from the environment
     try:
         applied = apply_app_options()
     except ValueError as err:
@@ -1094,6 +1122,8 @@ def main() -> None:
         sys.exit(2)
     if applied is not None:  # names only: an option can be the password
         log(f"running as a Home Assistant app; from its options: {', '.join(applied) or 'nothing set'}")
+        enable_app_watchdog(token)
+    token = ""
     if PORT is None:
         log(f"HRI_PORT={os.environ.get('HRI_PORT')!r} is not a TCP port (1-65535): fix the container's environment; not starting")
         sys.exit(2)

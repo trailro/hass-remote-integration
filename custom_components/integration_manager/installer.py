@@ -2117,6 +2117,8 @@ class Installer:
             _LOGGER.error("restart failed before stopping: %s", err)
             return {"ok": False, "error": f"restart failed before stopping: {err}"}
         self._arm_stop_watchdog()
+        if (in_place := self.hass.data.get("hri_restart_in_place")) is not None:
+            in_place()  # run.py: the Home Assistant app starts over in place once stopped, instead of staying stopped
         # busy stays set from here on: the process is going down, and if async_stop hangs or fails the
         # watchdog exits hard rather than leaving a half-stopped HA that accepts installs again
         self.hass.async_create_task(self.hass.async_stop())
