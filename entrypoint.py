@@ -368,7 +368,13 @@ class _StatusHandler(http.server.BaseHTTPRequestHandler):
         # any healthcheck used to get this HTML page with a 200 and call the container healthy for the whole
         # install.  503 says what is true, and the page is served with it too - browsers render the body.
         if urllib.parse.urlsplit(self.path).path.startswith("/api/"):
-            self._send(503, "application/json", json.dumps(install_status()).encode())
+            status = install_status()
+            if password_configured() and not ingress:
+                # no login exists yet: the version, the phase (apt package names) and a failed restore are for
+                # whoever can log in; a healthcheck or a waiting script needs only "not up yet"
+                status = {"installing": status["installing"], "error": "the manager API is not up yet (Home Assistant "
+                          + ("is still being installed or prepared)" if status["installing"] else "is not started)")}
+            self._send(503, "application/json", json.dumps(status).encode())
             return
         if _status.get("kind") != "install":
             tail = ""  # the log is of the last install, nothing to do with a restore that failed
