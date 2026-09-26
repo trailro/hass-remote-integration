@@ -267,5 +267,32 @@ class PatchKeepsTheBytesTest(PatchTestCase):
         self.assertEqual(self.read("two.py"), "z\n")
 
 
+# ----- S2-5 -----------------------------------------------------------------------------------------
+
+def _hacs_zip(value):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("owner-repo-abc123/hacs.json", json.dumps({"name": "x", "homeassistant": value}))
+    return buf.getvalue()
+
+
+class MinHaTest(unittest.TestCase):
+    CRAFTED = "2026.1." + "9" * 5000
+
+    def test_a_crafted_value_is_dropped(self):
+        self.assertIsNone(Installer._hacs_min_ha(_hacs_zip(self.CRAFTED)))
+        for bad in ("2026", "latest", "2026.1.0; x", "2026.1.0" + " " * 40, True, ["2026.1.0"]):
+            with self.subTest(bad=bad):
+                self.assertIsNone(Installer._hacs_min_ha(_hacs_zip(bad)))
+        for ok in ("2024.1", "2026.9.0", "2026.9.0b2"):
+            with self.subTest(ok=ok):
+                self.assertEqual(Installer._hacs_min_ha(_hacs_zip(ok)), ok)
+
+    def test_a_crafted_value_already_stored_cannot_break_start_or_a_version_change(self):
+        inst = object.__new__(Installer)
+        inst.state = State(domain="demo", installed={"demo": {"running_tag": "1.0", "versions": {"1.0": {"min_ha": self.CRAFTED}}}})
+        self.assertIsNone(inst.min_ha_of("demo", "1.0"))  # views.async_change_ha_version compares it with ha_vkey
+
+
 if __name__ == "__main__":
     unittest.main()

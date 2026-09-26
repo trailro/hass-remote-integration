@@ -311,6 +311,16 @@ def _mtime(path: str) -> int:
         return -1
 
 
+_MIN_HA_RE = re.compile(r"\s*\d+\.\d+(?:\.\d+)?(?:b\d+)?\s*")  # what ha_vkey parses (hacs.json may say 2024.1)
+
+
+def _min_ha_ok(value: Any) -> str | None:
+    """hacs.json's minimum Home Assistant version when ha_vkey can compare it, else None: a crafted value
+    (thousands of digits, which int() refuses) raised out of every comparison, start() and a version change."""
+    text = str(value) if isinstance(value, (str, int, float)) and not isinstance(value, bool) else ""
+    return text if len(text) <= 32 and _MIN_HA_RE.fullmatch(text) else None
+
+
 def _within(stamp: Any, window_s: int) -> bool:
     """Whether an ha.json timestamp is younger than `window_s`; an unreadable
     one counts as young, so a missing date never drops a protection."""
@@ -2768,11 +2778,11 @@ class Installer:
         except (zipfile.BadZipFile, KeyError, ValueError, StopIteration):
             return None
         value = data.get("homeassistant") if isinstance(data, dict) else None
-        return str(value) if isinstance(value, (str, int, float)) and str(value).strip() else None
+        return _min_ha_ok(value)
 
     def min_ha_of(self, domain: str | None, tag: str | None) -> str | None:
         rec = ((self.state.installed.get(domain or "") or {}).get("versions") or {}).get(tag or "") or {}
-        return rec.get("min_ha")
+        return _min_ha_ok(rec.get("min_ha"))  # a record stored before the value was checked
 
     def _store_version(self, blob: bytes, domain: str, tag: str, stamp: str | None = None) -> dict[str, Any]:
         """Blocking: the release into versions/<domain>/<tag>, validated in staging first.  A copy already
