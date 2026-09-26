@@ -10,9 +10,14 @@ can move) is the Supervisor, and marks it as ingress.  The host guard and the
 password check let a marked request through: Home Assistant's login is the
 gate, narrowed to the HA users of ``HRI_INGRESS_USERS`` when that is set.
 The Supervisor sets X-Remote-User-Id and X-Remote-User-Name from the ingress
-session but drops a client's own copy only when its name is spelled exactly
-as its own, so a request whose user headers are spelled any other way, or
-repeated, is refused: the user name is then the session's.
+session, and drops a client's own copy only when its name is spelled exactly
+as its own.  A copy spelled another way is added after them, and the
+Supervisor's aiohttp client (ClientSession._prepare_headers) merges it into
+its own header, keeping the client's spelling and value: the app receives
+only the client's copy.  So a user header not in the Supervisor's spelling,
+or repeated, is refused, and the user name is the session's.  A session the
+Supervisor opened without user data sends neither header: served unless
+HRI_INGRESS_USERS is set.
 
 Only with ``HRI_APP`` set (entrypoint.apply_app_options): on a plain Docker
 install nothing is installed and every request is handled as before."""
@@ -32,7 +37,7 @@ SUPERVISOR_IP = "172.30.32.2"  # the Supervisor on the hassio network (superviso
 FORWARDED_MIDDLEWARE = "forwarded_middleware"  # homeassistant/components/http/forwarded.py
 KEY = "hri_ingress"  # request key: True on a request the Supervisor proxied
 USER_KEY = "hri_ingress_user"  # the HA user name the Supervisor set (X-Remote-User-Name), "" when none
-USER_HEADER = "X-Remote-User-Name"  # the Supervisor drops a client's own and sets it from the ingress session
+USER_HEADER = "X-Remote-User-Name"  # set by the Supervisor from the ingress session (a client's copy: see above)
 USER_ID_HEADER = "X-Remote-User-Id"  # likewise; the Supervisor sends it with every session that has a user
 _READ_ONLY = frozenset({"GET", "HEAD", "OPTIONS"})
 

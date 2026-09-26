@@ -21,6 +21,7 @@ from unittest import mock
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
+from multidict import CIMultiDict, istr
 
 from custom_components.integration_manager import auth as auth_mod
 from custom_components.integration_manager import hostguard
@@ -47,22 +48,28 @@ INGRESS_HEADERS = {
 }
 
 
-# the same request as a list of (name, value) sent as written, for the spellings a client may add: the Supervisor
-# forwards a client's copy of its user headers unless the name is spelled exactly as its own
+# the same request as a list of (name, value) sent as written.  The Supervisor drops a client's copy of its user headers
+# only when the name is spelled exactly as its own, and its aiohttp client (ClientSession._prepare_headers) then merges
+# a copy spelled another way into its own header, keeping the client's spelling and value: the app sees one header,
+# the client's.  mallory is the session's user, alice the one allowed
 USER_NAME = ("X-Remote-User-Name", "alice")
 USER_ID = ("X-Remote-User-Id", "abc123")
 BASE = [(k, v) for k, v in INGRESS_HEADERS.items() if k not in (USER_NAME[0], USER_ID[0])]
-SPOOFED = {  # each is refused, with ingress_users set or not; mallory is the session's user, alice the one allowed
+SPOOFED = {  # what the Supervisor forwards when the browser adds a copy: each is refused, with ingress_users set or not
     "lowercase name": BASE + [USER_ID, ("x-remote-user-name", "alice")],
     "mixed-case name": BASE + [USER_ID, ("X-REMOTE-USER-NAME", "alice")],
-    "a client's copy after the Supervisor's": BASE + [USER_ID, ("X-Remote-User-Name", "mallory"), ("x-remote-user-name", "alice")],
-    "a client's copy before the Supervisor's": BASE + [USER_ID, ("x-remote-user-name", "alice"), ("X-Remote-User-Name", "mallory")],
-    "the name twice": BASE + [USER_ID, ("X-Remote-User-Name", "mallory"), USER_NAME],
-    "no id": BASE + [USER_NAME],
-    "the id twice": BASE + [USER_ID, USER_ID, USER_NAME],
     "a respelled id": BASE + [("x-remote-user-id", "abc123"), USER_NAME],
-    "the id and a respelled copy": BASE + [USER_ID, ("X-REMOTE-USER-ID", "abc123"), USER_NAME],
+    "a respelled name in a session without a user": BASE + [("x-remote-user-name", "alice")],
 }
+MALFORMED = {  # shapes the Supervisor does not send today, refused all the same
+    "an exact name and a respelled copy": BASE + [USER_ID, ("X-Remote-User-Name", "mallory"), ("x-remote-user-name", "alice")],
+    "a respelled name and an exact copy": BASE + [USER_ID, ("x-remote-user-name", "alice"), ("X-Remote-User-Name", "mallory")],
+    "the name twice": BASE + [USER_ID, ("X-Remote-User-Name", "mallory"), USER_NAME],
+    "an exact name without an id": BASE + [USER_NAME],
+    "the id twice": BASE + [USER_ID, USER_ID, USER_NAME],
+    "an exact id and a respelled copy": BASE + [USER_ID, ("X-REMOTE-USER-ID", "abc123"), USER_NAME],
+}
+REFUSED = {**SPOOFED, **MALFORMED}
 EXACT = BASE + [USER_ID, USER_NAME]
 
 
@@ -94,6 +101,23 @@ def _ha_http():
     except ImportError as err:  # pragma: no cover - outside the container's HA venv
         raise unittest.SkipTest(f"Home Assistant's http component is not importable: {err}")
     return async_setup_forwarded, setup_request_context, setup_security_filter
+
+
+def _supervisor_forwards(user, browser):
+    """The headers of the Supervisor's request to the app, as api/ingress.py _init_header (Supervisor 2026.09.3) builds
+    them: its own user headers from the session, then the browser's, skipping only a name equal to its constants (istr
+    compares as str: case-sensitive).  A CIMultiDict, which the ClientSession merges as it does the Supervisor's."""
+    headers = CIMultiDict()
+    if user is not None:
+        headers["X-Remote-User-Id"] = user["id"]
+        headers["X-Remote-User-Name"] = user["name"]
+        headers["X-Remote-User-Display-Name"] = user["display"]
+    own = (istr("X-Remote-User-Id"), istr("X-Remote-User-Name"), istr("X-Remote-User-Display-Name"))
+    for name, value in [(k, v) for k, v in BASE if not k.startswith("X-Remote-User-")] + browser:
+        if name in own:
+            continue
+        headers.add(name, value)
+    return headers
 
 
 async def _raw(host, port, method, path, headers):
@@ -143,6 +167,7 @@ class IngressStackTest(unittest.TestCase):
                         if isinstance(headers, list):  # sent as written: the client session merges names by case
                             out.append(await _raw(client.host, client.port, method, path, headers))
                             continue
+                        # the TestClient's aiohttp ClientSession: a CIMultiDict is merged as the Supervisor's client does
                         resp = await client.request(method, path, headers=headers, allow_redirects=False)
                         out.append(resp.status)
             return out, [m.__name__ for m in app.middlewares]
@@ -193,15 +218,41 @@ class IngressStackTest(unittest.TestCase):
 
     def test_the_user_headers_must_be_the_supervisors_own(self):
         """The Supervisor drops a client's X-Remote-User-* only when the name is spelled as its own: a copy spelled any
-        other way reaches HRI, and aiohttp's headers do not tell them apart."""
+        other way reaches HRI in place of the Supervisor's (SPOOFED); MALFORMED are shapes it does not send."""
         for users in ("alice", ""):
             with self.subTest(ingress_users=users), self.assertLogs(ingress.__name__ if ingress else "x", logging.WARNING) as logs:
-                out, _, seen = self._run([("GET", "/", h) for h in SPOOFED.values()] + [("GET", "/", EXACT)],
+                out, _, seen = self._run([("GET", "/", h) for h in REFUSED.values()] + [("GET", "/", EXACT)],
                                          HRI_APP="1", HRI_INGRESS_USERS=users)
-                self.assertEqual(dict(zip([*SPOOFED, "exact"], out)), {**dict.fromkeys(SPOOFED, 403), "exact": 200})
+                self.assertEqual(dict(zip([*REFUSED, "exact"], out)), {**dict.fromkeys(REFUSED, 403), "exact": 200})
                 self.assertEqual(seen, [{"xff": None, "xfh": None, "ingress": True, "user": "alice"}])
                 self.assertEqual(sum("a user header not spelled or sent as the Supervisor sends it: refused GET /" in line
-                                     for line in logs.output), len(SPOOFED), logs.output)
+                                     for line in logs.output), len(REFUSED), logs.output)
+
+    def test_through_the_supervisors_own_client(self):
+        """End to end: the headers built as the Supervisor's _init_header builds them, the browser's copy included, sent
+        through a real aiohttp ClientSession as the Supervisor sends them.  Pins what the check relies on: the merge
+        keeps the browser's spelling, so a spoof never arrives as the Supervisor's spelling."""
+        mallory = {"id": "abc123", "name": "mallory", "display": "Mallory"}
+        cases = {  # name: (the session's user or None, the browser's own copies), {ingress_users: status}
+            "legitimate": (mallory, []),
+            "an exact copy, which the Supervisor drops": (mallory, [("X-Remote-User-Name", "alice")]),
+            "lowercase name": (mallory, [("x-remote-user-name", "alice")]),
+            "mixed-case name": (mallory, [("X-REMOTE-USER-NAME", "alice")]),
+            "lowercase id": (mallory, [("x-remote-user-id", "other")]),
+            "a session without a user": (None, []),
+            "a respelled name in a session without a user": (None, [("x-remote-user-name", "alice")]),
+        }
+        served = {  # ingress_users: the cases served and the user each is served as; every other case gets 403
+            "": {"legitimate": "mallory", "an exact copy, which the Supervisor drops": "mallory", "a session without a user": ""},
+            "alice": {},
+            "mallory": {"legitimate": "mallory", "an exact copy, which the Supervisor drops": "mallory"},
+        }
+        for users, want in served.items():
+            with self.subTest(ingress_users=users):
+                out, _, seen = self._run([("GET", "/", _supervisor_forwards(*c)) for c in cases.values()],
+                                         HRI_APP="1", HRI_INGRESS_USERS=users)
+                self.assertEqual(dict(zip(cases, out)), {case: 200 if case in want else 403 for case in cases})
+                self.assertEqual([s["user"] for s in seen], list(want.values()))
 
     def test_without_a_user_name_the_exact_id_is_enough(self):
         out, _, seen = self._run([("GET", "/", BASE + [USER_ID])], HRI_APP="1")
@@ -309,7 +360,7 @@ class StatusServerTest(unittest.TestCase):
 
     def test_the_user_headers_must_be_the_supervisors_own(self):
         for users in ("alice", ""):
-            for case, headers in {**SPOOFED, "exact": EXACT}.items():
+            for case, headers in {**REFUSED, "exact": EXACT}.items():
                 with self.subTest(ingress_users=users, case=case):
                     want = 503 if case == "exact" else 403
                     self.assertEqual(self._get(supervisor="127.0.0.1", headers=headers, HRI_APP="1", HRI_INGRESS_USERS=users), want)
