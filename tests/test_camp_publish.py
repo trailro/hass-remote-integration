@@ -13,6 +13,7 @@ from unittest import mock
 from homeassistant.helpers.service import entity_service_call
 
 from custom_components.integration_manager import mqtt_publisher as mp
+from custom_components.integration_manager.mqtt_rules import MqttRules
 
 BASE = "hass_camp"
 
@@ -61,6 +62,7 @@ def _publisher(**config):
     pub._topics = {}
     pub._services_published = set()
     pub.results = []
+    pub.rules = MqttRules("/nonexistent/mqtt_rules.json")  # no file: no rules, and nothing holds the connection
     return pub
 
 

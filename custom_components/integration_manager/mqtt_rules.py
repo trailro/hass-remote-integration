@@ -22,12 +22,15 @@ import json
 import logging
 import os
 import re
+import shutil
+import time
 from functools import lru_cache
 from typing import Any, Callable, Iterable
 
 from . import writer
 
 FIELDS = ("exclude", "name", "enabled_by_default", "entity_category", "device_class", "icon")
+CORRUPT_KEEP = 3  # mqtt_rules.json.corrupt-<stamp> copies kept, as settings.json's
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -93,6 +96,10 @@ def matches(pattern: str, entity_id: str) -> bool:
 
 
 class MqttRules:
+    # why the file could not be read, None when it could (or there is none): the exclusions it holds are unknown,
+    # so the publisher does not connect (nothing is published, no command is taken) and no save replaces it
+    problem: str | None = None
+
     def __init__(self, path: str) -> None:
         self.path = path
         self.rules: dict[str, dict[str, Any]] = {}
@@ -106,17 +113,25 @@ class MqttRules:
         self.load()
 
     def load(self) -> None:
+        self.problem = None
         try:
             with open(self.path, encoding="utf-8") as fh:
                 raw = json.load(fh)
-            rules = raw.get("rules") if isinstance(raw, dict) else None
-        except (OSError, ValueError) as err:
-            if os.path.exists(self.path):
-                logging.getLogger(__name__).error("mqtt_rules.json unreadable, no rules applied: %s", err)
+        except FileNotFoundError:
             self.rules = {}
             return
+        except OSError as err:
+            self._failed(f"mqtt_rules.json cannot be read ({type(err).__name__}: {err})")
+            return
+        except (ValueError, RecursionError) as err:  # also a text that is not UTF-8
+            self._failed(f"mqtt_rules.json is not valid JSON ({type(err).__name__}: {err}) {self._keep_corrupt()}")
+            return
+        rules = raw.get("rules", {}) if isinstance(raw, dict) else None
+        if not isinstance(rules, dict):
+            self._failed(f"mqtt_rules.json does not hold a rules object {self._keep_corrupt()}")
+            return
         out = {}
-        for k, v in (rules or {}).items():
+        for k, v in rules.items():
             if not isinstance(v, dict):
                 continue
             try:
@@ -132,8 +147,36 @@ class MqttRules:
                 _LOGGER.error("mqtt rule %r ignored: %s", k, err)
         self.rules = out
 
+    def _failed(self, problem: str) -> None:
+        self.problem = (f"{problem}: its exclusions are unknown, so nothing is published over MQTT and rule changes are "
+                        "refused until the file is fixed or removed (then save the MQTT settings, or restart)")
+        self.rules = {}
+        _LOGGER.error("%s", self.problem)
+
+    def _keep_corrupt(self) -> str:
+        """A copy of the damaged file, the newest CORRUPT_KEEP kept.  The file itself stays where it is: removed, the
+        next start would read no rules at all and publish what they excluded."""
+        kept = f"{self.path}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
+        try:
+            shutil.copyfile(self.path, kept)
+            os.chmod(kept, 0o600)
+        except OSError as err:
+            return f"and could not be copied aside ({err})"
+        folder, prefix = os.path.dirname(self.path), os.path.basename(self.path) + ".corrupt-"
+        try:
+            for old in sorted(n for n in os.listdir(folder) if n.startswith(prefix))[:-CORRUPT_KEEP]:
+                os.remove(os.path.join(folder, old))
+        except OSError:
+            pass
+        return f"(a copy is kept as {os.path.basename(kept)})"
+
+    def _refuse_if_failed(self) -> None:
+        if self.problem:
+            raise ValueError(self.problem)
+
     async def async_save(self) -> None:
         """The rules as they are now (copied on the loop, where they change), written by the ordered writer."""
+        self._refuse_if_failed()
         await writer.async_write(self.path, {"rules": self.rules}, indent=1, sort_keys=True)
 
     @staticmethod
@@ -160,6 +203,7 @@ class MqttRules:
         return out
 
     def replace_all(self, rules: dict[str, Any]) -> None:
+        self._refuse_if_failed()
         if not isinstance(rules, dict):
             raise ValueError("rules must be an object")
         new = {}
@@ -177,6 +221,7 @@ class MqttRules:
 
     def set(self, entity_id: str, **changes: Any) -> dict[str, Any]:
         """Update the exact-id rule of one entity (None removes a field)."""
+        self._refuse_if_failed()
         cur = dict(self.rules.get(entity_id) or {})
         for k, v in changes.items():
             if v is None:

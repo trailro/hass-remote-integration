@@ -333,6 +333,18 @@ missing. When a glob later matches an entity the class or category does not
 fit, that entity is announced without it, with a warning in the log (once for
 the category), and the rest of the rule applies.
 
+When `integration_manager/mqtt_rules.json` cannot be read (not valid JSON, not
+a rules object, a read error), which entities it excludes is unknown, so the
+container fails closed: it does not connect to the broker, publishes nothing
+and takes no command. The main HA keeps its entities, unavailable after the
+retained `offline`. `GET /api/mqtt/status` names the problem in `rules_error`
+and `connect_error`, and the log says it. The damaged file stays where it is,
+with a copy as `mqtt_rules.json.corrupt-<time>` (the newest 3 are kept). Rule
+changes from the Entities page or `POST /api/mqtt/rules` are refused with the
+same reason, so none overwrites the file. Fix the file, or remove it to start
+over without rules, then save the MQTT settings (or restart): the rules are
+read again before connecting.
+
 ### Collisions
 
 When two entities of one device would get the same component key

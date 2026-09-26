@@ -18,6 +18,7 @@ from homeassistant.helpers import entity_registry as er
 
 from custom_components.integration_manager import discovery as disc
 from custom_components.integration_manager import mqtt_publisher as mp
+from custom_components.integration_manager.mqtt_rules import MqttRules
 from tests.test_r3_mqtt import BASE, _message, _publisher
 
 
@@ -170,6 +171,7 @@ def _connect_publisher(loop=None):
     pub._tls_checked_at, pub._tls_error, pub._last_disconnect = 0.0, "", ""
     pub.stats, pub._last_hash = {}, {}
     pub._conn_lock = asyncio.Lock() if loop else None
+    pub.rules = MqttRules("/nonexistent/mqtt_rules.json")  # no file: no rules, and nothing holds the connection
     if loop:
         pub.hass = SimpleNamespace(loop=loop, async_add_executor_job=lambda f, *a: loop.run_in_executor(None, f, *a),
                                    config=SimpleNamespace(path=lambda *p: "/nonexistent/" + "/".join(p)))
@@ -259,6 +261,7 @@ class IdentitySweepRetryTest(unittest.IsolatedAsyncioTestCase):
         pub.config = mp.MqttConfig(enabled=True, discovery_prefix="homeassistant")
         pub._connected, pub._live_base, pub._key_provider = False, None, lambda: "hass_demo"
         pub._last_wanted, pub._topics, pub._registry_timer, pub._services_timer = "hass_demo", {}, None, None
+        pub.rules = MqttRules("/nonexistent/mqtt_rules.json")  # no file: no rules, and nothing holds the connection
         pub._republish_interval = pub.config.republish_interval_s
         pub.hass = mock.Mock()
 
