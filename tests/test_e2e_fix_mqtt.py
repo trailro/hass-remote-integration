@@ -177,12 +177,13 @@ class BearerInHistoryTest(unittest.TestCase):
                     self.assertNotIn(TOKEN, mp._mask_codes(data if isinstance(data, str) else json.dumps(data)))
 
     def test_what_follows_the_value_stays_readable(self):
-        self.assertEqual(mp._mask_text(f"Authorization: Bearer {TOKEN}, retry in 5 s"), 'Authorization: "***", retry in 5 s')
-        self.assertEqual(mp._mask_text(f"token: {TOKEN} expired"), 'token: "***" expired')
+        # unquoted as it came (b4cd1a1 review: quotes added here ended the JSON string of a data field)
+        self.assertEqual(mp._mask_text(f"Authorization: Bearer {TOKEN}, retry in 5 s"), 'Authorization: ***, retry in 5 s')
+        self.assertEqual(mp._mask_text(f"token: {TOKEN} expired"), 'token: *** expired')
 
     def test_a_scheme_word_alone_is_a_value(self):
-        self.assertEqual(mp._mask_text("token: Bearer, then"), 'token: "***", then')
-        self.assertEqual(mp._mask_text("token: Basically fine"), 'token: "***" fine')
+        self.assertEqual(mp._mask_text("token: Bearer, then"), 'token: ***, then')
+        self.assertEqual(mp._mask_text("token: Basically fine"), 'token: *** fine')
 
     def test_linear_on_adversarial_text(self):
         shapes = (lambda n: "token: Bearer" + " " * n + ",", lambda n: ("token=Bearer " * n)[:n],

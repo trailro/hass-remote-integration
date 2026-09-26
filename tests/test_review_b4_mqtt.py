@@ -3,7 +3,8 @@ in clear in the command history when the call was refused before it was masked (
 a payload that does not parse), and a number was never masked at all.  S3-2: an entity moved to another device while
 the container was down stayed in its old device's retained config.  S3-5: a version switch cleared the retained
 documents of disabled entities, whose discovery components stay and read them.  End-to-end run: saving the MQTT
-settings opened mqtt.json on the event loop."""
+settings opened mqtt.json on the event loop, and the command history showed a masked value in a data field's text as
+token=\"***\": the quotes it added ended the JSON string around it."""
 
 import asyncio
 import builtins
@@ -179,6 +180,31 @@ class SaveReadsTheFileOffTheLoopTest(unittest.TestCase):
         self.assertNotIn(loop_thread, opened_on)
         self.assertEqual((first.host, first.port, first.qos), ("broker.lan", 1884, 1))  # the file is still the base
         self.assertEqual((second.host, second.port, second.qos), ("other", 1884, 1))  # and each save sees the one before
+
+
+class MaskedTextKeepsItsQuotesTest(unittest.TestCase):
+    def test_a_data_field_that_quotes_credentials(self):
+        pub = camp._publisher()
+        message = "see https://x.invalid/a?token=XTOK then Authorization: Bearer YTOKEN1234 password=ZPW"
+        rec = pub._remember("call", "hri_probe.fail", {"_id": "mf1", "message": message}, "mf1")
+        shown = json.loads(rec["data"])  # still JSON: no quote was added inside the string
+        self.assertEqual(shown["message"], "see https://x.invalid/a?token=*** then Authorization: *** password=***")
+
+    def test_a_field_that_needs_no_name_stays_readable(self):
+        """The shapes that need no name (a lone Bearer, a URL password) are for a service's error message only."""
+        pub = camp._publisher()
+        rec = pub._remember("call", "demo.x", {"message": "just Bearer abcdefghijkl here"}, None)
+        self.assertEqual(json.loads(rec["data"]), {"message": "just Bearer abcdefghijkl here"})
+
+    def test_quotes_are_kept_as_they_were(self):
+        for text, masked in (('{"code": 1234}', '{"code": "***"}'),
+                             ("{'token': 'abc'}", "{'token': '***'}"),
+                             ("{'token': abc}", "{'token': '***'}"),
+                             ('{\\"code\\": 1234}', '{\\"code\\": \\"***\\"}'),
+                             ('{\\"code\\": \\"1234\\"}', '{\\"code\\": \\"***\\"}'),
+                             ("pin=1234 and more", "pin=*** and more")):
+            with self.subTest(text=text):
+                self.assertEqual(mp._mask_text(text), masked)
 
 
 if __name__ == "__main__":
