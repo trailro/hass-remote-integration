@@ -255,14 +255,20 @@ the app from this repository never does). What changes then:
   Supervisor starts a fresh container, unless the Watchdog could not be
   turned on either or you turned it off ([Restarts and the
   Watchdog](#restarts-and-the-watchdog)): then start the app on its Info tab.
+  An instance restored from a backup onto another Home Assistant keeps its
+  port and may collide with another app there: if it fails to start after
+  such a restore, reinstall it from the HRI Manager.
 - **The port is on your network.** On the host network it listens on every
   interface of the host, the Network tab has nothing to turn off, and a port
   without a password would be HRI open to anyone on the LAN. So without the
   app's `password`, every request to the port that is not the sidebar panel
   gets `403` ("Set the app's password to use hass-remote-integration on its
-  port"), the page shown while Home Assistant installs too; only
-  `/api/alive`, the healthcheck, still answers there. With a password the
-  port works as the app's port always does, behind HRI's login.
+  port"), the page shown while Home Assistant installs too. `/api/alive`, the
+  healthcheck, answers only while Home Assistant installs; once it runs,
+  every request that is not the sidebar panel, `/api/alive` included, gets
+  `403`, which the healthcheck accepts (any answer below `500` is alive).
+  With a password the port works as the app's port always does, behind
+  HRI's login.
 - **Home Assistant is not announced.** The Home Assistant inside does not
   announce itself on the LAN by either of the two ways Home Assistant does:
   not over mDNS (zeroconf's `_home-assistant._tcp` service), and not over
