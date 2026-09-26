@@ -78,9 +78,11 @@ its restart policy (`restart: unless-stopped`) for that.
 
 - **A restart asked for from HRI** (**Restart** in the web UI or the API, the
   MQTT restart, the health watchdog, and the restart after a Home Assistant
-  version change, a restore, a clean start or an integration update) starts
-  HRI over inside the running app, with or without the Watchdog. What the
-  Supervisor stops (**Stop** or **Restart** on the Info tab, an update of the
+  version change, a restore, a clean start or an integration update) ends
+  the app's process when the Watchdog was on at the app's start, and the
+  Supervisor starts a fresh container, as after a crash. With the Watchdog
+  off, or when HRI could not read it at the start, HRI starts over inside the
+  running app instead. What the Supervisor stops (**Stop** or **Restart** on the Info tab, an update of the
   app, a host shutdown) is left to the Supervisor.
 - **Everything else ends the app's process**, and only the Watchdog starts it
   again: a crash, a stop that hangs (HRI ends it hard after about 225

@@ -29,6 +29,7 @@ minutes; the web UI shows the progress. It needs internet access.
 - Stopping waits up to 240 seconds for Home Assistant inside; a clean stop
   takes well under a second.
 - Keep the app's **Watchdog** (Info tab) on: HRI turns it on once at the
-  first start. A restart from HRI's web UI starts HRI over inside the app
-  either way, but only the Watchdog starts the app again after a crash, a
-  hung stop or an out-of-memory kill.
+  first start. A restart from HRI's web UI then ends the app and the
+  Watchdog starts it again (with it off, HRI starts over inside the app), but
+  only the Watchdog starts the app again after a crash, a hung stop or an
+  out-of-memory kill.

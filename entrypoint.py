@@ -94,6 +94,12 @@ APP_OPTIONS = {
 # /addons/self/...), and the options handler only stores the flag (api/apps.py APIApps.options): the app is not restarted.
 SUPERVISOR_OPTIONS_URL = "http://supervisor/addons/self/options"
 APP_WATCHDOG_MARKER = os.path.join(STATE_DIR, "app-watchdog-enabled")
+# The toggle as it is at boot, read while the token is still there (data.watchdog), for run.py: "1" on, "0" off,
+# unset when unknown.  With it on, a restart HRI asks for ends the process and the Supervisor starts a fresh container,
+# with Docker's start period for the HEALTHCHECK; otherwise run.py restarts in place.  The restarted entrypoint has no
+# token and keeps the value it inherits.
+SUPERVISOR_INFO_URL = "http://supervisor/addons/self/info"
+APP_WATCHDOG_VAR = "HRI_APP_WATCHDOG"
 # the Supervisor, the transport peer of every request Home Assistant's ingress proxies (as ingress.py SUPERVISOR_IP)
 SUPERVISOR_IP = "172.30.32.2"
 CONSTRAINTS_URL = "https://raw.githubusercontent.com/home-assistant/core/{version}/homeassistant/package_constraints.txt"
@@ -1147,6 +1153,23 @@ def enable_app_watchdog(token: str) -> None:
     log("turned the app's Watchdog on (once for this volume: turning it off on the Info tab is respected)")
 
 
+def read_app_watchdog(token: str) -> bool | None:
+    """The app's Watchdog toggle from the Supervisor, None when it cannot be read; fail-soft, never logs the token."""
+    if not token:
+        return None
+    request = urllib.request.Request(SUPERVISOR_INFO_URL, headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(request, timeout=5) as resp:
+            watchdog = json.loads(resp.read(1 << 20))["data"]["watchdog"]
+    except Exception as err:  # noqa: BLE001 - unknown: run.py restarts in place
+        log(f"the app's Watchdog setting could not be read ({type(err).__name__}); a restart from HRI restarts in place")
+        return None
+    if not isinstance(watchdog, bool):
+        log("the app's Watchdog setting could not be read (not a bool); a restart from HRI restarts in place")
+        return None
+    return watchdog
+
+
 def main() -> None:
     global _boot_server
     restrict_umask()  # first: inherited by everything created from here on, and by the exec'd Home Assistant
@@ -1160,6 +1183,11 @@ def main() -> None:
     if applied is not None:  # names only: an option can be the password
         log(f"running as a Home Assistant app; from its options: {', '.join(applied) or 'nothing set'}")
         enable_app_watchdog(token)
+        watchdog = read_app_watchdog(token)
+        if watchdog is None:
+            os.environ.pop(APP_WATCHDOG_VAR, None)
+        else:
+            os.environ[APP_WATCHDOG_VAR] = "1" if watchdog else "0"
     token = ""
     if PORT is None:
         log(f"HRI_PORT={os.environ.get('HRI_PORT')!r} is not a TCP port (1-65535): fix the container's environment; not starting")
