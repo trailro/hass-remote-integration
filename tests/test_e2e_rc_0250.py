@@ -5,6 +5,7 @@ E1  with HRI_DEBUG=1 Home Assistant 2026.5.0 could not boot: run.py turned on th
     looks the integration up in hass.data, which the loader had not set up yet (KeyError: 'integrations').
 E2  after a downgrade with a clean start every device has a new id: the new configs went out while the old ones were
     still retained with the same unique ids, and the main HA refused them until the orphan sweep, five minutes later.
+E3  _rollback_full read restore-pending.json on the event loop.
 """
 
 import asyncio
@@ -180,6 +181,33 @@ class SupersededBootConfigsTest(StartWindowCase):
     async def test_someone_elses_config_is_left_alone(self):
         await self._first_publish({self._topic(self.a): self._retained(self.a, "sensor.a", "sensor.b", base="hass_other_")})
         self.assertEqual(self._last(self.a), [])
+
+
+class RollbackReadsPendingOffTheLoopTest(unittest.TestCase):
+    """E3: _rollback_full asks whether a restore is scheduled (restore-pending.json) in the executor, with busy held
+    (rollback_full holds it), as install and start do."""
+
+    setUp = r10.FullRollbackVersusScheduledChangesTest.setUp  # its installer, backups and executor
+
+    def test_in_the_executor_with_busy_held(self):
+        inner, through = self.hass.async_add_executor_job, []
+
+        async def executor(fn, *args):
+            through.append(fn)
+            return await inner(fn, *args)
+
+        self.hass.async_add_executor_job = executor
+        real, busy = backupkit.pending, []
+
+        def pending(cfg):
+            busy.append(self.installer.busy)
+            return real(cfg)
+
+        with mock.patch.object(backupkit, "pending", pending):
+            res = asyncio.run(self.installer.rollback_full("demo"))
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(busy, [True])
+        self.assertEqual(through.count(pending), 1, "read on the event loop")
 
 
 if __name__ == "__main__":

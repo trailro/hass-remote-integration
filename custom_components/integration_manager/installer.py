@@ -1962,7 +1962,7 @@ class Installer:
                 await self.hass.async_add_executor_job(backupkit.validate, zip_path)
             except ValueError as err:
                 return {"ok": False, "error": f"the pre-update backup is unusable ({err}); only a plain start of {prev_tag} is possible"}
-            if backupkit.pending(self.config_dir):
+            if await self.hass.async_add_executor_job(backupkit.pending, self.config_dir):  # busy held by rollback_full
                 return {"ok": False, "error": self.rollback_restore_refusal() or "a restore is scheduled for the next restart: restart (or cancel it in the Backup card) first"}
             # a clean start schedules no archive: this restore would take its place at the boot, and the switch is cancelled there
             ha_state = await self.hass.async_add_executor_job(jsonio.read_json, os.path.join(self.config_dir, backupkit.STATE_DIR, "ha.json"), {})
