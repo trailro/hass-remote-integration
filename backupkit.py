@@ -9,7 +9,8 @@ What a backup holds: everything that is configuration or state -
 ``integration_manager/`` (state, MQTT config, registry, ha.json),
 ``configuration.yaml`` and any other top-level yaml.
 What it never holds: HA venvs (reinstalled by the entrypoint), log files,
-caches, local backups themselves.
+caches, local backups themselves (the Supervisor's backup of the app does hold
+those: APP_BACKUP_EXCLUDE_GLOBS).
 """
 
 from __future__ import annotations
@@ -62,10 +63,10 @@ SECRET_FILES = (f"{STATE_DIR}/settings.json", f"{STATE_DIR}/mqtt.json")  # mode 
 # relative to the config dir; directories are recursed
 INCLUDE_DIRS = (".storage", "custom_components", STATE_DIR)
 INCLUDE_ROOT_GLOBS = ("*.yaml", "*.yml")
-# What no backup holds, here or in the Supervisor's backup of the app (app/config.yaml backup_exclude is derived
-# from this tuple, and tests/test_ha_app.py checks it): what the boot rebuilds (the Home Assistant venvs, ~700 MB
-# each), logs, caches, the backups themselves, files being written, a restore or an import in flight, and the
-# login key with its revocations (a restore must not revive logged-out sessions; a new key is made at first use).
+# What no backup made here holds, and (but for the backups themselves) nor the Supervisor's backup of the app
+# (APP_BACKUP_EXCLUDE_GLOBS below): what the boot rebuilds (the Home Assistant venvs, ~700 MB each), logs, caches, the
+# backups themselves, files being written, a restore or an import in flight, and the login key with its revocations
+# (a restore must not revive logged-out sessions; a new key is made at first use).
 DISPOSABLE_GLOBS = (
     f"{STATE_DIR}/auth_key", f"{STATE_DIR}/auth_key.tmp", f"{STATE_DIR}/auth_revoked", f"{STATE_DIR}/auth_revoked.tmp",
     "venv-*", "venv-current", "backups", "backups/*", "*.log",
@@ -97,6 +98,12 @@ KEEP_LIVE_GLOBS = (
     f"{STATE_DIR}/app-watchdog-enabled",
 )
 EXCLUDE_GLOBS = DISPOSABLE_GLOBS + KEEP_LIVE_GLOBS
+BACKUPS_GLOBS = (BACKUP_DIR, f"{BACKUP_DIR}/*", f"{STATE_DIR}/backups", f"{STATE_DIR}/backups/*")
+# What the Supervisor's backup of the app leaves out (app/config.yaml backup_exclude is derived from this tuple, and
+# tests/test_ha_app.py checks it): DISPOSABLE_GLOBS but the backups.  A Supervisor restore replaces the app's whole
+# folder, so backups left out of it would be deleted, the pre-update backup a Full rollback needs among them.  A
+# backup being written or uploaded (a hidden .tmp) stays out: half a zip is no backup.
+APP_BACKUP_EXCLUDE_GLOBS = tuple(g for g in DISPOSABLE_GLOBS if g not in BACKUPS_GLOBS) + (f"{BACKUP_DIR}/.*.tmp",)
 KEEP_DEFAULT = 5
 _LOGGER = logging.getLogger(__name__)
 UNKNOWN_DOMAIN = object()  # backup_domain: the archive does not say which integration ran

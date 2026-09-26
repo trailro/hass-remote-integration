@@ -51,8 +51,9 @@ schema:
   debug: bool
   cookie_secure: bool
   ingress_users: ["str?"]
-# what HRI's own backups leave out too (backupkit.py DISPOSABLE_GLOBS), matched the way the Supervisor matches:
-# against the end of the full path, so "*_hass_remote_integration/" ties a name to the top of this app's folder.
+# what HRI's own backups leave out too but HRI's backups themselves (backupkit.py APP_BACKUP_EXCLUDE_GLOBS: a
+# restore replaces the folder, and would delete them), matched the way the Supervisor matches: against the end of
+# the full path, so "*_hass_remote_integration/" ties a name to the top of this app's folder.
 # That part is the slug above: a fork or a local build with another slug must change it in every entry, or its
 # Home Assistant backups hold the venv (about 800 MB)
 backup_exclude:
@@ -62,7 +63,6 @@ backup_exclude:
   - "*_hass_remote_integration/integration_manager/auth_revoked.tmp"
   - "*_hass_remote_integration/venv-*"
   - "*_hass_remote_integration/venv-current"
-  - "*_hass_remote_integration/backups"
   - "*.log"
   - "*.log.*"
   - "*_hass_remote_integration/__pycache__"
@@ -78,7 +78,6 @@ backup_exclude:
   - "*_hass_remote_integration/integration_manager/pre-restore-*"
   - "*_hass_remote_integration/integration_manager/ha-install.log"
   - "*_hass_remote_integration/integration_manager/staging-*"
-  - "*_hass_remote_integration/integration_manager/backups"
   - "*_hass_remote_integration/integration_manager/import.tar"
   - "*_hass_remote_integration/integration_manager/import.tar.tmp"
   - "*_hass_remote_integration/integration_manager/import-extracted"
@@ -87,3 +86,4 @@ backup_exclude:
   - "*_hass_remote_integration/.storage/tmp[a-z0-9_][a-z0-9_][a-z0-9_][a-z0-9_][a-z0-9_][a-z0-9_][a-z0-9_][a-z0-9_]"
   - "*_hass_remote_integration/.storage/*.pre-import"
   - "*_hass_remote_integration/.storage/*.pre-import.done"
+  - "*_hass_remote_integration/backups/.*.tmp"

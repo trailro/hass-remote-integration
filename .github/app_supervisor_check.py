@@ -13,8 +13,9 @@ reads this repository:
   - SCHEMA_APP_TRANSLATIONS on app/translations/*, the same way;
   - AppOptions on the default options, the check an app's start runs;
   - App._is_excluded_by_filter, the backup's filter, over the app's folder named as the Supervisor names it: what
-    backupkit.DISPOSABLE_GLOBS leaves out of HRI's own backups must stay out of the Supervisor's (the venv alone is
-    about 800 MB), and the live state (KEEP_LIVE_GLOBS, settings, installed versions, patches) must stay in.  The
+    backupkit.APP_BACKUP_EXCLUDE_GLOBS names (what HRI's own backups leave out, but those backups) must stay out of
+    the Supervisor's (the venv alone is about 800 MB), and the live state (KEEP_LIVE_GLOBS, settings, installed
+    versions, patches) and HRI's own backups (a restore would delete them) must stay in.  The
     Supervisor matches the patterns against the full path today and says it may switch to the relative one
     (apps/app.py, _is_excluded_by_filter's docstring): this is what notices.
 
@@ -40,6 +41,8 @@ STATE_FILES = (
     "integration_manager/settings.json", "integration_manager/state.json", "integration_manager/mqtt.json",
     "integration_manager/versions/ramses_cc/0.55.1/custom_components/ramses_cc/__init__.py",
     "integration_manager/patches/ramses_cc/fix.patch", "custom_components/ramses_cc/manifest.json",
+    # HRI's own backups, the one a Full rollback needs among them
+    "backups/20260926-120000-pre-update.zip", "integration_manager/backups/x.zip",
 )
 
 
@@ -185,9 +188,9 @@ class Check:
                 for i in range(1, len(parts) + 1)
             )
 
-        out = sorted({example_path(g, "x1") for g in backupkit.DISPOSABLE_GLOBS})
+        out = sorted({example_path(g, "x1") for g in backupkit.APP_BACKUP_EXCLUDE_GLOBS})
         keep = sorted({example_path(g, "") for g in backupkit.KEEP_LIVE_GLOBS} | set(STATE_FILES))
-        problems = [f"kept, but HRI's backups leave it out: {rel}" for rel in out if not excluded(rel)]
+        problems = [f"kept, but the app's backup must leave it out: {rel}" for rel in out if not excluded(rel)]
         problems += [f"left out, but it is live state: {rel}" for rel in keep if excluded(rel)]
         self.section(f"backup_exclude under {folder} ({len(out)} left out, {len(keep)} kept)", problems)
         return 1 if self.failed else 0

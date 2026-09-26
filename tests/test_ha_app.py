@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 
 import backupkit
@@ -125,7 +126,12 @@ class AppConfigTest(unittest.TestCase):
         self.assertLessEqual(key(self.cfg["version"]), key(manifest))
 
     def test_backup_exclude_is_derived_from_backupkit(self):
-        self.assertEqual(self.cfg["backup_exclude"], supervisor_backup_exclude(backupkit.DISPOSABLE_GLOBS, self.cfg["slug"]))
+        self.assertEqual(self.cfg["backup_exclude"], supervisor_backup_exclude(backupkit.APP_BACKUP_EXCLUDE_GLOBS, self.cfg["slug"]))
+        # the app's backup keeps HRI's backups (a Supervisor restore replaces the folder: left out, they would be
+        # deleted, the pre-update backup a Full rollback needs among them); everything else HRI leaves out, it does too
+        self.assertEqual(set(backupkit.DISPOSABLE_GLOBS) - set(backupkit.APP_BACKUP_EXCLUDE_GLOBS),
+                         {"backups", "backups/*", "integration_manager/backups", "integration_manager/backups/*"})
+        self.assertFalse([g for g in self.cfg["backup_exclude"] if g.endswith("/backups")])
         self.assertIn(f"*_{self.cfg['slug']}/venv-*", self.cfg["backup_exclude"])
         # a Supervisor restore replaces the whole folder: what backupkit keeps out only so that a restore leaves the
         # live copy alone would be deleted by it
@@ -133,7 +139,7 @@ class AppConfigTest(unittest.TestCase):
 
     def test_backup_exclude_leaves_out_what_backupkit_leaves_out(self):
         """The Supervisor's matching, run on a folder named as the Supervisor names it, drops exactly the files
-        backupkit's DISPOSABLE_GLOBS drop, and nothing else - not a same-named folder deeper down."""
+        backupkit's APP_BACKUP_EXCLUDE_GLOBS drop, and nothing else - not a same-named folder deeper down."""
         slug = self.cfg["slug"]
         root = pathlib.Path(tempfile.mkdtemp()) / f"0123abcd_{slug}"
         files = [
@@ -149,21 +155,64 @@ class AppConfigTest(unittest.TestCase):
             "integration_manager/restore-pending-1.zip", "integration_manager/restore-pending.json",
             "integration_manager/staging-restore-1/deep/f", "integration_manager/import-extracted/.storage/x",
             "integration_manager/import.tar", "integration_manager/backups/x", "integration_manager/pre-restore-x/y",
-            "integration_manager/hacs_catalog.json",
+            "integration_manager/hacs_catalog.json", "integration_manager/backups/x.zip", "backups/hri-2-pre-update.zip",
+            "backups/.20260926-120000.zip.ab12cd.tmp", "backups/.upload-ab12cd.zip.tmp",
         ]
         for rel in files:
             (root / rel).parent.mkdir(parents=True, exist_ok=True)
             (root / rel).write_text("x")
         (root / "venv-current").symlink_to(root / "venv-2026.9.3")
-        want = {rel for rel in files if not any(fnmatch.fnmatch(rel, g) for g in backupkit.DISPOSABLE_GLOBS)}
+        want = {rel for rel in files if not any(fnmatch.fnmatch(rel, g) for g in backupkit.APP_BACKUP_EXCLUDE_GLOBS)}
         self.assertEqual(supervisor_archive(root, self.cfg["backup_exclude"]), want)
         for rel in ("custom_components/foo/backups/keep.py", "custom_components/foo/venv-x/keep.py", ".storage/core.uuid",
-                    ".storage/http", "integration_manager/events.jsonl", "integration_manager/mqtt_identity.json"):
+                    ".storage/http", "integration_manager/events.jsonl", "integration_manager/mqtt_identity.json",
+                    "backups/hri-1.zip", "backups/hri-2-pre-update.zip", "integration_manager/backups/x.zip"):
             self.assertIn(rel, want)
-        for rel in ("venv-2026.9.3/bin/python", "backups/hri-1.zip", "home-assistant.log", "integration_manager/auth_key",
+        for rel in ("venv-2026.9.3/bin/python", "home-assistant.log", "integration_manager/auth_key",
                     ".storage/tmpab12cd_9", "integration_manager/staging-restore-1/deep/f",
-                    "integration_manager/hacs_catalog.json"):
+                    "integration_manager/hacs_catalog.json", "backups/.20260926-120000.zip.ab12cd.tmp",
+                    "backups/.upload-ab12cd.zip.tmp"):
             self.assertNotIn(rel, want)
+
+    def test_a_supervisor_restore_brings_back_hri_backups(self):
+        """A Supervisor restore replaces the app's folder with what its backup kept: the pre-update backup state.json
+        names (the one a Full rollback restores) is there again, listed and valid; the venv is not."""
+        root = pathlib.Path(tempfile.mkdtemp()) / f"0123abcd_{self.cfg['slug']}"
+        self.addCleanup(shutil.rmtree, root.parent, True)
+        for rel in (backupkit.MARKER, ".storage/core.config_entries", "configuration.yaml", "venv-2026.9.3/bin/python",
+                    "home-assistant.log"):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text("{}")
+        pre = backupkit.create(str(root), "pre-update-foo-1.0")["name"]
+        (root / backupkit.MARKER).write_text(json.dumps({"installed": {"foo": {"pre_update_backup": pre}}}))
+        restored = pathlib.Path(tempfile.mkdtemp()) / root.name
+        self.addCleanup(shutil.rmtree, restored.parent, True)
+        for rel in supervisor_archive(root, self.cfg["backup_exclude"]):
+            (restored / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(root / rel, restored / rel)
+        named = json.loads((restored / backupkit.MARKER).read_text())["installed"]["foo"]["pre_update_backup"]
+        self.assertEqual([b["name"] for b in backupkit.list_backups(str(restored))], [named])
+        backupkit.validate(str(restored / backupkit.BACKUP_DIR / named))
+        self.assertFalse((restored / "venv-2026.9.3").exists())
+        self.assertFalse((restored / "home-assistant.log").exists())
+
+    def test_hri_backups_never_hold_hri_backups(self):
+        """The app's backup keeps backups/, HRI's own backups still leave it out: a backup inside a backup would grow
+        with every one made."""
+        cfg = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, cfg, True)
+        for rel in (backupkit.MARKER, "backups/old.zip", "integration_manager/backups/x.zip", "configuration.yaml"):
+            os.makedirs(os.path.dirname(os.path.join(cfg, rel)), exist_ok=True)
+            with open(os.path.join(cfg, rel), "w", encoding="utf-8") as fh:
+                fh.write("{}")
+        rec = backupkit.create(cfg, "t")
+        with zipfile.ZipFile(os.path.join(cfg, backupkit.BACKUP_DIR, rec["name"])) as zf:
+            names = set(zf.namelist())
+        self.assertIn(backupkit.MARKER, names)
+        self.assertIn("configuration.yaml", names)
+        self.assertFalse([n for n in names if "backups/" in n], names)
+        for g in ("backups", "backups/*", "integration_manager/backups", "integration_manager/backups/*"):
+            self.assertIn(g, backupkit.EXCLUDE_GLOBS)
 
     def test_the_hacs_catalog_cache_is_in_no_backup(self):
         """hacs_catalog.json (about 1.3 MB) is a cache catalog.py fetches again: out of HRI's backups, out of the
