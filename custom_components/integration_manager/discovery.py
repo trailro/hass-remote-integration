@@ -257,6 +257,9 @@ _UPDATE_TPL = _tpl(
 _AVAILABILITY_TPL = _tpl("'offline' if value_json.state == 'unavailable' else 'online'")
 # Same, for a platform with no no-value payload: an unknown state has nothing honest to show either.
 _AVAILABILITY_UNKNOWN_TPL = _tpl("'offline' if value_json.state in ['unavailable', 'unknown'] else 'online'")
+# A vacuum's document carries its activity as `state` (document_extras), null for an unavailable source: its own
+# `availability` field says it instead.  A document published before that field existed counts as online.
+_VACUUM_AVAILABILITY_TPL = _tpl("value_json.get('availability', 'online')")
 
 
 def _offline_when_unknown(comp: dict[str, Any]) -> None:
@@ -905,6 +908,9 @@ def build_component(
         )
         if attrs.get("fan_speed_list"):
             comp.update({"fan_speed_list": list(attrs["fan_speed_list"]), "set_fan_speed_topic": f"{cmd}/fan_speed"})
+        for avail in comp.get("availability", ()):
+            if avail.get("value_template") == _AVAILABILITY_TPL:
+                avail["value_template"] = _VACUUM_AVAILABILITY_TPL
 
     elif domain == "lawn_mower":
         comp.pop("state_topic", None)
@@ -940,12 +946,13 @@ def document_extras(state: State) -> dict[str, Any]:
     A vacuum is the one platform with no value template, so `_STATE_TPL` cannot turn an unknown state into
     the no-value payload: MQTT vacuum drops any state that is not one of its six activities and keeps the
     one it had, which left a stale activity on the main HA.  `null` is what that platform reads as "no
-    activity", which is what `unknown` means here; `unavailable` takes the entity offline through its
-    availability topic either way, and sending null with it keeps a stale activity from reappearing when
-    it comes back."""
+    activity", which is what `unknown` means here; `unavailable` takes the entity offline through the
+    `availability` field its availability template reads (the replaced `state` no longer says it), and
+    sending null with it keeps a stale activity from reappearing when it comes back."""
     if state.entity_id.startswith("vacuum."):
         return {"fan_speed": state.attributes.get("fan_speed"),
-                "state": state.state if state.state in _VACUUM_ACTIVITIES else None}
+                "state": state.state if state.state in _VACUUM_ACTIVITIES else None,
+                "availability": "offline" if state.state == "unavailable" else "online"}
     return {}
 
 
