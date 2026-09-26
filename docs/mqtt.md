@@ -25,6 +25,73 @@ An integration named `call`, `cmd`, `result`, `services`, `manager`, `health`
 or `status` publishes under `<name>-integration/<domain>/<object_id>`, so its
 documents never land on the command, call or result topics.
 
+`hass_<domain>` in these topics is the base topic, which is also the client id
+and the start of every discovery id: `hass_<domain>_<instance>` for a container
+with `HRI_INSTANCE` set ([Identity](#identity)).
+
+## Identity
+
+The identity is the name everything published derives from: the base topic,
+the client id, the availability topics, the discovery ids and unique ids
+(`<identity>_<entity_id>`), and the manager device
+(`hass-remote-integration (<identity>)`, `sensor.<identity>_health`, ...). It
+is `hass_<domain>` for the running integration, or `hass_<domain>_<instance>`
+when the container has `HRI_INSTANCE=<instance>`. The MQTT page shows the base
+topic in use and where it comes from; `GET /api/mqtt/status` says the same in
+`identity_source` (`default`, `instance`, `remembered`, `invalid`, or `null`
+with nothing running), `identity_instance` and `identity_problem`.
+
+### The rule
+
+1. If this volume already published the running integration, it keeps the
+   identity it published under (`remembered`), whatever `HRI_INSTANCE` says
+   now: the names on the broker and the entities on the main HA stay as they
+   are.
+2. Otherwise it is `hass_<domain>_<HRI_INSTANCE>` (`instance`), or
+   `hass_<domain>` with `HRI_INSTANCE` unset or empty (`default`).
+
+What a volume published is recorded in `integration_manager/mqtt_identity.json`
+at every connection, with the integration it belongs to. A record written by
+0.25.x or older names no integration: it counts for the integration whose
+plain `hass_<domain>` it holds. So an install that published as
+`hass_hri_probe` keeps `hass_hri_probe`, its client id and its discovery unique
+ids, and with them its entity ids on the main HA, after an update that sets
+`HRI_INSTANCE` (an HRI Manager instance: [Home Assistant OS app](app.md#hri-manager-instances)).
+An integration this volume never published (a fresh volume, another
+integration, a volume that only ran with MQTT disabled) takes rule 2. The
+manager's own backups leave `mqtt_identity.json` out ([Backups](backups.md)), so
+a backup restored into another container takes that container's identity.
+
+`HRI_INSTANCE` is 1 to 32 characters of `a`-`z`, `0`-`9` and `_`, not starting
+with `_`; every HRI Manager instance name fits. Any other value is refused: it
+is never used and never replaced by the plain name. MQTT stays disconnected
+(`connect_error` and the MQTT page name the value and why), the log and the
+timeline say so at every start, and the preflight of every install lists it as
+a warning. The integration itself runs; fix or remove the variable and restart.
+
+### Two instances of the same integration
+
+Two containers running the same integration on one broker need different
+identities: with the same one they take each other's connection (one client id)
+and clear each other's retained data. Set `HRI_INSTANCE` in one of them (HRI
+Manager sets it for each instance it creates), or in both, to different values.
+`hass_demo` and `hass_demo_garage` share no topic, client id, discovery id or
+unique id, so both mirror to one main HA side by side. Their entities there
+take the ids they have in each container, so of two with the same id the one
+created second gets a suffix (`switch.door_2`).
+
+The container that already published keeps its names (rule 1). To give it the
+instance identity on purpose, use **Move to hass_<domain>_<instance>** on the
+MQTT page (or `POST /api/mqtt/move_identity` with `{"to": "<identity>"}`,
+the identity the page shows), while MQTT is connected. It clears everything
+published under the old identity, as a change of integration does: **the main
+HA deletes those entities and devices, with what was customised there (areas,
+names, labels)**, and creates them again under the new one. The manager
+device's entity ids change with the name. Nothing else moves an identity:
+removing or changing `HRI_INSTANCE` later keeps the one recorded. The Move
+offers whatever the rule gives now, so it also takes a container back to the
+plain `hass_<domain>` after `HRI_INSTANCE` was removed.
+
 ## Connection
 
 ### Protocol
@@ -456,7 +523,8 @@ parameters only as a mapping.
 
 With discovery on, or `manager_discovery` alone (for example in
 [shadow mode](shadow-mode.md)), the main Home Assistant gets a
-`hass-remote-integration (hass_<domain>)` device: whether the integration is up
+`hass-remote-integration (<identity>)` device (`hass_<domain>`, see
+[Identity](#identity)): whether the integration is up
 and its health; update entities for the integration, for Home Assistant in the
 container and for hass-remote-integration; sensors for memory, CPU, event-loop
 lag (the worst delay of a one-second timer in the last minute), volume usage
@@ -518,7 +586,8 @@ updated by pulling a new image.
 
 ## Stop, uninstall, restore
 
-The identity (`hass_<domain>`) belongs to the running integration.
+The identity (`hass_<domain>`, see [Identity](#identity)) belongs to the running
+integration.
 
 - **Stop** is not a removal: the whole device, the manager device included,
   goes unavailable on the main HA and keeps its entities and customisations

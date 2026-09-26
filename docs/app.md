@@ -74,6 +74,16 @@ An options file the app cannot read stops it at boot, with a line in its log,
 rather than starting without the password it may hold. The log names the
 variables set from the options, never their values.
 
+## HRI Manager instances
+
+An instance HRI Manager creates (the local app `local_hri_<name>`) runs with
+`HRI_INSTANCE=<name>`, so two instances of the same integration publish under
+different MQTT identities, `hass_<domain>_<name>`, and share one broker and one
+main Home Assistant. An instance that already published keeps the identity it
+published under (`hass_<domain>` for one created before instances had their
+own), with its entities on the main Home Assistant; the MQTT page shows which
+and offers the move ([Identity](mqtt.md#identity)).
+
 ## Restarts and the Watchdog
 
 The Supervisor starts a stopped app again only when the app's **Watchdog**
