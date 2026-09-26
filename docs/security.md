@@ -130,12 +130,14 @@ Supervisor sets. Ingress is open to every logged-in Home Assistant user,
 administrator or not (the panel shows only for administrators, which hides it
 and nothing more), so `ingress_users` is what restricts HRI's panel. The
 Supervisor drops a client's own `X-Remote-User-Id` and `X-Remote-User-Name`
-only when the name is spelled exactly as its own, and forwards a copy spelled
-in another case (`x-remote-user-name`). HRI therefore requires the
-Supervisor's exact spelling: `X-Remote-User-Id` exactly once,
-`X-Remote-User-Name` at most once, no other spelling of either; anything else
-gets `403`, with or without `ingress_users`, so the user name the log shows is
-the session's. Home Assistant's http settings
+only when the name is spelled exactly as its own; a copy spelled in another
+case (`x-remote-user-name`) replaces its own header on the way to the app.
+HRI therefore requires the Supervisor's exact spelling: `X-Remote-User-Id`
+exactly once, `X-Remote-User-Name` at most once, no other spelling of either;
+anything else gets `403`, with or without `ingress_users`, so the user name
+the log shows is the session's. A session the Supervisor opened without a
+user (it could not find one) carries neither header: it is served while
+`ingress_users` is empty and refused when it is set. Home Assistant's http settings
 and trusted proxies are not changed. The boot status page lets the same
 requests through. Every page uses relative URLs, so the UI works under the
 prefix; `frame-ancestors 'self'` lets Home Assistant frame it.
