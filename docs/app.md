@@ -168,8 +168,10 @@ They hold no venv, so each is small: about one to a few MB,
 depending on the integration's `.storage`. A Home Assistant backup of the app
 grows by roughly *Backups to keep* (`backup_keep`, 5 by default) times that,
 plus the backups pruning keeps on top of it (the pre-update backup, a
-pre-restore backup for 7 days, an upload for 7 days). Delete the ones you no
-longer need from **System**.
+pre-restore backup for 7 days, an upload for 7 days). With *Backups to keep*
+at 0 (keep all) nothing is pruned, so every Home Assistant backup of the app
+holds every backup HRI ever made and grows with each one. Delete the ones you
+no longer need from **System**.
 
 Each of the manager's backups holds `integration_manager/settings.json` (its
 tokens) and `mqtt.json` (the broker password) as they were when it was made.
