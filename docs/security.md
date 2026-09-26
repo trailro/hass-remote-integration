@@ -25,7 +25,10 @@ Set `HRI_PASSWORD`, or `HRI_PASSWORD_FILE` (a Docker secret), to require one:
   matches and each try counts toward the lockout. The login form takes it;
   for scripts, choose a password without one.
 - Browsers get the cookie `hri_session_<port>`, valid 30 days (an old
-  `hri_session` cookie moves over by itself).
+  `hri_session` cookie moves over by itself). As the Home Assistant app,
+  whose port inside is always 8087, it is `hri_session_<the app's host
+  name>`, so two apps on one host keep their sessions apart; ingress needs
+  no cookie.
 - **Log out** (top bar) and a password change end every session in every
   browser, one opened a moment before included, across restarts and restores.
   If the volume cannot record a logout (full or read-only), the page says so
