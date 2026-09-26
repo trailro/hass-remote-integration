@@ -17,7 +17,8 @@ attempts are slowed down; after MAX_FAILURES within FAILURE_WINDOW_S from one
 address that address is refused until the window passes, and after
 GLOBAL_MAX_FAILURES within GLOBAL_WINDOW_S from all addresses together (many
 addresses, e.g. an IPv6 range) every password attempt is refused until the
-count drops.  The cookie name carries the port: browsers send cookies to every
+count drops.  The cookie name carries the port (as the app, whose port inside
+is always the same, the container's host name): browsers send cookies to every
 port of a host, so two instances on one host would otherwise share one name.
 """
 
@@ -29,7 +30,9 @@ import hmac
 import ipaddress
 import logging
 import os
+import re
 import secrets
+import socket
 import time
 from typing import Any
 from urllib.parse import quote
@@ -46,7 +49,19 @@ from .ui import load_template
 _LOGGER = logging.getLogger(__name__)
 
 LEGACY_COOKIE = "hri_session"  # the name before it carried the port: a valid one is moved to COOKIE on its next request
-COOKIE = f"hri_session_{os.environ.get('HRI_PORT', '8087').strip() or '8087'}"
+
+
+def _cookie_name() -> str:
+    """hri_session_<port>; as the app the port inside is always 8087, so two apps on one host would share it: there
+    the container's host name, which the Supervisor sets per app, reduced to the characters a cookie name takes."""
+    if os.environ.get("HRI_APP"):
+        host = re.sub(r"[^a-z0-9-]", "_", socket.gethostname().strip().lower().rstrip("."))
+        if host:
+            return f"hri_session_{host}"
+    return f"hri_session_{os.environ.get('HRI_PORT', '8087').strip() or '8087'}"
+
+
+COOKIE = _cookie_name()
 SESSION_S = 30 * 86400
 MAX_FAILURES = 5
 FAILURE_WINDOW_S = 900

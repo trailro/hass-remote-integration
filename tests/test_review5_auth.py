@@ -256,5 +256,28 @@ class RevokedRecordTest(unittest.TestCase):
         self.assertEqual(auth.generation, 0)
 
 
+# ----- X-2 ----------------------------------------------------------------------------------------
+
+class CookieNameTest(unittest.TestCase):
+    def _name(self, hostname="a0d7b954-hass-remote-integration", **env):
+        with _env(**env), mock.patch("socket.gethostname", return_value=hostname):
+            return auth_mod._cookie_name()
+
+    def test_docker_keeps_the_port(self):
+        self.assertEqual(self._name(HRI_PORT="8088"), "hri_session_8088")
+        self.assertEqual(self._name(HRI_PORT=" "), "hri_session_8087")
+
+    def test_the_app_takes_its_host_name(self):
+        a = self._name(HRI_APP="1", HRI_PORT="8087")
+        b = self._name("local-hass-remote-integration", HRI_APP="1", HRI_PORT="8087")
+        self.assertEqual(a, "hri_session_a0d7b954-hass-remote-integration")
+        self.assertNotEqual(a, b)
+        self.assertNotEqual(a, auth_mod.LEGACY_COOKIE)
+
+    def test_the_host_name_is_a_cookie_token(self):
+        self.assertEqual(self._name("Weird.Host name;=x.", HRI_APP="1"), "hri_session_weird_host_name__x")
+        self.assertEqual(self._name("", HRI_APP="1", HRI_PORT="8087"), "hri_session_8087")
+
+
 if __name__ == "__main__":
     unittest.main()
