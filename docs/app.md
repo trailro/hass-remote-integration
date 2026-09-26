@@ -141,8 +141,8 @@ you set one again on the **Configuration** tab.
 ## Backups
 
 A Home Assistant backup that includes the app holds its whole folder except
-what no backup needs (`backupkit.DISPOSABLE_GLOBS`, the same list the
-manager's own backups leave out):
+what no backup needs (`backupkit.APP_BACKUP_EXCLUDE_GLOBS`: what the
+manager's own backups leave out, but those backups themselves):
 
 - `venv-*`, one installed Home Assistant each, about 800 MB. After a restore
   the first start installs Home Assistant again, which takes a few minutes and
@@ -150,11 +150,17 @@ manager's own backups leave out):
 - log files, Python caches, `deps/` and `tts/`;
 - the cached HACS list of the Install page (`hacs_catalog.json`), fetched
   again at the first search;
-- `backups/`, the manager's own backups: copies of the same state, which would
-  otherwise be stored again in every Home Assistant backup. Download the ones
-  you want to keep from **System**;
-- files being written, and a restore or import in progress;
+- files being written (a backup being made or uploaded included), and a
+  restore or import in progress;
 - the login key and the logout record: everyone logs in again after a restore.
+
+The manager's own backups (`backups/`) are in it (since 0.25.2; before, they
+were left out). They hold no venv, so each is small: about one to a few MB,
+depending on the integration's `.storage`. A Home Assistant backup of the app
+grows by roughly *Backups to keep* (`backup_keep`, 5 by default) times that,
+plus the backups pruning keeps on top of it (the pre-update backup, a
+pre-restore backup for 7 days, an upload for 7 days). Delete the ones you no
+longer need from **System**.
 
 A restore of a Home Assistant backup replaces the app's whole folder. So,
 unlike a restore from **System**, it also brings back the timeline, the
@@ -163,13 +169,16 @@ resource history, `.storage/http`, `.storage/core.uuid` and the MQTT ledgers
 backup was taken. The manager's own backups work as before and are the way to
 move an integration to another install.
 
-That restore also deletes the manager's own backups: `backups/` is not in the
-Home Assistant backup, and the folder it restores has none. **System** then
-lists no backups, and the backup taken before the last integration update goes
-too, while the integration's state may still name it. A **Full rollback** is
-refused with the reason (the backup no longer exists); a plain start of the
-previous version still works. Download the backups you want to keep before
-you restore a Home Assistant backup, and upload them again after.
+That restore brings back the manager's own backups as they were when the Home
+Assistant backup was taken, together with the state that names them: the
+backup taken before the last integration update is there again, so a **Full
+rollback** works after the restore. Backups made after that Home Assistant
+backup are gone with the rest of the folder: download them from **System**
+first if you want to keep them, and upload them again after. A restore of a
+Home Assistant backup made before 0.25.2 still brings back no backups:
+**System** then lists none, and a **Full rollback** is refused with the reason
+(the backup no longer exists); a plain start of the previous version still
+works.
 
 `backup_exclude` in `app/config.yaml` names every entry below
 `*_hass_remote_integration/`, the folder of this app's slug. If you build the

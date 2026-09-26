@@ -445,12 +445,15 @@ class OlderThanTheConfigurationTest(unittest.TestCase):
         self.assertEqual(self.storage(), NEW)
 
     def test_x1_a_restored_downgrade_whose_restore_cannot_happen(self):
-        # a Supervisor restore brought back ha.json with a downgrade scheduled, but not its restore (restore-pending*
-        # and backups/ are not in the app's backup) nor any venv
+        # a Supervisor restore brought back ha.json with a downgrade scheduled and its pre-change backup (backups/ is in
+        # the app's backup since 0.25.2), but not its restore (restore-pending* is not) nor any venv: the boot applies
+        # only what is scheduled, never a backup because it is there
         change = {"to": OLD, "mode": "restore", "backup": f"pre-ha-{OLD}.zip", "at": "2026-09-20T10:00:00"}
         self.ha(desired=OLD, current=NEW, proven=NEW, change=change)
+        make_backup(self.cfg, change["backup"], OLD)
         r = self.prepare(installs=(OLD,))
         self.assert_refused(r, OLD)
+        self.assertTrue(os.path.isfile(os.path.join(self.cfg, backupkit.BACKUP_DIR, change["backup"])))
         self.assertEqual(r.state["desired"], OLD, "desired is not changed silently")
         self.assertEqual(r.state["current"], NEW)
         self.assertEqual(r.state["change"], change, "the switch is not marked applied: nothing booted")

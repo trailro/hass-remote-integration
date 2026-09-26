@@ -9,7 +9,7 @@ All under `/config`. *Backup* says whether a backup holds the file
 |---|---|---|
 | `venv-<ha version>/` | one per installed Home Assistant; `venv-current` links the active one | no |
 | `custom_components/<domain>/` | the deployed integration | yes |
-| `backups/` | backups (zip); `<time>-pre-restore.zip`, taken before a restore, is kept from pruning and deletion for 7 days | no |
+| `backups/` | backups (zip); `<time>-pre-restore.zip`, taken before a restore, is kept from pruning and deletion for 7 days | no (a Home Assistant backup of the app holds it: [app backups](app.md#backups)) |
 | `.storage.pre-rebuild-<time>/` | `.storage` set aside by a clean start; removed once the rebuild finishes or a restore replaces `.storage`. Kept (and logged) if the clean start was dropped: delete it by hand | no |
 
 ## `integration_manager/`
