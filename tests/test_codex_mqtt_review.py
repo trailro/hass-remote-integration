@@ -67,7 +67,7 @@ class OutOfRangeSettingsTest(unittest.TestCase):
     def test_a_bad_value_on_disk_is_not_carried_into_the_next_save(self):
         pub = _config_publisher({"republish_interval_s": HUGE})
         with self.assertLogs(mp._LOGGER, "WARNING"):
-            config = pub._validated({"host": "broker"})
+            config = pub._validated({"host": "broker"}, pub._read_saved())
         self.assertEqual(config.republish_interval_s, 300)
 
 

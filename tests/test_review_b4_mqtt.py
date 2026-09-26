@@ -2,9 +2,15 @@
 in clear in the command history when the call was refused before it was masked (an oversized _id, a denied domain,
 a payload that does not parse), and a number was never masked at all.  S3-2: an entity moved to another device while
 the container was down stayed in its old device's retained config.  S3-5: a version switch cleared the retained
-documents of disabled entities, whose discovery components stay and read them."""
+documents of disabled entities, whose discovery components stay and read them.  End-to-end run: saving the MQTT
+settings opened mqtt.json on the event loop."""
 
+import asyncio
+import builtins
 import json
+import os
+import tempfile
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -142,6 +148,37 @@ class VersionSwitchKeepsDisabledEntitiesTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(er, "async_get", return_value=registry):
             self.assertEqual(await pub.async_clear_stale_docs(), 2)
         self.assertEqual(sorted(cleared), [f"{camp.BASE}/demo/sensor/gone", f"{camp.BASE}/demo/sensor/hidden"])
+
+
+class SaveReadsTheFileOffTheLoopTest(unittest.TestCase):
+    def test_mqtt_json_is_not_opened_on_the_loop(self):
+        pub = object.__new__(mp.MqttPublisher)
+        pub.path = os.path.join(tempfile.mkdtemp(), "mqtt.json")
+        with open(pub.path, "w", encoding="utf-8") as fh:
+            json.dump({"host": "broker.lan", "port": 1884}, fh)
+        pub.config = mp.MqttConfig()
+        pub._saved = pub._disk_read = None
+        opened_on = []
+        real_open = builtins.open
+
+        def spy(path, *a, **k):
+            if path == pub.path:
+                opened_on.append(threading.current_thread())
+            return real_open(path, *a, **k)
+
+        async def main():
+            loop = asyncio.get_running_loop()
+            pub.hass = mock.Mock()
+            pub.hass.async_add_executor_job = lambda f, *a: loop.run_in_executor(None, f, *a)
+            with mock.patch.object(mp.writer, "async_write", mock.AsyncMock()), mock.patch("builtins.open", spy):
+                first, second = await asyncio.gather(pub.async_save({"qos": 1}), pub.async_save({"host": "other"}))
+            return threading.current_thread(), first, second
+
+        loop_thread, first, second = asyncio.run(main())
+        self.assertTrue(opened_on)
+        self.assertNotIn(loop_thread, opened_on)
+        self.assertEqual((first.host, first.port, first.qos), ("broker.lan", 1884, 1))  # the file is still the base
+        self.assertEqual((second.host, second.port, second.qos), ("other", 1884, 1))  # and each save sees the one before
 
 
 if __name__ == "__main__":
