@@ -43,8 +43,9 @@ from homeassistant.core import HomeAssistant
 from jsonio import fsync_dir
 
 from . import events
+from .hostguard import CSP
 from .http_util import ManagerView, with_body
-from .ingress import is_ingress
+from .ingress import FORWARDED_MIDDLEWARE, is_ingress
 from .ui import load_template
 
 _LOGGER = logging.getLogger(__name__)
@@ -390,16 +391,23 @@ async def async_setup_auth(hass: HomeAssistant) -> Auth:
 
 def _install_lan_guard(hass: HomeAssistant) -> None:
     """No password on the host network: every request that is not ingress gets 403, whatever its path (the image's
-    healthcheck too, which takes any answer below 500 for alive).  Refuses to run without it, as the password check."""
+    healthcheck too, which takes any answer below 500 for alive).  Refuses to run without it, as the password check.
+    Placed before Home Assistant's forwarded middleware, right after the ingress middleware that marks a request: a
+    LAN request gets this 403 whatever it carries (Home Assistant answers 400 to an X-Forwarded-For from a peer it
+    does not trust), and none of Home Assistant's middlewares (bans, auth) handles it."""
 
     @web.middleware
     async def lan_guard(request: web.Request, handler):
         if is_ingress(request):
             return await handler(request)
-        return web.Response(status=403, content_type="text/plain", text=LAN_REFUSED)
+        return web.Response(status=403, content_type="text/plain", headers={"Content-Security-Policy": CSP},
+                            text=LAN_REFUSED)
 
+    middlewares = hass.http.app.middlewares
+    index = next((i for i, m in enumerate(middlewares) if getattr(m, "__name__", "") == FORWARDED_MIDDLEWARE),
+                 len(middlewares))
     try:
-        hass.http.app.middlewares.append(lan_guard)
+        middlewares.insert(index, lan_guard)
     except Exception as err:  # noqa: BLE001 - a frozen app: refuse to run the UI open instead
         _LOGGER.error("host network guard not installed (%s): the UI refuses every request", err)
         raise

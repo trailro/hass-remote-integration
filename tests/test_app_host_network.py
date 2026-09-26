@@ -309,10 +309,103 @@ class HomeAssistantPortTest(unittest.TestCase):
             def append(self, *a):
                 raise RuntimeError("frozen")
 
+            insert = append
+
         hass = _hass(_tmp(self), SimpleNamespace(middlewares=Frozen()))
         with _env(HRI_APP="1", HRI_HOST_NETWORK="1"), self.assertLogs(auth_mod._LOGGER, logging.ERROR), \
                 self.assertRaises(RuntimeError):
             asyncio.run(auth_mod.async_setup_auth(hass))
+
+
+class RealHttpChainTest(unittest.TestCase):
+    """Home Assistant's own HomeAssistantHTTP, initialised as its http component does with the defaults HRI runs with
+    (no http section: HTTP_SCHEMA({})), its auth manager real too, and HRI's middlewares installed as
+    __init__.async_setup does, on a real socket: a HomeAssistantView, the websocket upgrade and a request carrying
+    X-Forwarded-For from the LAN get the guard's 403, ingress is served."""
+
+    def setUp(self):
+        try:
+            from homeassistant import core, loader
+            from homeassistant.auth import auth_manager_from_config
+            from homeassistant.components import http as ha_http
+            from homeassistant.components.websocket_api.http import WebsocketAPIView
+            from homeassistant.helpers import device_registry as dr
+        except ImportError as err:  # pragma: no cover - outside the container's HA venv
+            self.skipTest(f"Home Assistant's http component is not importable: {err}")
+        self.core, self.loader, self.dr = core, loader, dr
+        self.auth_manager_from_config, self.ha_http, self.websocket_view = auth_manager_from_config, ha_http, WebsocketAPIView
+
+    def _run(self, requests, supervisor=False, **env):
+        from homeassistant.components.http import HomeAssistantView
+
+        class Api(HomeAssistantView):
+            url, name, requires_auth = "/api/hri_probe", "api:hri_probe", True
+
+            async def get(self, request):
+                return web.Response(text="api")
+
+        class Open(HomeAssistantView):
+            url, name, requires_auth = "/hri_open", "hri_open", False
+
+            async def get(self, request):
+                return web.Response(text="open")
+
+        async def main():
+            hass = self.core.HomeAssistant(_tmp(self))
+            self.loader.async_setup(hass)
+            self.dr.async_setup(hass)
+            await self.dr.async_load(hass, load_empty=True)
+            hass.auth = await self.auth_manager_from_config(hass, [], [])
+            conf = self.ha_http.HTTP_SCHEMA({})
+            server = self.ha_http.HomeAssistantHTTP(hass, ssl_certificate=None, ssl_peer_certificate=None, ssl_key=None,
+                                                    server_host=["127.0.0.1"], server_port=0, trusted_proxies=[],
+                                                    ssl_profile=conf["ssl_profile"])
+            await server.async_initialize(cors_origins=conf["cors_allowed_origins"],
+                                          use_x_forwarded_for=conf.get("use_x_forwarded_for", False),
+                                          login_threshold=conf["login_attempts_threshold"],
+                                          is_ban_enabled=conf["ip_ban_enabled"], use_x_frame_options=conf["use_x_frame_options"])
+            hass.http = server
+            try:
+                with _env(**{**NOT_HOST, **env}):
+                    self.assertTrue(ingress.install_ingress(hass, hostguard.CSP))
+                    hostguard.install_host_guard(hass, SimpleNamespace(settings=SimpleNamespace(data={})))
+                    await auth_mod.async_setup_auth(hass)
+                for view in (Api, Open, self.websocket_view):
+                    server.register_view(view)
+                out = []
+                with mock.patch.object(ingress, "SUPERVISOR_IP", "127.0.0.1" if supervisor else "172.30.32.2"):
+                    async with TestClient(TestServer(server.app, host="127.0.0.1")) as client:
+                        for path, headers in requests:
+                            resp = await client.get(path, headers=headers, allow_redirects=False)
+                            out.append((resp.status, await resp.text()))
+                return out
+            finally:
+                await hass.async_stop(force=True)
+
+        return asyncio.run(main())
+
+    WS = {**LAN, "Connection": "Upgrade", "Upgrade": "websocket", "Sec-WebSocket-Version": "13",
+          "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ=="}
+    REQUESTS = [("/api/hri_probe", {**LAN, "X-Forwarded-For": "203.0.113.9"}), ("/api/hri_probe", LAN),
+                ("/hri_open", LAN), ("/api/websocket", WS), ("/api/alive", LAN)]
+
+    def test_without_a_password_the_lan_gets_403(self):
+        with self.assertLogs(auth_mod._LOGGER, logging.WARNING):
+            out = self._run(self.REQUESTS, HRI_APP="1", HRI_HOST_NETWORK="1")
+        self.assertEqual(out, [(403, auth_mod.LAN_REFUSED)] * len(self.REQUESTS))
+
+    def test_ingress_in_the_supervisors_spelling_is_served(self):
+        with self.assertLogs(auth_mod._LOGGER, logging.WARNING):
+            out = self._run([("/hri_open", INGRESS_HEADERS)], supervisor=True, HRI_APP="1", HRI_HOST_NETWORK="1")
+        self.assertEqual(out, [(200, "open")])
+        respelled = {("x-remote-user-name" if k == "X-Remote-User-Name" else k): v for k, v in INGRESS_HEADERS.items()}
+        with self.assertLogs(auth_mod._LOGGER, logging.WARNING):
+            self.assertEqual(self._run([("/hri_open", respelled)], supervisor=True, HRI_APP="1", HRI_HOST_NETWORK="1")[0][0], 403)
+
+    def test_off_the_host_network_home_assistant_answers(self):
+        """The same chain without the guard: what the 403s above replace."""
+        out = self._run(self.REQUESTS[:3], HRI_APP="1")
+        self.assertEqual([status for status, _ in out], [400, 401, 200])
 
 
 class CookieNameTest(unittest.TestCase):
