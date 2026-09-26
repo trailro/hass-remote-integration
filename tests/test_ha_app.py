@@ -108,6 +108,7 @@ class AppConfigTest(unittest.TestCase):
         self.assertEqual(self.cfg["timeout"], int(grace))
         self.assertLessEqual(self.cfg["timeout"], 300)  # the Supervisor's limit
         self.assertEqual(self.cfg["map"], [{"type": "app_config", "read_only": False}])  # addon_config: legacy
+        self.assertEqual(self.cfg["homeassistant"], "2025.10.0")  # docs/mqtt.md: the release discovery works on
         self.assertEqual(self.cfg["ports"], {"8087/tcp": 8087})
         # the panel (ingress) and the port serve one UI; no webui next to ingress (the app linter refuses it)
         self.assertNotIn("webui", self.cfg)
