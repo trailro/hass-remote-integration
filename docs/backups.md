@@ -48,6 +48,9 @@ Not in a backup, so a restore never rolls them back:
   aside;
 - `mqtt_identity.json`, `mqtt_cleanup_pending.json` and
   `mqtt_undiscover.json`, since the broker is outside the volume;
+- `app-watchdog-enabled`, the record that HRI turned the app's Watchdog on
+  ([the Watchdog](app.md#restarts-and-the-watchdog)), so a restore never
+  turns it on again;
 - what the boot rebuilds or is only in flight: the Home Assistant venvs
   (`venv-*`), logs (`*.log`, `*.log.*`), caches (`__pycache__`, `*.pyc`,
   `deps`, `tts`), the backups themselves, `integration_manager/*.tmp`,

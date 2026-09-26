@@ -92,6 +92,9 @@ KEEP_LIVE_GLOBS = (
     # what the broker holds is outside the volume: an older ledger or cleanup list would forget retained data still
     # on the broker (the main HA keeps those entities) or clear data published since
     f"{STATE_DIR}/mqtt_identity.json*", f"{STATE_DIR}/mqtt_cleanup_pending.json*",
+    # the app's Watchdog was turned on once (entrypoint.enable_app_watchdog): a backup without it would turn it on
+    # again at the next start, after the user turned it off
+    f"{STATE_DIR}/app-watchdog-enabled",
 )
 EXCLUDE_GLOBS = DISPOSABLE_GLOBS + KEEP_LIVE_GLOBS
 KEEP_DEFAULT = 5
