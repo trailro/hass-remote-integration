@@ -108,14 +108,15 @@ class LogSecretsTest(unittest.TestCase):
 
 
 class LogQueryBoundsTest(unittest.TestCase):
-    def test_limit_is_clamped(self):
+    def test_limit_outside_its_range_is_refused(self):
+        """Refused rather than clamped since the b4cd1a1 review (docs/api.md: 1-2000, otherwise 400)."""
         seen = []
         handler = SimpleNamespace(capacity=0, path="p", query=lambda **kw: (seen.append(kw["limit"]) or ([], False)))
         view = logs_page.LogsApiView(SimpleNamespace(async_add_executor_job=_job))
         with mock.patch.object(logs_page.logbuffer, "find", return_value=handler):
-            for limit in ("0", "-5", "99999", "7"):
-                asyncio.run(view.get(_get(f"/api/logs?limit={limit}")))
-        self.assertEqual(seen, [1, 1, 2000, 7])
+            statuses = [asyncio.run(view.get(_get(f"/api/logs?limit={limit}"))).status for limit in ("0", "-5", "99999", "7")]
+        self.assertEqual(statuses, [400, 400, 400, 200])
+        self.assertEqual(seen, [7])
 
     def test_level_only_for_known_or_sane_logger_names(self):
         view = logs_page.LogLevelView()
