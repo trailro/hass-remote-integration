@@ -117,7 +117,9 @@ BACKUPS_GLOBS = (BACKUP_DIR, f"{BACKUP_DIR}/*", f"{STATE_DIR}/backups", f"{STATE
 # What the Supervisor's backup of the app leaves out (app/config.yaml backup_exclude is derived from this tuple, and
 # tests/test_ha_app.py checks it): DISPOSABLE_GLOBS but the backups.  A Supervisor restore replaces the app's whole
 # folder, so backups left out of it would be deleted, the pre-update backup a Full rollback needs among them.  A
-# backup being written or uploaded (a hidden .tmp) stays out: half a zip is no backup.
+# backup being written or uploaded (a hidden .tmp) stays out: half a zip is no backup.  The empty <name>.zip
+# reserve_name leaves while one is written can land in it; harmless: list_backups skips an empty file and
+# _drop_dead_partials removes it once stale.
 APP_BACKUP_EXCLUDE_GLOBS = tuple(g for g in DISPOSABLE_GLOBS if g not in BACKUPS_GLOBS) + (f"{BACKUP_DIR}/.*.tmp",)
 KEEP_DEFAULT = 5
 _LOGGER = logging.getLogger(__name__)
