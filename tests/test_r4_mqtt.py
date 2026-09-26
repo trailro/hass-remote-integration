@@ -246,6 +246,7 @@ class IdentitySweepRetryTest(unittest.IsolatedAsyncioTestCase):
         pub.publish_health = pub._publish_manager_discovery = pub.publish_manager = lambda: None
         pub._publish_services = mock.AsyncMock()
         pub._identity_sweep_due = True
+        pub._conn_lock = asyncio.Lock()  # the sweep runs under it (a Move must not interleave)
         with mock.patch.object(mp, "read_json", return_value={"base": "hass_old", "prefix": "homeassistant"}), \
                 mock.patch.object(mp.MqttPublisher, "_clear_retained_under", side_effect=[None, 3]) as sweep, \
                 mock.patch.object(mp.MqttPublisher, "_remember_identity") as remember:
