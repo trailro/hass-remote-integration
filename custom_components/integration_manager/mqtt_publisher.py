@@ -722,6 +722,7 @@ class MqttPublisher:
         self._undiscover_due = False  # discovery was turned off: remove the announced entities at the next full republish
         self._last_event: dict[str, str] = {}  # event entity -> the occurrence (state = its time) last emitted or seen
         self._saved: dict[str, Any] | None = None  # the mqtt.json this process last queued: the base of the next save
+        self._disk_read: asyncio.Future | None = None  # mqtt.json read in the executor, while there is no _saved
         # once per process, after HA started: what this process never published (so the in-memory discovery
         # map cannot compute removal forms for it) but is still retained, e.g. entities a restore took away
         self._orphan_sweep_due = True
@@ -834,31 +835,41 @@ class MqttPublisher:
         other in order), written by the ordered writer; a write error reaches
         the caller.  Written to disk only: async_reconnect() adopts it, so it
         can still compare the old topics against the new ones and clear them."""
-        new = asdict(self._validated(updates))
+        on_disk = None
+        if self._saved is None:
+            # the file is read off the loop, once: saves that arrive meanwhile wait for the same read and resume in
+            # the order they came, so each still validates on top of the one before
+            if self._disk_read is None:
+                self._disk_read = self.hass.async_add_executor_job(self._read_saved)
+            on_disk = await self._disk_read
+        new = asdict(self._validated(updates, on_disk))
         self._saved = new
         try:
             await writer.async_write(self.path, new, mode=0o600)
         except BaseException:
             if self._saved is new:
-                self._saved = None  # not on disk: the file is the base again
+                self._saved = self._disk_read = None  # not on disk: the file is the base again
             raise
         return MqttConfig(**new)
 
-    def _validated(self, updates: dict[str, Any]) -> MqttConfig:
+    def _read_saved(self) -> dict[str, Any] | None:
+        """Blocking: mqtt.json as it is on disk, None without one (or unreadable)."""
+        try:
+            with open(self.path, encoding="utf-8") as fh:
+                on_disk = json.load(fh)
+        except (OSError, ValueError):
+            return None
+        return on_disk if isinstance(on_disk, dict) else None
+
+    def _validated(self, updates: dict[str, Any], on_disk: dict[str, Any] | None = None) -> MqttConfig:
         """Starts from the last save this process queued, else from what is on
-        disk: a save not adopted yet (waiting for a reconnect) must not be
-        undone by the next one."""
+        disk (`on_disk`, read by the caller): a save not adopted yet (waiting
+        for a reconnect) must not be undone by the next one."""
         current = asdict(self.config)
         if self._saved is not None:
             current.update(self._saved)
-        else:
-            try:  # once per process: a few hundred bytes, on the loop
-                with open(self.path, encoding="utf-8") as fh:
-                    on_disk = json.load(fh)
-                if isinstance(on_disk, dict):
-                    current.update(self._sane({k: v for k, v in on_disk.items() if k in current}))
-            except (OSError, ValueError):
-                pass  # no file yet (or unreadable): the running config is the base
+        elif on_disk is not None:
+            current.update(self._sane({k: v for k, v in on_disk.items() if k in current}))
         for k, v in updates.items():
             if k not in current or k in ("base_topic", "client_id"):
                 continue  # derived from the running integration, never stored from the UI

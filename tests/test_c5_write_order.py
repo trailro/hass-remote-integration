@@ -311,9 +311,12 @@ class RoutedSavesTest(unittest.TestCase):
         pub = object.__new__(MqttPublisher)
         pub.path = os.path.join(self.dir, "mqtt.json")
         pub.config = MqttConfig()
-        pub._saved = None
+        pub._saved = pub._disk_read = None
 
         async def main():
+            loop = asyncio.get_running_loop()
+            pub.hass = mock.Mock()
+            pub.hass.async_add_executor_job = lambda f, *a: loop.run_in_executor(None, f, *a)
             with mock.patch.object(jsonio, "write_json", _slow_writes(0.2)):
                 a, b = await asyncio.gather(pub.async_save({"host": "broker.lan"}), pub.async_save({"port": 1884}))
             return a, b
