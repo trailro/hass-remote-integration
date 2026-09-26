@@ -1036,9 +1036,10 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
             warnings.append("YAML is stored here and this version has a config flow: if it imports the YAML into a config entry, "
                             "remove the YAML afterwards (it is still applied at every boot)")
 
-        # 7. an invalid HRI_INSTANCE or a damaged mqtt_identity.json keeps MQTT disconnected, whichever version runs
+        # 7. an invalid (or unknown) HRI_INSTANCE or a damaged mqtt_identity.json keeps MQTT disconnected, whichever version
+        # runs; an invalid HRI_INSTANCE that a remembered identity leaves unused is still worth fixing
         identity = getattr(installer, "mqtt_identity", None)
-        if identity is not None and (why := identity.blocking()):
+        if identity is not None and (why := identity.problem_for(domain) or identity.warning_for(domain)):
             warnings.append(why)
 
         return {

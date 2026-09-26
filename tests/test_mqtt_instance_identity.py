@@ -31,10 +31,12 @@ BROKER = {"host": "127.0.0.1", "port": 1883, "tls": False, "username": ""}
 LEGACY = {"base": "hass_hri_probe", "prefix": "homeassistant", "broker": BROKER}
 
 
-def _env(value):
-    env = {k: v for k, v in os.environ.items() if k != "HRI_INSTANCE"}
+def _env(value, unknown=None):
+    env = {k: v for k, v in os.environ.items() if k not in ("HRI_INSTANCE", "HRI_INSTANCE_UNKNOWN")}
     if value is not None:
         env["HRI_INSTANCE"] = value
+    if unknown is not None:
+        env["HRI_INSTANCE_UNKNOWN"] = unknown  # the app's entrypoint, when the Supervisor did not say which app it is
     return mock.patch.dict(os.environ, env, clear=True)
 
 
@@ -45,10 +47,10 @@ class _Dir(unittest.TestCase):
         self.path = os.path.join(self.dir, "mqtt_identity.json")
         self.domain = "hri_probe"
 
-    def identity(self, env=None, record=None):
+    def identity(self, env=None, record=None, unknown=None):
         if record is not None:
             mp.write_json(self.path, record)
-        with _env(env):
+        with _env(env, unknown):
             ident = MqttIdentity(self.path, lambda: self.domain)
         ident.load()
         return ident
@@ -81,7 +83,19 @@ class InstanceNameTest(unittest.TestCase):
                 instance, problem = configured_instance()
             self.assertIsNone(instance, value)
             self.assertIn("HRI_INSTANCE", problem)
-            self.assertIn("MQTT stays disconnected", problem)
+            self.assertIn("correct or remove it", problem)
+
+    def test_an_app_that_could_not_read_its_slug_has_an_unknown_instance(self):
+        with _env(None, "1"):
+            instance, problem = configured_instance()
+        self.assertIsNone(instance)
+        self.assertIn("the app's slug could not be read from the Supervisor", problem)
+        self.assertIn("restart the app", problem)
+        with _env("garage", "1"):  # set explicitly: known, whatever the Supervisor said
+            self.assertEqual(configured_instance(), ("garage", None))
+        for unknown in ("", "0"):
+            with _env(None, unknown):
+                self.assertEqual(configured_instance(), (None, None), unknown)
 
 
 class IdentityRuleTest(_Dir):
@@ -103,7 +117,7 @@ class IdentityRuleTest(_Dir):
         ident = self.identity("garage", LEGACY)
         self.assertEqual(ident.key("hri_probe"), "hass_hri_probe")
         self.assertEqual(ident.describe(), {"identity_source": "remembered", "identity_instance": "garage", "identity_problem": None,
-                                            "identity_move_to": "hass_hri_probe-garage"})
+                                            "identity_warning": None, "identity_move_to": "hass_hri_probe-garage"})
 
     def test_a_legacy_record_of_another_integration_holds_nothing(self):
         ident = self.identity("garage", {**LEGACY, "base": "hass_other"})
@@ -132,10 +146,32 @@ class IdentityRuleTest(_Dir):
         self.assertIsNone(ident.key("hri_probe"))
         self.assertEqual(ident.source("hri_probe"), "invalid")
         self.assertIn("'Garage'", ident.describe()["identity_problem"])
-        # what was published stays that identity (an uninstall still clears it), and the publisher refuses to connect
-        ident = self.identity("Garage", LEGACY)
-        self.assertEqual(ident.key("hri_probe"), "hass_hri_probe")
-        self.assertIsNone(ident.describe()["identity_move_to"])
+        self.assertIn("MQTT stays disconnected", ident.blocking())
+        self.assertIsNone(ident.describe()["identity_warning"])
+
+    def test_an_invalid_instance_blocks_only_what_would_take_it(self):
+        """A remembered identity does not need HRI_INSTANCE: it keeps connecting, with the problem as a warning."""
+        for env, unknown, text in (("Garage", None, "'Garage'"), (None, "1", "restart the app")):
+            ident = self.identity(env, LEGACY, unknown)
+            self.assertEqual(ident.key("hri_probe"), "hass_hri_probe", env)
+            self.assertEqual(ident.source("hri_probe"), "remembered")
+            self.assertIsNone(ident.blocking())
+            info = ident.describe()
+            self.assertIsNone(info["identity_problem"])
+            self.assertIn(text, info["identity_warning"])
+            self.assertIn("not used: hri_probe keeps hass_hri_probe", info["identity_warning"])
+            self.assertIsNone(info["identity_move_to"])
+            # another integration on the same volume would take it: that one has no identity
+            self.assertIsNone(ident.key("other"))
+            self.assertIn(text, ident.problem_for("other"))
+            self.assertIsNone(ident.warning_for("other"))
+
+    def test_an_unknown_instance_pins_nothing_on_a_fresh_volume(self):
+        ident = self.identity(None, unknown="1")
+        self.assertIsNone(ident.key("hri_probe"))
+        self.assertEqual(ident.source("hri_probe"), "invalid")
+        self.assertIn("the app's slug could not be read from the Supervisor", ident.blocking())
+        self.assertIn("MQTT stays disconnected", ident.blocking())
 
     def test_only_a_missing_record_is_a_fresh_volume(self):
         ident = self.identity("garage")
@@ -196,26 +232,37 @@ class IdentityRuleTest(_Dir):
 
 
 class InstallerIdentityTest(unittest.TestCase):
-    def installer(self, env, record=None):
+    def installer(self, env, record=None, level=None, unknown=None):
         cfg = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, cfg, True)
         os.makedirs(os.path.join(cfg, "integration_manager"))
         if record is not None:
             mp.write_json(os.path.join(cfg, "integration_manager", "mqtt_identity.json"), record)
+            mp.write_json(os.path.join(cfg, "integration_manager", "state.json"), {"domain": "hri_probe", "installed": {"hri_probe": {}}})
 
         async def executor(fn, *args):
             return fn(*args)
 
-        with _env(env), mock.patch.object(inst_mod.events, "emit") as emit, (self.assertLogs(inst_mod._LOGGER, "ERROR") if env == "Bad" else contextlib.nullcontext()):
+        with _env(env, unknown), mock.patch.object(inst_mod.events, "emit") as emit, \
+                (self.assertLogs(inst_mod._LOGGER, level) if level else contextlib.nullcontext()) as logs:
             inst = Installer(SimpleNamespace(config=SimpleNamespace(config_dir=cfg, components=set()), async_add_executor_job=executor))
+        if level:
+            self.assertEqual({r.levelname for r in logs.records if r.getMessage().startswith("MQTT: ")}, {level})
         inst.state.domain = "hri_probe"
         return inst, emit
 
     def test_an_invalid_instance_is_logged_and_on_the_timeline(self):
-        inst, emit = self.installer("Bad")
+        inst, emit = self.installer("Bad", level="ERROR")
         self.assertIsNone(inst.instance_key)
         emit.assert_called_once()
         self.assertIn("HRI_INSTANCE='Bad'", emit.call_args.args[1])
+
+    def test_an_unused_invalid_instance_is_a_warning(self):
+        for env, unknown in (("Bad", None), (None, "1")):
+            inst, emit = self.installer(env, LEGACY, level="WARNING", unknown=unknown)
+            self.assertEqual(inst.instance_key, "hass_hri_probe")
+            emit.assert_called_once()
+            self.assertIn("not used: hri_probe keeps hass_hri_probe", emit.call_args.args[1])
 
     def test_the_identity_of_an_uninstall_is_the_one_published(self):
         inst, _emit = self.installer("garage", LEGACY)
@@ -232,7 +279,13 @@ class PreflightNoticeTest(unittest.TestCase):
             inst.mqtt_identity = MqttIdentity(os.path.join(inst.state_dir, "mqtt_identity.json"), lambda: "demo")
         report = _preflight_run(inst)
         self.assertTrue(report["ok"])  # MQTT is not the integration's fault: a warning, not a blocker
-        self.assertIn(inst.mqtt_identity.problem, report["warnings"])
+        self.assertIn(inst.mqtt_identity.problem_for("demo"), report["warnings"])
+        # with an identity remembered for it, the problem does not keep it off MQTT, and is still reported
+        mp.write_json(inst.mqtt_identity.path, {"base": "hass_demo", "prefix": "homeassistant"})
+        inst.mqtt_identity.load()
+        report = _preflight_run(inst)
+        self.assertIsNone(inst.mqtt_identity.problem_for("demo"))
+        self.assertIn(inst.mqtt_identity.warning_for("demo"), report["warnings"])
 
 
 def _publisher(identity, domain):
@@ -428,15 +481,28 @@ class PublisherIdentityTest(_Case):
         self.assertIs(write.call_args.kwargs["fsync"], True)
 
     async def test_an_invalid_instance_never_connects(self):
-        mp.write_json(os.path.join(self.dir, "integration_manager", "mqtt_identity.json"), LEGACY)
+        """A fresh volume: the identity it would take is unknown."""
         pub = self.pub_with(self.identity("-bad"), force_base_topic=True)
         pub._client, pub._connected, pub.stats = None, False, {}
         with mock.patch.object(mp.mqtt, "Client") as client, mock.patch.object(mp.MqttPublisher, "_sweep_old_identity") as sweep:
             await pub.hass.async_add_executor_job(pub._connect)
         client.assert_not_called()
         sweep.assert_not_called()
-        self.assertEqual(pub.stats["connect_error"], f"not connecting: {pub._identity.problem}")
+        self.assertEqual(pub.stats["connect_error"], f"not connecting: {pub._identity.blocking()}")
         self.assertIsNone(pub._live_base)
+
+    async def test_an_invalid_instance_does_not_stop_a_remembered_identity(self):
+        mp.write_json(os.path.join(self.dir, "integration_manager", "mqtt_identity.json"), LEGACY)
+        pub = self.pub_with(self.identity("-bad"), force_base_topic=True)
+        pub._client, pub._connected, pub.stats, pub._stopping = None, False, {}, False
+        pub._cleanup_pending = {}
+        with mock.patch.object(mp.MqttPublisher, "_new_client") as new_client, \
+                mock.patch.object(mp.MqttPublisher, "_sweep_old_identity", return_value=True) as sweep:
+            await pub.hass.async_add_executor_job(pub._connect)
+        new_client.assert_called_once_with("hass_hri_probe")
+        sweep.assert_called_once_with("hass_hri_probe")
+        self.assertEqual(pub.stats["connect_error"], "")
+        self.assertIn("not used", pub._identity.describe()["identity_warning"])
 
     def moving(self, pub):
         pub._connected, pub._live_base, pub._live_prefix = True, "hass_hri_probe", "hass_hri_probe_"
