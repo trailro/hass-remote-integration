@@ -1,5 +1,5 @@
-"""Review round 5, auth: the boot status page's /api/ answer names the version and the phase (apt packages
-included) without a login even with a password set; a password that is not UTF-8 (file or environment) crashed the
+"""Review round 5, auth: the boot status page (its /api/ answer and its HTML) named the version and the phase (apt
+packages included) without a login even with a password set; a password that is not UTF-8 (file or environment) crashed the
 setup instead of closing the UI with a reason; a password ending in a space cannot be sent as Bearer (documented);
 the direct port under a host name outside the allowed list (documented); HRI_COOKIE_SECURE was on only for exactly
 "1"; a logout was written without fsync and an unparsable record read as generation 0; and two apps on one host
@@ -111,6 +111,59 @@ class StatusApiWithPasswordTest(unittest.TestCase):
     def test_the_apps_ingress_still_sees_the_details(self):
         status, body = self._get(supervisor="127.0.0.1", HRI_APP="1", HRI_PASSWORD="pw")
         self.assertEqual((status, json.loads(body)["version"]), (503, "2026.9.3"))
+
+
+class StatusPageWithPasswordTest(unittest.TestCase):
+    """The HTML page of the same server, same rule: with a password, a caller that is not the app's ingress sees that
+    Home Assistant is being installed or is not started, not the version, the phase (apt package names) or the backup
+    a failed restore needs."""
+
+    _get = StatusApiWithPasswordTest._get
+
+    def test_a_password_hides_the_details(self):
+        for env in ({"HRI_PASSWORD": "pw"}, {"HRI_PASSWORD_FILE": "/run/secrets/hri"}):
+            with self.subTest(env=env):
+                status, body = self._get("/", **env)
+                self.assertEqual(status, 503)
+                self.assertIn(b"being installed or prepared", body)
+                for leak in (b"ffmpeg", b"2026.9.3", b"apt-get"):
+                    self.assertNotIn(leak, body)
+
+    def test_a_title_with_the_version_is_hidden_too(self):
+        ep = entrypoint_for(self, _tmp(self), HRI_APP="", HRI_INGRESS_USERS="", HRI_PASSWORD="pw", HRI_PASSWORD_FILE="")
+        with mock.patch.dict(ep._status, {"title": "Starting Home Assistant 2026.9.3 …", "phase": "removing venv-2026.8.1"}):
+            srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ep._StatusHandler)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            try:
+                req = urllib.request.Request(f"http://127.0.0.1:{srv.server_address[1]}/", headers={"Host": "localhost"})
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    urllib.request.urlopen(req, timeout=5)
+                with ctx.exception as err:
+                    body = err.read()
+            finally:
+                srv.shutdown()
+                srv.server_close()
+        self.assertNotIn(b"2026.9.3", body)
+        self.assertNotIn(b"2026.8.1", body)
+
+    def test_a_held_restore_is_not_described_either(self):
+        status, body = self._get("/", held=True, HRI_PASSWORD="pw")
+        self.assertEqual(status, 503)
+        self.assertIn(b"not started", body)
+        self.assertNotIn(b"b.tar", body)
+        self.assertNotIn(b"restore", body)
+
+    def test_without_a_password_nothing_changes(self):
+        status, body = self._get("/")
+        self.assertEqual(status, 503)
+        self.assertIn(b"2026.9.3", body)
+        self.assertIn(b"apt-get install ffmpeg jq", body)
+
+    def test_the_apps_ingress_still_sees_the_details(self):
+        status, body = self._get("/", supervisor="127.0.0.1", HRI_APP="1", HRI_PASSWORD="pw")
+        self.assertEqual(status, 503)
+        self.assertIn(b"apt-get install ffmpeg jq", body)
+        self.assertIn(b"2026.9.3", body)
 
 
 # ----- S4-2 ---------------------------------------------------------------------------------------
