@@ -84,7 +84,7 @@ APP_OPTIONS = {
     "apt_packages": ("HRI_APT_PACKAGES", None),
     "call_timeout": ("HRI_CALL_TIMEOUT", None),
     "ha_version_latest": ("HA_VERSION_LATEST", ("1", "0")),
-    "debug": ("HRI_DEBUG", ("1", None)),  # run.py takes any value as on, "0" too
+    "debug": ("HRI_DEBUG", ("1", None)),  # unset rather than "0": the variable a Docker install reads
     "cookie_secure": ("HRI_COOKIE_SECURE", ("1", None)),
 }
 CONSTRAINTS_URL = "https://raw.githubusercontent.com/home-assistant/core/{version}/homeassistant/package_constraints.txt"

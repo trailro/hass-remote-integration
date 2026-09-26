@@ -904,7 +904,8 @@ def _boot_with_logging() -> int:
             return not ("custom integration integration_manager" in msg and "not been tested" in msg)
 
     logging.getLogger("homeassistant.loader").addFilter(_OwnLoaderNoise())
-    if os.environ.get("HRI_DEBUG"):
+    # off as settings.bool_ reads it: HRI_DEBUG=0 (or false, no, off) in an .env turned it on
+    if os.environ.get("HRI_DEBUG", "").strip().lower() not in ("", "0", "false", "no", "off"):
         logging.getLogger("custom_components.integration_manager").setLevel(logging.DEBUG)
         # what bootstrap.async_setup_hass always does: log file/listdir/import calls on the event loop, raise on
         # time.sleep and blocking HTTP.  Dev only: it wraps open() and friends, and a strict hit in an
