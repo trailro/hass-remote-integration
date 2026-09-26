@@ -1,5 +1,6 @@
-# Home Assistant OS / Supervised app ("add-on" before 2026): the published image, run with the app's own folder
-# (/app_configs/<id>_hass_remote_integration on the host) as the /config volume.  Reference: docs/app.md.
+# Home Assistant OS / Supervised app ("add-on" before 2026; Supervised is deprecated): the published image, run with
+# the app's own folder (/app_configs/<id>_hass_remote_integration on the host) as the /config volume.  Reference:
+# docs/app.md.
 name: hass-remote-integration
 # the image tag the Supervisor pulls: .github/workflows/image.yml moves it once that image is pushed
 version: "0.24.0"
