@@ -158,5 +158,20 @@ class UndecodablePasswordTest(unittest.TestCase):
         self.assertTrue(ep.password_configured())
 
 
+# ----- S4-3 / S4-4 --------------------------------------------------------------------------------
+
+class DocsTest(unittest.TestCase):
+    def _read(self, name):
+        path = ROOT / name
+        if not path.is_file():
+            self.skipTest(f"{name} not copied next to the tests")
+        return path.read_text(encoding="utf-8")
+
+    def test_a_trailing_space_and_bearer(self):
+        row = next(line for line in self._read("README.md").splitlines() if line.startswith("| `HRI_PASSWORD` |"))
+        self.assertIn("Bearer", row)
+        self.assertIn("Bearer", next(p for p in self._read("docs/security.md").split("\n\n") if "ends with a space" in p))
+
+
 if __name__ == "__main__":
     unittest.main()

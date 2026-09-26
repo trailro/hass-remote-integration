@@ -19,7 +19,11 @@ Set `HRI_PASSWORD`, or `HRI_PASSWORD_FILE` (a Docker secret), to require one:
 - Line ends at either end of `HRI_PASSWORD` are not part of it; spaces are.
   Only line ends means no password. `HRI_PASSWORD_FILE` is read once at
   process start, trimmed of spaces and line ends: restart after rotating it.
-- Scripts send `Authorization: Bearer <password>` (scheme in any case).
+- Scripts send `Authorization: Bearer <password>` (scheme in any case). A
+  `HRI_PASSWORD` that ends with a space or tab cannot be sent that way: HTTP
+  drops whitespace at the end of a header value, so the header never
+  matches and each try counts toward the lockout. The login form takes it;
+  for scripts, choose a password without one.
 - Browsers get the cookie `hri_session_<port>`, valid 30 days (an old
   `hri_session` cookie moves over by itself).
 - **Log out** (top bar) and a password change end every session in every
