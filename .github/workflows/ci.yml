@@ -76,6 +76,47 @@ jobs:
           python -m pip install --quiet -r .supervisor/requirements.txt pyyaml
           python .github/app_supervisor_check.py .supervisor
 
+  manager:
+    name: HRI Manager accepts the app
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - id: release
+        name: The newest release of HRI Manager
+        # the manager refuses an app/config.yaml key it has not vetted (0.1.1 refused 0.25.2's backup_pre): what
+        # users run is its newest release, not its main branch.  The highest vX.Y.Z of the releases that are neither
+        # drafts nor prereleases, not releases/latest (the one GitHub marks latest, by date or by hand).  An API that
+        # cannot be asked, or no such release, fails the job: never green without the check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tags=$(gh api --paginate repos/trailro/hass-remote-integration-manager/releases \
+                   --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name')
+          tag=$(printf '%s\n' "$tags" | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' | sort -V | tail -n 1)
+          if [ -z "$tag" ]; then
+            echo "no vX.Y.Z release of HRI Manager among: $(printf '%s' "$tags" | tr '\n' ' ')" >&2
+            exit 1
+          fi
+          echo "HRI Manager $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: trailro/hass-remote-integration-manager
+          ref: ${{ steps.release.outputs.tag }}
+          path: .manager   # a dot folder: the app discovery check skips it, as the Supervisor does
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: The manager's own check and stamping of app/config.yaml
+        # fails with "release a manager that accepts <key> first"
+        run: |
+          python -m pip install --quiet pyyaml==6.0.3
+          python .github/manager_compat_check.py .manager
+
   boot:
     name: ${{ matrix.name }}
     needs: checks

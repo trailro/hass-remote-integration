@@ -100,6 +100,32 @@ APP_WATCHDOG_MARKER = os.path.join(STATE_DIR, "app-watchdog-enabled")
 # token and keeps the value it inherits.
 SUPERVISOR_INFO_URL = "http://supervisor/addons/self/info"
 APP_WATCHDOG_VAR = "HRI_APP_WATCHDOG"
+# The same answer gives the port and the network.  An app with `ingress_port: 0` (what HRI Manager stamps for an
+# instance on the host network, where two instances cannot both listen on 8087) gets a port the Supervisor picks once
+# per slug (supervisor/ingress.py get_dynamic_port) and proxies ingress to: HRI listens there, whatever HRI_PORT the
+# image sets.  HRI Manager looks for this line in a release's entrypoint.py before it offers the host network, and
+# takes it as a promise of both halves its gate relies on: this entrypoint reads its dynamic port, AND, on the host
+# network, refuses every request that is not ingress while the app has no password (lan_refused here, the guard in
+# auth.py).  A release that has the line must have both.
+APP_DYNAMIC_PORT = True
+# "1" when the app shares the host's network namespace (host_network): its port is then on every interface of the host,
+# the LAN included, and the web UI refuses anything but ingress until the app has a password (auth.py, the status page)
+HOST_NETWORK_VAR = "HRI_HOST_NETWORK"
+# the Supervisor's hassio bridge on the host: an address the container owns only when it shares the host's network
+HASSIO_GATEWAY = "172.30.32.1"
+# an HRI Manager instance's slug (local app hri_<name>; the manager's names.NAME_RE): <name> goes to Home Assistant as
+# HRI_INSTANCE, which keeps two instances of one integration apart on the broker.  Nothing else in a slug is passed on.
+# HRI_INSTANCE_UNKNOWN=1 goes instead when the app's info could not be read at all (and HRI_INSTANCE is not set
+# explicitly): the app may be a manager instance whose name is unknown, so nothing may take "no instance" as the answer
+# (the MQTT identity must not be pinned from it)
+INSTANCE_VAR = "HRI_INSTANCE"
+INSTANCE_UNKNOWN_VAR = "HRI_INSTANCE_UNKNOWN"
+INSTANCE_SLUG_RE = re.compile(r"local_hri_([a-z][a-z0-9_]{0,19})")
+# GET /addons/self/info is asked again after these pauses (seconds) before it counts as unreadable
+APP_INFO_RETRY_DELAYS = (1, 2, 4)
+# the port HRI listens on, for the image's HEALTHCHECK: Docker runs it with the image's environment (HRI_PORT=8087),
+# not with the one this process sets from the Supervisor's answer.  In the container, not on the volume
+PORT_FILE = "/run/hri-port"
 # the Supervisor, the transport peer of every request Home Assistant's ingress proxies (as ingress.py SUPERVISOR_IP)
 SUPERVISOR_IP = "172.30.32.2"
 CONSTRAINTS_URL = "https://raw.githubusercontent.com/home-assistant/core/{version}/homeassistant/package_constraints.txt"
@@ -349,6 +375,16 @@ def password_configured() -> bool:
     return bool(os.environ.get("HRI_PASSWORD", "").strip("\r\n") or os.environ.get("HRI_PASSWORD_FILE", "").strip())
 
 
+# as auth.LAN_REFUSED, one line: send_error puts it in the status line too
+LAN_REFUSED = ("Set the app's password to use hass-remote-integration on its port: the app runs on the host network, "
+               "so the port is open to your network. The HRI sidebar panel works without it.")
+
+
+def lan_refused() -> bool:
+    """The app on the host network without a password: its port is on the LAN, where an open UI installs code."""
+    return bool(os.environ.get(APP_MARKER)) and os.environ.get(HOST_NETWORK_VAR) == "1" and not password_configured()
+
+
 def _log_tail() -> str:
     try:
         with open(LOG_FILE, "rb") as fh:  # last 64 KB only, the file may be long
@@ -393,6 +429,9 @@ class _StatusHandler(http.server.BaseHTTPRequestHandler):
             # "unhealthy" (the Supervisor's) restarts it halfway.  Once Home Assistant runs, the manager has no
             # view here: 404, or 401 with a password, both below the 500 the probe takes for dead
             self._send(200, "application/json", b'{"alive": true}')
+            return
+        if not ingress and lan_refused():
+            self.send_error(403, LAN_REFUSED)
             return
         # Nothing else here is the manager API: while Home Assistant installs, /api/status, /api/diag/health and
         # any monitor used to get this HTML page with a 200 and call the container healthy for the whole
@@ -1193,25 +1232,90 @@ def enable_app_watchdog(token: str) -> None:
     log("turned the app's Watchdog on (once for this volume: turning it off on the Info tab is respected)")
 
 
-def read_app_watchdog(token: str) -> bool | None:
-    """The app's Watchdog toggle from the Supervisor, None when it cannot be read; fail-soft, never logs the token."""
+def read_app_info(token: str) -> dict | None:
+    """The app's own info from the Supervisor (supervisor/api/apps.py info_data: watchdog, ingress_port, host_network,
+    slug), None when it cannot be read, after APP_INFO_RETRY_DELAYS; fail-soft, never logs the token."""
     if not token:
         return None
     request = urllib.request.Request(SUPERVISOR_INFO_URL, headers={"Authorization": f"Bearer {token}"})
+    for delay in (*APP_INFO_RETRY_DELAYS, None):
+        try:
+            with urllib.request.urlopen(request, timeout=5) as resp:
+                info = json.loads(resp.read(1 << 20))["data"]
+            if not isinstance(info, dict):
+                raise TypeError("data is not an object")
+            return info
+        except Exception as err:  # noqa: BLE001 - what an unreadable answer means is main's and apply_app_info's
+            error = type(err).__name__
+        if delay is not None:
+            time.sleep(delay)
+    log(f"the app's info could not be read from the Supervisor ({error}, {len(APP_INFO_RETRY_DELAYS) + 1} tries): the "
+        f"Watchdog setting is unknown (a restart from HRI restarts in place), so are the app's port and instance name")
+    return None
+
+
+def owns_address(address: str) -> bool:
+    """Whether this network namespace has ``address`` (a bind to it works only then)."""
     try:
-        with urllib.request.urlopen(request, timeout=5) as resp:
-            watchdog = json.loads(resp.read(1 << 20))["data"]["watchdog"]
-    except Exception as err:  # noqa: BLE001 - unknown: run.py restarts in place
-        log(f"the app's Watchdog setting could not be read ({type(err).__name__}); a restart from HRI restarts in place")
-        return None
-    if not isinstance(watchdog, bool):
-        log("the app's Watchdog setting could not be read (not a bool); a restart from HRI restarts in place")
-        return None
-    return watchdog
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.bind((address, 0))
+    except OSError:
+        return False
+    return True
+
+
+def apply_app_info(info: dict | None) -> None:
+    """Export what the app's info says, before anything reads it; the exec of run.py and a restart in place (which
+    has no token to ask again) inherit it.  A value missing or of another type keeps the fallback: the Watchdog
+    unknown, HRI_PORT as the image sets it, no instance name (no info at all: INSTANCE_UNKNOWN_VAR; main never gets
+    here with no info on the host network).  The network is never guessed open: without a readable host_network, an
+    address only the host has (the hassio bridge) decides."""
+    watchdog = info.get("watchdog") if info is not None else None
+    if isinstance(watchdog, bool):
+        os.environ[APP_WATCHDOG_VAR] = "1" if watchdog else "0"
+    else:
+        os.environ.pop(APP_WATCHDOG_VAR, None)
+        if info is not None:
+            log("the app's Watchdog setting could not be read (not a bool); a restart from HRI restarts in place")
+    port = info.get("ingress_port") if info is not None else None
+    if type(port) is int and 0 < port < 65536:
+        os.environ["HRI_PORT"] = str(port)
+    elif info is not None:
+        log(f"the app's ingress port could not be read (not a port number); HRI listens on HRI_PORT ({os.environ.get('HRI_PORT')})")
+    host_network = info.get("host_network") if info is not None else None
+    if not isinstance(host_network, bool):
+        host_network = owns_address(HASSIO_GATEWAY)
+        log(f"the app's network could not be read; {'the host network' if host_network else 'not the host network'} "
+            f"(the container {'has' if host_network else 'does not have'} the host's {HASSIO_GATEWAY})")
+    if host_network:
+        os.environ[HOST_NETWORK_VAR] = "1"
+    else:
+        os.environ.pop(HOST_NETWORK_VAR, None)
+    slug = info.get("slug") if info is not None else None
+    match = INSTANCE_SLUG_RE.fullmatch(slug) if isinstance(slug, str) else None
+    if match and INSTANCE_VAR not in os.environ:
+        os.environ[INSTANCE_VAR] = match.group(1)
+    if info is None and INSTANCE_VAR not in os.environ:
+        os.environ[INSTANCE_UNKNOWN_VAR] = "1"
+        log(f"HRI listens on HRI_PORT ({os.environ.get('HRI_PORT')}); the instance name is unknown ({INSTANCE_UNKNOWN_VAR}=1)")
+    else:
+        os.environ.pop(INSTANCE_UNKNOWN_VAR, None)
+    log(f"app: port {os.environ.get('HRI_PORT')}, {'host network' if host_network else 'app network'}"
+        + (f", instance {os.environ[INSTANCE_VAR]}" if os.environ.get(INSTANCE_VAR) else ""))
+
+
+def write_port_file(port: int) -> None:
+    """For the image's HEALTHCHECK (PORT_FILE); fail-soft: without it the probe asks HRI_PORT, right unless the
+    Supervisor gave another port."""
+    try:
+        with open(PORT_FILE, "w", encoding="utf-8") as fh:
+            fh.write(f"{port}\n")
+    except OSError as err:
+        log(f"{PORT_FILE} not written ({err}): the healthcheck asks HRI_PORT ({os.environ.get('HRI_PORT')})")
 
 
 def main() -> None:
-    global _boot_server
+    global _boot_server, PORT
     restrict_umask()  # first: inherited by everything created from here on, and by the exec'd Home Assistant
     os.makedirs(STATE_DIR, exist_ok=True)  # before the first log() call
     token = os.environ.get("SUPERVISOR_TOKEN", "")  # apply_app_options removes it from the environment
@@ -1222,16 +1326,26 @@ def main() -> None:
         sys.exit(2)
     if applied is not None:  # names only: an option can be the password
         log(f"running as a Home Assistant app; from its options: {', '.join(applied) or 'nothing set'}")
-        enable_app_watchdog(token)
-        watchdog = read_app_watchdog(token)
-        if watchdog is None:
-            os.environ.pop(APP_WATCHDOG_VAR, None)
-        else:
-            os.environ[APP_WATCHDOG_VAR] = "1" if watchdog else "0"
+        enable_app_watchdog(token)  # first: the exit below is started again only with the Watchdog on
+        info = read_app_info(token)
+        if info is None and owns_address(HASSIO_GATEWAY):
+            # the host network, and not the port the Supervisor gave this app: the image's 8087 there is a port on the
+            # LAN, perhaps another app's.  The Supervisor starts a fresh container, with a fresh token, with the Watchdog on
+            log(f"the app runs on the host network and its port could not be read from the Supervisor: not listening "
+                f"on HRI_PORT ({os.environ.get('HRI_PORT')}); exiting (with the app's Watchdog on the Supervisor starts "
+                f"it again, otherwise start it on its Info tab)")
+            sys.exit(1)
+        apply_app_info(info)
     token = ""
+    PORT = _parse_port(os.environ.get("HRI_PORT", "8087"))  # the app's own port, when apply_app_info set it
     if PORT is None:
         log(f"HRI_PORT={os.environ.get('HRI_PORT')!r} is not a TCP port (1-65535): fix the container's environment; not starting")
         sys.exit(2)
+    if applied is not None:
+        write_port_file(PORT)  # a restart in place keeps the file of the first start, with the same port
+    if lan_refused():
+        log("the app runs on the host network without a password: its port answers only the sidebar panel (ingress); "
+            "set the app's password to use the port")
     if not DEFAULT_VERSION.strip():
         log("HA_VERSION_DEFAULT is empty: the image sets it to the Home Assistant version it was built with, so this "
             "container's environment overrides it with nothing; remove that override. Not starting")
