@@ -124,6 +124,45 @@ class MovedWhileDownTest(StartWindowCase):
         self.assertEqual(config["components"]["sensor_a"], {"platform": "sensor"})
         self.assertIn("unique_id", config["components"]["sensor_d"])
 
+    def _add(self, eid, platform):
+        self.registry.entities[eid] = _entry(eid)
+        self.registry.entities[eid].platform = platform
+        self.states[eid] = State(eid, "5", {"unit_of_measurement": "W"})
+
+    async def test_every_device_got_a_new_id(self):
+        """End-to-end run: a downgrade with a clean start gave every device a new id.  The old configs (A, B) stayed
+        retained with the same unique ids, and the main HA refused the new ones (C, D) on every republish."""
+        self._add("sensor.c", "other")
+        self.pub.hass.config.components = {"demo", "other"}
+        await self.pub.async_republish_all()
+        c, d = self.did, disc.device_block(self.pub.hass, None, "other", self.pub.prefix)[0]
+        live = {self.pub._discovery_topic(x): self._last(x)[-1].encode() for x in (c, d)}
+        a, b = f"{self.pub.prefix}olda", f"{self.pub.prefix}oldb"
+        await self._sweep({self.pub._discovery_topic(a): self._retained(a, "sensor.a", "sensor.b"),
+                           self.pub._discovery_topic(b): self._retained(b, "sensor.c"), **live})
+        self.assertEqual((self._last(a), self._last(b)), ([None], [None]))
+        self.assertEqual((self._last(c), self._last(d)), ([], []))  # live configs untouched by the sweep
+        self.published[:] = []
+        await self.run_debounced()  # announced again once the old configs are gone
+        self.assertEqual(set(json.loads(self._last(c)[-1])["components"]), {"sensor_a", "sensor_b"})
+        self.assertEqual(set(json.loads(self._last(d)[-1])["components"]), {"sensor_c"})
+
+    async def test_moved_and_gone_in_one_old_config(self):
+        old = f"{self.pub.prefix}{self.OLD}"
+        await self._sweep({self.pub._discovery_topic(old): self._retained(old, "sensor.a", "sensor.gone"), **self._demo_retained()})
+        self.assertEqual(self._last(old), [None])
+
+    async def test_moved_gone_and_setting_up_in_one_old_config(self):
+        self.registry.entities["sensor.d"] = _entry("sensor.d")
+        self.registry.entities["sensor.d"].platform = "slow"
+        old = f"{self.pub.prefix}{self.OLD}"
+        await self._sweep({self.pub._discovery_topic(old): self._retained(old, "sensor.d", "sensor.a", "sensor.gone"),
+                           **self._demo_retained()})
+        [config] = [json.loads(p) for p in self._last(old)]
+        self.assertEqual((config["components"]["sensor_a"], config["components"]["sensor_gone"]),
+                         ({"platform": "sensor"}, {"platform": "sensor"}))
+        self.assertIn("unique_id", config["components"]["sensor_d"])
+
     async def test_an_entity_that_did_not_move_is_left_alone(self):
         await self._sweep(self._demo_retained())
         self.assertEqual(self.published, [])
