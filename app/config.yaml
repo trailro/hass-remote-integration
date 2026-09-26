@@ -3,7 +3,7 @@
 # docs/app.md.
 name: hass-remote-integration
 # the image tag the Supervisor pulls: .github/workflows/image.yml moves it once that image is pushed
-version: "0.25.1"
+version: "0.25.2"
 slug: hass_remote_integration
 description: Run one Home Assistant integration in its own container, mirrored to your Home Assistant over MQTT
 url: https://github.com/trailro/hass-remote-integration
