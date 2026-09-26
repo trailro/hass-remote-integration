@@ -660,5 +660,29 @@ class InstallLocalOffTheLoopTest(unittest.TestCase):
         self.assertTrue(inst.busy)  # someone else's flag, left alone
 
 
+# ----- follow-up: stop / uninstall errors masked -----------------------------------------------
+
+class StopUninstallMaskedTest(WatchdogBase):
+    def test_a_failed_stop_puts_a_masked_error_on_the_timeline_and_in_the_answer(self):
+        inst = self.installer()
+        inst._disable_entries = mock.AsyncMock(side_effect=RuntimeError(f"config entry 'Hub' did not unload (password={SECRET})"))
+        inst.rollback_restore_refusal = lambda: None
+        inst.dismiss_patch_notification = lambda domain: None
+        res = asyncio.run(inst.stop())
+        self.assertFalse(res["ok"])
+        self.assertNotIn(SECRET, res["error"])
+        self.assertTrue(self.lines("stop demo failed"), self.emitted)
+        self.assertNotIn(SECRET, " ".join(m for _k, m in self.emitted))  # before the fix: {err} as it was
+
+    def test_a_failed_uninstall_answers_masked(self):
+        inst = self.installer()
+        inst._remove_domain = mock.AsyncMock(side_effect=RuntimeError(f"unload failed: https://bob:{SECRET}@192.0.2.1/x"))
+        inst.rollback_restore_refusal = lambda: None
+        res = asyncio.run(inst.uninstall(DOMAIN))
+        self.assertFalse(res["ok"])
+        self.assertNotIn(SECRET, res["error"])
+        self.assertNotIn(SECRET, " ".join(m for _k, m in self.emitted))
+
+
 if __name__ == "__main__":
     unittest.main()
