@@ -97,7 +97,9 @@ The watchdog (on **System**, off by default) acts when the verdict has been
 with the `updated` stale basis to catch a zombie on a dead source); `stopped`
 is your decision. An integration installed but not configured reports `error`
 (`not loaded (no config entry, no YAML setup)`); a restart cannot fix that, so
-it is left alone.
+it is left alone. One with YAML stored on the Integration page that did not
+load reports `not loaded (no config entry; the YAML setup did not load it)`
+and is acted on: with no config entry to reload, the first step is the restart.
 
 **It never fights the rest of the manager.** Nothing is reloaded or restarted:
 

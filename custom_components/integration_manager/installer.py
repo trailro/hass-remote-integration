@@ -847,8 +847,14 @@ class Installer:
         active = [e for e in entries if not e["disabled_by"]]
         loaded = domain in self.hass.config.components
         if not entries:
-            # YAML-only integration: no config entry to look at, "loaded" is the verdict
-            state, reason = ("ok", "") if loaded else ("error", "not loaded (no config entry, no YAML setup)")
+            # YAML-only integration: no config entry to look at, "loaded" is the verdict.  Stored YAML that did not
+            # load it is a failure the watchdog acts on; without YAML nothing was ever configured (it leaves that alone)
+            if loaded:
+                state, reason = "ok", ""
+            elif os.path.isfile(self.yaml_path(domain)):
+                state, reason = "error", "not loaded (no config entry; the YAML setup did not load it)"
+            else:
+                state, reason = "error", "not loaded (no config entry, no YAML setup)"
         elif not active:
             state, reason = "error", "no enabled config entry"
         elif all(e["state"] == "loaded" for e in active):
