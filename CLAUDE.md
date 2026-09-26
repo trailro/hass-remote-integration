@@ -27,3 +27,4 @@ Check the exit code, never `| tail` the runner. All tests must pass before a com
 
 ## Release checklist
 Version bump → CI green → container image verified → `docs-drift-check` subagent (docs vs code since previous tag) → shadow redeploy.
+The version bump touches `manifest.json`, the README and compose examples only: never `app/config.yaml` `version`, which the Image workflow's `app-version` job moves after the release's images are pushed (a version ahead of the image breaks every app install).
