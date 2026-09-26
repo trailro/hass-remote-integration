@@ -24,7 +24,7 @@ All under `/config`. *Backup* says whether a backup holds the file
 | `auth_revoked` | time of the last logout; older sessions are invalid | no |
 | `mqtt.json` | broker configuration; mode 600 | yes |
 | `mqtt_rules.json` | per-entity MQTT rules | yes |
-| `mqtt_identity.json` | base topic, discovery prefix and broker (host, port, TLS, user; no password) of the last retained publish, and the integration it belongs to, which keeps that base topic ([Identity](mqtt.md#identity)); `released` after a Move until the new one is recorded | no |
+| `mqtt_identity.json` | base topic, discovery prefix and broker (host, port, TLS, user; no password) of the last retained publish, and the integration it belongs to, which keeps that base topic once a connection under it held (`pinned`; [Identity](mqtt.md#identity)); `released` after a Move until the new one is recorded | no |
 | `mqtt_undiscover.json` | whether a discovery cleanup awaits the broker's confirmation | no |
 | `mqtt_cleanup_pending.json` | uncleared retained data of uninstalled integrations, per broker (unreachable, or MQTT off); retried every minute while MQTT is on with that broker | no |
 | `restore-pending.json` | restore scheduled for the next restart (with its zip); deleting it ends a failed restore's wait | no |

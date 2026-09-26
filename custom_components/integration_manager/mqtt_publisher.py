@@ -1800,6 +1800,9 @@ class MqttPublisher:
             self.hass.loop.call_soon_threadsafe(lambda: self.hass.loop.call_later(SUBACK_WAIT_S, self._suback_overdue, client, mid))
         _LOGGER.info("MQTT connected to %s:%s", self.config.host, self.config.port)
         events.emit("mqtt", f"connected to {self.config.host}:{self.config.port} as {self.base_topic}")
+        if self._identity is not None:
+            # a second past the drop window: a timer may fire a hair early, and this must be past it
+            self.hass.loop.call_soon_threadsafe(lambda: self.hass.loop.call_later(DROP_AFTER_CONNECT_S + 1, self._connection_held, client))
         # Runs in paho's thread: hop onto the HA loop for the full publish.  A
         # broker that came back without its retained store must get every
         # discovery config and the service catalog again (paho's automatic
@@ -1812,6 +1815,28 @@ class MqttPublisher:
             self.hass.async_create_task(self.async_republish_all())
 
         self.hass.loop.call_soon_threadsafe(_resume)
+
+    @callback
+    def _connection_held(self, client) -> None:
+        """Loop: the connection outlived DROP_AFTER_CONNECT_S (no other client took the client id back, the broker kept
+        it): a new identity is kept from now on (installer.MqttIdentity.pin), not at a CONNACK the next second undoes."""
+        if self._client is client and self._connected and self._connected_at \
+                and time.monotonic() - self._connected_at >= DROP_AFTER_CONNECT_S:
+            self.hass.async_create_task(self._async_pin(client))
+
+    async def _async_pin(self, client) -> None:
+        async with self._conn_lock:  # a Move or a reconnect rewrites the record: never in between
+            base = self._live_base
+            if self._client is not client or not self._connected or self._moving or not base:
+                return
+            try:
+                pinned = await self.hass.async_add_executor_job(self._identity.pin, base)
+            except OSError as err:
+                _LOGGER.warning("MQTT: identity %s not recorded as kept (%s): tried again at the next connection", base, err)
+                return
+        if pinned:
+            _LOGGER.info("MQTT: identity %s kept from now on (its first connection held)", base)
+            events.emit("mqtt", f"identity {base} kept from now on: its first connection held")
 
     def _on_subscribe(self, client, userdata, mid, reason_codes, properties=None) -> None:
         """Paho thread: the SUBACK.  A broker whose ACL allows publishing but not subscribing refuses the topics here, and

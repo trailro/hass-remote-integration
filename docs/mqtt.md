@@ -60,7 +60,12 @@ identity leaves unused).
    `hass_<domain>` with `HRI_INSTANCE` unset or empty (`default`).
 
 What a volume published is recorded in `integration_manager/mqtt_identity.json`
-at every connection, with the integration it belongs to. A record written by
+at every connection, with the integration it belongs to. A new identity counts
+for rule 1 only once a connection under it has held for more than 10 seconds
+(`pinned`): a connection the broker drops at once (another client with the same
+client id takes it back, a packet over the broker's maximum) or a login it
+refuses keeps nothing, so correcting `HRI_INSTANCE` after such a start still
+applies. A record written by
 0.25.x or older names no integration: it counts for the integration whose
 plain `hass_<domain>` it holds. So an install that published as
 `hass_hri_probe` keeps `hass_hri_probe`, its client id and its discovery unique
