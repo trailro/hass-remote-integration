@@ -140,7 +140,7 @@ user (it could not find one) carries neither header: it is served while
 `ingress_users` is empty and refused when it is set. A reverse proxy or
 single sign-on in front of Home Assistant that injects its own
 `X-Remote-User-*` headers in another spelling (lowercase, for example)
-therefore gets `403` on HRI's panel; that is intended. Home Assistant's http settings
+therefore gets `403` on HRI's panel; that is intended. A Home Assistant user without a login name (Trusted Networks, for example) reaches HRI with `X-Remote-User-Id` only: it is served while `ingress_users` is empty, and cannot be listed in `ingress_users`, which matches names. Home Assistant's http settings
 and trusted proxies are not changed. The boot status page lets the same
 requests through. Every page uses relative URLs, so the UI works under the
 prefix; `frame-ancestors 'self'` lets Home Assistant frame it.
