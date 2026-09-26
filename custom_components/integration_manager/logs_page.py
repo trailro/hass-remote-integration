@@ -188,9 +188,11 @@ class LogsApiView(ManagerView):
             return self.json_message("level must be one of " + ", ".join(LEVELS), status_code=400)
         try:
             since_id = int(q.get("since_id", 0) or 0)
-            limit = max(1, min(int(q.get("limit", 500) or 500), MAX_LIMIT))
+            limit = int(q.get("limit") or 500)  # absent or empty: the default page
         except ValueError:
             return self.json_message("since_id/limit must be integers", status_code=400)
+        if not 1 <= limit <= MAX_LIMIT:  # refused like since_id, not clamped: 0 answered a full page of 500
+            return self.json_message(f"limit must be between 1 and {MAX_LIMIT}", status_code=400)
         if not 0 <= since_id <= MAX_SINCE_ID:  # the cursor echoes it back, and the JSON encoder takes 64-bit integers only
             return self.json_message(f"since_id must be between 0 and {MAX_SINCE_ID}", status_code=400)
         recs, truncated, cursor = await self.hass.async_add_executor_job(
