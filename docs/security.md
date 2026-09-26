@@ -257,6 +257,10 @@ Backups hold secrets (tokens in `settings.json`, the broker password in
 the volume. The login key and logout record are left out, so a restore never
 revives a logged-out session. The key of an encrypted Home Assistant backup
 you import serves that request only. See [Files on the volume](files.md).
+In the Home Assistant app, a Home Assistant backup of the app holds these
+backups (installed app 0.25.2 or newer), and with them past credentials:
+password-protect Home Assistant backups, the only way Home Assistant encrypts
+the app's part ([app backups](app.md#backups)).
 
 An imported Home Assistant backup must be Home Assistant's uncompressed
 `.tar`, with a configuration archive of at most 2 GB and a `backup.json` of at
