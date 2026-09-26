@@ -2324,17 +2324,18 @@ class MqttPublisher:
         if id_problem is not None:
             sent_id = _short_call_id(sent_id)
         # read before anything is remembered, so a refused call masks the value too: a text.set_value that does not
-        # parse cannot tell which entity it was for, and is kept masked whole
+        # parse to an object (not JSON, or a bare "value", number or list) cannot tell which entity it was for, and is
+        # kept masked whole
         set_value = len(parts) == 2 and (parts[0].lower(), parts[1].lower()) == ("text", "set_value")
         secret = self._password_value("text", "set_value", parsed) if set_value and isinstance(parsed, dict) else None
 
         def remember(what: str) -> dict[str, Any]:
             if secret:
                 return self._remember("call", what, {**parsed, "value": "***"}, sent_id)
+            if set_value and not isinstance(parsed, dict):
+                return self._remember("call", what, "***", sent_id, unparsable=True)
             if isinstance(parsed, (dict, list)):
                 return self._remember("call", what, parsed, sent_id)
-            if set_value and parsed is None:
-                return self._remember("call", what, "***", sent_id, unparsable=True)
             return self._remember("call", what, payload, sent_id, unparsable=bad is not None and parsed is None)
 
         if len(parts) != 2:
