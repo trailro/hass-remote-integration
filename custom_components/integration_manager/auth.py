@@ -281,9 +281,24 @@ def login_location(path_qs: str) -> str:
     return f"{up}login?next=" + quote(path_qs.lstrip("/"), safe="")
 
 
+_cookie_secure_warned = False
+
+
+def _cookie_secure() -> bool:
+    global _cookie_secure_warned  # one warning per process, not one per login
+    value = os.environ.get("HRI_COOKIE_SECURE", "").strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value not in ("", "0", "false", "no", "off") and not _cookie_secure_warned:
+        _cookie_secure_warned = True
+        _LOGGER.warning("HRI_COOKIE_SECURE=%r is not 1/true/yes/on or 0/false/no/off: the session cookie is not marked "
+                        "Secure", os.environ.get("HRI_COOKIE_SECURE", ""))
+    return False
+
+
 def _set_session_cookie(response: web.StreamResponse, request: web.Request, value: str, max_age: int) -> None:
     response.set_cookie(COOKIE, value, max_age=max_age, path="/", httponly=True, samesite="Strict",
-                        secure=request.secure or os.environ.get("HRI_COOKIE_SECURE", "") == "1")  # behind a TLS proxy the request looks plain
+                        secure=request.secure or _cookie_secure())  # behind a TLS proxy the request looks plain
     response.del_cookie(LEGACY_COOKIE, path="/")
 
 
