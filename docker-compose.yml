@@ -5,7 +5,7 @@
 # automatically; see README).
 # The image comes from GitHub Container Registry or, with
 # HRI_REGISTRY=docker.io/trailro26, from Docker Hub: the same image, tags and
-# digest (amd64 and arm64). Pin a release with HRI_VERSION (e.g. 0.24.0), or
+# digest (amd64 and arm64). Pin a release with HRI_VERSION (e.g. 0.25.0), or
 # build it from this checkout with docker-compose.build.yml.
 services:
   hass-remote-integration:
