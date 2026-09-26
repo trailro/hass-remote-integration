@@ -81,6 +81,7 @@ backup_exclude:
   - "*_hass_remote_integration/integration_manager/import.tar"
   - "*_hass_remote_integration/integration_manager/import.tar.tmp"
   - "*_hass_remote_integration/integration_manager/import-extracted"
+  - "*_hass_remote_integration/integration_manager/hacs_catalog.json"
   - "*_hass_remote_integration/.storage/*.log"
   - "*_hass_remote_integration/.storage/tmp[a-z0-9_][a-z0-9_][a-z0-9_][a-z0-9_][a-z0-9_][a-z0-9_][a-z0-9_][a-z0-9_]"
   - "*_hass_remote_integration/.storage/*.pre-import"

@@ -73,6 +73,7 @@ DISPOSABLE_GLOBS = (
     f"{STATE_DIR}/restore-pending*.zip", f"{STATE_DIR}/restore-pending.json", f"{STATE_DIR}/restore-applied.json", f"{STATE_DIR}/restore-failed.json", f"{STATE_DIR}/*.tmp", f"{STATE_DIR}/pre-restore-*", f"{STATE_DIR}/ha-install.log",
     f"{STATE_DIR}/staging-*", f"{STATE_DIR}/staging-*/*", f"{STATE_DIR}/backups", f"{STATE_DIR}/backups/*",
     f"{STATE_DIR}/import.tar", f"{STATE_DIR}/import.tar.tmp", f"{STATE_DIR}/import-extracted", f"{STATE_DIR}/import-extracted/*",
+    f"{STATE_DIR}/hacs_catalog.json",  # catalog.py fetches it again; the file is only its offline fallback
     ".storage/*.log",
     # a store being written (HA's temporary file: tmp + 8 random characters) and an import's set-aside original
     ".storage/tmp" + "[a-z0-9_]" * 8, ".storage/*.pre-import", ".storage/*.pre-import.done",

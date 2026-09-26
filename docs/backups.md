@@ -51,8 +51,9 @@ Not in a backup, so a restore never rolls them back:
 - what the boot rebuilds or is only in flight: the Home Assistant venvs
   (`venv-*`), logs (`*.log`, `*.log.*`), caches (`__pycache__`, `*.pyc`,
   `deps`, `tts`), the backups themselves, `integration_manager/*.tmp`,
-  staging folders, a scheduled restore and its record, `pre-restore-*`, and an
-  import's `import.tar` and `import-extracted`.
+  staging folders, a scheduled restore and its record, `pre-restore-*`, an
+  import's `import.tar` and `import-extracted`, and the cached HACS list
+  (`hacs_catalog.json`).
 
 A backup of the Docker volume made with other tools can leave out `venv-*`
 the same way: each is about 800 MB, and the boot installs the one it needs
