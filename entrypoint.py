@@ -366,6 +366,16 @@ def password_configured() -> bool:
     return bool(os.environ.get("HRI_PASSWORD", "").strip("\r\n") or os.environ.get("HRI_PASSWORD_FILE", "").strip())
 
 
+# as auth.LAN_REFUSED, one line: send_error puts it in the status line too
+LAN_REFUSED = ("Set the app's password to use hass-remote-integration on its port: the app runs on the host network, "
+               "so the port is open to your network. The HRI sidebar panel works without it.")
+
+
+def lan_refused() -> bool:
+    """The app on the host network without a password: its port is on the LAN, where an open UI installs code."""
+    return bool(os.environ.get(APP_MARKER)) and os.environ.get(HOST_NETWORK_VAR) == "1" and not password_configured()
+
+
 def _log_tail() -> str:
     try:
         with open(LOG_FILE, "rb") as fh:  # last 64 KB only, the file may be long
@@ -410,6 +420,9 @@ class _StatusHandler(http.server.BaseHTTPRequestHandler):
             # "unhealthy" (the Supervisor's) restarts it halfway.  Once Home Assistant runs, the manager has no
             # view here: 404, or 401 with a password, both below the 500 the probe takes for dead
             self._send(200, "application/json", b'{"alive": true}')
+            return
+        if not ingress and lan_refused():
+            self.send_error(403, LAN_REFUSED)
             return
         # Nothing else here is the manager API: while Home Assistant installs, /api/status, /api/diag/health and
         # any monitor used to get this HTML page with a 200 and call the container healthy for the whole
@@ -1303,6 +1316,9 @@ def main() -> None:
         sys.exit(2)
     if applied is not None:
         write_port_file(PORT)  # a restart in place keeps the file of the first start, with the same port
+    if lan_refused():
+        log("the app runs on the host network without a password: its port answers only the sidebar panel (ingress); "
+            "set the app's password to use the port")
     if not DEFAULT_VERSION.strip():
         log("HA_VERSION_DEFAULT is empty: the image sets it to the Home Assistant version it was built with, so this "
             "container's environment overrides it with nothing; remove that override. Not starting")

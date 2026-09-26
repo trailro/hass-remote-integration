@@ -3,7 +3,8 @@
 ``HRI_PASSWORD`` (or ``HRI_PASSWORD_FILE``, e.g. a Docker secret; it wins)
 set and not empty: every page and API call needs a session cookie from
 ``/login``, or the password as ``Authorization: Bearer <password>`` for
-scripts.  Unset or empty: no login, as before.  A ``HRI_PASSWORD_FILE``
+scripts.  Unset or empty: no login, as before (except the app on the host
+network, whose port only ingress may use then: LAN_REFUSED).  A ``HRI_PASSWORD_FILE``
 that cannot be read, or that is there but empty, and a ``HRI_PASSWORD`` of
 only whitespace, are a password that was meant to be set: the UI stays
 closed with a password nobody knows, and the login page says why.
@@ -17,8 +18,8 @@ attempts are slowed down; after MAX_FAILURES within FAILURE_WINDOW_S from one
 address that address is refused until the window passes, and after
 GLOBAL_MAX_FAILURES within GLOBAL_WINDOW_S from all addresses together (many
 addresses, e.g. an IPv6 range) every password attempt is refused until the
-count drops.  The cookie name carries the port (as the app, whose port inside
-is always the same, the container's host name): browsers send cookies to every
+count drops.  The cookie name carries the port (as the app on its own network,
+where the port inside is always the same, the container's host name): browsers send cookies to every
 port of a host, so two instances on one host would otherwise share one name.
 """
 
@@ -52,9 +53,10 @@ LEGACY_COOKIE = "hri_session"  # the name before it carried the port: a valid on
 
 
 def _cookie_name() -> str:
-    """hri_session_<port>; as the app the port inside is always 8087, so two apps on one host would share it: there
-    the container's host name, which the Supervisor sets per app, reduced to the characters a cookie name takes."""
-    if os.environ.get("HRI_APP"):
+    """hri_session_<port>; as the app the port inside is 8087 for every app, so two apps on one host would share it:
+    there the container's host name, which the Supervisor sets per app, reduced to the characters a cookie name takes.
+    Not on the host network: the host's own name there, and a port the Supervisor gave this app alone."""
+    if os.environ.get("HRI_APP") and os.environ.get("HRI_HOST_NETWORK") != "1":
         host = re.sub(r"[^a-z0-9-]", "_", socket.gethostname().strip().lower().rstrip("."))
         if host:
             return f"hri_session_{host}"
@@ -70,6 +72,10 @@ GLOBAL_WINDOW_S = 300
 MAX_KEYS = 1000
 OPEN_PATHS = frozenset({"/login", "/api/login", "/static/hri.css", "/static/login.js"})
 DATA_KEY = "integration_manager_auth"
+# the app on the host network (HRI_HOST_NETWORK, entrypoint.apply_app_info) shares the host's interfaces, so its port is
+# on the LAN: without a password nothing but ingress is served there (the entrypoint's status page says the same)
+LAN_REFUSED = ("Set the app's password to use hass-remote-integration on its port: the app runs on the host network, "
+               "so the port is open to your network. The HRI sidebar panel works without it.")
 
 LOGIN_HTML = load_template("login")
 
@@ -332,6 +338,8 @@ async def async_setup_auth(hass: HomeAssistant) -> Auth:
     if not password:
         auth = Auth("")
         hass.data[DATA_KEY] = auth
+        if os.environ.get("HRI_APP") and os.environ.get("HRI_HOST_NETWORK") == "1":
+            _install_lan_guard(hass)
         return auth
     if unusable:
         _LOGGER.error("%s: nobody can log in until it is fixed", unusable)
@@ -378,6 +386,25 @@ async def async_setup_auth(hass: HomeAssistant) -> Auth:
         raise
     _LOGGER.info("web UI password enabled")
     return auth
+
+
+def _install_lan_guard(hass: HomeAssistant) -> None:
+    """No password on the host network: every request that is not ingress gets 403, whatever its path (the image's
+    healthcheck too, which takes any answer below 500 for alive).  Refuses to run without it, as the password check."""
+
+    @web.middleware
+    async def lan_guard(request: web.Request, handler):
+        if is_ingress(request):
+            return await handler(request)
+        return web.Response(status=403, content_type="text/plain", text=LAN_REFUSED)
+
+    try:
+        hass.http.app.middlewares.append(lan_guard)
+    except Exception as err:  # noqa: BLE001 - a frozen app: refuse to run the UI open instead
+        _LOGGER.error("host network guard not installed (%s): the UI refuses every request", err)
+        raise
+    _LOGGER.warning("the app runs on the host network without a password: its port answers only the sidebar panel "
+                    "(ingress); set the app's password to use the port")
 
 
 class LoginPageView(ManagerView):

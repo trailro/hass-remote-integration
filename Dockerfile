@@ -53,7 +53,8 @@ EXPOSE 8087
 # while Home Assistant installs, the entrypoint's status page answers it 200, so an install is never
 # "unhealthy" (the Supervisor's watchdog restarts an unhealthy app, and after a restart in place the start
 # period does not apply again); once Home Assistant runs, the manager has no view there and answers 404,
-# or 401 with HRI_PASSWORD set - anything below 500 is an answer, so healthy.  A refused connection, a
+# or 401 with HRI_PASSWORD set, or 403 as the app on the host network without a password - anything below 500
+# is an answer, so healthy.  A refused connection, a
 # timeout or a 5xx are not.  start-period: the time before the status page first listens (the image's
 # first steps) and a slow first answer; 20 minutes, as when the probe waited for the install, and a probe
 # that fails in there never counts: the first answer flips the container to healthy at once.
