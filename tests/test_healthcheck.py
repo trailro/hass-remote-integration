@@ -1,19 +1,26 @@
 """The image's HEALTHCHECK: its shape in the Dockerfile, and what the probe it ships really does against
-a server that answers the way the manager and the entrypoint do (200, 401 with a password, 503 while Home
-Assistant installs, nothing at all)."""
+a server that answers the way the manager and the entrypoint do (404 or 401 from the manager, 200 from the
+entrypoint's status server while Home Assistant installs, a 5xx, nothing at all).  It is liveness only: an
+install in progress is alive, or a Supervisor watchdog would restart the app in the middle of one."""
 
+import http.client
 import http.server
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import unittest
 
+from tests.fakes import entrypoint_for
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOCKERFILE = os.path.join(ROOT, "Dockerfile")
+ALIVE = "/api/alive"
 
 
 def _dockerfile() -> str:
@@ -64,10 +71,12 @@ class ShapeTest(Requires):
         self.assertIn("HRI_PORT", code)
         self.assertIn("os.environ", code)
 
-    def test_it_asks_the_cheap_status_path(self):
-        """/api/status without X-Requested-With: a copy at most 10 s old, and no patch code run."""
+    def test_it_asks_the_liveness_path(self):
+        """/api/alive: the entrypoint's status server answers it 200 while Home Assistant installs, the manager
+        has no view for it (404, or 401 with a password), so no manager code runs for a probe."""
         code = _probe_argv()[2]
-        self.assertIn("/api/status", code)
+        self.assertIn(f"'{ALIVE}'", code)
+        self.assertNotIn("/api/status", code)
         self.assertNotIn("X-Requested-With", code)
 
     def test_the_probe_is_valid_python(self):
@@ -116,12 +125,16 @@ class ProbeTest(Requires):
         self.assertEqual(self._serving(200), 0)
 
     def test_a_password_does_not_make_it_fail(self):
-        """With HRI_PASSWORD set the auth layer answers 401 on /api/status: the manager is up."""
+        """With HRI_PASSWORD set the auth layer answers 401 on /api/alive: the manager is up."""
         self.assertEqual(self._serving(401), 0)
 
-    def test_the_install_page_is_not_healthy(self):
-        """While Home Assistant installs the entrypoint answers 503 under /api/: no manager API yet."""
+    def test_no_view_does_not_make_it_fail(self):
+        """Without a password Home Assistant answers 404 on /api/alive, which has no view: the manager is up."""
+        self.assertEqual(self._serving(404), 0)
+
+    def test_a_server_error_is_not_healthy(self):
         self.assertEqual(self._serving(503), 1)
+        self.assertEqual(self._serving(500), 1)
 
     def test_a_manager_that_answers_nothing_is_unhealthy(self):
         sock = socket.socket()
@@ -129,6 +142,57 @@ class ProbeTest(Requires):
         port = sock.getsockname()[1]
         sock.close()  # nothing listens there
         self.assertEqual(self._run(port), 1)
+
+
+class StatusServerTest(Requires):
+    """The entrypoint's status server, served while Home Assistant installs (and while a failed restore holds the
+    boot): the probe the Dockerfile ships finds it alive, while every other /api/ path still answers 503."""
+
+    def _server(self, held=False, **env):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        ep = entrypoint_for(self, tmp, **{"HRI_APP": "", "HRI_PASSWORD": "", "HRI_PASSWORD_FILE": "", **env})
+        if held:
+            ep._status.update(phase="retrying", version=None, kind="restore_hold", title="held")
+        else:
+            ep._status.update(phase="apt-get install ffmpeg", version="2026.9.3", kind="install", title=None)
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ep._StatusHandler)
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv.server_address[1]
+
+    def _get(self, port, path, host="localhost"):
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            c.request("GET", path, headers={"Host": host})
+            resp = c.getresponse()
+            return resp.status, resp.read()
+        finally:
+            c.close()
+
+    def test_the_probe_finds_an_install_alive(self):
+        for env in ({}, {"HRI_PASSWORD": "pw"}):
+            with self.subTest(env=env):
+                self.assertEqual(ProbeTest._run(self, self._server(**env)), 0)
+        self.assertEqual(ProbeTest._run(self, self._server(held=True)), 0)
+
+    def test_alive_is_200_and_says_nothing_else(self):
+        port = self._server(HRI_PASSWORD="pw")
+        status, body = self._get(port, ALIVE)
+        self.assertEqual(status, 200)
+        self.assertLessEqual(len(body), 32)
+        for leak in (b"2026.9.3", b"ffmpeg", b"phase"):
+            self.assertNotIn(leak, body)
+        self.assertEqual(self._get(port, ALIVE + "?x=1")[0], 200)
+
+    def test_the_rest_of_the_api_is_still_not_up(self):
+        port = self._server()
+        self.assertEqual(self._get(port, "/api/status")[0], 503)
+        self.assertEqual(self._get(port, "/api/alive/more")[0], 503)
+
+    def test_the_host_guard_applies(self):
+        self.assertEqual(self._get(self._server(), ALIVE, host="evil.example.com")[0], 403)
 
 
 if __name__ == "__main__":

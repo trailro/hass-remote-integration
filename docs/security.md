@@ -88,7 +88,8 @@ set it says only that Home Assistant is being installed or is not started;
 the details are in the container log. With no password set, or to the app's
 ingress, it also shows the version, the phase (naming the `HRI_APT_PACKAGES`
 packages) and the backup a failed restore needs, and without a password the
-tail of the last install log. Under `/api/` it answers `503` with JSON:
+tail of the last install log. Under `/api/` it answers `503` with JSON
+(only `/api/alive`, the healthcheck, gets `200` and `{"alive": true}`):
 `installing` (`false` while a failed restore holds the boot) and `error`;
 with no password set, or to the app's ingress, also the version, the phase
 and `restore_failed`.

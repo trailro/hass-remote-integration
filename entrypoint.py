@@ -347,6 +347,9 @@ def _log_tail() -> str:
         return ""
 
 
+ALIVE_PATH = "/api/alive"  # the Dockerfile's HEALTHCHECK asks it
+
+
 class _StatusHandler(http.server.BaseHTTPRequestHandler):
     # every request is one small GET answered at once (no long poll, no stream): a connection that sends nothing
     # would otherwise hold its thread in readline() for good, and anyone on the LAN could open them by the thousand
@@ -364,13 +367,20 @@ class _StatusHandler(http.server.BaseHTTPRequestHandler):
         elif not status_host_ok(self.headers.get("Host", "")):
             self.send_error(403, "Host not allowed (DNS rebinding guard)")
             return
-        # Nothing here is the manager API: while Home Assistant installs, /api/status, /api/diag/health and
-        # any healthcheck used to get this HTML page with a 200 and call the container healthy for the whole
+        path = urllib.parse.urlsplit(self.path).path
+        if path == ALIVE_PATH:
+            # the image's HEALTHCHECK is liveness: an install in progress is alive, or a watchdog that acts on
+            # "unhealthy" (the Supervisor's) restarts it halfway.  Once Home Assistant runs, the manager has no
+            # view here: 404, or 401 with a password, both below the 500 the probe takes for dead
+            self._send(200, "application/json", b'{"alive": true}')
+            return
+        # Nothing else here is the manager API: while Home Assistant installs, /api/status, /api/diag/health and
+        # any monitor used to get this HTML page with a 200 and call the container healthy for the whole
         # install.  503 says what is true, and the page is served with it too - browsers render the body.
         # no login exists yet: with a password, the version, the phase (apt package names) and a failed restore are for
         # whoever can log in; a healthcheck, a waiting script or a browser needs only "not up yet"
         hide = password_configured() and not ingress
-        if urllib.parse.urlsplit(self.path).path.startswith("/api/"):
+        if path.startswith("/api/"):
             status = install_status()
             if hide:
                 status = {"installing": status["installing"], "error": "the manager API is not up yet (Home Assistant "
