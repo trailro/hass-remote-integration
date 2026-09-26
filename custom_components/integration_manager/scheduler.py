@@ -50,6 +50,7 @@ class Scheduler:
         self._ok_since: float | None = None     # monotonic: when the verdict became ok (the one clock of a recovery)
         self._reload_skip_said = False          # "no reload: <why>" already on the timeline for this episode
         self._announced = False                # the notification of the last automatic restart, raised once per boot
+        self._setup_since: float | None = None  # monotonic: when a config entry was first seen still setting up
 
     def start(self) -> None:
         self.rearm()
@@ -139,7 +140,7 @@ class Scheduler:
             return None
 
     def _watchdog_clear(self) -> None:
-        self._bad_since, self._refused = None, False
+        self._bad_since, self._refused, self._setup_since = None, False, None
         self.installer.watchdog_pending = None
 
     def _ladder_reset(self) -> None:
@@ -182,12 +183,19 @@ class Scheduler:
             return f"a manager action is running ({manager._running})"  # noqa: SLF001
         if inst.smoke.get("pending") or inst.state.pending_smoke:
             return "a smoke test is pending: its verdict decides, not the watchdog"
-        if inst.state.pending_start:
+        # blocked: kept for a Home Assistant version that did not boot, so no restart will ever run it
+        if inst.state.pending_start and not inst.state.pending_start.get("blocked"):
             return "a start is deferred to the next boot: restart on System to run it"
         if inst.state.pending_rollback:
             return "a full rollback is waiting for the restart"
         if any(e.state.value == "setup_in_progress" for e in inst._entries_of(inst.state.domain) if not e.disabled_by):  # noqa: SLF001
-            return "a config entry is still setting up"
+            # Home Assistant puts no timeout on a setup: past the smoke test's hang limit it is not waited for any more
+            now = time.monotonic()
+            self._setup_since = self._setup_since or now
+            if now - self._setup_since <= max(inst.SETUP_WAIT_S, inst.settings.int_("smoke_test_s", 0, 86400)):
+                return "a config entry is still setting up"
+        else:
+            self._setup_since = None
         return None
 
     def _scheduled_refusal(self) -> str | None:

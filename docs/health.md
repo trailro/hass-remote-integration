@@ -110,8 +110,10 @@ and is acted on: with no config entry to reload, the first step is the restart.
 - while no integration runs or Home Assistant is not running yet;
 - while a restore, rebuild, Home Assistant version change, deferred start or
   full rollback waits for the next restart, or an import from a Home Assistant
-  backup waits on **System**;
-- while a smoke test is pending or a config entry is still setting up;
+  backup waits on **System** (a deferred start kept blocked because its Home
+  Assistant version did not boot waits for no restart, and does not count);
+- while a smoke test is pending, or a config entry is still setting up, for at
+  most 15 minutes (or `smoke_test_s`, if longer), the smoke test's limit;
 - in the first 15 minutes after a boot.
 
 A reload or restart it decided against puts one line on the timeline for that
