@@ -250,13 +250,18 @@ count.
   backup of the app restored while one was scheduled), the newest release an
   older image's Python supports, the fallback after a failed install. The
   version that last wrote the configuration is the one in `/config/.HA_VERSION`,
-  which Home Assistant writes itself. The boot ends with the reason in the log
-  and in `integration_manager/ha.json` (`last_error`, shown on **System** once
-  Home Assistant runs again), and the wanted version is left as it was. To go
-  on, run that version or newer (the image that ran it, or
+  which Home Assistant writes itself. The container does not exit (an exit
+  would be a restart every few seconds): it waits, with the reason on the
+  manager port's status page (with a password set the page says only that the
+  start was refused), in the log and in `integration_manager/ha.json`
+  (`last_error`, shown on **System** once Home Assistant runs again).
+  `/api/alive` answers `200` meanwhile, so neither Docker nor the app's
+  Watchdog restarts it, and a stop ends it at once. The wanted version is left
+  as it was. To go on, run that version or newer (the image that ran it, or
   `"desired": "<that version>"` in `ha.json`), or restore a backup made on the
-  older version. A downgrade with **keep**, and one whose restore or clean
-  start ran, boot as before.
+  older version, then restart the container (or the app): none of these is
+  picked up while it waits. A downgrade with **keep**, and one whose restore
+  or clean start ran, boot as before.
 
 What happened (a fallback, a failed install) stays on **System** until the
 next version change and is announced once as a notification.
