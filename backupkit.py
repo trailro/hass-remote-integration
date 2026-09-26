@@ -48,7 +48,21 @@ APPLIED_META = os.path.join(STATE_DIR, "restore-applied.json")
 # the same for a restore that failed and was put back: without it a full disk re-applies it at every boot
 FAILED_META = os.path.join(STATE_DIR, "restore-failed.json")
 # a Home Assistant version as jsonio.ha_vkey parses it; anything else ("unknown", "dev") says nothing about the version
+# Set by the app's backup_pre and cleared by its backup_post (app/config.yaml): the Supervisor is walking the app's
+# folder for a Home Assistant backup, backups/ included, and a file deleted under that walk fails the app's part of
+# it.  Pruning and deleting wait while it is set; one older than APP_BACKUP_FLAG_STALE_S was left by a backup that
+# never ran its backup_post (a Supervisor restarted mid-backup) and is ignored.  A plain Docker install has none.
+APP_BACKUP_FLAG = f"{STATE_DIR}/ha-backup-running"
+APP_BACKUP_FLAG_STALE_S = 2 * 3600
 _HA_VERSION_RE = re.compile(r"\s*\d+\.\d+(?:\.\d+)?(?:b\d+)?\s*")
+
+
+def app_backup_running(config_dir: str) -> bool:
+    try:
+        age = time.time() - os.stat(os.path.join(config_dir, APP_BACKUP_FLAG)).st_mtime
+    except OSError:
+        return False
+    return abs(age) < APP_BACKUP_FLAG_STALE_S  # dated far ahead: a clock set back since, stale as well
 
 
 def known_ha_version(value) -> str | None:
@@ -75,6 +89,7 @@ DISPOSABLE_GLOBS = (
     f"{STATE_DIR}/staging-*", f"{STATE_DIR}/staging-*/*", f"{STATE_DIR}/backups", f"{STATE_DIR}/backups/*",
     f"{STATE_DIR}/import.tar", f"{STATE_DIR}/import.tar.tmp", f"{STATE_DIR}/import-extracted", f"{STATE_DIR}/import-extracted/*",
     f"{STATE_DIR}/hacs_catalog.json",  # catalog.py fetches it again; the file is only its offline fallback
+    APP_BACKUP_FLAG,
     ".storage/*.log",
     # a store being written (HA's temporary file: tmp + 8 random characters) and an import's set-aside original
     ".storage/tmp" + "[a-z0-9_]" * 8, ".storage/*.pre-import", ".storage/*.pre-import.done",
@@ -319,7 +334,8 @@ def create(config_dir: str, label: str = "", storage_version: str | None = None,
     safe = re.sub(r"\.{2,}", ".", file_label(label))[:48]
     name = reserve_name(bdir, f"{stamp}{'-' + safe if safe else ''}")
     final = os.path.join(bdir, name)
-    _drop_dead_partials(bdir)
+    if not app_backup_running(config_dir):
+        _drop_dead_partials(bdir)
     fd, tmp = tempfile.mkstemp(dir=bdir, prefix=f".{name}.", suffix=".tmp")
     count = 0
     domain = UNKNOWN_DOMAIN
@@ -508,8 +524,13 @@ def prune(config_dir: str, keep: int = KEEP_DEFAULT, protect: set[str] | None = 
     names in `protect` (e.g. the recorded pre-update backup, the backup the
     caller just made) are never removed, nor what a restore needs, nor an
     upload younger than UPLOAD_GRACE_S.  Those still count toward `keep`: the
-    backup just made is one of the `keep` newest, not one more."""
+    backup just made is one of the `keep` newest, not one more.  Nothing is
+    removed while a Home Assistant backup of the app runs (APP_BACKUP_FLAG):
+    the next prune catches up."""
     if keep <= 0:
+        return []
+    if app_backup_running(config_dir):
+        _LOGGER.info("pruning backups waits: a Home Assistant backup of the app is running")
         return []
     removed = []
     protect = set(protect or ()) | restore_needs(config_dir)

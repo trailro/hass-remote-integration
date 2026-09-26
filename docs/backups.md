@@ -137,7 +137,9 @@ valid date is never pruned and cannot be deleted from the UI: remove it by
 hand if you do not need it. Protected backups still count: with
 *keep 5*, a backup made by hand is one of the 5, not a sixth. The backup a
 restore came from is pruned and deleted like any other once that restore is
-over (applied, put back or dropped).
+over (applied, put back or dropped). In the Home Assistant app, pruning and
+deleting wait while Home Assistant backs up the app
+([app backups](app.md#backups)).
 
 An upload never replaces a backup: a taken name gets a `-2`, `-3`, … suffix
 (a long name is shortened to fit). An upload that cannot be written (a full

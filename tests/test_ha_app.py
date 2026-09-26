@@ -157,7 +157,7 @@ class AppConfigTest(unittest.TestCase):
             "integration_manager/staging-restore-1/deep/f", "integration_manager/import-extracted/.storage/x",
             "integration_manager/import.tar", "integration_manager/backups/x", "integration_manager/pre-restore-x/y",
             "integration_manager/hacs_catalog.json", "integration_manager/backups/x.zip", "backups/hri-2-pre-update.zip",
-            "backups/.20260926-120000.zip.ab12cd.tmp", "backups/.upload-ab12cd.zip.tmp",
+            "backups/.20260926-120000.zip.ab12cd.tmp", "backups/.upload-ab12cd.zip.tmp", "integration_manager/ha-backup-running",
         ]
         for rel in files:
             (root / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -172,7 +172,7 @@ class AppConfigTest(unittest.TestCase):
         for rel in ("venv-2026.9.3/bin/python", "home-assistant.log", "integration_manager/auth_key",
                     ".storage/tmpab12cd_9", "integration_manager/staging-restore-1/deep/f",
                     "integration_manager/hacs_catalog.json", "backups/.20260926-120000.zip.ab12cd.tmp",
-                    "backups/.upload-ab12cd.zip.tmp"):
+                    "backups/.upload-ab12cd.zip.tmp", "integration_manager/ha-backup-running"):
             self.assertNotIn(rel, want)
 
     def test_a_supervisor_restore_brings_back_hri_backups(self):

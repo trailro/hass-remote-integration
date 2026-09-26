@@ -162,6 +162,14 @@ plus the backups pruning keeps on top of it (the pre-update backup, a
 pre-restore backup for 7 days, an upload for 7 days). Delete the ones you no
 longer need from **System**.
 
+The app keeps running while Home Assistant backs it up. Around that, the
+app's `backup_pre` and `backup_post` commands set and clear
+`integration_manager/ha-backup-running`: meanwhile HRI prunes nothing and
+refuses to delete a backup ("try again in a few minutes"), since a file
+deleted while Home Assistant reads the folder fails the app's part of the
+backup. The next prune catches up. A mark older than 2 hours (a backup that
+never finished) is ignored.
+
 A restore of a Home Assistant backup replaces the app's whole folder. So,
 unlike a restore from **System**, it also brings back the timeline, the
 resource history, `.storage/http`, `.storage/core.uuid` and the MQTT ledgers

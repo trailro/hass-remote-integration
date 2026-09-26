@@ -51,6 +51,12 @@ schema:
   debug: bool
   cookie_secure: bool
   ingress_users: ["str?"]
+# a hot backup (no "backup:" key): the app keeps running while the Supervisor walks its folder.  These run in the
+# container around that walk (docker exec, the string split like a shell line, no shell of its own) and flag it to HRI,
+# which holds back pruning and deleting backups meanwhile: a backup deleted under the walk fails the app's part of the
+# Home Assistant backup (backupkit.py APP_BACKUP_FLAG).  A command exiting non-zero fails it too, so both always exit 0
+backup_pre: sh -c "mkdir -p /config/integration_manager && touch /config/integration_manager/ha-backup-running; exit 0"
+backup_post: sh -c "rm -f /config/integration_manager/ha-backup-running; exit 0"
 # what HRI's own backups leave out too but HRI's backups themselves (backupkit.py APP_BACKUP_EXCLUDE_GLOBS: a
 # restore replaces the folder, and would delete them), matched the way the Supervisor matches: against the end of
 # the full path, so "*_hass_remote_integration/" ties a name to the top of this app's folder.
@@ -82,6 +88,7 @@ backup_exclude:
   - "*_hass_remote_integration/integration_manager/import.tar.tmp"
   - "*_hass_remote_integration/integration_manager/import-extracted"
   - "*_hass_remote_integration/integration_manager/hacs_catalog.json"
+  - "*_hass_remote_integration/integration_manager/ha-backup-running"
   - "*_hass_remote_integration/.storage/*.log"
   - "*_hass_remote_integration/.storage/tmp[a-z0-9_][a-z0-9_][a-z0-9_][a-z0-9_][a-z0-9_][a-z0-9_][a-z0-9_][a-z0-9_]"
   - "*_hass_remote_integration/.storage/*.pre-import"

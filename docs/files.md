@@ -40,6 +40,7 @@ All under `/config`. *Backup* says whether a backup holds the file
 | `change_reports.json` | what the last version switches changed | no |
 | `resource_history.json` | resource samples of the Overview | no |
 | `hacs_catalog.json` | cached HACS list for the Install page search, read only when fetching it fails (it is fetched at the first search after a start, then every 12 hours) | no |
+| `ha-backup-running` | in the Home Assistant app, set while Home Assistant backs up the app: pruning and deleting backups wait; ignored after 2 hours | no |
 | `events.jsonl` | timeline | no |
 | `process.log` | process log, rotated to `process.log.1` and `.2` | no |
 | `ha-install.log` | since the last boot that installed Home Assistant: pip output of its installs and the manager's requirements, then every entrypoint line (the container log has them, without pip's) | no |
