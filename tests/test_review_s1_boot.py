@@ -222,7 +222,7 @@ class AppWatchdogTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"SUPERVISOR_TOKEN": "t0ken-secret"}), \
                 mock.patch.object(self.ep, "APP_OPTIONS_FILE", options), \
                 mock.patch.object(self.ep, "enable_app_watchdog", enable), \
-                mock.patch.object(self.ep, "read_app_watchdog", lambda token: None), \
+                mock.patch.object(self.ep, "read_app_info", lambda token: None), \
                 mock.patch.object(self.ep, "_prepare", mock.Mock(side_effect=SystemExit(7))), \
                 mock.patch.object(self.ep, "start_status_server", lambda: None), \
                 mock.patch.object(self.ep, "restrict_umask", lambda: 0):
@@ -276,12 +276,20 @@ class AppWatchdogRestartModeTest(unittest.TestCase):
         resp.__enter__.return_value.read.return_value = body
         return resp
 
+    def _watchdog(self, info):
+        """What main() exports from the app's info, as run.py reads it."""
+        with mock.patch.dict(os.environ, {"HRI_APP_WATCHDOG": "stale"}), mock.patch.object(self.ep, "owns_address", lambda a: False):
+            self.ep.apply_app_info(info)
+            return os.environ.get("HRI_APP_WATCHDOG")
+
     def test_it_reads_the_toggle_with_the_apps_token(self):
-        for watchdog in (True, False):
+        for watchdog, var in ((True, "1"), (False, "0")):
             with self.subTest(watchdog=watchdog):
                 body = json.dumps({"result": "ok", "data": {"watchdog": watchdog, "slug": "x"}}).encode()
                 with mock.patch.object(self.ep.urllib.request, "urlopen", return_value=self._answer(body)) as urlopen:
-                    self.assertIs(self.ep.read_app_watchdog("t0ken-secret"), watchdog)
+                    info = self.ep.read_app_info("t0ken-secret")
+                self.assertEqual(info, {"watchdog": watchdog, "slug": "x"})
+                self.assertEqual(self._watchdog(info), var)
                 request = urlopen.call_args.args[0]
                 self.assertEqual((request.full_url, request.get_method()), ("http://supervisor/addons/self/info", "GET"))
                 self.assertEqual(request.get_header("Authorization"), "Bearer t0ken-secret")
@@ -290,22 +298,29 @@ class AppWatchdogRestartModeTest(unittest.TestCase):
     def test_unknown_is_none_and_logged_without_the_token(self):
         refused = urllib.error.HTTPError("http://supervisor/addons/self/info", 403, "Forbidden", {}, None)
         self.addCleanup(refused.close)
-        answers = [urllib.error.URLError("Name or service not known"), TimeoutError("timed out"), refused,
-                   self._answer(b"not json"), self._answer(b'{"result": "ok", "data": {}}'),
-                   self._answer(b'{"result": "ok", "data": {"watchdog": "yes"}}')]
-        for answer in answers:
+        unreadable = [urllib.error.URLError("Name or service not known"), TimeoutError("timed out"), refused,
+                      self._answer(b"not json"), self._answer(b'{"result": "ok"}'), self._answer(b'{"result": "ok", "data": []}')]
+        for answer in unreadable:
             with self.subTest(answer=answer):
                 self.lines.clear()
                 kwargs = {"side_effect": answer} if isinstance(answer, BaseException) else {"return_value": answer}
                 with mock.patch.object(self.ep.urllib.request, "urlopen", **kwargs):
-                    self.assertIsNone(self.ep.read_app_watchdog("t0ken-secret"))  # never raises
-                self.assertTrue(any("Watchdog setting could not be read" in line for line in self.lines), self.lines)
+                    info = self.ep.read_app_info("t0ken-secret")  # never raises
+                self.assertIsNone(info)
+                self.assertIsNone(self._watchdog(info))
+                self.assertTrue(any("the Watchdog setting is unknown" in line for line in self.lines), self.lines)
                 self.assertFalse([line for line in self.lines if "t0ken" in line])
+        for data in ({}, {"watchdog": "yes"}):
+            with self.subTest(data=data):
+                self.lines.clear()
+                self.assertIsNone(self._watchdog(data))
+                self.assertTrue(any("Watchdog setting could not be read" in line for line in self.lines), self.lines)
         with mock.patch.object(self.ep.urllib.request, "urlopen") as urlopen:
-            self.assertIsNone(self.ep.read_app_watchdog(""))
+            self.assertIsNone(self.ep.read_app_info(""))
         urlopen.assert_not_called()
 
     def _main(self, env, read):
+        info = None if read is None else {"watchdog": read}
         options = os.path.join(self.tmp, "options.json")
         with open(options, "w", encoding="utf-8") as fh:
             json.dump({"password": "pw"}, fh)
@@ -318,7 +333,8 @@ class AppWatchdogRestartModeTest(unittest.TestCase):
         with mock.patch.dict(os.environ, env), \
                 mock.patch.object(self.ep, "APP_OPTIONS_FILE", options), \
                 mock.patch.object(self.ep, "enable_app_watchdog", lambda token: order.append(("enable", token))), \
-                mock.patch.object(self.ep, "read_app_watchdog", lambda token: order.append(("read", token)) or read), \
+                mock.patch.object(self.ep, "read_app_info", lambda token: order.append(("read", token)) or info), \
+                mock.patch.object(self.ep, "owns_address", lambda address: False), \
                 mock.patch.object(self.ep, "_prepare", prepare), \
                 mock.patch.object(self.ep, "start_status_server", lambda: None), \
                 mock.patch.object(self.ep, "restrict_umask", lambda: 0):
