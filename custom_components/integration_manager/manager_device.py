@@ -570,9 +570,9 @@ class ManagerDevice:
                 if action == "restart":
                     res.update(ok=False, error=failed)
         self.last_action = res
+        shown = _scrubbed_action(res)  # in the history, on the broker and in the timeline, as in the retained document
         if rec is not None:
-            self.publisher._finish(rec, "ok" if res.get("ok") else "failed", res.get("error"))  # noqa: SLF001
-        shown = _scrubbed_action(res)  # on the broker and in the timeline, as in the retained document
+            self.publisher._finish(rec, "ok" if res.get("ok") else "failed", shown.get("error"))  # noqa: SLF001
         # before the publish: a stop already under way, or a broker that never confirms, must not cost the timeline
         events.emit("mqtt", f"manager action {action} from MQTT: "
                     + (("ok" + (f", {shown['note']}" if shown.get("note") else "") + ("; restarting" if restart else "")) if shown.get("ok") else f"failed: {shown.get('error')}"),

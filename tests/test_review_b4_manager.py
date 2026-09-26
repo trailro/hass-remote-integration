@@ -32,7 +32,7 @@ class LastActionMaskedTest(unittest.IsolatedAsyncioTestCase):
 
 
 class ResultAndTimelineMaskedTest(unittest.IsolatedAsyncioTestCase):
-    async def test_the_error_of_a_failed_action(self):
+    async def _failed_action(self, rec=None):
         dev = device()
 
         async def boom():
@@ -40,7 +40,11 @@ class ResultAndTimelineMaskedTest(unittest.IsolatedAsyncioTestCase):
 
         dev._do_check_updates = boom
         with self.assertLogs(md._LOGGER, "ERROR"), mock.patch.object(md.events, "emit") as emit:
-            await dev.async_action("check_updates")
+            await dev.async_action("check_updates", rec)
+        return dev, emit
+
+    async def test_the_error_of_a_failed_action(self):
+        dev, emit = await self._failed_action()
         [result] = [e[1] for e in dev.publisher.log if e[0] == "result"]
         self.assertNotIn(TOKEN, str(result))
         self.assertIn("RuntimeError: cannot reach", result["error"])
@@ -48,6 +52,15 @@ class ResultAndTimelineMaskedTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(TOKEN, str(event))
         self.assertIn("failed: RuntimeError: cannot reach", event.args[1])
 
+    async def test_the_command_history_row(self):
+        """recent_commands scrubs "error" on read, but the stored row kept the text unmasked in memory."""
+        rec = {}
+        dev, _emit = await self._failed_action(rec)
+        [(_, row, state, error)] = [e for e in dev.publisher.log if e[0] == "finish"]
+        self.assertIs(row, rec)
+        self.assertEqual(state, "failed")
+        self.assertNotIn(TOKEN, error)
+        self.assertIn("RuntimeError: cannot reach", error)
 
 if __name__ == "__main__":
     unittest.main()
