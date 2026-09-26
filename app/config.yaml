@@ -14,9 +14,9 @@ image: ghcr.io/trailro/hass-remote-integration
 # Home Assistant inside writes its registries last when it stops (the compose file's stop_grace_period)
 timeout: 240
 map:
-  # the same /config the compose file mounts its volume at.  Supervisor 2026.07 renamed it app_config and warns
-  # about this name; older Supervisors know only this one
-  - type: addon_config
+  # the same /config the compose file mounts its volume at.  addon_config before Supervisor 2026.07.1, same mount;
+  # installing or updating an app needs the newest Supervisor anyway
+  - type: app_config
     read_only: false
 # the sidebar panel: the Supervisor proxies Home Assistant's ingress to the same port as the one published below,
 # with the prefix stripped (ingress.py).  Streamed: backup uploads (up to 200 MiB) and a Home Assistant import (up to

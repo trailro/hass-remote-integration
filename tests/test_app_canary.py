@@ -11,6 +11,7 @@ report runs with `gh` and `git` answering from a state.
 import importlib.util
 import json
 import os
+import pathlib
 import shutil
 import subprocess
 import tempfile
@@ -316,9 +317,13 @@ class SupervisorCheckTest(unittest.TestCase):
         self.assertEqual(self.m.dropped_keys(given, kept), ["map[0].new", "gone"])
 
     def test_the_allow_list(self):
-        allow = self.m.allowed_lines()
-        self.assertIn("uses legacy map type 'addon_config'; use 'app_config' instead", allow)
-        self.assertFalse([line for line in allow if line.startswith("#")])
+        self.assertEqual(self.m.allowed_lines(), [])  # app/config.yaml maps app_config: nothing to let through
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = pathlib.Path(tmp, "allow.txt")
+        path.write_text("# a comment\n\nuses legacy map type 'addon_config'; use 'app_config' instead\n", encoding="utf-8")
+        allow = self.m.allowed_lines(path)
+        self.assertEqual(allow, ["uses legacy map type 'addon_config'; use 'app_config' instead"])
         msg = "App 'hass-remote-integration' uses legacy map type 'addon_config'; use 'app_config' instead."
         self.assertEqual(self.m.unexpected([msg, "App 'x' uses deprecated 'arch' values: ['armv7']"], allow),
                          ["App 'x' uses deprecated 'arch' values: ['armv7']"])

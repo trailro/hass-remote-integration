@@ -107,7 +107,7 @@ class AppConfigTest(unittest.TestCase):
             grace = re.search(r"stop_grace_period:\s*(\d+)s", fh.read()).group(1)
         self.assertEqual(self.cfg["timeout"], int(grace))
         self.assertLessEqual(self.cfg["timeout"], 300)  # the Supervisor's limit
-        self.assertEqual(self.cfg["map"], [{"type": "addon_config", "read_only": False}])
+        self.assertEqual(self.cfg["map"], [{"type": "app_config", "read_only": False}])  # addon_config: legacy
         self.assertEqual(self.cfg["ports"], {"8087/tcp": 8087})
         # the panel (ingress) and the port serve one UI; no webui next to ingress (the app linter refuses it)
         self.assertNotIn("webui", self.cfg)
