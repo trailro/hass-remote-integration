@@ -872,6 +872,13 @@ class Installer:
         else:
             bad = next(e for e in active if e["state"] != "loaded")
             state, reason = "error", f"config entry '{bad['title']}' is {bad['state']}" + (f": {bad['reason']}" if bad["reason"] else "")
+        from .diagnostics import scrub_text  # diagnostics imports this module
+
+        # retained on the broker and recorded by the main Home Assistant: an entry's reason or an error can carry
+        # a URL with a token in it (ConfigEntryNotReady(f"cannot connect to {url}")), masked as the UI masks it
+        for e in entries:
+            if e["reason"]:
+                e["reason"] = scrub_text(str(e["reason"]))
         return {
             "integration": domain,
             "tag": rec.get("running_tag"),
@@ -879,10 +886,10 @@ class Installer:
             "loaded": loaded,
             "entries": entries,
             "restart_required": self.state.restart_required,
-            "last_error": self.state.last_error or "",
+            "last_error": scrub_text(self.state.last_error or ""),
             "patch": self._patch_status(domain),
             "state": state,
-            "reason": reason,
+            "reason": scrub_text(reason),
         }
 
     async def status(self) -> dict[str, Any]:
@@ -1330,7 +1337,9 @@ class Installer:
                     "smoke_test": scheduled, "note": note, **changed}
         except Exception as err:  # noqa: BLE001
             _LOGGER.exception("start %s %s failed", domain, tag)
-            self.state.last_error = f"{type(err).__name__}: {err}"
+            from .diagnostics import scrub_text  # diagnostics imports this module
+
+            self.state.last_error = scrub_text(f"{type(err).__name__}: {err}")  # state.json, the timeline, MQTT health
             events.emit("error", f"start {domain} {tag} failed: {self.state.last_error}", domain=domain, tag=tag)
             if prev_domain and self.state.domain == prev_domain:
                 # nothing was switched: give the previous integration its entries back
@@ -1686,7 +1695,9 @@ class Installer:
             try:
                 disabled = await self._disable_entries(domain)
             except RuntimeError as err:
-                self.state.last_error = str(err)
+                from .diagnostics import scrub_text  # diagnostics imports this module
+
+                self.state.last_error = scrub_text(str(err))
                 self._save_state()
                 events.emit("error", f"stop {domain} failed: {err}", domain=domain)
                 return {"ok": False, "error": str(err), "restart_required": True}
@@ -1807,7 +1818,9 @@ class Installer:
             try:
                 await self._remove_domain(domain)
             except RuntimeError as err:  # an entry that refused to unload
-                self.state.last_error = str(err)
+                from .diagnostics import scrub_text  # diagnostics imports this module
+
+                self.state.last_error = scrub_text(str(err))
                 self._save_state()
                 return {"ok": False, "error": str(err), "restart_required": True}
             self.state.last_action = f"uninstalled {domain}"
@@ -2928,7 +2941,9 @@ class Installer:
                 if isinstance(data, dict) and isinstance(data.get("integrations"), dict) and data["integrations"].pop(domain, None) is not None:
                     write_json(self.user_registry_file, data, fsync=False)
                     self._registry_cache = None
-            self.state.last_error = f"{type(err).__name__}: {err}"
+            from .diagnostics import scrub_text  # diagnostics imports this module
+
+            self.state.last_error = scrub_text(f"{type(err).__name__}: {err}")
             self._save_state()
             return {"ok": False, "error": self.state.last_error}
         finally:

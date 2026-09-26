@@ -369,5 +369,40 @@ class PrepareWithHaChangeTest(unittest.TestCase):
         self.assertFalse(views._ha_change_lock_taken())
 
 
+# ----- S3-3 -----------------------------------------------------------------------------------------
+
+SECRET = "hunter2secretvalue"
+
+
+class HealthMaskedTest(WatchdogBase):
+    def test_the_health_document_masks_reasons_and_the_last_error(self):
+        inst = self.installer()
+        inst._patch_cache = {}
+        inst._entries_of = lambda dom: [SimpleNamespace(title="Hub", state=SimpleNamespace(value="setup_retry"), disabled_by=None,
+                                                        reason=f"cannot connect to http://192.0.2.1/api?token={SECRET}")]
+        inst.state.last_error = f"ConnectError: https://bob:{SECRET}@192.0.2.1/x"
+        doc = json.dumps(inst.health())
+        self.assertNotIn(SECRET, doc)  # before the fix: in entries[].reason, reason and last_error
+        self.assertIn("token=***", doc)
+
+    def test_a_failed_start_stores_a_masked_last_error(self):
+        inst = _start_installer(self)
+        inst._ensure_deployed = mock.Mock(side_effect=RuntimeError(f"cannot fetch https://192.0.2.1/x?token={SECRET}"))
+        with mock.patch.object(backupkit, "prune", return_value=[]), mock.patch.object(installer_mod.events, "emit"), \
+                self.assertLogs("custom_components.integration_manager.installer", "ERROR"):
+            res = asyncio.run(inst.start("demo", "2.0"))
+        self.assertFalse(res["ok"])
+        self.assertNotIn(SECRET, inst.state.last_error)
+        self.assertIn("token=***", inst.state.last_error)
+
+    def test_a_refused_unload_stores_a_masked_last_error(self):
+        inst = self.installer()
+        inst._remove_domain = mock.AsyncMock(side_effect=RuntimeError(f"unload failed: password={SECRET}"))
+        inst.rollback_restore_refusal = lambda: None
+        res = asyncio.run(inst.uninstall(DOMAIN))
+        self.assertFalse(res["ok"])
+        self.assertNotIn(SECRET, inst.state.last_error)
+
+
 if __name__ == "__main__":
     unittest.main()
