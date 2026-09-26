@@ -89,8 +89,8 @@ def topbar(active: str) -> str:
     ver = (f'<a class="ver" href="{html.escape(href)}" target="_blank" rel="noopener" '
            f'title="hass-remote-integration {html.escape(v["version"])}, build {html.escape(v["build"])}">'
            f'v{html.escape(v["version"])} · {html.escape(v["build_short"])}</a>')
-    return (f'<nav class="topbar"><a class="brand" href="./">hass<b>-remote-</b>integration</a>{ver}{links}'
-            f'<span class="spacer"></span><span id="tb-chips"></span></nav>')
+    return (f'<nav class="topbar"><div class="tb-nav"><a class="brand" href="./">hass<b>-remote-</b>integration</a>{ver}{links}'
+            f'</div><span id="tb-chips"></span></nav>')
 
 
 def render(page_html: str, active: str) -> str:
