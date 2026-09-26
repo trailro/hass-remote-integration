@@ -198,7 +198,9 @@ move an integration to another install.
 That restore brings back the manager's own backups as they were when the Home
 Assistant backup was taken, together with the state that names them: the
 backup taken before the last integration update is there again, so a **Full
-rollback** works after the restore. Backups made after that Home Assistant
+rollback** works after the restore (unless the Home Assistant backup was
+taken while HRI was writing that very backup: then the rollback is refused and a
+plain start of the previous version still works). Backups made after that Home Assistant
 backup are gone with the rest of the folder: download them from **System**
 first if you want to keep them, and upload them again after. A restore of a
 Home Assistant backup made while the installed app was older than 0.25.2 (the

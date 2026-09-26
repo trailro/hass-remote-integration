@@ -11,6 +11,9 @@ Every version's changes are in the
   install, so the backup grows by about *Backups to keep* times one to a few
   MB (with *Backups to keep* at 0, keep all, by every backup ever made).
   Restoring it brings them back as they were when it was taken.
+- **While Home Assistant backs up the app**, HRI waits with pruning and
+  refuses to delete a backup ("try again in a few minutes"), so its backup
+  of the app never fails on a file HRI removed halfway.
 - **Release images:** the release build checks out the release tag itself,
   never a branch with the same name, and the step that updates the app's
   version no longer leaves its write token on disk.
