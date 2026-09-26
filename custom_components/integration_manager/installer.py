@@ -2207,18 +2207,18 @@ class Installer:
                 "reloads": sorted(t for t in reloads if cut < t <= now + self.WATCHDOG_DAY_S),
                 "last_reload": rec.get("last_reload") if isinstance(rec.get("last_reload"), dict) else None}
 
-    def _watchdog_save(self, rec: dict[str, Any]) -> None:
-        """The ledger is kept whatever the disk does.  restart() already restarts on a state.json it could
-        not write - the operator usually frees the disk BY restarting - but this write comes first, and an
-        OSError out of it ended the tick a minute before the restart, every minute, so the restart the
-        comment there promises never happened.  What is not written stays in memory and is saved again at
-        the next change; the boot after a restart starts from the file, which is one restart behind."""
+    def _watchdog_save(self, rec: dict[str, Any]) -> OSError | None:
+        """The ledger is kept in memory whatever the disk does (an OSError out of here ended the tick, every
+        minute), and saved again at the next change.  The write error is returned: the boot after a restart
+        starts from the file, so an automatic restart on a ledger that was not written would reset the daily
+        cap and the backoff and could loop (watchdog_restart refuses it; restart() by hand still restarts)."""
         self.state.watchdog = rec
         try:
             self._save_state()
         except OSError as err:
-            _LOGGER.warning("health watchdog: state.json not written (%s): the record is kept in memory only, "
-                            "and a restart it decides on still happens", err)
+            _LOGGER.warning("health watchdog: state.json not written (%s): the record is kept in memory only", err)
+            return err
+        return None
 
     def watchdog_window_s(self) -> int:
         """How long the verdict must have been ``error`` before the next restart:
@@ -2334,7 +2334,20 @@ class Installer:
                     f"and it is restarted again after that, at least {cfg['min_interval_min']} min from now; {left} left today")
         rec["last"] = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "integration": self.state.domain, "reason": reason,
                        "unhealthy_s": int(unhealthy_s), "attempt": rec["attempts"], "next": plan, "state": state}
-        self._watchdog_save(rec)  # last_action is not touched: restart() sets its own, and watchdog.last is the record
+        if (err := self._watchdog_save(rec)) is not None:  # last_action is not touched: restart() sets its own
+            # the restart would boot on the ledger of the file, without this attempt: no cap, no backoff, a loop
+            why = f"the watchdog's record could not be written to state.json ({type(err).__name__}: {err})"
+            rolled = self.watchdog_record()
+            rolled["restarts"] = [t for t in rolled["restarts"] if t != now]
+            rolled["attempts"] = max(0, rolled["attempts"] - 1)
+            rolled["last"] = {**rec["last"], "attempt": rolled["attempts"], "next": f"not restarted: {why}"}
+            self._watchdog_save(rolled)
+            _LOGGER.error("health watchdog: %s %s for %s s (%s): not restarting the process: %s",
+                          self.state.domain, was, int(unhealthy_s), reason, why)
+            events.emit("restart", f"health watchdog: {self.state.domain or 'the integration'} has been {was} for "
+                                   f"{int(unhealthy_s / 60)} min ({reason}) but the process is not restarted: {why}; "
+                                   "Restart on System still restarts it", domain=self.state.domain, reason=reason)
+            return {"ok": False, "error": why}
         events.emit("restart", f"health watchdog: {self.state.domain or 'the integration'} has been {was} for "
                                f"{int(unhealthy_s / 60)} min ({reason}); restarting the process (attempt {rec['attempts']}); {plan}",
                     domain=self.state.domain, attempt=rec["attempts"], reason=reason)
