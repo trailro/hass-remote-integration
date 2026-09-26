@@ -3,6 +3,17 @@
 Every version's changes are in the
 [GitHub releases](https://github.com/trailro/hass-remote-integration/releases).
 
+## 0.25.1
+
+- **Security fix, sidebar panel (ingress):** a Home Assistant user could
+  open the panel under another user's name, getting past `ingress_users`:
+  the Supervisor passes on a copy of its user headers that the browser
+  sends spelled in another case. HRI now accepts only the Supervisor's own
+  spelling and answers `403` otherwise.
+- Every logged-in Home Assistant user can open the panel, administrator or
+  not (the others only do not see it in the sidebar). If some of them should
+  not reach HRI, set `ingress_users` on the **Configuration** tab.
+
 ## 0.25.0
 
 - **The options apply:** until now the app ran the 0.24.0 image, which does
