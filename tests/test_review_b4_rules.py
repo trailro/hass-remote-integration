@@ -12,7 +12,8 @@ from unittest import mock
 from custom_components.integration_manager import mqtt_publisher as mp
 from custom_components.integration_manager.mqtt_rules import MqttRules
 from tests import test_camp_publish as camp
-from tests.test_e2e_pub_status import NoIdentityTest, _publisher
+from tests import test_e2e_pub_status as pub_status
+from tests.test_e2e_pub_status import _publisher
 
 BROKEN = '{"rules": {"lock.*": {"exclude": true}'
 
@@ -117,9 +118,9 @@ class FailClosedTest(unittest.TestCase):
     def test_the_status_says_why(self):
         pub = _publisher("hass_demo")
         pub.rules = self._broken_rules()
-        status = NoIdentityTest.status(None, pub)
+        status = pub_status.NoIdentityTest.status(None, pub)
         self.assertIn("mqtt_rules.json is not valid JSON", status["rules_error"])
-        self.assertIsNone(NoIdentityTest.status(None, _publisher("hass_demo"))["rules_error"])
+        self.assertIsNone(pub_status.NoIdentityTest.status(None, _publisher("hass_demo"))["rules_error"])
 
 
 if __name__ == "__main__":

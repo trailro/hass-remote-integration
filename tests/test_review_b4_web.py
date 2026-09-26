@@ -8,7 +8,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 from custom_components.integration_manager import devices_page, entities_page
-from tests.test_review_fable_web import DeleteDeviceOfSeveralEntriesTest, _request
+from tests import test_review_fable_web as fable
+from tests.test_review_fable_web import _request
 
 TOKEN = "s3cr3tT0kenValue42"
 LEAK = f"cannot reach https://cloud.invalid/api?access_token={TOKEN}"
@@ -19,8 +20,8 @@ class DeviceAnswersMaskedTest(unittest.TestCase):
         async def boom(hass, entry, dev):
             raise RuntimeError(LEAK)
 
-        allow = DeleteDeviceOfSeveralEntriesTest._hook(True)
-        body, _registry = DeleteDeviceOfSeveralEntriesTest._delete(self, {"alpha": allow, "beta": boom})
+        allow = fable.DeleteDeviceOfSeveralEntriesTest._hook(True)
+        body, _registry = fable.DeleteDeviceOfSeveralEntriesTest._delete(self, {"alpha": allow, "beta": boom})
         self.assertFalse(body["ok"])
         self.assertNotIn(TOKEN, body["error"])
         self.assertIn("beta: RuntimeError: cannot reach", body["error"])
