@@ -860,7 +860,10 @@ class MqttPublisher:
             if self._disk_read is None:
                 self._disk_read = self.hass.async_add_executor_job(self._read_saved)
             on_disk = await self._disk_read
-        new = asdict(self._validated(updates, on_disk))
+        # a path checked against the filesystem (realpath, isfile), off the loop too; the rest of the check stays here
+        ca = updates.get("ca_certs")
+        ca_path = await self.hass.async_add_executor_job(self._ca_certs_path, ca.strip()) if isinstance(ca, str) else None
+        new = asdict(self._validated(updates, on_disk, ca_path))
         self._saved = new
         try:
             await writer.async_write(self.path, new, mode=0o600)
@@ -871,23 +874,28 @@ class MqttPublisher:
         return MqttConfig(**new)
 
     def _read_saved(self) -> dict[str, Any] | None:
-        """Blocking: mqtt.json as it is on disk, None without one (or unreadable)."""
+        """Blocking: the usable settings of mqtt.json as it is on disk (its ca_certs checked against the filesystem),
+        None without one (or unreadable)."""
         try:
             with open(self.path, encoding="utf-8") as fh:
                 on_disk = json.load(fh)
         except (OSError, ValueError):
             return None
-        return on_disk if isinstance(on_disk, dict) else None
+        if not isinstance(on_disk, dict):
+            return None
+        return self._sane({k: v for k, v in on_disk.items() if k in MqttConfig.__dataclass_fields__})
 
-    def _validated(self, updates: dict[str, Any], on_disk: dict[str, Any] | None = None) -> MqttConfig:
+    def _validated(self, updates: dict[str, Any], on_disk: dict[str, Any] | None = None,
+                   ca_path: str | None = None) -> MqttConfig:
         """Starts from the last save this process queued, else from what is on
-        disk (`on_disk`, read by the caller): a save not adopted yet (waiting
-        for a reconnect) must not be undone by the next one."""
+        disk (`on_disk`, from _read_saved): a save not adopted yet (waiting
+        for a reconnect) must not be undone by the next one.  `ca_path`: the
+        ca_certs of `updates` already checked by _ca_certs_path (else it is checked here)."""
         current = asdict(self.config)
         if self._saved is not None:
             current.update(self._saved)
         elif on_disk is not None:
-            current.update(self._sane({k: v for k, v in on_disk.items() if k in current}))
+            current.update(on_disk)
         for k, v in updates.items():
             if k not in current or k in ("base_topic", "client_id"):
                 continue  # derived from the running integration, never stored from the UI
@@ -899,7 +907,7 @@ class MqttPublisher:
             elif k == "ca_certs":
                 if not isinstance(v, str):
                     raise ValueError("ca_certs must be a string")
-                v = self._ca_certs_path(v.strip())
+                v = ca_path if ca_path is not None else self._ca_certs_path(v.strip())
             elif k == "main_ha_version":
                 if not isinstance(v, str):
                     raise ValueError("main_ha_version must be a string")

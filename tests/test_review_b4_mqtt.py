@@ -246,5 +246,48 @@ class MaskedTextKeepsItsQuotesTest(unittest.TestCase):
                 self.assertEqual(mp._mask_text(text), masked)
 
 
+class CaCertsCheckedOffTheLoopTest(unittest.TestCase):
+    """Saving ca_certs resolved and checked the path (os.path.realpath, os.path.isfile) on the event loop, for the
+    path saved and for the one already in mqtt.json."""
+
+    def test_the_path_is_checked_in_the_executor(self):
+        config_dir = tempfile.mkdtemp()
+        with open(os.path.join(config_dir, "ca.pem"), "w", encoding="utf-8") as fh:
+            fh.write("x")
+        pub = object.__new__(mp.MqttPublisher)
+        pub.path = os.path.join(config_dir, "mqtt.json")
+        with open(pub.path, "w", encoding="utf-8") as fh:
+            json.dump({"tls": True, "ca_certs": "ca.pem"}, fh)
+        pub.config = mp.MqttConfig()
+        pub._saved = pub._disk_read = None
+        checked_on = []
+        real_realpath, real_isfile = os.path.realpath, os.path.isfile
+
+        def realpath(path, *a, **k):
+            checked_on.append(threading.current_thread())
+            return real_realpath(path, *a, **k)
+
+        def isfile(path):
+            checked_on.append(threading.current_thread())
+            return real_isfile(path)
+
+        async def main():
+            loop = asyncio.get_running_loop()
+            pub.hass = mock.Mock()
+            pub.hass.config.config_dir = config_dir
+            pub.hass.async_add_executor_job = lambda f, *a: loop.run_in_executor(None, f, *a)
+            with mock.patch.object(mp.writer, "async_write", mock.AsyncMock()), \
+                    mock.patch.object(mp.os.path, "realpath", realpath), mock.patch.object(mp.os.path, "isfile", isfile):
+                saved = await pub.async_save({"ca_certs": " ca.pem ", "port": 8883})
+                with self.assertRaises(ValueError):
+                    await pub.async_save({"ca_certs": "missing.pem"})
+            return threading.current_thread(), saved
+
+        loop_thread, saved = asyncio.run(main())
+        self.assertTrue(checked_on)
+        self.assertNotIn(loop_thread, checked_on)
+        self.assertEqual((saved.ca_certs, saved.tls, saved.port), (os.path.join(config_dir, "ca.pem"), True, 8883))
+
+
 if __name__ == "__main__":
     unittest.main()
