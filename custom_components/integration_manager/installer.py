@@ -773,7 +773,14 @@ class Installer:
             names = []
         for name in names:
             m = _PRE_RESTORE_NAME.fullmatch(name)
-            if m and _within(time.strftime("%Y-%m-%dT%H:%M:%S", time.strptime(m.group(1), "%Y%m%d-%H%M%S")), PRE_RESTORE_GRACE_S):
+            if not m:
+                continue
+            try:
+                stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.strptime(m.group(1), "%Y%m%d-%H%M%S"))
+            except ValueError:  # 20260931-...: no date, so no way to tell it is old; kept like an unreadable stamp
+                out.add(name)
+                continue
+            if _within(stamp, PRE_RESTORE_GRACE_S):
                 out.add(name)
         plan = jsonio.read_json(os.path.join(self.state_dir, "rebuild-pending.json"), {}) or {}
         if isinstance(plan, dict):

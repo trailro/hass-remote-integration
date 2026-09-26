@@ -404,5 +404,22 @@ class HealthMaskedTest(WatchdogBase):
         self.assertNotIn(SECRET, inst.state.last_error)
 
 
+# ----- S5-2 -----------------------------------------------------------------------------------------
+
+class PreRestoreNameTest(unittest.TestCase):
+    def test_an_impossible_date_is_protected_not_a_crash(self):
+        d = _tmp(self)
+        inst = object.__new__(Installer)
+        inst.state_dir = os.path.join(d, "integration_manager")
+        inst.state = State()
+        os.makedirs(os.path.join(d, "backups"))
+        for name in ("20260931-120000-pre-restore.zip", "20200101-120000-pre-restore.zip"):
+            with open(os.path.join(d, "backups", name), "wb") as fh:
+                fh.write(b"x")
+        out = inst.protected_backups()  # before the fix: ValueError out of every prune, delete and pre-start backup
+        self.assertIn("20260931-120000-pre-restore.zip", out)
+        self.assertNotIn("20200101-120000-pre-restore.zip", out)  # a real date past the 7 days still ages out
+
+
 if __name__ == "__main__":
     unittest.main()
