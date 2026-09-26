@@ -624,5 +624,41 @@ class PreRestoreNameTest(unittest.TestCase):
         self.assertNotIn("20200101-120000-pre-restore.zip", out)  # a real date past the 7 days still ages out
 
 
+
+# ----- follow-up: install_local off the loop ---------------------------------------------------
+
+class InstallLocalOffTheLoopTest(unittest.TestCase):
+    def test_install_local_reads_restore_pending_in_the_executor_under_busy(self):
+        inst = _start_installer(self)
+        inst.rollback_restore_refusal = lambda: None
+        busy = []
+
+        def pending(cfg):
+            busy.append(inst.busy)
+            return _on_loop()  # "pending" when read on the loop, so the refusal below also says where it ran
+
+        with mock.patch.object(backupkit, "pending", pending):
+            res = asyncio.run(inst.install_local("demo"))
+        self.assertFalse(res["ok"])
+        self.assertEqual(busy, [True])  # before the fix: read on the loop, busy not held
+        self.assertFalse(inst.busy)
+
+    def test_a_pending_restore_still_refuses_install_local(self):
+        inst = _start_installer(self)
+        inst.rollback_restore_refusal = lambda: None
+        with mock.patch.object(backupkit, "pending", return_value=True):
+            res = asyncio.run(inst.install_local("demo"))
+        self.assertIn("a restore is scheduled", res["error"])
+        self.assertFalse(inst.busy)
+
+    def test_install_local_refuses_while_busy_without_reading(self):
+        inst = _start_installer(self)
+        inst.busy = True
+        with mock.patch.object(backupkit, "pending", mock.Mock(side_effect=AssertionError("read while busy"))):
+            res = asyncio.run(inst.install_local("demo"))
+        self.assertIn("another action is running", res["error"])
+        self.assertTrue(inst.busy)  # someone else's flag, left alone
+
+
 if __name__ == "__main__":
     unittest.main()
