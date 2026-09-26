@@ -18,10 +18,14 @@ minutes; the web UI shows the progress. It needs internet access.
 
 - MQTT: the Mosquitto broker app is `core-mosquitto`, port 1883, the host a
   fresh app offers.
-- A Home Assistant backup of the app holds the manager's own backups (since
-  0.25.2; they hold no venv, so it grows by about *Backups to keep* times one
-  to a few MB), the one a Full rollback needs included. Restoring it brings
-  them back as they were then: download the ones made since first.
+- A Home Assistant backup of the app holds the manager's own backups once
+  the installed app is 0.25.2 or newer (they hold no venv, so it grows by
+  about *Backups to keep* times one to a few MB), the one a Full rollback
+  needs included. Restoring it brings them back as they were then: download
+  the ones made since first. The backup taken right before the update to
+  0.25.2 still leaves them out, and restoring one made on an older version
+  of the app brings that version back, which leaves them out until you
+  update again.
 - Any logged-in Home Assistant user, administrator or not, can open the UI
   through Home Assistant (the panel is hidden from the others, not closed to
   them): the `ingress_users` option narrows it to the user names listed. Clear the

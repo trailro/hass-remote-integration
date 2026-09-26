@@ -154,8 +154,17 @@ manager's own backups leave out, but those backups themselves):
   restore or import in progress;
 - the login key and the logout record: everyone logs in again after a restore.
 
-The manager's own backups (`backups/`) are in it (since 0.25.2; before, they
-were left out). They hold no venv, so each is small: about one to a few MB,
+The manager's own backups (`backups/`) are in it when the installed app is
+0.25.2 or newer. The Supervisor backs an app up with the configuration of the
+version installed, so:
+
+- the backup Home Assistant takes right before the update from 0.25.1 or
+  older to 0.25.2 still leaves `backups/` out;
+- restoring a Home Assistant backup made while an older version of the app
+  ran brings that version back, with its configuration: later Home Assistant
+  backups leave `backups/` out again until you update the app.
+
+They hold no venv, so each is small: about one to a few MB,
 depending on the integration's `.storage`. A Home Assistant backup of the app
 grows by roughly *Backups to keep* (`backup_keep`, 5 by default) times that,
 plus the backups pruning keeps on top of it (the pre-update backup, a
@@ -183,10 +192,11 @@ backup taken before the last integration update is there again, so a **Full
 rollback** works after the restore. Backups made after that Home Assistant
 backup are gone with the rest of the folder: download them from **System**
 first if you want to keep them, and upload them again after. A restore of a
-Home Assistant backup made before 0.25.2 still brings back no backups:
-**System** then lists none, and a **Full rollback** is refused with the reason
-(the backup no longer exists); a plain start of the previous version still
-works.
+Home Assistant backup made while the installed app was older than 0.25.2 (the
+one taken right before the update to 0.25.2 included) still brings back no
+backups: **System** then lists none, and a **Full rollback** is refused with
+the reason (the backup no longer exists); a plain start of the previous
+version still works.
 
 `backup_exclude` in `app/config.yaml` names every entry below
 `*_hass_remote_integration/`, the folder of this app's slug. If you build the
