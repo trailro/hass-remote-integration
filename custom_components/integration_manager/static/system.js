@@ -11,7 +11,8 @@ function wdRender(w){ if(!w) return; const p=[];
   if(w.gave_up) p.push('<span class="warn">given up: '+esc(w.gave_up)+'</span>');
   else if(w.pending) p.push(`<span class="warn">${esc(w.pending.state||'error')} for ${Math.round(w.pending.bad_for_s/60)} min of ${Math.round(w.pending.window_s/60)}; next step: ${esc(w.pending.next||'restart')}</span>`);
   if(w.last_reload) p.push(`last reload ${esc(w.last_reload.at)} after ${Math.round((w.last_reload.unhealthy_s||0)/60)} min ${esc(w.last_reload.state||'')} (${esc(w.last_reload.reason||'')}): ${esc(w.last_reload.result||'')}`);
-  if(w.last) p.push(`last action ${esc(w.last.at)}: restarted after ${Math.round((w.last.unhealthy_s||0)/60)} min of ${esc(w.last.state||'error')} (${esc(w.last.reason||'')}), attempt ${w.last.attempt} — ${esc(w.last.next||'')}`);
+  // a restart the watchdog decided on but did not make (its record not written, the restart refused) says so in next
+  if(w.last) p.push(`last action ${esc(w.last.at)}: ${String(w.last.next||'').startsWith('not restarted')?'restart refused':'restarted'} after ${Math.round((w.last.unhealthy_s||0)/60)} min of ${esc(w.last.state||'error')} (${esc(w.last.reason||'')}), attempt ${w.last.attempt} — ${esc(w.last.next||'')}`);
   if(w.reloads_24h) p.push(`${w.reloads_24h} automatic reload${w.reloads_24h>1?'s':''} in the last 24 h (max ${w.max_reloads_per_day})`);
   if(w.restarts_24h) p.push(`${w.restarts_24h} automatic restart${w.restarts_24h>1?'s':''} in the last 24 h (max ${w.max_per_day})`);
   $('#wdlast').innerHTML=p.join(' · ');
