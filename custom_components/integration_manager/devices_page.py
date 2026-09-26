@@ -17,6 +17,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
 from . import discovery as disc
+from .diagnostics import scrub_text
 from .ha_import import registry_devices
 from .mqtt_publisher import MqttPublisher, _json_default
 from .http_util import ManagerView, with_body
@@ -126,7 +127,7 @@ class DeviceActionView(ManagerView):
             if action == "delete":
                 return await self._delete(reg, device_id)
         except Exception as err:  # noqa: BLE001
-            return self.json({"ok": False, "error": f"{type(err).__name__}: {err}"})
+            return self.json({"ok": False, "error": scrub_text(f"{type(err).__name__}: {err}")})
         return self.json_message("unknown action", status_code=400)
 
     async def _delete(self, reg: Any, device_id: str) -> web.Response:
@@ -167,7 +168,7 @@ class DeviceActionView(ManagerView):
                     break
                 reg.async_update_device(device_id, remove_config_entry_id=entry.entry_id)
             except Exception as err:  # noqa: BLE001
-                return failed(f"{entry.domain}: {type(err).__name__}: {err}")
+                return failed(scrub_text(f"{entry.domain}: {type(err).__name__}: {err}"))  # the integration's own text
             detached.append(entry.domain)
         if reg.async_get(device_id) is not None and not detached:
             reg.async_remove_device(device_id)  # orphan device without config entries
