@@ -3,6 +3,17 @@
 Every version's changes are in the
 [GitHub releases](https://github.com/trailro/hass-remote-integration/releases).
 
+## 0.25.2
+
+- **HRI's backups are now in the Home Assistant backup of the app.** Until
+  now they were left out, so restoring a Home Assistant backup deleted them,
+  the one a **Full rollback** needs included. They hold no Home Assistant
+  install, so the backup grows by about *Backups to keep* times one to a few
+  MB. Restoring it brings them back as they were when it was taken.
+- **Release images:** the release build checks out the release tag itself,
+  never a branch with the same name, and the step that updates the app's
+  version no longer leaves its write token on disk.
+
 ## 0.25.1
 
 - **Security fix, sidebar panel (ingress):** a Home Assistant user could
