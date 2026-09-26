@@ -37,5 +37,19 @@ class ExcludedWhileDownTest(unittest.TestCase):
         self.assertIn(f"{mp.ORPHAN_SWEEP_DELAY_S // 60} minutes after the start", row.replace("five", "5"))
 
 
+class DamagedRulesFileTest(unittest.TestCase):
+    """docs/files.md lists what happens to each damaged file: mqtt_rules.json and its .corrupt copies were missing."""
+
+    def test_the_rules_file_has_its_row(self):
+        from custom_components.integration_manager import mqtt_rules
+
+        with open(os.path.join(ROOT, "docs", "files.md"), encoding="utf-8") as fh:
+            [row] = [line for line in fh if line.startswith("| `mqtt_rules.json` | Unreadable")]
+        self.assertIn("mqtt_rules.json.corrupt-<stamp>", row)
+        self.assertIn(f"newest {('one', 'two', 'three', 'four')[mqtt_rules.CORRUPT_KEEP - 1]}", row)
+        for recovery in ("put it back", "Reconnect", "remove"):
+            self.assertIn(recovery, row)
+
+
 if __name__ == "__main__":
     unittest.main()

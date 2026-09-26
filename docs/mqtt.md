@@ -345,8 +345,8 @@ and `connect_error`, and the log says it. The damaged file stays where it is,
 with a copy as `mqtt_rules.json.corrupt-<time>` (the newest 3 are kept). Rule
 changes from the Entities page or `POST /api/mqtt/rules` are refused with the
 same reason, so none overwrites the file. Fix the file, or remove it to start
-over without rules, then save the MQTT settings (or restart): the rules are
-read again before connecting.
+over without rules, then press *Reconnect*, save the MQTT settings or
+restart: the rules are read again before connecting.
 
 ### Collisions
 
