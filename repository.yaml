@@ -1,4 +1,4 @@
-# Home Assistant OS / Supervised: add this repository's URL in Settings > Apps > App Store > Repositories.
+# Home Assistant OS / Supervised (deprecated): add this repository's URL in Settings > Apps > App Store > Repositories.
 # The app itself is in app/ (the Supervisor finds it by its config.yaml).
 name: hass-remote-integration
 url: https://github.com/trailro/hass-remote-integration
