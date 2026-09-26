@@ -164,6 +164,11 @@ The web UI opens two ways, with a different gate each:
   with HRI's own password, session cookie and host guard
   ([Security](security.md)). If you use only the panel, clear the port on the
   app's **Network** tab; nothing is then reachable without Home Assistant.
+  The host guard serves the port only under an IP address, `localhost` or a
+  local name (`.local`, `.lan`, `.home`, …): under any other name, such as a
+  split-DNS name or a `*.ts.net` one, it answers `403`. Open it once by IP
+  address and add the name under *allowed host names* on **System**
+  (`allowed_hosts`).
 
 A write (install, start, settings, service call) made through the panel names
 the Home Assistant user in the manager's log (`ingress: POST /api/… by Home

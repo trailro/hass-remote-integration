@@ -172,6 +172,11 @@ class DocsTest(unittest.TestCase):
         self.assertIn("Bearer", row)
         self.assertIn("Bearer", next(p for p in self._read("docs/security.md").split("\n\n") if "ends with a space" in p))
 
+    def test_the_apps_port_under_another_host_name(self):
+        access = self._read("docs/app.md").split("## Access", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("allowed host names", access)
+        self.assertIn("403", access)
+
 
 if __name__ == "__main__":
     unittest.main()
