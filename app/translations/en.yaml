@@ -1,7 +1,7 @@
 configuration:
   password:
     name: Password
-    description: Password for the web UI and API (HRI_PASSWORD). Empty means no login.
+    description: Password for the web UI and API on the app's port (HRI_PASSWORD). Empty means no login there. The sidebar panel always uses Home Assistant's login.
   apt_packages:
     name: Debian packages
     description: Installed at boot, before Home Assistant, for what pip cannot install, such as ffmpeg (HRI_APT_PACKAGES). Names separated by spaces or commas.
