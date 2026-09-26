@@ -367,11 +367,12 @@ class _StatusHandler(http.server.BaseHTTPRequestHandler):
         # Nothing here is the manager API: while Home Assistant installs, /api/status, /api/diag/health and
         # any healthcheck used to get this HTML page with a 200 and call the container healthy for the whole
         # install.  503 says what is true, and the page is served with it too - browsers render the body.
+        # no login exists yet: with a password, the version, the phase (apt package names) and a failed restore are for
+        # whoever can log in; a healthcheck, a waiting script or a browser needs only "not up yet"
+        hide = password_configured() and not ingress
         if urllib.parse.urlsplit(self.path).path.startswith("/api/"):
             status = install_status()
-            if password_configured() and not ingress:
-                # no login exists yet: the version, the phase (apt package names) and a failed restore are for
-                # whoever can log in; a healthcheck or a waiting script needs only "not up yet"
+            if hide:
                 status = {"installing": status["installing"], "error": "the manager API is not up yet (Home Assistant "
                           + ("is still being installed or prepared)" if status["installing"] else "is not started)")}
             self._send(503, "application/json", json.dumps(status).encode())
@@ -384,14 +385,21 @@ class _StatusHandler(http.server.BaseHTTPRequestHandler):
             # without a password the manager shows the same log to anyone once it runs; until then this is the
             # only place pip's progress appears (pip writes into the file, not into the container log)
             tail = _log_tail()
-        heading = _status.get("title") or f"Installing Home Assistant {_status['version']} …"
+        if hide:
+            heading = ("Home Assistant is still being installed or prepared …" if _status.get("kind") == "install"
+                       else "Home Assistant is not started")
+            detail = "<p>the details are in the container log · this page refreshes itself</p>"
+        else:
+            heading = _status.get("title") or f"Installing Home Assistant {_status['version']} …"
+            detail = (f"<p>phase: <b>{html.escape(str(_status['phase']))}</b> · {int(time.time() - _status['started'])} s so far"
+                      " · this page refreshes itself</p>")
         log_block = f"<pre style='font:12px ui-monospace;color:#8b98a5;white-space:pre-wrap'>{html.escape(tail)}</pre>" if tail else ""
         body = (
             "<!doctype html><meta charset=utf-8><meta http-equiv=refresh content=5>"
             f"<title>hass-remote-integration · {html.escape(heading)}</title>"
             "<body style='font:14px system-ui;background:#0f1418;color:#e6edf3;padding:24px'>"
             f"<h2>{html.escape(heading)}</h2>"
-            f"<p>phase: <b>{html.escape(str(_status['phase']))}</b> · {int(time.time() - _status['started'])} s so far · this page refreshes itself</p>"
+            f"{detail}"
             f"{log_block}"
         ).encode()
         self._send(503, "text/html; charset=utf-8", body)
