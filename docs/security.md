@@ -62,7 +62,9 @@ Behind a reverse proxy:
   `400 Bad Request`;
 - all requests come from the proxy, so five wrong passwords from anywhere
   block new logins and `Bearer` scripts for 15 minutes;
-- set `HRI_COOKIE_SECURE=1` to mark the cookie `Secure`.
+- set `HRI_COOKIE_SECURE=1` (or `true`, `yes`, `on`, any case) to mark the
+  cookie `Secure`; any other value leaves it unmarked, with a warning in the
+  log for one that is not `0`, `false`, `no` or `off`.
 
 To allow only the Docker host, bind the port to localhost in
 `docker-compose.override.yml`:

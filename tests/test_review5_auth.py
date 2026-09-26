@@ -178,5 +178,42 @@ class DocsTest(unittest.TestCase):
         self.assertIn("403", access)
 
 
+# ----- S4-5 ---------------------------------------------------------------------------------------
+
+class CookieSecureTest(unittest.TestCase):
+    def setUp(self):
+        patch = mock.patch.object(auth_mod, "_cookie_secure_warned", False, create=True)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def _secure(self, value):
+        resp = web.Response()
+        with _env(HRI_COOKIE_SECURE=value):
+            auth_mod._set_session_cookie(resp, _request(), "v", 60)
+        return bool(resp.cookies[auth_mod.COOKIE]["secure"])
+
+    def test_the_usual_spellings_of_on(self):
+        for value in ("1", "1 ", " 1\n", "true", "True", "YES", "on", "On "):
+            with self.subTest(value=value):
+                self.assertTrue(self._secure(value))
+
+    def test_off_and_unset(self):
+        for value in ("", "0", "false", "no", "off", " "):
+            with self.subTest(value=value), self.assertNoLogs(auth_mod._LOGGER, logging.WARNING):
+                self.assertFalse(self._secure(value))
+
+    def test_an_unknown_value_is_warned_about_once(self):
+        with self.assertLogs(auth_mod._LOGGER, logging.WARNING) as logs:
+            self.assertFalse(self._secure("maybe"))
+            self.assertFalse(self._secure("maybe"))
+        self.assertEqual(len([r for r in logs.records if "HRI_COOKIE_SECURE" in r.getMessage()]), 1)
+
+    def test_a_tls_request_is_secure_whatever_the_value(self):
+        resp = web.Response()
+        with _env(HRI_COOKIE_SECURE="0"):
+            auth_mod._set_session_cookie(resp, _request(secure=True), "v", 60)
+        self.assertTrue(resp.cookies[auth_mod.COOKIE]["secure"])
+
+
 if __name__ == "__main__":
     unittest.main()
