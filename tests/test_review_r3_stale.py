@@ -17,6 +17,9 @@ from tests.test_r3_mqtt import _publisher
 class ClearsAfterTheConnackTest(unittest.IsolatedAsyncioTestCase):
     def publisher(self):
         pub = _publisher()
+        registry = mock.patch.object(mp.er, "async_get", return_value=mock.Mock(entities={}))  # the disabled entries kept
+        registry.start()
+        self.addCleanup(registry.stop)
         pub._connected = False
         pub.async_republish_all = mock.AsyncMock(return_value=None)
         pub._clear_stale_docs = mock.Mock(return_value=7)

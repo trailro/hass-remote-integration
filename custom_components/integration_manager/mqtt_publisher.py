@@ -2857,13 +2857,13 @@ class MqttPublisher:
         self.stats["discovery_compat_device_classes_dropped"] = counts.get("compat_device_classes", 0)
         self.stats["discovery_compat_platforms_mirrored"] = counts.get("compat_platforms", 0)
 
-    def _clear_stale_docs(self) -> int:
+    def _clear_stale_docs(self, keep: frozenset[str] = frozenset()) -> int:
         """Blocking: retained entity documents of ours under <base>/ that this
-        process no longer publishes (entities a new version dropped)."""
+        process no longer publishes (entities a new version dropped); `keep`: those of registry entries without a state."""
         base = self.base_topic
         try:
             found = self._retained_scan("stale", [(f"{base}/#", 1)])
-            live = set(self._topics.values())
+            live = set(self._topics.values()) | keep
             keep_prefixes = (f"{base}/services/", f"{base}/cmd/", f"{base}/call/")
             stale = [t for t, p in found.items()
                      if t not in live and t not in (self._status_topic(), self._health_topic(), self._manager_topic())
@@ -3162,7 +3162,13 @@ class MqttPublisher:
             _LOGGER.warning("MQTT: stale documents not cleared (no connection within %.0f s)", self.CONNECT_GRACE_S)
             return 0
         await self.async_republish_all()  # so _topics reflects the new version first
-        return await self.hass.async_add_executor_job(self._clear_stale_docs)
+        # entries without a state (disabled): no document is published for them, but their discovery components stay and
+        # read the retained one, which an empty payload would break there.  Read on the loop, where the registry lives
+        reg = er.async_get(self.hass)
+        keep = frozenset(self._topic_for(e.entity_id, e.platform) for e in list(reg.entities.values())
+                         if self.hass.states.get(e.entity_id) is None and not self._integration_excluded(e.platform)
+                         and not self.rules.for_entity(e.entity_id).get("exclude"))
+        return await self.hass.async_add_executor_job(self._clear_stale_docs, keep)
 
     # ----- rules ---------------------------------------------------------------
 
