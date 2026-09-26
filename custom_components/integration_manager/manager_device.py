@@ -641,8 +641,9 @@ class ManagerDevice:
         import backupkit
 
         rec = await self.installer.async_backup_exclusive("mqtt")
-        await self.hass.async_add_executor_job(backupkit.prune, self.installer.config_dir, self.installer.settings.backup_keep,
-                                               self.installer.protected_backups() | {rec["name"]})
+        # protected_backups() reads ha.json, the rebuild plan and the backups directory: in the job too
+        await self.hass.async_add_executor_job(lambda: backupkit.prune(self.installer.config_dir, self.installer.settings.backup_keep,
+                                                                       self.installer.protected_backups() | {rec["name"]}))
         return {"ok": True, "note": f"backup {rec['name']}"}
 
     async def _do_check_updates(self) -> dict[str, Any]:
