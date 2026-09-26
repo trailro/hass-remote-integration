@@ -219,5 +219,53 @@ class LedgerNotWrittenTest(WatchdogBase):
         self.assertTrue(any("not restarting the process" in str(c.args[0]) for c in log.call_args_list))
 
 
+# ----- S2-4 / S2-7 ----------------------------------------------------------------------------------
+
+class PatchKeepsTheBytesTest(PatchTestCase):
+    def write_bytes(self, name, data):
+        with open(os.path.join(self.comp, name), "wb") as fh:
+            fh.write(data)
+
+    def read_bytes(self, name):
+        with open(os.path.join(self.comp, name), "rb") as fh:
+            return fh.read()
+
+    def test_crlf_endings_are_kept(self):
+        self.write_bytes("mod.py", b"a = 1\r\nb = 2\r\nc = 4\r\n")
+        self.assertEqual(patches._diff_status(DIFF, self.ctx), "pending")
+        self.assertEqual(patches._diff_apply(DIFF, self.ctx), "applied")
+        self.assertEqual(self.read_bytes("mod.py"), b"a = 1\r\nb = 3\r\nc = 4\r\n")  # before the fix: LF
+        self.assertEqual(patches._diff_status(DIFF, self.ctx), "applied")
+
+    def test_mixed_endings_outside_the_hunk_are_kept(self):
+        self.write_bytes("mod.py", b"x = 0\r\n\r\ny = 0\nz = 0\r\na = 1\nb = 2\nc = 4\ntail = 1\r\n")
+        diff = "--- a/mod.py\n+++ b/mod.py\n@@ -5,3 +5,3 @@\n a = 1\n-b = 2\n+b = 3\n c = 4\n"
+        self.assertEqual(patches._diff_apply(diff, self.ctx), "applied")
+        self.assertEqual(self.read_bytes("mod.py"), b"x = 0\r\n\r\ny = 0\nz = 0\r\na = 1\nb = 3\nc = 4\ntail = 1\r\n")
+
+    def test_a_file_that_is_not_utf8_is_refused_not_rewritten(self):
+        data = b"a = 1\nb = 2\nc = 4\n# caf\xe9\n"
+        self.write_bytes("mod.py", data)
+        self.assertIn("not UTF-8", patches._diff_status(DIFF, self.ctx))
+        self.assertIn("not UTF-8", patches._diff_apply(DIFF, self.ctx))
+        self.assertEqual(self.read_bytes("mod.py"), data)  # before the fix: \xe9 became U+FFFD, status "applied"
+
+    def test_a_failed_tmp_write_leaves_no_tmp_behind(self):
+        self.write("two.py", "z\n")
+        diff = DIFF + "--- a/two.py\n+++ b/two.py\n@@ -1 +1 @@\n-z\n+Z\n"
+        real = open
+
+        def failing_open(path, mode="r", *a, **kw):
+            if str(path).endswith("two.py.tmp") and "w" in mode:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real(path, mode, *a, **kw)
+
+        with mock.patch("builtins.open", failing_open), self.assertRaises(OSError):
+            patches._diff_apply(diff, self.ctx)
+        self.assertEqual(sorted(os.listdir(self.comp)), ["mod.py", "two.py"])  # before the fix: mod.py.tmp stayed
+        self.assertEqual(self.read("mod.py"), "a = 1\nb = 2\nc = 4\n")
+        self.assertEqual(self.read("two.py"), "z\n")
+
+
 if __name__ == "__main__":
     unittest.main()
