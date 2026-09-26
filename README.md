@@ -343,12 +343,13 @@ stop, and before 0.18.0 it does not pass `HRI_APT_PACKAGES` on, so setting it
 in `.env` does nothing. Download the file again (the command in [Quick
 start](#quick-start)) when you update, or fix `stop_grace_period` by hand.
 
-The image carries a healthcheck, so `docker ps` says `healthy` once the manager
-API answers and `unhealthy` when it stops, and `depends_on: condition:
-service_healthy` works. It needs no new compose file: a service without its own
-`healthcheck:` inherits the image's. It asks `GET /api/status` on `HRI_PORT`
-every 30 s with the image's Python, and holds off for the first 20 minutes, the
-time a first Home Assistant install takes (see
+The image carries a healthcheck, so `docker ps` says `healthy` once the port
+answers and `unhealthy` when nothing does. It is liveness only: a container
+that is installing Home Assistant is healthy (the install page answers it), so
+`depends_on: condition: service_healthy` waits for the container to be up, not
+for the manager API. It needs no new compose file: a service without its own
+`healthcheck:` inherits the image's. It asks `GET /api/alive` on `HRI_PORT`
+every 30 s with the image's Python, and holds off for the first 20 minutes (see
 [Troubleshooting](#troubleshooting)).
 
 The top bar shows the running version and the commit its image was built from
@@ -693,7 +694,7 @@ without it too, from a copy at most 10 seconds old. See [API](docs/api.md).
   shows only the start and end. Until Home Assistant is started (the
   `HRI_APT_PACKAGES` packages, the PyPI lookup, the install, the manager's
   requirements, a scheduled restore, removing unused venvs), the page and every
-  `/api/` path answer `503` with `Retry-After: 5`, under `/api/` with a JSON
+  `/api/` path but `/api/alive` answer `503` with `Retry-After: 5`, under `/api/` with a JSON
   body naming the `phase` and the seconds since the container started
   (`elapsed`). `docker stop` during these steps stops pip and exits at once. An
   install runs as long as it makes progress; one that writes nothing for 15
@@ -702,15 +703,16 @@ without it too, from a copy at most 10 seconds old. See [API](docs/api.md).
   version in `integration_manager/ha.json` that is not a version number (a hand
   edit) is ignored and logged.
 - **`docker ps` says the container is unhealthy, or stays `starting`.**
-  `starting` is the first 20 minutes, which covers the first install; the
-  manager's first answer makes it healthy at once. `unhealthy` after that means
-  three failed probes of `GET /api/status` in a row (about 90 s). `docker
+  `starting` is at most the first 20 minutes; the first answer, the install
+  page's included, makes it healthy at once. `unhealthy` after that means
+  three failed probes of `GET /api/alive` in a row (about 90 s): nothing
+  answered on the port, or it answered `5xx`. `docker
   inspect --format '{{json .State.Health}}' <name>` shows what the probe got,
   and `docker logs <name>` why. A password changes nothing: a `401` is the
   manager answering. To see the probe's own error, run it by hand:
   `docker exec <name> python -c "import http.client, os;
   c = http.client.HTTPConnection('127.0.0.1', int(os.environ.get('HRI_PORT') or 8087));
-  c.request('GET', '/api/status'); print(c.getresponse().status)"`.
+  c.request('GET', '/api/alive'); print(c.getresponse().status)"`.
 - **The page says Home Assistant is not started: a restore failed and could not
   be put back.** The configuration is half restored, and the page names the
   backup that holds it from before. Free space or fix the error in `docker logs

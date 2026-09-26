@@ -54,6 +54,11 @@ Exceptions:
 
 ### Status
 
+- `GET /api/alive`: the image's healthcheck, liveness only. Until Home
+  Assistant runs, the boot status page answers it `200` (`{"alive": true}`,
+  nothing else) while every other `/api/` path answers `503`; then the
+  manager has no view for it, so it answers `404`, or `401` with a password.
+  The probe takes any answer below `500` as alive.
 - `GET /api/mqtt/status`: see the [MQTT reference](mqtt.md).
   `retained_cleanup_pending` is a list of `{base_topic, broker, other_broker,
   deferred, error, since}`, the configured broker's first.

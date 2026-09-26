@@ -46,16 +46,16 @@ ENV HRI_BUILD=${HRI_BUILD}
 VOLUME ["/config"]
 EXPOSE 8087
 
-# Without this Docker cannot tell whether the manager answers at all.  There is no curl in the image, so
-# its own Python asks the manager port - HRI_PORT read at runtime, not the 8087 baked in above - for
-# /api/status without X-Requested-With: the copy at most 10 s old, which runs no patch code (README,
-# "API").  Anything the manager itself answers is healthy, the 401 of a container with HRI_PASSWORD set
-# included; a refused connection and the 503 the entrypoint serves while Home Assistant installs are not.
-# start-period: that install is the slow part, and an install that writes nothing for 15 minutes is the
-# longest one the entrypoint waits for (PIP_IDLE_TIMEOUT_S) - 20 minutes leaves the rest of the boot (apt
-# packages, the PyPI lookup, the manager's requirements, Home Assistant's own first start) inside it, and
-# a probe that fails in there never counts: the first answer flips the container to healthy at once.
+# Without this Docker cannot tell whether the container is alive.  There is no curl in the image, so its
+# own Python asks HRI_PORT (read at runtime, not the 8087 baked in above) for /api/alive.  Liveness only:
+# while Home Assistant installs, the entrypoint's status page answers it 200, so an install is never
+# "unhealthy" (the Supervisor's watchdog restarts an unhealthy app, and after a restart in place the start
+# period does not apply again); once Home Assistant runs, the manager has no view there and answers 404,
+# or 401 with HRI_PASSWORD set - anything below 500 is an answer, so healthy.  A refused connection, a
+# timeout or a 5xx are not.  start-period: the time before the status page first listens (the image's
+# first steps) and a slow first answer; 20 minutes, as when the probe waited for the install, and a probe
+# that fails in there never counts: the first answer flips the container to healthy at once.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20m --retries=3 \
-    CMD ["python", "-c", "import http.client, os; c = http.client.HTTPConnection('127.0.0.1', int(os.environ.get('HRI_PORT') or 8087), timeout=5); c.request('GET', '/api/status'); raise SystemExit(0 if c.getresponse().status < 500 else 1)"]
+    CMD ["python", "-c", "import http.client, os; c = http.client.HTTPConnection('127.0.0.1', int(os.environ.get('HRI_PORT') or 8087), timeout=5); c.request('GET', '/api/alive'); raise SystemExit(0 if c.getresponse().status < 500 else 1)"]
 
 CMD ["python", "/app/entrypoint.py"]
