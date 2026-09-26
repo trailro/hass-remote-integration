@@ -201,10 +201,16 @@ The web UI opens two ways, with a different gate each:
   the **HRI** sidebar panel. It works wherever your Home Assistant does,
   remote access over HTTPS and Home Assistant Cloud (Nabu Casa) included,
   with nothing opened on your network. Home Assistant's login is the gate:
-  HRI's password and host guard do not apply. The panel shows for
-  administrators, but any logged-in Home Assistant user who has the panel's
-  address can open it, and the UI installs code and runs service calls: set
-  `ingress_users` to the users who may (anyone else gets `403`).
+  HRI's password and host guard do not apply. The panel shows only for
+  administrators, but that only hides it: the Supervisor opens ingress
+  sessions for every logged-in Home Assistant user, administrator or not, so
+  anyone with the panel's address can open the UI, which installs code and
+  runs service calls. `ingress_users` is the way to restrict it: set it to
+  the users who may (anyone else gets `403`). HRI reads the user from the
+  `X-Remote-User-Id` and `X-Remote-User-Name` headers only when each comes
+  once and spelled exactly so: the Supervisor forwards a client's own copy
+  spelled in another case, so such a request gets `403`, with or without
+  `ingress_users`.
 - **On the app's port** (8087 on the host by default): as a Docker install,
   with HRI's own password, session cookie and host guard
   ([Security](security.md)). If you use only the panel, clear the port on the
