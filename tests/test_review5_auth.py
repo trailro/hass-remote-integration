@@ -113,5 +113,50 @@ class StatusApiWithPasswordTest(unittest.TestCase):
         self.assertEqual((status, json.loads(body)["version"]), (503, "2026.9.3"))
 
 
+# ----- S4-2 ---------------------------------------------------------------------------------------
+
+class UndecodablePasswordTest(unittest.TestCase):
+    """A password file that is not UTF-8, or HRI_PASSWORD with bytes that are not (os.environ holds them as lone
+    surrogates), crashed async_setup: now the UI stays closed and the login page says why."""
+
+    def _file(self, content: bytes):
+        path = os.path.join(_tmp(self), "hri_password")
+        with open(path, "wb") as fh:
+            fh.write(content)
+        return path
+
+    def _setup(self, **env):
+        with _env(**env):
+            return asyncio.run(auth_mod.async_setup_auth(_hass(_tmp(self))))
+
+    def test_a_file_that_is_not_utf8(self):
+        with _env(HRI_PASSWORD_FILE=self._file(b"s3\xffcr3t\n")):
+            password, reason = auth_mod._configured_password()
+        self.assertTrue(password)
+        self.assertIn("UTF-8", reason)
+        self.assertNotIn("0xff", reason)  # nothing of the password's bytes in the log or on the page
+        with self.assertLogs(auth_mod._LOGGER, logging.ERROR):
+            auth = self._setup(HRI_PASSWORD_FILE=self._file(b"s3\xffcr3t\n"))
+        self.assertTrue(auth.enabled)
+        self.assertIn("UTF-8", auth.unusable)
+
+    def test_an_environment_value_that_is_not_utf8(self):
+        with _env(HRI_PASSWORD="s3\udcffcr3t"):  # b"s3\xffcr3t" in the process environment
+            password, reason = auth_mod._configured_password()
+        self.assertTrue(password)
+        self.assertIn("UTF-8", reason)
+        with self.assertLogs(auth_mod._LOGGER, logging.ERROR):
+            auth = self._setup(HRI_PASSWORD="s3\udcffcr3t")
+        self.assertTrue(auth.enabled)
+        self.assertIn("UTF-8", auth.unusable)
+        self.assertFalse(auth.check_password("s3\udcffcr3t"))
+
+    def test_the_status_page_counts_both_as_a_password(self):
+        ep = entrypoint_for(self, _tmp(self), HRI_PASSWORD="s3\udcffcr3t", HRI_PASSWORD_FILE="")
+        self.assertTrue(ep.password_configured())
+        ep = entrypoint_for(self, _tmp(self), HRI_PASSWORD="", HRI_PASSWORD_FILE=self._file(b"\xff"))
+        self.assertTrue(ep.password_configured())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -71,6 +71,8 @@ def _configured_password() -> tuple[str, str]:
         except OSError as err:
             # fail closed: a password was meant to be set, so the UI must not open without one
             return secrets.token_urlsafe(32), f"HRI_PASSWORD_FILE {path} is not readable ({err})"
+        except ValueError:  # the error names the bytes of the password: not repeated
+            return secrets.token_urlsafe(32), f"HRI_PASSWORD_FILE {path} is not UTF-8 text"
         if not password:
             # a Docker secret declared but never populated, or a file truncated by a full disk, reads
             # as "": the same mistake as an unreadable one, and must not open the UI either
@@ -84,6 +86,10 @@ def _configured_password() -> tuple[str, str]:
         # only spaces, tabs and the like: a password was meant to be set (a template that rendered blank) and
         # did not arrive, like an empty HRI_PASSWORD_FILE; taken as it is, it would be guessed in a few tries
         return secrets.token_urlsafe(32), "HRI_PASSWORD is set but holds only whitespace"
+    try:
+        password.encode()
+    except UnicodeEncodeError:  # bytes that are not UTF-8 arrive as lone surrogates, which no login can send
+        return secrets.token_urlsafe(32), "HRI_PASSWORD holds bytes that are not UTF-8"
     return password, ""
 
 

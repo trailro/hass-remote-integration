@@ -11,10 +11,11 @@ expose it to the internet**.
 
 Set `HRI_PASSWORD`, or `HRI_PASSWORD_FILE` (a Docker secret), to require one:
 
-- An empty or unreadable `HRI_PASSWORD_FILE`, or a `HRI_PASSWORD` of only
-  spaces or tabs, is a password that failed to arrive: nothing is accepted
-  until you fix it, and `POST /api/login` answers `503` with the reason (also
-  in the log and on the timeline).
+- An empty or unreadable `HRI_PASSWORD_FILE`, one that is not UTF-8 text,
+  or a `HRI_PASSWORD` of only spaces or tabs or with bytes that are not
+  UTF-8, is a password that failed to arrive: nothing is accepted until you
+  fix it, and `POST /api/login` answers `503` with the reason (also in the
+  log and on the timeline).
 - Line ends at either end of `HRI_PASSWORD` are not part of it; spaces are.
   Only line ends means no password. `HRI_PASSWORD_FILE` is read once at
   process start, trimmed of spaces and line ends: restart after rotating it.
