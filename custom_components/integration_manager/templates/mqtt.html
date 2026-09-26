@@ -4,7 +4,7 @@
 <title>hass-remote-integration · MQTT</title>
 <!--css--></head><body><main>
 <h1>MQTT</h1>
-<div style="color:var(--mut);margin-bottom:6px">Every entity of the running integration goes to the broker as a retained JSON document under its base topic (<code>hass_&lt;domain&gt;/…</code>, or <code>hass_&lt;domain&gt;_&lt;instance&gt;/…</code> with <code>HRI_INSTANCE</code>; the broker line below shows which, and why), with HA discovery for the consuming Home Assistant once you turn it on; commands and service calls come back the same way.<div id="flash" class="warn" style="min-height:1.2em"></div></div>
+<div style="color:var(--mut);margin-bottom:6px">Every entity of the running integration goes to the broker as a retained JSON document under its base topic (<code>hass_&lt;domain&gt;/…</code>, or <code>hass_&lt;domain&gt;-&lt;instance&gt;/…</code> with <code>HRI_INSTANCE</code>; the broker line below shows which, and why), with HA discovery for the consuming Home Assistant once you turn it on; commands and service calls come back the same way.<div id="flash" class="warn" style="min-height:1.2em"></div></div>
 
 <div class="card"><h2>Entity translator</h2>
  <table>

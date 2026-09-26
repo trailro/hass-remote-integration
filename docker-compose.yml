@@ -30,7 +30,7 @@ services:
       HRI_CALL_TIMEOUT: "${HRI_CALL_TIMEOUT:-60}"   # seconds a service call may take (over MQTT and from the Services page)
       HRI_DEBUG: "${HRI_DEBUG:-}"                   # 1: debug logging for the manager
       HRI_TRACE_IMPORT: "${HRI_TRACE_IMPORT:-}"     # diagnostics: log who imports these packages
-      HRI_INSTANCE: "${HRI_INSTANCE:-}"             # e.g. "garage": MQTT identity hass_<domain>_garage, for a second container of the same integration on one broker
+      HRI_INSTANCE: "${HRI_INSTANCE:-}"             # e.g. "garage": MQTT identity hass_<domain>-garage, for a second container of the same integration on one broker
     extra_hosts:
       - "host.docker.internal:host-gateway"   # a serial-to-TCP bridge or a broker on the Docker host
 

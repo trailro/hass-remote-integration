@@ -34,7 +34,7 @@ class BrokerLineTest(unittest.TestCase):
 
     def test_instance(self):
         o = self.out["instance"]
-        self.assertIn("hass_demo_garage/…", o["text"])
+        self.assertIn("hass_demo-garage/…", o["text"])
         self.assertIn("from HRI_INSTANCE garage", o["text"])
         self.assertIsNone(o["button"])
 
@@ -42,11 +42,11 @@ class BrokerLineTest(unittest.TestCase):
         o = self.out["remembered"]
         self.assertIn("hass_demo/…", o["text"])
         self.assertIn("kept: this volume already published the running integration under it", o["text"])
-        self.assertIn("HRI_INSTANCE garage would give hass_demo_garage", o["text"])
-        self.assertEqual(o["button"], "Move to hass_demo_garage")
+        self.assertIn("HRI_INSTANCE garage would give hass_demo-garage", o["text"])
+        self.assertEqual(o["button"], "Move to hass_demo-garage")
         self.assertEqual(len(o["confirms"]), 1)
         self.assertIn("deletes those entities and devices", o["confirms"][0])
-        self.assertEqual(o["sent"], [["api/mqtt/move_identity", {"to": "hass_demo_garage"}]])
+        self.assertEqual(o["sent"], [["api/mqtt/move_identity", {"to": "hass_demo-garage"}]])
 
     def test_invalid_is_the_reason_and_escaped(self):
         o = self.out["invalid"]

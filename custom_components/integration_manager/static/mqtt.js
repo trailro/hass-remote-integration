@@ -30,7 +30,7 @@ async function mqMove(from,to){
 async function mqttConfigLoad(){
   const c=await (await fetch('api/mqtt/config')).json();
   for(const k of ['base_topic',...MQ_TEXT,...Object.keys(MQ_INT)]) $('#mq_'+k).value=c[k]??'';
-  MQ_BOOL.forEach(k=>$('#mq_'+k).checked=!!c[k]); $('#mq_base_topic').disabled=true; $('#mq_base_topic').title=c.identity_source==='remembered'?'kept: this volume already published the running integration under it':c.identity_source==='instance'?'hass_<domain>_<HRI_INSTANCE>':'derived from the running integration';
+  MQ_BOOL.forEach(k=>$('#mq_'+k).checked=!!c[k]); $('#mq_base_topic').disabled=true; $('#mq_base_topic').title=c.identity_source==='remembered'?'kept: this volume already published the running integration under it':c.identity_source==='instance'?'hass_<domain>-<HRI_INSTANCE>':'derived from the running integration';
   $('#mq_exclude_integrations').value=(c.exclude_integrations||[]).join(',');
 }
 const MQ_TEXT=['host','username','discovery_prefix','ca_certs','main_ha_version'], MQ_INT={port:1883,republish_interval_s:300,full_republish_interval_min:60}, MQ_BOOL=['enabled','discovery_enabled','force_base_topic','manager_discovery','manager_commands','tls','tls_insecure'];

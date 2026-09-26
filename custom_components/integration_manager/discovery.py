@@ -42,9 +42,22 @@ ORIGIN = {
 }
 
 
+# between the domain and the instance in an identity (hass_<domain>-<instance>): no integration domain has one (Home
+# Assistant's and HRI's rules allow a-z, 0-9 and _), and MQTT topics, client ids and discovery ids all take it
+INSTANCE_SEP = "-"
+
+
+def identity_prefix(key: str) -> str:
+    """What the unique ids and device identifiers of identity ``key`` start with: ``hass_<domain>_`` as always, and
+    ``hass_<domain>-<instance>-`` for an instance, whose name may hold a ``_``: with a ``_`` there, garage's
+    ``binary_sensor.x`` and garage_binary's ``sensor.x`` would get the same unique id, and one identity's prefix would
+    start the other's (parity takes what starts with its prefix for its own)."""
+    return key + (INSTANCE_SEP if INSTANCE_SEP in key else "_")
+
+
 def origin(prefix: str) -> dict[str, Any]:
-    """Origin block naming the instance (prefix = instance key + '_')."""
-    return {**ORIGIN, "name": f"{ORIGIN['name']} ({prefix.rstrip('_')})"}
+    """Origin block naming the instance (prefix = identity_prefix of the instance key)."""
+    return {**ORIGIN, "name": f"{ORIGIN['name']} ({prefix[:-1] if prefix.endswith(('_', INSTANCE_SEP)) else prefix})"}
 
 # Domains with a native MQTT platform on the consuming HA.
 NATIVE = {
@@ -1111,7 +1124,7 @@ def manager_device(key: str, prefix: str, topics: dict[str, str], integration: s
             category="config")
         add("button", "check_updates", "Check for updates", {"command_topic": f"{cmd}/check_updates", "payload_press": MANAGER_ACTIONS["check_updates"],
                                                              "icon": "mdi:update"}, category="config")
-    block = {"identifiers": [f"{key}_manager"], "name": f"hass-remote-integration ({key})", "manufacturer": "hass-remote-integration",
+    block = {"identifiers": [f"{prefix}manager"], "name": f"hass-remote-integration ({key})", "manufacturer": "hass-remote-integration",
              "model": f"integration manager, running {integ}", "sw_version": version}
     return f"{key}_manager", block, comps
 
