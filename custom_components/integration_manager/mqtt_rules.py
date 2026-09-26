@@ -149,7 +149,8 @@ class MqttRules:
 
     def _failed(self, problem: str) -> None:
         self.problem = (f"{problem}: its exclusions are unknown, so nothing is published over MQTT and rule changes are "
-                        "refused until the file is fixed or removed (then save the MQTT settings, or restart)")
+                        "refused until the file is fixed or removed (then press Reconnect on the MQTT page, save the MQTT "
+                        "settings, or restart)")
         self.rules = {}
         _LOGGER.error("%s", self.problem)
 
