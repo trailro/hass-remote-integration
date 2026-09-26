@@ -294,5 +294,80 @@ class MinHaTest(unittest.TestCase):
         self.assertIsNone(inst.min_ha_of("demo", "1.0"))  # views.async_change_ha_version compares it with ha_vkey
 
 
+# ----- S2-6 -----------------------------------------------------------------------------------------
+
+class PrepareWithHaChangeTest(unittest.TestCase):
+    TARGET = "2099.1.0"
+
+    def build(self, install=None):
+        view = object.__new__(build_views.BuildPrepareView)
+        view.hass, view.publisher = None, None
+        view.installer = SimpleNamespace(busy=False, install=install or mock.AsyncMock(return_value={"ok": True, "replaced": "old"}))
+        view.updater = SimpleNamespace(status=mock.AsyncMock(return_value={"current": build_views.HA_VERSION}), validate=mock.AsyncMock())
+        view._check = SimpleNamespace(_resolve=mock.AsyncMock(return_value=("demo", "v1", self.TARGET, "owner/demo")), checked=lambda *a: True)
+        return view
+
+    def run_prepare(self, view, hold_lock=False):
+        self.changed = []
+
+        async def change(installer, updater, target, mode, source):
+            # the refusals async_change_ha_version checks before it does anything
+            if views._ha_change_lock_taken():
+                raise ValueError("a Home Assistant version change, a restore or a full rollback is being prepared")
+            if installer.busy:
+                raise ValueError("another action is running")
+            async with views._HA_CHANGE_LOCK:
+                self.changed.append(target)
+                return {"desired": target, "backup": "pre-ha.zip"}
+
+        async def go():
+            request = _request({"domain": "demo", "ref": "v1", "ha": self.TARGET, "replace": True})
+            if hold_lock:
+                async with views._HA_CHANGE_LOCK:
+                    return await view.post(request)
+            return await view.post(request)
+
+        with mock.patch.object(build_views, "_commit_of", mock.AsyncMock(return_value="c" * 40)), \
+                mock.patch.object(views, "async_change_ha_version", change), mock.patch.object(build_views.events, "emit"):
+            return _body(asyncio.run(go()))
+
+    def test_a_change_being_prepared_refuses_before_anything_is_installed(self):
+        view = self.build()
+        res = self.run_prepare(view, hold_lock=True)
+        self.assertFalse(res["ok"])
+        view.installer.install.assert_not_awaited()  # before the fix: installed (and replaced), then refused
+
+    def test_no_other_change_can_start_while_the_install_runs(self):
+        seen = []
+
+        async def install(*a, **kw):
+            seen.append(views._ha_change_lock_taken())
+            return {"ok": True, "replaced": "old"}
+
+        res = self.run_prepare(self.build(install=install))
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(seen, [True])  # before the fix: the System page could take the lock here
+        self.assertEqual(self.changed, [self.TARGET])
+        self.assertFalse(views._ha_change_lock_taken())
+
+    def test_an_action_started_during_the_mqtt_reconnect_does_not_refuse_the_change(self):
+        view = self.build()
+
+        async def reconnect():
+            view.installer.busy = True  # a start from the UI, while the reconnect awaited
+
+        view.publisher = SimpleNamespace(async_reconnect=reconnect)
+        res = self.run_prepare(view)
+        self.assertTrue(res["ok"], res)  # before the fix: the reconnect ran first and the change was refused
+        self.assertEqual(self.changed, [self.TARGET])
+
+    def test_a_failed_install_releases_the_lock(self):
+        view = self.build(install=mock.AsyncMock(return_value={"ok": False, "error": "GitHub said no"}))
+        res = self.run_prepare(view)
+        self.assertFalse(res["ok"])
+        self.assertEqual(self.changed, [])
+        self.assertFalse(views._ha_change_lock_taken())
+
+
 if __name__ == "__main__":
     unittest.main()
