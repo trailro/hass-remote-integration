@@ -5,6 +5,7 @@ UI, the boot status page lets the Supervisor through, and app/config.yaml declar
 prefix needs: test_relative_urls.py."""
 
 import asyncio
+import http.client
 import http.server
 import json
 import logging
@@ -14,8 +15,6 @@ import shutil
 import tempfile
 import threading
 import unittest
-import urllib.error
-import urllib.request
 from contextvars import ContextVar
 from types import SimpleNamespace
 from unittest import mock
@@ -48,6 +47,25 @@ INGRESS_HEADERS = {
 }
 
 
+# the same request as a list of (name, value) sent as written, for the spellings a client may add: the Supervisor
+# forwards a client's copy of its user headers unless the name is spelled exactly as its own
+USER_NAME = ("X-Remote-User-Name", "alice")
+USER_ID = ("X-Remote-User-Id", "abc123")
+BASE = [(k, v) for k, v in INGRESS_HEADERS.items() if k not in (USER_NAME[0], USER_ID[0])]
+SPOOFED = {  # each is refused, with ingress_users set or not; mallory is the session's user, alice the one allowed
+    "lowercase name": BASE + [USER_ID, ("x-remote-user-name", "alice")],
+    "mixed-case name": BASE + [USER_ID, ("X-REMOTE-USER-NAME", "alice")],
+    "a client's copy after the Supervisor's": BASE + [USER_ID, ("X-Remote-User-Name", "mallory"), ("x-remote-user-name", "alice")],
+    "a client's copy before the Supervisor's": BASE + [USER_ID, ("x-remote-user-name", "alice"), ("X-Remote-User-Name", "mallory")],
+    "the name twice": BASE + [USER_ID, ("X-Remote-User-Name", "mallory"), USER_NAME],
+    "no id": BASE + [USER_NAME],
+    "the id twice": BASE + [USER_ID, USER_ID, USER_NAME],
+    "a respelled id": BASE + [("x-remote-user-id", "abc123"), USER_NAME],
+    "the id and a respelled copy": BASE + [USER_ID, ("X-REMOTE-USER-ID", "abc123"), USER_NAME],
+}
+EXACT = BASE + [USER_ID, USER_NAME]
+
+
 def _tmp(test):
     tmp = tempfile.mkdtemp()
     test.addCleanup(shutil.rmtree, tmp, True)
@@ -76,6 +94,17 @@ def _ha_http():
     except ImportError as err:  # pragma: no cover - outside the container's HA venv
         raise unittest.SkipTest(f"Home Assistant's http component is not importable: {err}")
     return async_setup_forwarded, setup_request_context, setup_security_filter
+
+
+async def _raw(host, port, method, path, headers):
+    reader, writer = await asyncio.open_connection(host, port)
+    lines = [f"{method} {path} HTTP/1.1", *(f"{k}: {v}" for k, v in headers), "Content-Length: 0", "Connection: close"]
+    writer.write(("\r\n".join(lines) + "\r\n\r\n").encode())
+    await writer.drain()
+    response = await reader.read()
+    writer.close()
+    await writer.wait_closed()
+    return int(response.split(b" ", 2)[1])
 
 
 class IngressStackTest(unittest.TestCase):
@@ -111,6 +140,9 @@ class IngressStackTest(unittest.TestCase):
             with patch:
                 async with TestClient(TestServer(app, host="127.0.0.1")) as client:
                     for method, path, headers in requests:
+                        if isinstance(headers, list):  # sent as written: the client session merges names by case
+                            out.append(await _raw(client.host, client.port, method, path, headers))
+                            continue
                         resp = await client.request(method, path, headers=headers, allow_redirects=False)
                         out.append(resp.status)
             return out, [m.__name__ for m in app.middlewares]
@@ -158,6 +190,24 @@ class IngressStackTest(unittest.TestCase):
             ("GET", "/", {k: v for k, v in INGRESS_HEADERS.items() if k != "X-Remote-User-Name"}),
         ], HRI_APP="1", HRI_INGRESS_USERS=" alice , bob,,")
         self.assertEqual(out, [200, 200, 403, 403])
+
+    def test_the_user_headers_must_be_the_supervisors_own(self):
+        """The Supervisor drops a client's X-Remote-User-* only when the name is spelled as its own: a copy spelled any
+        other way reaches HRI, and aiohttp's headers do not tell them apart."""
+        for users in ("alice", ""):
+            with self.subTest(ingress_users=users), self.assertLogs(ingress.__name__ if ingress else "x", logging.WARNING) as logs:
+                out, _, seen = self._run([("GET", "/", h) for h in SPOOFED.values()] + [("GET", "/", EXACT)],
+                                         HRI_APP="1", HRI_INGRESS_USERS=users)
+                self.assertEqual(dict(zip([*SPOOFED, "exact"], out)), {**dict.fromkeys(SPOOFED, 403), "exact": 200})
+                self.assertEqual(seen, [{"xff": None, "xfh": None, "ingress": True, "user": "alice"}])
+                self.assertEqual(sum("refused GET /" in line for line in logs.output), len(SPOOFED), logs.output)
+
+    def test_without_a_user_name_the_exact_id_is_enough(self):
+        out, _, seen = self._run([("GET", "/", BASE + [USER_ID])], HRI_APP="1")
+        self.assertEqual(out, [200])
+        self.assertEqual(seen, [{"xff": None, "xfh": None, "ingress": True, "user": ""}])
+        out, _, _ = self._run([("GET", "/", BASE + [USER_ID])], HRI_APP="1", HRI_INGRESS_USERS="alice")
+        self.assertEqual(out, [403])
 
     def test_empty_ingress_users_is_every_user(self):
         out, _, _ = self._run([("GET", "/", {**INGRESS_HEADERS, "X-Remote-User-Name": "anyone"})], HRI_APP="1", HRI_INGRESS_USERS=" , ")
@@ -220,14 +270,16 @@ class StatusServerTest(unittest.TestCase):
         with patch:
             srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ep._StatusHandler)
             threading.Thread(target=srv.serve_forever, daemon=True).start()
-            try:
-                req = urllib.request.Request(f"http://127.0.0.1:{srv.server_address[1]}/", headers=headers or INGRESS_HEADERS)
+            try:  # http.client sends the names as written (urllib capitalizes them: X-Remote-user-name)
+                conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=5)
                 try:
-                    with urllib.request.urlopen(req, timeout=5) as resp:
-                        return resp.status
-                except urllib.error.HTTPError as err:
-                    with err:
-                        return err.code
+                    conn.putrequest("GET", "/", skip_host=True, skip_accept_encoding=True)
+                    for name, value in (headers or list(INGRESS_HEADERS.items())):
+                        conn.putheader(name, value)
+                    conn.endheaders()
+                    return conn.getresponse().status
+                finally:
+                    conn.close()
             finally:
                 srv.shutdown()
                 srv.server_close()
@@ -242,6 +294,14 @@ class StatusServerTest(unittest.TestCase):
     def test_ingress_users(self):
         self.assertEqual(self._get(supervisor="127.0.0.1", HRI_APP="1", HRI_INGRESS_USERS="alice"), 503)
         self.assertEqual(self._get(supervisor="127.0.0.1", HRI_APP="1", HRI_INGRESS_USERS="dave"), 403)
+
+    def test_the_user_headers_must_be_the_supervisors_own(self):
+        for users in ("alice", ""):
+            for case, headers in {**SPOOFED, "exact": EXACT}.items():
+                with self.subTest(ingress_users=users, case=case):
+                    want = 503 if case == "exact" else 403
+                    self.assertEqual(self._get(supervisor="127.0.0.1", headers=headers, HRI_APP="1", HRI_INGRESS_USERS=users), want)
+        self.assertEqual(self._get(supervisor="127.0.0.1", headers=BASE + [USER_ID], HRI_APP="1"), 503)
 
 
 class AppIngressConfigTest(unittest.TestCase):
