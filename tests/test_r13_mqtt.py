@@ -24,11 +24,14 @@ from custom_components.integration_manager import mqtt_publisher as mp
 from custom_components.integration_manager.mqtt_rules import MqttRules
 
 
-def _closed_port() -> int:
-    s = socket.create_server(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
+def _closed_port(*other: int) -> int:
+    """A port nothing listens on, never one of ``other``: the system may hand out a port it just freed again."""
+    while True:
+        s = socket.create_server(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        if port not in other:
+            return port
 
 
 def _config(base: str) -> bytes:
