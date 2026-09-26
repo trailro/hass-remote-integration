@@ -3098,6 +3098,7 @@ class Installer:
         self._deploy(domain, tag)
         with open(marker, "w", encoding="utf-8") as fh:
             fh.write(stamp)
+        self.installed_manifest(domain)  # read here, in the executor: health() on the loop then finds it cached
         return True
 
     def _install_requirements(self, requirements: list[str], force: bool = False) -> list[str]:

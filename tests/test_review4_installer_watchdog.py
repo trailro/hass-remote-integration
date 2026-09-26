@@ -684,5 +684,34 @@ class StopUninstallMaskedTest(WatchdogBase):
         self.assertNotIn(SECRET, " ".join(m for _k, m in self.emitted))
 
 
+# ----- follow-up: health() does not open manifest.json after a deploy ---------------------------
+
+class ManifestCacheWarmedTest(unittest.TestCase):
+    def test_a_deploy_leaves_the_new_manifest_cached(self):
+        d = _tmp(self)
+        os.makedirs(os.path.join(d, "integration_manager"))
+        inst = Installer(SimpleNamespace(config=SimpleNamespace(config_dir=d)))
+        for tag in ("1.0", "2.0"):
+            src = inst._version_dir("demo", tag)
+            os.makedirs(src)
+            with open(os.path.join(src, "manifest.json"), "w", encoding="utf-8") as fh:
+                json.dump({"domain": "demo", "version": tag}, fh)
+            os.utime(os.path.join(src, "manifest.json"), ns=(10**18 + int(float(tag)), 10**18 + int(float(tag))))
+        inst.state.installed = {"demo": {"versions": {"1.0": {}, "2.0": {}}}}
+        inst._ensure_deployed("demo", "1.0")
+        self.assertEqual(inst.installed_manifest("demo")["version"], "1.0")
+        inst._ensure_deployed("demo", "2.0")  # an executor job in the installer
+        opened = _Where(None)
+        real = Installer._manifest_at
+
+        def spy(path):
+            opened(path)
+            return real(path)
+
+        with mock.patch.object(Installer, "_manifest_at", staticmethod(spy)):
+            self.assertEqual(inst.installed_manifest("demo")["version"], "2.0")  # what health() asks, on the loop
+        self.assertEqual(opened.on_loop, [])  # before the fix: manifest.json opened by the first health() after it
+
+
 if __name__ == "__main__":
     unittest.main()
