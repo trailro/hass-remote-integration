@@ -19,6 +19,8 @@ for (const [name, s] of Object.entries({
   instance: { ...base, has_identity: true, wanted_base_topic: 'hass_demo-garage', identity_source: 'instance', identity_instance: 'garage' },
   remembered: { ...base, has_identity: true, wanted_base_topic: 'hass_demo', identity_source: 'remembered', identity_instance: 'garage',
                 identity_move_to: 'hass_demo-garage' },
+  remembered_clear: { ...base, has_identity: true, wanted_base_topic: 'hass_demo', identity_source: 'remembered', identity_instance: 'garage',
+                      identity_move_to: 'hass_demo-garage' },
   warned: { ...base, has_identity: true, wanted_base_topic: 'hass_demo', identity_source: 'remembered',
             identity_warning: "HRI_INSTANCE='<i>x</i>' is not an instance name (not used: demo keeps hass_demo, the identity this volume published it under)" },
   invalid: { ...base, has_identity: false, wanted_base_topic: null, identity_source: 'invalid',
@@ -30,8 +32,9 @@ for (const [name, s] of Object.entries({
   const run = new Function('$', 'esc', 's', 'post', 'log', 'confirm', 'mqtt', 'mqttConfigLoad',
     `${helpers}\n${broker}`);
   run($, pageEsc(path.join(STATIC, 'mqtt.js')), s, post, () => {}, m => { confirms.push(m); return true; }, async () => {}, () => {});
-  const button = el.querySelector('#mqmove');
+  const button = el.querySelector('#mqmove'), box = el.querySelector('#mqmoveclear');
+  if (box && name.endsWith('_clear')) box.checked = true;
   if (button) { button.onclick(); await new Promise(r => setTimeout(r, 0)); }
-  out[name] = { text: el.textContent, bold: el.querySelectorAll('b').length, italic: el.querySelectorAll('i').length, button: button ? button.textContent : null, sent, confirms };
+  out[name] = { text: el.textContent, bold: el.querySelectorAll('b').length, italic: el.querySelectorAll('i').length, button: button ? button.textContent : null, box: box ? box.checked : null, sent, confirms };
 }
 console.log(JSON.stringify(out));

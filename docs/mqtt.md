@@ -121,14 +121,28 @@ created second gets a suffix (`switch.door_2`).
 The container that already published keeps its names (rule 1). To give it the
 instance identity on purpose, use **Move to hass_<domain>-<instance>** on the
 MQTT page (or `POST /api/mqtt/move_identity` with `{"to": "<identity>"}`,
-the identity the page shows), while MQTT is connected. It clears everything
-published under the old identity, as a change of integration does: **the main
-HA deletes those entities and devices, with what was customised there (areas,
-names, labels)**, and creates them again under the new one. The manager
-device's entity ids change with the name. Nothing else moves an identity:
-removing or changing `HRI_INSTANCE` later keeps the one recorded. The Move
-offers whatever the rule gives now, so it also takes a container back to the
-plain `hass_<domain>` after `HRI_INSTANCE` was removed.
+the identity the page shows, and `"clear": true` for the second choice below),
+while MQTT is connected. The main HA creates the entities and devices again
+under the new identity; what was customised there (areas, names, labels) does
+not follow, and the manager device's entity ids change with the name. What
+happens to the old names is your choice:
+
+- **Leave them** (the default): nothing is cleared. The old names are marked
+  offline, so the main HA keeps those entities and devices, unavailable, until
+  you delete them there; while they exist, a new entity whose id one of them
+  holds gets a suffix (`switch.door_2`). HRI forgets the old names: an
+  uninstall no longer clears them.
+- **And clear hass_<domain> on the broker**: everything retained under the old
+  identity is cleared, as a change of integration does, and **the main HA
+  deletes those entities and devices**. The clear takes whatever sits under
+  the old names with HRI's shape, so **it also deletes the entities of any
+  other container that publishes under the same old name** on that broker
+  (the case that makes a Move necessary: two containers of one integration).
+  Clear only when this container is the only one that published there.
+
+Nothing else moves an identity: removing or changing `HRI_INSTANCE` later keeps
+the one recorded. The Move offers whatever the rule gives now, so it also takes
+a container back to the plain `hass_<domain>` after `HRI_INSTANCE` was removed.
 
 ## Connection
 

@@ -64,11 +64,14 @@ Exceptions:
   deferred, error, since}`, the configured broker's first. `identity_source`,
   `identity_instance`, `identity_problem`, `identity_warning` and `identity_move_to` say where the
   base topic comes from ([Identity](mqtt.md#identity)).
-- `POST /api/mqtt/move_identity` `{"to": "<identity>"}`: moves the running
-  integration to `identity_move_to`, which `to` must repeat; only while MQTT is
-  connected. The main HA deletes and re-creates the entities
-  ([Two instances](mqtt.md#two-instances-of-the-same-integration)). Answers
-  `{ok, from, to}` or `{ok: false, error}`.
+- `POST /api/mqtt/move_identity` `{"to": "<identity>", "clear": false}`: moves
+  the running integration to `identity_move_to`, which `to` must repeat; only
+  while MQTT is connected. `clear` (default `false`) also clears the old names
+  on the broker, which deletes their entities on the main HA, those of any other
+  container publishing under them included; without it they stay, marked
+  offline ([Two instances](mqtt.md#two-instances-of-the-same-integration)).
+  Answers `{ok, from, to, cleared}` or `{ok: false, error}`; a body that is not
+  a JSON object, or a `clear` that is not `true` or `false`, is a `400`.
 - `GET /api/summary` includes `manager_update`: the running release and the
   newer ones the banner shows.
 - `GET /api/status` `health`: the verdict published on MQTT (`state`,

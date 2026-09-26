@@ -1143,11 +1143,12 @@ class MqttPublisher:
         async with self._conn_lock:
             await self._async_reconnect_locked()
 
-    async def async_move_identity(self, to: str) -> dict[str, Any]:
+    async def async_move_identity(self, to: str, clear: bool = False) -> dict[str, Any]:
         """The MQTT page's Move: the running integration leaves the identity this volume remembered for it for the one
-        the rule gives now (HRI_INSTANCE, or hass_<domain> without it).  Only over a live connection, whose move clears
-        everything retained under the old names (the main Home Assistant deletes those entities and devices) before the
-        new ones are published; ``to`` must name the identity the page showed."""
+        the rule gives now (HRI_INSTANCE, or hass_<domain> without it).  Only over a live connection; ``to`` must name
+        the identity the page showed.  ``clear`` clears everything retained under the old names first (the main Home
+        Assistant deletes those entities and devices, and those of any other container publishing under them); without
+        it they stay on the broker, marked offline, and the main Home Assistant keeps those entities unavailable."""
         async with self._conn_lock:
             info = self._identity.describe() if self._identity else {}
             old, new = self.wanted_base_topic, info.get("identity_move_to")
@@ -1161,16 +1162,18 @@ class MqttPublisher:
                 await self.hass.async_add_executor_job(self._identity.release)
             except OSError as err:
                 return {"ok": False, "error": f"mqtt_identity.json not written ({err}): nothing moved"}
-            await self._async_reconnect_locked()
-        _LOGGER.warning("MQTT: identity moved from %s to %s: the main Home Assistant re-creates the entities", old, new)
-        events.emit("mqtt", f"identity moved from {old} to {new}")
-        return {"ok": True, "from": old, "to": self.wanted_base_topic}
+            await self._async_reconnect_locked(clear_old=clear)
+        left = "" if clear else f"; what {old} published stays on the broker"
+        _LOGGER.warning("MQTT: identity moved from %s to %s: the main Home Assistant creates the entities again%s", old, new, left)
+        events.emit("mqtt", f"identity moved from {old} to {new}" + (f" ({old} cleared)" if clear else left))
+        return {"ok": True, "from": old, "to": self.wanted_base_topic, "cleared": clear}
 
-    async def _async_reconnect_locked(self) -> None:
+    async def _async_reconnect_locked(self, clear_old: bool = True) -> None:
         """Reload the config file and reconnect.  If the instance identity
         (running integration) or the discovery prefix changed since we
         connected, everything we own under the old names is cleared first
-        (a stop is not a move: the consumer keeps its entities)."""
+        (a stop is not a move: the consumer keeps its entities), unless
+        ``clear_old`` is False (a Move that leaves them: marked offline)."""
         new = await self.hass.async_add_executor_job(self._load)
         # A stop (wanted identity None) is NOT a move: the consumer keeps its
         # entities, marked unavailable by the retained "offline"; clearing
@@ -1200,9 +1203,12 @@ class MqttPublisher:
             self._services_published.clear()
             # a new discovery prefix alone moves only the discovery configs: the documents stay where they are
             base_moved = self.wanted_base_topic is not None and self.wanted_base_topic != self._live_base
-            cleared = await self.hass.async_add_executor_job(self._clear_retained_under, self.base_topic, self.config.discovery_prefix, base_moved)
-            swept = cleared is not None
-            _LOGGER.info("MQTT: cleared %s retained topics left under the old names by earlier runs", cleared)
+            if clear_old:
+                cleared = await self.hass.async_add_executor_job(self._clear_retained_under, self.base_topic, self.config.discovery_prefix, base_moved)
+                swept = cleared is not None
+                _LOGGER.info("MQTT: cleared %s retained topics left under the old names by earlier runs", cleared)
+            else:
+                _LOGGER.info("MQTT: what %s published stays on the broker, marked offline", self.base_topic)
         if moved and swept:
             # the live move handled it: the next connect must not sweep the old names a second time (a change
             # while disconnected is left to _connect, which compares the recorded names with the new ones)
@@ -1216,8 +1222,8 @@ class MqttPublisher:
             # and the retained catalog must not keep advertising services the consumer can no longer call
             self._publish(self._health_topic(), _dumps(self.build_health()), qos=1)
             self._clear_services_catalog()
-        # no retained "offline" on a status topic we just cleared
-        await self.hass.async_add_executor_job(self._disconnect, not moved)
+        # no retained "offline" on a status topic we just cleared; one on the names a Move leaves
+        await self.hass.async_add_executor_job(self._disconnect, not moved or not clear_old)
         self._moving = False
         if new.main_ha_version != self.config.main_ha_version:
             self._compat_warned.clear()  # a new declared version must say again what it leaves out

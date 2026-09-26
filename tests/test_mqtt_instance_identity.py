@@ -22,6 +22,7 @@ from homeassistant.core import State
 from custom_components.integration_manager import discovery as disc
 from custom_components.integration_manager import installer as inst_mod
 from custom_components.integration_manager import mqtt_publisher as mp
+from custom_components.integration_manager import views
 from custom_components.integration_manager.installer import Installer, MqttIdentity, configured_instance
 from tests.test_camp_preflight import _installer as _preflight_installer
 from tests.test_camp_preflight import _run as _preflight_run
@@ -421,6 +422,32 @@ class UnambiguousIdentityTest(_Dir):
         self.assertNotIn(disc.INSTANCE_SEP, "+#/$\0")
 
 
+class MoveViewTest(unittest.IsolatedAsyncioTestCase):
+    def post(self, body, content_type="application/json"):
+        async def payload():
+            if isinstance(body, Exception):
+                raise body
+            return body
+
+        publisher = SimpleNamespace(async_move_identity=mock.AsyncMock(return_value={"ok": True}))
+        view = views.MqttActionView(publisher)
+        return view.post(SimpleNamespace(content_type=content_type, json=payload), "move_identity"), publisher
+
+    async def test_a_bad_body_is_a_400(self):
+        for body in ([], "x", ValueError("Expecting value"), {"to": "hass_x-a", "clear": "yes"}, {"to": "hass_x-a", "clear": 1}):
+            with self.subTest(body=body):
+                call, publisher = self.post(body)
+                response = await call
+                self.assertEqual(response.status, 400)
+                publisher.async_move_identity.assert_not_called()
+
+    async def test_the_choice_reaches_the_publisher(self):
+        for body, clear in (({"to": "hass_x-a"}, False), ({"to": "hass_x-a", "clear": False}, False), ({"to": "hass_x-a", "clear": True}, True)):
+            call, publisher = self.post(body)
+            self.assertEqual(json.loads((await call).body), {"ok": True})
+            publisher.async_move_identity.assert_awaited_once_with("hass_x-a", clear=clear)
+
+
 class PublisherIdentityTest(_Case):
     """The publisher with the real identity: what it records, what it connects as, and the Move."""
 
@@ -588,17 +615,18 @@ class PublisherIdentityTest(_Case):
         ident = self.identity("garage")
         pub = self.pub_with(ident)
         cleared = self.moving(pub)
-        self.assertEqual(await pub.async_move_identity("hass_hri_probe-other"),
+        self.assertEqual(await pub.async_move_identity("hass_hri_probe-other", clear=True),
                          {"ok": False, "error": "the identity to move to is hass_hri_probe-garage now, not hass_hri_probe-other: reload the page"})
         pub._connected = False
-        res = await pub.async_move_identity("hass_hri_probe-garage")
+        res = await pub.async_move_identity("hass_hri_probe-garage", clear=True)
         self.assertFalse(res["ok"])
         self.assertIn("not connected", res["error"])
         self.assertEqual((cleared, ident.key("hri_probe")), ([], "hass_hri_probe"))  # a refusal changes nothing
         pub._connected = True
-        res = await pub.async_move_identity("hass_hri_probe-garage")
-        self.assertEqual(res, {"ok": True, "from": "hass_hri_probe", "to": "hass_hri_probe-garage"})
+        res = await pub.async_move_identity("hass_hri_probe-garage", clear=True)
+        self.assertEqual(res, {"ok": True, "from": "hass_hri_probe", "to": "hass_hri_probe-garage", "cleared": True})
         self.assertEqual(cleared, [("hass_hri_probe", "homeassistant", True)])  # documents and discovery configs of the old names
+        pub._disconnect.assert_called_once_with(False)  # no retained "offline" on a status topic just cleared
         self.assertEqual({k: v for k, v in self.record().items() if k != "broker"},
                          {"base": "hass_hri_probe-garage", "prefix": "homeassistant", "domain": "hri_probe", "pinned": False})
         self.assertEqual(self.identity("garage").key("hri_probe"), "hass_hri_probe-garage")
@@ -606,6 +634,21 @@ class PublisherIdentityTest(_Case):
         self.assertEqual(self.identity(None).key("hri_probe"), "hass_hri_probe-garage")
         self.assertEqual(await pub.async_move_identity("hass_hri_probe-garage"),
                          {"ok": False, "error": "nothing to move: the identity is the one the rule gives"})
+
+    async def test_move_leaves_the_old_names_by_default(self):
+        """Another container may publish under the old names too: by default nothing is cleared, and the old names are
+        marked offline, so the main Home Assistant keeps those entities, unavailable."""
+        mp.write_json(os.path.join(self.dir, "integration_manager", "mqtt_identity.json"), {**LEGACY, "broker": {**BROKER, "port": self.port}})
+        ident = self.identity("garage")
+        pub = self.pub_with(ident)
+        cleared = self.moving(pub)
+        res = await pub.async_move_identity("hass_hri_probe-garage")
+        self.assertEqual(res, {"ok": True, "from": "hass_hri_probe", "to": "hass_hri_probe-garage", "cleared": False})
+        self.assertEqual(cleared, [])
+        pub._disconnect.assert_called_once_with(True)  # the retained "offline" on the old status topic
+        self.assertEqual(self.record()["base"], "hass_hri_probe-garage")  # the next connect sweeps nothing either
+        self.assertNotIn("released", self.record())
+        self.emit.assert_any_call("mqtt", "identity moved from hass_hri_probe to hass_hri_probe-garage; what hass_hri_probe published stays on the broker")
 
     async def test_a_republish_during_a_move_never_sweeps_under_the_old_names(self):
         """A full republish whose identity sweep was due, arriving while a Move waits for its settings: the sweep waits
@@ -653,7 +696,7 @@ class PublisherIdentityTest(_Case):
         pub = self.pub_with(ident)
         self.moving(pub)
         pub._clear_retained_under.side_effect = lambda *a, **k: None
-        self.assertTrue((await pub.async_move_identity("hass_hri_probe-garage"))["ok"])
+        self.assertTrue((await pub.async_move_identity("hass_hri_probe-garage", clear=True))["ok"])
         self.assertEqual((self.record()["base"], self.record()["released"]), ("hass_hri_probe", True))
         self.assertEqual(self.identity("garage").key("hri_probe"), "hass_hri_probe-garage")
 

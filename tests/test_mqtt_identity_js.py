@@ -44,9 +44,19 @@ class BrokerLineTest(unittest.TestCase):
         self.assertIn("kept: this volume already published the running integration under it", o["text"])
         self.assertIn("HRI_INSTANCE garage would give hass_demo-garage", o["text"])
         self.assertEqual(o["button"], "Move to hass_demo-garage")
+        self.assertIn("and clear hass_demo on the broker", o["text"])
+        self.assertIs(o["box"], False)  # leaving the old names is the default
+        self.assertEqual(len(o["confirms"]), 1)
+        self.assertIn("What hass_demo published stays on the broker", o["confirms"][0])
+        self.assertIn("keeps those entities and devices, unavailable", o["confirms"][0])
+        self.assertEqual(o["sent"], [["api/mqtt/move_identity", {"to": "hass_demo-garage", "clear": False}]])
+
+    def test_clearing_the_old_names_says_it_deletes_other_containers_entities(self):
+        o = self.out["remembered_clear"]
         self.assertEqual(len(o["confirms"]), 1)
         self.assertIn("deletes those entities and devices", o["confirms"][0])
-        self.assertEqual(o["sent"], [["api/mqtt/move_identity", {"to": "hass_demo-garage"}]])
+        self.assertIn("also deletes the entities of any OTHER container that publishes under hass_demo", o["confirms"][0])
+        self.assertEqual(o["sent"], [["api/mqtt/move_identity", {"to": "hass_demo-garage", "clear": True}]])
 
     def test_an_unused_invalid_instance_is_a_warning_next_to_the_kept_identity(self):
         o = self.out["warned"]
