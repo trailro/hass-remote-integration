@@ -110,10 +110,8 @@ class InstalledActionView(ManagerView):
             if res.get("ok"):
                 if was_running:
                     await self.publisher.async_reconnect()  # disconnects (no identity), retained offline
-                from .installer import instance_key
-
                 # the uninstall cleared most of it already; this second pass only finds what the reconnect published since
-                key = instance_key(domain) or ""
+                key = self.installer.identity_for(domain) or ""
                 res["retained_cleared"] = self.installer.last_identity_cleared + (await self.publisher.async_clear_identity(key) or 0)
                 if pending := self.publisher.retained_cleanup_pending(key):
                     # removed here; the main Home Assistant keeps the entities until the broker takes the retried cleanup

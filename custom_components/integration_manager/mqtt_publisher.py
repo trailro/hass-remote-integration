@@ -619,6 +619,7 @@ _ENTITY_SERVICE_CALLS = frozenset({"entity_service_call", "batched_entity_servic
 
 class MqttPublisher:
     _stopping = False  # Home Assistant is stopping: no client may be created any more
+    _identity: Any = None  # installer.MqttIdentity, set in __init__
     _identity_sweep_due = False  # the sweep of an identity that changed while disconnected failed: retried after a connect
     # the last CONNACK was a refusal: paho follows it with a disconnection ("Unspecified error"), which must not replace the reason
     _refused = False
@@ -651,8 +652,11 @@ class MqttPublisher:
     _subscribing_lock = threading.Lock()  # the SUBACK (paho thread) and its overdue timer (loop) race for it
     _last_subscribe_error = ""  # the refusal already logged: repeated only after a subscription succeeded
 
-    def __init__(self, hass: HomeAssistant, key_provider=None, health_provider=None, rules_provider=None) -> None:
+    def __init__(self, hass: HomeAssistant, key_provider=None, health_provider=None, rules_provider=None, identity=None) -> None:
         self._health_provider = health_provider
+        # where the identity comes from (HRI_INSTANCE, the record of the last publication); without one the key provider
+        # alone names it
+        self._identity = identity
         # settings.health_for(domain): stale seconds, mode, unavailable share
         self._rules_provider = rules_provider or (lambda domain: {"stale_s": HEALTH_STALE_S, "mode": "periodic", "unavailable_pct": 50,
                                                                    "stale_basis": "reported"})
@@ -1028,6 +1032,7 @@ class MqttPublisher:
         d["base_topic"] = self.wanted_base_topic
         d["client_id"] = self.wanted_base_topic
         d["derived"] = ["base_topic", "client_id"]
+        d["identity_source"] = self._identity.describe()["identity_source"] if self._identity else None
         return d
 
     # ----- lifecycle -------------------------------------------------------
@@ -1137,6 +1142,29 @@ class MqttPublisher:
     async def async_reconnect(self) -> None:
         async with self._conn_lock:
             await self._async_reconnect_locked()
+
+    async def async_move_identity(self, to: str) -> dict[str, Any]:
+        """The MQTT page's Move: the running integration leaves the identity this volume remembered for it for the one
+        the rule gives now (HRI_INSTANCE, or hass_<domain> without it).  Only over a live connection, whose move clears
+        everything retained under the old names (the main Home Assistant deletes those entities and devices) before the
+        new ones are published; ``to`` must name the identity the page showed."""
+        async with self._conn_lock:
+            info = self._identity.describe() if self._identity else {}
+            old, new = self.wanted_base_topic, info.get("identity_move_to")
+            if not new:
+                return {"ok": False, "error": info.get("identity_problem") or "nothing to move: the identity is the one the rule gives"}
+            if to != new:
+                return {"ok": False, "error": f"the identity to move to is {new} now, not {to}: reload the page"}
+            if not self._connected:
+                return {"ok": False, "error": "MQTT is not connected: the move clears the old names on the broker, so it needs the connection"}
+            try:
+                await self.hass.async_add_executor_job(self._identity.release)
+            except OSError as err:
+                return {"ok": False, "error": f"mqtt_identity.json not written ({err}): nothing moved"}
+            await self._async_reconnect_locked()
+        _LOGGER.warning("MQTT: identity moved from %s to %s: the main Home Assistant re-creates the entities", old, new)
+        events.emit("mqtt", f"identity moved from {old} to {new}")
+        return {"ok": True, "from": old, "to": self.wanted_base_topic}
 
     async def _async_reconnect_locked(self) -> None:
         """Reload the config file and reconnect.  If the instance identity
@@ -1369,13 +1397,18 @@ class MqttPublisher:
         return self.hass.config.path("integration_manager", "mqtt_identity.json")
 
     def _remember_identity(self, base: str | None, prefix: str) -> None:
-        """Blocking: the names retained data was last published under, and the broker it went to."""
+        """Blocking: the names retained data was last published under, the broker it went to, and the integration they
+        belong to (which keeps that identity from then on: installer.MqttIdentity)."""
         if not base:
             return
+        record = {"base": base, "prefix": prefix, "broker": self._broker_identity(),
+                  **(self._identity.stamp(base) if self._identity else {})}
         try:
-            write_json(self._identity_file(), {"base": base, "prefix": prefix, "broker": self._broker_identity()}, fsync=False)
+            write_json(self._identity_file(), record, fsync=False)
         except OSError:
-            pass
+            return
+        if self._identity:
+            self._identity.adopt(record)
 
     def _clear_retained_under(self, base_topic: str, discovery_prefix: str, docs: bool = True) -> int | None:
         """Blocking: every retained topic of ours under <base>/# (unless
@@ -1590,6 +1623,10 @@ class MqttPublisher:
             # fail closed: which entities are excluded is unknown, so none is published and no command is taken (the
             # main HA shows them unavailable after the retained "offline", and keeps them)
             self.stats["connect_error"] = f"not connecting: {self.rules.problem}"
+            return
+        if self._identity and self._identity.problem:
+            # never published under a name nobody chose, and never under the plain one the user did not ask for either
+            self.stats["connect_error"] = f"not connecting: {self._identity.problem}"
             return
         base = self.wanted_base_topic
         if not base:
@@ -1898,7 +1935,7 @@ class MqttPublisher:
             # taken over" carries no properties, and paho 2.1 drops a DISCONNECT reason that has none)
             hint = (f"; the broker closed the connection {lived:.0f}s after accepting it (a packet over its maximum looks like this, "
                     f"and so does another client connecting with the client id {self.client_id}: a second container "
-                    "running the same integration on this broker)"
+                    "running the same integration on this broker without its own HRI_INSTANCE)"
                     if lived is not None and lived < DROP_AFTER_CONNECT_S
                     else "" if lived is not None
                     else "; if the port is a TLS listener, turn TLS on" if not self.config.tls and reason == "Unspecified error" else "")
@@ -3801,6 +3838,11 @@ class MqttPublisher:
             "wanted_base_topic": self.wanted_base_topic,
             "identity_moved": self._connected and self.wanted_base_topic != self._live_base,
             "has_identity": bool(self.wanted_base_topic),
+            # where the base topic comes from (remembered, instance, default, invalid), HRI_INSTANCE, and the identity a
+            # Move would take (installer.MqttIdentity)
+            **(self._identity.describe() if self._identity else {"identity_source": "default" if self.wanted_base_topic else None,
+                                                                  "identity_instance": None, "identity_problem": None,
+                                                                  "identity_move_to": None}),
             "retained_cleanup_pending": self.retained_cleanup_pending(),  # uninstalled identities a broker did not take yet
             "prefix": self.prefix if named else None,
             "force_base_topic": self.config.force_base_topic,

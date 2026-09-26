@@ -123,7 +123,7 @@ class _Case(unittest.IsolatedAsyncioTestCase):
 
     async def uninstall(self, pub, domain="demo"):
         """InstalledActionView with an installer that, like the real one, clears the identity once itself."""
-        installer = SimpleNamespace(running=None, last_identity_cleared=0)
+        installer = SimpleNamespace(running=None, last_identity_cleared=0, identity_for=lambda d: f"hass_{d}")
 
         async def uninstall(d):
             installer.last_identity_cleared = await pub.async_clear_identity(f"hass_{d}") or 0

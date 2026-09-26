@@ -1036,6 +1036,11 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
             warnings.append("YAML is stored here and this version has a config flow: if it imports the YAML into a config entry, "
                             "remove the YAML afterwards (it is still applied at every boot)")
 
+        # 7. an invalid HRI_INSTANCE keeps MQTT disconnected, whichever version runs
+        identity = getattr(installer, "mqtt_identity", None)
+        if identity is not None and identity.problem:
+            warnings.append(identity.problem)
+
         return {
             "domain": domain, "ref": ref, "repo": repo, "target_ha": target, "current_ha": ha_version,
             "ok": not blockers, "blockers": blockers, "warnings": warnings,

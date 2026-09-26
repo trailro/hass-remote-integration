@@ -266,7 +266,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     # <base>/status.  Connects only if enabled in integration_manager/mqtt.json.
     publisher = await hass.async_add_executor_job(functools.partial(  # reads mqtt.json and mqtt_rules.json
         MqttPublisher, hass, key_provider=lambda: installer.instance_key, health_provider=installer.health,
-        rules_provider=installer.settings.health_for))
+        rules_provider=installer.settings.health_for, identity=installer.mqtt_identity))
     installer.health_source = publisher.build_health
     manager_device = await hass.async_add_executor_job(ManagerDevice, hass, installer, ha_updater, publisher)  # reads its JSON files
     publisher.manager = manager_device
