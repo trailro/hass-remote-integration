@@ -139,8 +139,11 @@ zip (which holds sanitized copies, `settings.json` and `mqtt-config.json`).
 Masked: the diagnostics zip, the **Logs** page (message and traceback),
 **Log files** tails, downloads and file names, an imported backup's
 inspection, and the error text of a failed Services-page call, flow step,
-config entry action, release lookup, backup or import. The manager's own log
-lines quoting an integration's exception are masked before they are written.
+config entry action, release lookup, backup or import, an entity or device
+action, and a failed stop or uninstall. On MQTT, the health document's reasons
+and `last_error`, and a manager action's `error` and `note`, are masked the
+same way. The manager's own log lines quoting an integration's exception are
+masked before they are written.
 The MQTT command history, status and log follow a rule of their own
 ([below](#mqtt-command-history)).
 
@@ -201,9 +204,11 @@ four differences:
 `translation_key`, `sort_key` and `primary_key` stay readable. The names count
 as JSON keys and also inside a data field's text (`password=x` or
 `Authorization: Bearer x` in a `message`); the value becomes `***` in the
-quotes it had, none added (`token=***`). The shapes that need no name (a lone
-`Bearer` token, a password in a URL) apply only to a service's error message. What else is masked
-there (password-mode `text` values) is in the [MQTT reference](mqtt.md#masking).
+quotes it had: one after a bare name stays unquoted (`token=***`), one after a
+quoted key gets the key's quotes (`"pin": "***"`), so JSON stays JSON. The
+shapes that need no name (a lone `Bearer` token, a password in a URL) apply
+only to a service's error message. What else is masked there (password-mode
+`text` values) is in the [MQTT reference](mqtt.md#masking).
 
 ### Request lines and the raw logs
 
@@ -274,7 +279,9 @@ URL with `user@` or `user:password@` is refused.
   the host.
 - Whoever reads the base topic reads every published state and attribute;
   only `access_token` and URLs with `token=` are left out (a token in a state
-  URL becomes `***`). Name-based masking does not apply here.
+  URL becomes `***`). Name-based masking does not apply to entity documents;
+  the health document's reasons and `last_error`, and a manager action's
+  `error` and `note`, are masked as on the Logs page.
 - Whoever publishes under the base topic can command the published entities
   and call services (deny list applies), and run manager actions when
   `manager_commands` is on ([MQTT reference](mqtt.md)).
