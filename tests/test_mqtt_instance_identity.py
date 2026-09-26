@@ -3,6 +3,7 @@ of the same integration can share one broker and one main Home Assistant.  What 
 an instance created before this (hass_hri_probe, its entities on the main HA) keeps its base topic, client id and
 discovery unique ids when HRI_INSTANCE appears.  An invalid HRI_INSTANCE is refused loudly."""
 
+import asyncio
 import contextlib
 import json
 import os
@@ -124,7 +125,7 @@ class IdentityRuleTest(_Dir):
         self.assertEqual(ident.key("hri_probe"), "hass_hri_probe-garage")
 
     def test_the_remembered_instance_stays_whatever_hri_instance_says_now(self):
-        record = {**LEGACY, "base": "hass_hri_probe-old", "domain": "hri_probe"}
+        record = {**LEGACY, "base": "hass_hri_probe-old", "domain": "hri_probe", "pinned": True}
         for env, move_to in (("new", "hass_hri_probe-new"), (None, "hass_hri_probe"), ("old", None)):
             ident = self.identity(env, record)
             self.assertEqual(ident.key("hri_probe"), "hass_hri_probe-old", env)
@@ -133,9 +134,29 @@ class IdentityRuleTest(_Dir):
     def test_a_record_names_its_integration(self):
         """hass_x_foo recorded for the integration x_foo is not the instance foo of x."""
         self.domain = "x"
-        ident = self.identity("bar", {**LEGACY, "base": "hass_x_foo", "domain": "x_foo"})
+        ident = self.identity("bar", {**LEGACY, "base": "hass_x_foo", "domain": "x_foo", "pinned": True})
         self.assertEqual(ident.key("x"), "hass_x-bar")
         self.assertEqual(ident.key("x_foo"), "hass_x_foo")
+
+    def test_a_record_not_pinned_yet_holds_nothing(self):
+        """Recorded at a first connection that did not hold (another client took the client id back at once, the
+        broker refused it): the identity still follows HRI_INSTANCE."""
+        record = {**LEGACY, "base": "hass_hri_probe", "domain": "hri_probe", "pinned": False}
+        for env, key in ((None, "hass_hri_probe"), ("garage", "hass_hri_probe-garage")):
+            ident = self.identity(env, record)
+            self.assertEqual((ident.key("hri_probe"), ident.source("hri_probe")), (key, "instance" if env else "default"), env)
+            self.assertIsNone(ident.describe()["identity_move_to"])
+        # pinned only for the base and the integration it records, and once
+        ident = self.identity("garage", record)
+        self.assertFalse(ident.pin("hass_hri_probe-garage"))
+        self.domain = "other"
+        self.assertFalse(ident.pin("hass_hri_probe"))
+        self.domain = "hri_probe"
+        self.assertTrue(ident.pin("hass_hri_probe"))
+        self.assertFalse(ident.pin("hass_hri_probe"))
+        self.assertEqual(self.identity("garage").key("hri_probe"), "hass_hri_probe")
+        self.assertFalse(self.identity("garage", {**record, "released": True}).pin("hass_hri_probe"))
+        self.assertFalse(self.identity("garage", LEGACY).pin("hass_hri_probe"))  # 0.25.x: kept already
 
     def test_a_released_record_holds_nothing(self):
         ident = self.identity("garage", {**LEGACY, "domain": "hri_probe", "released": True})
@@ -433,19 +454,57 @@ class PublisherIdentityTest(_Case):
             self.assertTrue(await pub.hass.async_add_executor_job(pub._sweep_old_identity, pub.wanted_base_topic))
         self.assertEqual((broker.scans, broker.cleared), ([], []))
         self.assertEqual({k: v for k, v in self.record().items() if k != "broker"},
-                         {"base": "hass_hri_probe", "prefix": "homeassistant", "domain": "hri_probe"})
+                         {"base": "hass_hri_probe", "prefix": "homeassistant", "domain": "hri_probe", "pinned": True})
         # the next boot reads that record: still the same names, with or without HRI_INSTANCE
         for env in ("garage", None, "other"):
             self.assertEqual(self.identity(env).key("hri_probe"), "hass_hri_probe", env)
 
-    async def test_a_fresh_volume_records_the_instance_and_keeps_it(self):
+    def held(self, pub, lived):
+        """The publisher connected ``lived`` seconds ago on a current client."""
+        pub._client, pub._connected, pub._moving = object(), True, False
+        pub._connected_at, pub._live_base = mp.time.monotonic() - lived, pub.wanted_base_topic
+        return pub._client
+
+    async def test_a_fresh_volume_keeps_the_instance_once_its_connection_held(self):
         ident = self.identity("garage")
         pub = self.pub_with(ident)
+        pub.hass.async_create_task = asyncio.ensure_future
         self.assertEqual(pub.wanted_base_topic, "hass_hri_probe-garage")
         await pub.hass.async_add_executor_job(pub._remember_identity, pub.wanted_base_topic, "homeassistant")
-        self.assertEqual(self.record()["domain"], "hri_probe")
+        self.assertEqual((self.record()["domain"], self.record()["pinned"]), ("hri_probe", False))
+        self.assertEqual(ident.source("hri_probe"), "instance")
+        self.assertEqual(self.identity(None).key("hri_probe"), "hass_hri_probe")  # not kept yet: HRI_INSTANCE still decides
+        # a connection that did not hold, or a client that is not the current one, pins nothing
+        client = self.held(pub, mp.DROP_AFTER_CONNECT_S - 2)
+        pub._connection_held(client)
+        pub._connection_held(object())
+        pub._connected = False
+        pub._connection_held(client)
+        await asyncio.sleep(0.05)
+        self.assertFalse(self.record()["pinned"])
+        client = self.held(pub, mp.DROP_AFTER_CONNECT_S + 1)
+        pub._connection_held(client)
+        for _ in range(100):
+            if self.record()["pinned"]:
+                break
+            await asyncio.sleep(0.01)
+        self.assertTrue(self.record()["pinned"])
         self.assertEqual(ident.source("hri_probe"), "remembered")
         self.assertEqual(self.identity(None).key("hri_probe"), "hass_hri_probe-garage")  # HRI_INSTANCE removed later: kept
+        self.emit.assert_any_call("mqtt", "identity hass_hri_probe-garage kept from now on: its first connection held")
+
+    async def test_the_pin_waits_for_a_move_in_progress(self):
+        ident = self.identity("garage")
+        pub = self.pub_with(ident)
+        await pub.hass.async_add_executor_job(pub._remember_identity, pub.wanted_base_topic, "homeassistant")
+        client = self.held(pub, mp.DROP_AFTER_CONNECT_S + 1)
+        async with pub._conn_lock:
+            task = asyncio.ensure_future(pub._async_pin(client))
+            await asyncio.sleep(0.05)
+            self.assertFalse(task.done())
+            pub._client = object()  # the reconnect under the lock replaced the client
+        await task
+        self.assertFalse(self.record()["pinned"])
 
     async def test_a_damaged_record_never_connects_until_corrected(self):
         path = os.path.join(self.dir, "integration_manager", "mqtt_identity.json")
@@ -539,7 +598,9 @@ class PublisherIdentityTest(_Case):
         self.assertEqual(res, {"ok": True, "from": "hass_hri_probe", "to": "hass_hri_probe-garage"})
         self.assertEqual(cleared, [("hass_hri_probe", "homeassistant", True)])  # documents and discovery configs of the old names
         self.assertEqual({k: v for k, v in self.record().items() if k != "broker"},
-                         {"base": "hass_hri_probe-garage", "prefix": "homeassistant", "domain": "hri_probe"})
+                         {"base": "hass_hri_probe-garage", "prefix": "homeassistant", "domain": "hri_probe", "pinned": False})
+        self.assertEqual(self.identity("garage").key("hri_probe"), "hass_hri_probe-garage")
+        self.assertTrue(ident.pin("hass_hri_probe-garage"))  # its first connection held
         self.assertEqual(self.identity(None).key("hri_probe"), "hass_hri_probe-garage")
         self.assertEqual(await pub.async_move_identity("hass_hri_probe-garage"),
                          {"ok": False, "error": "nothing to move: the identity is the one the rule gives"})

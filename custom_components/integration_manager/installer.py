@@ -269,8 +269,9 @@ def _record_shape_problem(rec: Any) -> str | None:
     plain = instance_key(domain)
     if base != plain and not (base.startswith(plain + INSTANCE_SEP) and INSTANCE_RE.fullmatch(base[len(plain) + 1:])):
         return f"holds {base[:80]!r}, which is no identity of {domain}"
-    if not isinstance(rec.get("released", False), bool):
-        return "has a released flag that is not true or false"
+    for flag in ("released", "pinned"):
+        if not isinstance(rec.get(flag, False), bool):
+            return f"has a {flag} flag that is not true or false"
     return None
 
 
@@ -284,6 +285,10 @@ class MqttIdentity:
     with them its entity ids on the main Home Assistant.  A record written before instances existed names no domain:
     it counts only for the integration whose plain hass_<domain> it holds.  ``release`` (the MQTT page's Move) drops the
     record's claim, and the publisher's move clears the old names and records the new ones.
+
+    A new identity is recorded at its first connection but kept (``pinned``) only once that connection has held
+    (``pin``, from the publisher): a connection another client takes back at once (a second container with the same
+    client id) or a broker that refuses it pins nothing, so a corrected HRI_INSTANCE still applies after it.
 
     Only a missing record is a volume that never published.  One that cannot be read or has a shape no version wrote
     (``record_problem``) gives no identity at all: MQTT stays disconnected and says why, since a new identity would
@@ -330,9 +335,9 @@ class MqttIdentity:
         if not domain or self.record_problem or not rec or rec.get("released"):
             return None
         base = rec["base"]
-        if "domain" not in rec:  # 0.25.x or older: its plain identity
+        if "domain" not in rec:  # 0.25.x or older: its plain identity, published
             return base if base == instance_key(domain) else None
-        return base if rec["domain"] == domain else None
+        return base if rec["domain"] == domain and rec.get("pinned") is True else None
 
     def target(self, domain: str | None) -> str | None:
         """What the rule gives an integration that never published from here; None for an invalid HRI_INSTANCE."""
@@ -380,10 +385,22 @@ class MqttIdentity:
                 "identity_warning": self.warning_for(domain), "identity_move_to": target if base and target and target != base else None}
 
     def stamp(self, base: str) -> dict[str, Any]:
-        """What a record of ``base`` says besides the names: the integration it belongs to (empty when ``base`` is not
-        the running integration's identity: such a record is not written)."""
+        """What a record of ``base`` says besides the names: the integration it belongs to, and whether it is kept
+        already (empty when ``base`` is not the running integration's identity: such a record is not written)."""
         domain = self._domain()
-        return {"domain": domain} if domain and base == self.key(domain) else {}
+        if not domain or base != self.key(domain):
+            return {}
+        return {"domain": domain, "pinned": base == self.remembered(domain)}
+
+    def pin(self, base: str) -> bool:
+        """Blocking: the running integration keeps ``base`` from now on, if the record holds it and does not keep it
+        yet.  True when this pinned it."""
+        rec = self.record
+        if self.record_problem or rec.get("base") != base or rec.get("domain") != self._domain() or rec.get("pinned") \
+                or rec.get("released"):
+            return False
+        self.write({**rec, "pinned": True})
+        return True
 
     def write(self, record: dict[str, Any]) -> None:
         """Blocking: ``record`` becomes the file, synced with its directory (a torn or lost record would stop MQTT
