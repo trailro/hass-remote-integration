@@ -112,7 +112,8 @@ written) puts the previous configuration back, is not retried, and records
 cut off halfway (`docker stop`, power loss, Ctrl-C) stays scheduled: the next
 boot applies it again from the same pre-restore backup, or puts that backup
 back. If putting it back fails too, Home Assistant is not started: the manager
-port shows a status page naming the pre-restore backup, the restore is retried
+port shows a status page naming the pre-restore backup (with a password set,
+the container log names it), the restore is retried
 every 5 minutes, and that backup cannot be pruned or deleted. Deleting
 `integration_manager/restore-pending.json` ends the wait and starts Home
 Assistant on the configuration as it is. A scheduled restore whose

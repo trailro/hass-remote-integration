@@ -153,8 +153,9 @@ page. Then start it (to build the image yourself instead, see
 docker compose up -d
 ```
 
-Open `http://<docker-host>:8087`. On the very first start the page shows the
-Home Assistant installation progress; it takes a few minutes.
+Open `http://<docker-host>:8087`. On the very first start the page says Home
+Assistant is being installed (without a password, with its progress); it
+takes a few minutes.
 
 ### Home Assistant OS / Supervised
 
@@ -696,14 +697,16 @@ without it too, from a copy at most 10 seconds old. See [API](docs/api.md).
   shows only the start and end. Until Home Assistant is started (the
   `HRI_APT_PACKAGES` packages, the PyPI lookup, the install, the manager's
   requirements, a scheduled restore, removing unused venvs), the page and every
-  `/api/` path but `/api/alive` answer `503` with `Retry-After: 5`, under `/api/` with a JSON
-  body naming the `phase` and the seconds since the container started
-  (`elapsed`). `docker stop` during these steps stops pip and exits at once. An
-  install runs as long as it makes progress; one that writes nothing for 15
-  minutes is taken for hung and fails: the container starts the Home Assistant
-  it already had, or, on a first start, exits and Docker starts it again. A
-  version in `integration_manager/ha.json` that is not a version number (a hand
-  edit) is ignored and logged.
+  `/api/` path but `/api/alive` answer `503` with `Retry-After: 5`, under
+  `/api/` with a JSON body naming the `phase` and the seconds since the
+  container started (`elapsed`). With a password set, the page and that body
+  say only that Home Assistant is not up yet, and the details are in `docker
+  logs <name>` ([Security](docs/security.md)). `docker stop` during these steps
+  stops pip and exits at once. An install runs as long as it makes progress;
+  one that writes nothing for 15 minutes is taken for hung and fails: the
+  container starts the Home Assistant it already had, or, on a first start,
+  exits and Docker starts it again. A version in `integration_manager/ha.json`
+  that is not a version number (a hand edit) is ignored and logged.
 - **`docker ps` says the container is unhealthy, or stays `starting`.**
   `starting` is at most the first 20 minutes; the first answer, the install
   page's included, makes it healthy at once. `unhealthy` after that means
@@ -716,8 +719,9 @@ without it too, from a copy at most 10 seconds old. See [API](docs/api.md).
   c = http.client.HTTPConnection('127.0.0.1', int(os.environ.get('HRI_PORT') or 8087));
   c.request('GET', '/api/alive'); print(c.getresponse().status)"`.
 - **The page says Home Assistant is not started: a restore failed and could not
-  be put back.** The configuration is half restored, and the page names the
-  backup that holds it from before. Free space or fix the error in `docker logs
+  be put back.** The configuration is half restored, and the page (with a
+  password set, `docker logs <name>`) names the backup that holds it from
+  before. Free space or fix the error in `docker logs
   <name>`; the restore is retried every 5 minutes. To start on the
   configuration as it is, delete `integration_manager/restore-pending.json`.
 - **The integration needs `ffmpeg` or another system package.** Name the Debian
