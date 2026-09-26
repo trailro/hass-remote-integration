@@ -1159,6 +1159,8 @@ class MqttPublisher:
         self.config = new
         if getattr(self, "_republish_interval", None) != new.republish_interval_s:
             self._arm_republish_timer()
+        if self.rules.problem:  # fixed or removed since: read again before anything is published
+            await self.hass.async_add_executor_job(self.rules.load)
         if self.config.enabled:
             await self.hass.async_add_executor_job(self._connect)
         self.publish_health()  # status() shows the new identity's verdict right away
@@ -1546,6 +1548,11 @@ class MqttPublisher:
 
     def _connect(self) -> None:
         if self._stopping:
+            return
+        if self.rules.problem:
+            # fail closed: which entities are excluded is unknown, so none is published and no command is taken (the
+            # main HA shows them unavailable after the retained "offline", and keeps them)
+            self.stats["connect_error"] = f"not connecting: {self.rules.problem}"
             return
         base = self.wanted_base_topic
         if not base:
@@ -3756,6 +3763,7 @@ class MqttPublisher:
             "call_base": self._call_base() if named else None,
             "health_topic": self._health_topic() if named else None,
             "rules": len(self.rules.rules),
+            "rules_error": self.rules.problem,
             "health": self._health_last or self.build_health(),
             "recent_commands": self.recent_commands(30),
             "history_size": len(self.history),

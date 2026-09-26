@@ -21,6 +21,7 @@ from paho.mqtt.reasoncodes import ReasonCode
 from custom_components.integration_manager import discovery as disc
 from custom_components.integration_manager import manage_views
 from custom_components.integration_manager import mqtt_publisher as mp
+from custom_components.integration_manager.mqtt_rules import MqttRules
 
 
 def _closed_port() -> int:
@@ -107,6 +108,7 @@ class _Case(unittest.IsolatedAsyncioTestCase):
         pub._live_base = pub._live_prefix = None
         pub._conn_lock = asyncio.Lock()
         pub._topics, pub._last_hash, pub._discovery_map, pub._blocks = {}, {}, {}, {}
+        pub.rules = MqttRules("/nonexistent/mqtt_rules.json")  # no file: no rules, and nothing holds the connection
         if hasattr(pub, "_read_cleanup_pending"):
             pub._cleanup_pending = pub._read_cleanup_pending()  # what async_start reads
         return pub
