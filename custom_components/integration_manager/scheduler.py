@@ -110,8 +110,9 @@ class Scheduler:
                 import backupkit
 
                 rec = await self.installer.async_backup_exclusive("daily")
-                pruned = await self.hass.async_add_executor_job(
-                    backupkit.prune, self.installer.config_dir, st.backup_keep, self.installer.protected_backups() | {rec["name"]})
+                keep = st.backup_keep
+                pruned = await self.hass.async_add_executor_job(  # protected_backups() reads files: in the job too
+                    lambda: backupkit.prune(self.installer.config_dir, keep, self.installer.protected_backups() | {rec["name"]}))
                 _LOGGER.info("daily backup %s (%s bytes), pruned %s", rec["name"], rec["bytes"], pruned or "nothing")
             except Exception as err:  # noqa: BLE001
                 _LOGGER.error("daily backup failed: %s", err)

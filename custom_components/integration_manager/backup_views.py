@@ -78,8 +78,9 @@ class BackupCreateView(ManagerView):
         cfg = self.hass.config.config_dir
         try:
             rec = await self.installer.async_backup_exclusive(str(body.get("label") or ""))
-            removed = await self.hass.async_add_executor_job(backupkit.prune, cfg, self.installer.settings.backup_keep,
-                                                             self.installer.protected_backups() | {rec["name"]})
+            keep = self.installer.settings.backup_keep
+            # protected_backups() reads ha.json, the rebuild plan and the backups directory: in the job too
+            removed = await self.hass.async_add_executor_job(lambda: backupkit.prune(cfg, keep, self.installer.protected_backups() | {rec["name"]}))
         except ValueError as err:
             return self.json({"ok": False, "error": str(err)})
         except Exception as err:  # noqa: BLE001
@@ -189,7 +190,7 @@ class BackupActionView(ManagerView):
             return self.json({"ok": False, "error": "no such backup"})
         try:
             if action == "delete":
-                if name in self.installer.protected_backups() | await self.hass.async_add_executor_job(backupkit.restore_needs, cfg):
+                if await self.hass.async_add_executor_job(lambda: name in self.installer.protected_backups() | backupkit.restore_needs(cfg)):
                     return self.json({"ok": False, "error": "this backup is still needed: it is the way back of a full rollback, of a scheduled or failed Home Assistant version change or clean start, "
                                                         "of a scheduled restore or a restore that could not be put back, or the copy taken before a restore in the last 7 days"})
                 await self.hass.async_add_executor_job(os.remove, path)

@@ -191,7 +191,8 @@ class BuildCheckView(ManagerView):
             if spec and spec.get("repo") and spec["repo"] != repo:
                 raise ValueError(f"{domain} is registered with {spec['repo']}; use another domain name for a different repository")
             if register and (not spec or not spec.get("repo")):
-                self.installer.add_to_registry(domain, repo, str(body.get("name") or "")[:80] or None)
+                # reads and writes the registry files: in the executor (a ValueError comes through unchanged)
+                await self.hass.async_add_executor_job(self.installer.add_to_registry, domain, repo, str(body.get("name") or "")[:80] or None)
         elif not spec or not spec.get("repo"):
             raise ValueError(f"{domain} is not in the registry: give its GitHub owner/repo")
         return domain, ref, ha, repo or str(spec.get("repo") or "")

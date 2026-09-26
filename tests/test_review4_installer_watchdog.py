@@ -404,6 +404,209 @@ class HealthMaskedTest(WatchdogBase):
         self.assertNotIn(SECRET, inst.state.last_error)
 
 
+# ----- S5-1 -----------------------------------------------------------------------------------------
+
+class InstallerOffTheLoopTest(unittest.TestCase):
+    def test_install_reads_restore_pending_in_the_executor(self):
+        inst = _start_installer(self)
+        inst.rollback_restore_refusal = lambda: None
+        pending = _Where(True)
+        with mock.patch.object(backupkit, "pending", pending):
+            res = asyncio.run(inst.install("2.0", domain="demo"))
+        self.assertIn("a restore is scheduled", res["error"])
+        self.assertEqual(pending.on_loop, [False])
+        self.assertFalse(inst.busy)
+
+    def test_start_reads_restore_pending_and_prunes_in_the_executor(self):
+        inst = _start_installer(self)
+        inst._ensure_deployed = mock.Mock(side_effect=RuntimeError("stop here"))
+        archive = _Where(None)
+        prune = _Where([])
+        with mock.patch.object(backupkit, "pending_archive", archive), mock.patch.object(backupkit, "prune", prune), \
+                mock.patch.object(installer_mod.events, "emit"), self.assertLogs("custom_components.integration_manager.installer", "ERROR"):
+            asyncio.run(inst.start("demo", "2.0"))
+        self.assertEqual(archive.on_loop, [False])
+        self.assertEqual(inst.protected_backups.on_loop, [False])  # before the fix: evaluated as prune's argument, on the loop
+        self.assertFalse(inst.busy)
+
+    def test_start_is_still_refused_while_a_restore_is_pending(self):
+        inst = _start_installer(self)
+        inst.rollback_restore_refusal = lambda: None
+        with mock.patch.object(backupkit, "pending_archive", _Where("/x/backups/b.zip")):
+            res = asyncio.run(inst.start("demo", "2.0"))
+        self.assertIn("a restore is scheduled", res["error"])
+        self.assertFalse(inst.busy)
+
+    def test_replace_prunes_in_the_executor(self):
+        inst = _start_installer(self)
+        inst.state.installed = {"old": {"versions": {"1.0": {}}}}
+        inst._remove_domain = mock.AsyncMock()
+        with mock.patch.object(backupkit, "prune", _Where([])), mock.patch.object(installer_mod.events, "emit"):
+            asyncio.run(inst._replace_current("demo"))
+        self.assertEqual(inst.protected_backups.on_loop, [False])
+
+    def test_requirements_read_the_manifest_in_the_executor(self):
+        inst = _start_installer(self)
+        inst.installed_manifest = _Where({"requirements": ["a==1"]})
+        self.assertEqual(asyncio.run(inst._requirements_for("demo")), ["a==1"])
+        self.assertEqual(inst.installed_manifest.on_loop, [False])
+
+    def test_preview_reads_the_running_manifest_in_the_executor(self):
+        inst = _start_installer(self)
+        inst.state.installed["demo"]["running_tag"] = "2.0"
+        inst.spec = lambda dom: {"repo": "owner/demo"}
+        inst.settings = SimpleNamespace(github_headers=lambda: {})
+        inst._releases_cache = {}
+        inst._requirement_versions = lambda reqs: {}
+        inst._manifest_at = _Where({"version": "2.0", "requirements": []})
+        manifest = json.dumps({"domain": "demo", "version": "3.0", "requirements": []}).encode()
+
+        class Resp:
+            status = 200
+            content_length = None
+            content = SimpleNamespace(iter_chunked=lambda n: _chunks([manifest]))
+
+        class Session:
+            def get(self, url, **kw):
+                class Ctx:
+                    async def __aenter__(self):
+                        return Resp()
+
+                    async def __aexit__(self, *a):
+                        return False
+                return Ctx()
+
+        with mock.patch.object(installer_mod, "async_get_clientsession", return_value=Session()):
+            res = asyncio.run(inst.preview("demo", "3.0"))
+        self.assertEqual(res["installed_version"], "2.0")
+        self.assertEqual(inst._manifest_at.on_loop, [False])
+
+    def test_registering_reads_and_writes_the_registries_in_the_executor(self):
+        d = _tmp(self)
+        os.makedirs(os.path.join(d, "integration_manager"))
+        inst = Installer(SimpleNamespace(config=SimpleNamespace(config_dir=d), async_add_executor_job=_job))
+        seen = _Where({})
+        real = installer_mod._registry_integrations
+
+        def spy(path):
+            seen(path)
+            return real(path)
+
+        with mock.patch.object(installer_mod, "_registry_integrations", spy):
+            res = _body(asyncio.run(views.RegistryView(inst).post(_request({"domain": "demo", "repo": "owner/demo"}))))
+        self.assertTrue(res["ok"], res)
+        self.assertTrue(seen.on_loop)
+        self.assertNotIn(True, seen.on_loop)  # before the fix: the built-in registry was read on the loop
+
+
+async def _chunks(chunks):
+    for c in chunks:
+        yield c
+
+
+class BackupViewsOffTheLoopTest(unittest.TestCase):
+    def setUp(self):
+        self.cfg = _tmp(self)
+        os.makedirs(os.path.join(self.cfg, backupkit.BACKUP_DIR))
+        self.hass = SimpleNamespace(config=SimpleNamespace(config_dir=self.cfg), async_add_executor_job=_job)
+
+    def test_create_prunes_with_protected_backups_in_the_executor(self):
+        protected = _Where(set)
+        installer = SimpleNamespace(async_backup_exclusive=mock.AsyncMock(return_value={"name": "new.zip"}),
+                                    settings=SimpleNamespace(backup_keep=5), protected_backups=protected)
+        with mock.patch.object(backupkit, "prune", return_value=[]):
+            res = _body(asyncio.run(backup_views.BackupCreateView(self.hass, installer).post(_request({}))))
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(protected.on_loop, [False])
+
+    def test_delete_checks_protected_backups_in_the_executor(self):
+        name = "20260101-000000-daily.zip"
+        with open(os.path.join(self.cfg, backupkit.BACKUP_DIR, name), "wb") as fh:
+            fh.write(b"x")
+        protected = _Where(lambda: {name})
+        installer = SimpleNamespace(protected_backups=protected, busy=False)
+        with mock.patch.object(backupkit, "restore_needs", return_value=set()):
+            res = _body(asyncio.run(backup_views.BackupActionView(self.hass, installer).post(_request({}), name=name, action="delete")))
+        self.assertFalse(res["ok"])
+        self.assertIn("still needed", res["error"])
+        self.assertEqual(protected.on_loop, [False])
+
+    def test_the_daily_backup_prunes_in_the_executor(self):
+        protected = _Where(set)
+        installer = SimpleNamespace(settings=SimpleNamespace(bool_=lambda key: key == "backup_daily", backup_keep=5, int_=lambda *a: 0),
+                                    busy=False, backup_running=False, config_dir=self.cfg, protected_backups=protected,
+                                    async_backup_exclusive=mock.AsyncMock(return_value={"name": "d.zip", "bytes": 1}),
+                                    state=SimpleNamespace(last_release_check=time.time()))
+        sch = scheduler_mod.Scheduler.__new__(scheduler_mod.Scheduler)
+        sch.hass, sch.installer, sch._retry = self.hass, installer, None
+        with mock.patch.object(backupkit, "prune", return_value=[]):
+            asyncio.run(sch._daily(None))
+        self.assertEqual(protected.on_loop, [False])
+
+
+class ImportViewsOffTheLoopTest(unittest.TestCase):
+    def setUp(self):
+        self.cfg = _tmp(self)
+        self.hass = SimpleNamespace(config=SimpleNamespace(config_dir=self.cfg, path=lambda *p: os.path.join(self.cfg, *p)),
+                                    async_add_executor_job=_job)
+        self.isfile = []
+        real = os.path.isfile
+
+        def spy(path):
+            if str(path).startswith(self.cfg):
+                self.isfile.append(_on_loop())
+            return real(path)
+
+        patcher = mock.patch("os.path.isfile", spy)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def stage_rebuild(self):
+        path = os.path.join(self.cfg, import_views.ha_import.REBUILD_FILE)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("{}")
+
+    def assert_off_the_loop(self):
+        self.assertTrue(self.isfile, "nothing was checked")
+        self.assertNotIn(True, self.isfile)  # before the fix: os.path.isfile on the loop
+
+    def test_inspect_get(self):
+        with mock.patch.object(import_views.ha_import, "load_summary", return_value=None):
+            res = _body(asyncio.run(import_views.ImportInspectView(self.hass, None).get(_request())))
+        self.assertFalse(res["uploaded"])
+        self.assert_off_the_loop()
+
+    def test_inspect_post(self):
+        res = _body(asyncio.run(import_views.ImportInspectView(self.hass, None).post(_request({}))))
+        self.assertIn("upload a backup first", res["error"])
+        self.assert_off_the_loop()
+
+    def test_apply_and_apply_all_refuse_a_staged_rebuild(self):
+        self.stage_rebuild()
+        installer = SimpleNamespace(busy=False, running=None, state=SimpleNamespace(installed={}))
+        res = _body(asyncio.run(import_views.ImportApplyView(self.hass, None, installer).post(_request({"domain": "demo", "entry_id": "abc"}))))
+        self.assertEqual(res["error"], import_views._REBUILD_MSG)
+        res = _body(asyncio.run(import_views.ImportApplyAllView(self.hass, None, installer).post(_request({}))))
+        self.assertEqual(res["error"], import_views._REBUILD_MSG)
+        self.assertFalse(installer.busy)
+        self.assert_off_the_loop()
+
+    def test_clear_refuses_a_staged_rebuild(self):
+        self.stage_rebuild()
+        with mock.patch.object(import_views.ha_import, "clear") as clear:
+            res = _body(asyncio.run(import_views.ImportClearView(self.hass).post(_request({}))))
+        self.assertEqual(res["error"], import_views._REBUILD_MSG)
+        clear.assert_not_called()
+        self.assert_off_the_loop()
+
+    def test_upload_refuses_a_staged_rebuild(self):
+        self.stage_rebuild()
+        res = _body(asyncio.run(import_views.ImportUploadView(self.hass).post(_request(headers={"X-Requested-With": "fetch"}))))
+        self.assertEqual(res["error"], import_views._REBUILD_MSG)
+        self.assert_off_the_loop()
+
+
 # ----- S5-2 -----------------------------------------------------------------------------------------
 
 class PreRestoreNameTest(unittest.TestCase):

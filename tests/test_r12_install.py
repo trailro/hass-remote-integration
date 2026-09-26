@@ -118,6 +118,10 @@ class DiffOffsetTest(R12PatchCase):
         self.assertEqual(self.read(), drifted)
 
 
+async def _executor_job(func, *args):
+    return await asyncio.get_running_loop().run_in_executor(None, func, *args)
+
+
 class R12InstallerCase(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="hri-r12-")
@@ -129,7 +133,7 @@ class R12InstallerCase(unittest.TestCase):
         if state is not None:
             with open(os.path.join(self.dir, "integration_manager", "state.json"), "w", encoding="utf-8") as fh:
                 json.dump(state, fh)
-        return Installer(SimpleNamespace(config=SimpleNamespace(config_dir=self.dir)))
+        return Installer(SimpleNamespace(config=SimpleNamespace(config_dir=self.dir), async_add_executor_job=_executor_job))
 
     def store(self, inst, domain, tag, version="1.0.0"):
         src = inst._version_dir(domain, tag)

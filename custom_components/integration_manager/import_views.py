@@ -72,7 +72,7 @@ class ImportUploadView(ManagerView):
             return await self._post(request)
 
     async def _post(self, request: web.Request) -> web.Response:
-        if _rebuild_staged(self.hass.config.config_dir):
+        if await self.hass.async_add_executor_job(_rebuild_staged, self.hass.config.config_dir):
             return self.json({"ok": False, "error": _REBUILD_MSG})
         reader = await request.multipart()
         field = await reader.next()
@@ -111,7 +111,7 @@ class ImportUploadView(ManagerView):
             await self.hass.async_add_executor_job(_discard)
         if size == 0:
             return self.json({"ok": False, "error": "empty upload"})
-        if _rebuild_staged(self.hass.config.config_dir):  # staged while this streamed: clearing the import area would drop it
+        if await self.hass.async_add_executor_job(_rebuild_staged, self.hass.config.config_dir):  # staged while this streamed: clearing the import area would drop it
             await self.hass.async_add_executor_job(os.remove, dest + ".tmp")
             return self.json({"ok": False, "error": _REBUILD_MSG})
         await self.hass.async_add_executor_job(os.replace, dest + ".tmp", dest)
@@ -133,8 +133,8 @@ class ImportInspectView(ManagerView):
         # anyone who reaches the UI, which with no password set is anyone on the network): its
         # passwords and tokens stay masked (the POST inspect answers the user who gave the key in
         # full; an import puts the stored value back wherever it receives "***")
-        return self.json({"uploaded": os.path.isfile(os.path.join(cfg, ha_import.IMPORT_TAR)),
-                          "summary": scrub(summary) if summary else None})
+        uploaded = await self.hass.async_add_executor_job(os.path.isfile, os.path.join(cfg, ha_import.IMPORT_TAR))
+        return self.json({"uploaded": uploaded, "summary": scrub(summary) if summary else None})
 
     @with_body
     async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
@@ -145,9 +145,9 @@ class ImportInspectView(ManagerView):
 
     async def _post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
         cfg = self.hass.config.config_dir
-        if os.path.isfile(os.path.join(cfg, ha_import.REBUILD_FILE)):
+        if await self.hass.async_add_executor_job(_rebuild_staged, cfg):
             return self.json({"ok": False, "error": "a Home Assistant downgrade with a clean start is scheduled: restart first"})
-        if not os.path.isfile(os.path.join(cfg, ha_import.IMPORT_TAR)):
+        if not await self.hass.async_add_executor_job(os.path.isfile, os.path.join(cfg, ha_import.IMPORT_TAR)):
             return self.json({"ok": False, "error": "upload a backup first"})
         password = body.get("password")
         if password is not None and not isinstance(password, str):
@@ -176,18 +176,19 @@ class ImportApplyView(ManagerView):
         entry_id = str(body.get("entry_id", "")).strip()
         if not re.fullmatch(r"[a-z0-9_]+", domain) or not re.fullmatch(r"[A-Za-z0-9]+", entry_id):
             return self.json({"ok": False, "error": "domain/entry_id required"})
-        if _rebuild_staged(self.hass.config.config_dir):
-            return self.json({"ok": False, "error": _REBUILD_MSG})
         data, options = body.get("data"), body.get("options")
         if data is not None and not isinstance(data, dict) or options is not None and not isinstance(options, dict):
             return self.json({"ok": False, "error": "data/options must be JSON objects"})
 
-        def do_apply():  # what runs is read inside _locked, under the flag a start or a stop takes
+        async def do_apply():  # what runs is read inside _locked, under the flag a start or a stop takes
+            # under the lock a clean start's staging takes too: read in the executor, and not staged since
+            if await self.hass.async_add_executor_job(_rebuild_staged, self.hass.config.config_dir):
+                raise ValueError(_REBUILD_MSG)
             running = self.installer.running if self.installer else None
             installed = set(self.installer.state.installed) if self.installer else set()
-            return ha_import.apply(self.hass, self.aligner, domain, entry_id, data, options,
-                                   bool(body.get("align", True)), bool(body.get("copy_storage", False)),
-                                   running=(domain == running), installed=(domain in installed))
+            return await ha_import.apply(self.hass, self.aligner, domain, entry_id, data, options,
+                                         bool(body.get("align", True)), bool(body.get("copy_storage", False)),
+                                         running=(domain == running), installed=(domain in installed))
 
         try:
             result = await _locked(do_apply, self.installer)
@@ -208,11 +209,11 @@ class ImportClearView(ManagerView):
 
     @with_body
     async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
-        if _rebuild_staged(self.hass.config.config_dir):
-            return self.json({"ok": False, "error": _REBUILD_MSG})
         if _IMPORT_LOCK.locked():
             return self.json({"ok": False, "error": "an import or upload is running: wait for it to finish"})
-        async with _IMPORT_LOCK:
+        async with _IMPORT_LOCK:  # the check in the executor, under the lock a clean start's staging takes too
+            if await self.hass.async_add_executor_job(_rebuild_staged, self.hass.config.config_dir):
+                return self.json({"ok": False, "error": _REBUILD_MSG})
             await self.hass.async_add_executor_job(ha_import.clear, self.hass.config.config_dir)
         return self.json({"ok": True})
 
@@ -230,15 +231,16 @@ class ImportApplyAllView(ManagerView):
 
     @with_body
     async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
-        if _rebuild_staged(self.hass.config.config_dir):
-            return self.json({"ok": False, "error": _REBUILD_MSG})
         domains = body.get("domains")
         if domains is not None and not (isinstance(domains, list) and all(isinstance(d, str) and re.fullmatch(r"[a-z0-9_]+", d) for d in domains)):
             return self.json({"ok": False, "error": "domains must be a list of domain names"})
 
-        def do_apply_all():
-            return ha_import.apply_all(self.hass, self.aligner, domains, bool(body.get("align", True)), bool(body.get("copy_storage", True)),
-                                       self.installer.running, set(self.installer.state.installed))
+        async def do_apply_all():
+            # under the lock a clean start's staging takes too: read in the executor, and not staged since
+            if await self.hass.async_add_executor_job(_rebuild_staged, self.hass.config.config_dir):
+                raise ValueError(_REBUILD_MSG)
+            return await ha_import.apply_all(self.hass, self.aligner, domains, bool(body.get("align", True)), bool(body.get("copy_storage", True)),
+                                             self.installer.running, set(self.installer.state.installed))
 
         try:
             result = await _locked(do_apply_all, self.installer)

@@ -25,6 +25,10 @@ def _body(response):
     return json.loads(response.body)
 
 
+async def _executor_job(func, *args):
+    return await asyncio.get_running_loop().run_in_executor(None, func, *args)
+
+
 class BuilderRegistryCase(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="hri-builder-")
@@ -33,7 +37,7 @@ class BuilderRegistryCase(unittest.TestCase):
         self.inst = Installer(SimpleNamespace(config=SimpleNamespace(config_dir=self.dir)))
         self.reg = self.inst.user_registry_file
         self.check = object.__new__(build_views.BuildCheckView)
-        self.check.hass, self.check.installer, self.check._checks = None, self.inst, {}
+        self.check.hass, self.check.installer, self.check._checks = SimpleNamespace(async_add_executor_job=_executor_job), self.inst, {}
         self.check.updater = SimpleNamespace(validate=mock.AsyncMock())
         self.check._pf = SimpleNamespace(_lock=asyncio.Lock())
 
