@@ -5,9 +5,26 @@ an app (called an add-on before 2026) from this repository. It is the same
 image as the Docker install, with the same web UI; what differs is set up
 below.
 
+## Requirements
+
+- **Home Assistant Core 2025.10 or newer**, enforced by the app: on an older
+  Core the App Store shows it as unavailable and refuses to install, update or
+  restore it. Below 2025.10 the entities HRI sends over MQTT lose their ids,
+  below 2024.11 they do not arrive ([what it
+  needs](mqtt.md#what-the-main-home-assistant-needs)).
+- **2026.5 or newer** for `date`, `time` and `datetime` entities.
+- **Supervisor 2026.07.1 or newer.** The Supervisor installs and updates apps
+  only while it is the current stable release, so keeping it updated is
+  enough.
+- **Home Assistant OS** in the range the Supervisor supports (the newest major
+  release and the three before it).
+
+Tested on Home Assistant OS 18.3 / Supervisor 2026.09.2 / Core 2026.9.3.
+
 ## Install
 
-1. **Settings > Apps > App Store**, menu **⋮ > Repositories**, add
+1. **Settings > Apps > App Store** (**Settings > Add-ons > Add-on Store** on
+   Core before 2026.2), menu **⋮ > Repositories**, add
    `https://github.com/trailro/hass-remote-integration`.
 2. Install **hass-remote-integration**.
 3. On its **Configuration** tab, set a password for the app's port (open to
