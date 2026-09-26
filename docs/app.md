@@ -3,7 +3,7 @@
 On Home Assistant OS or a Supervised install, hass-remote-integration runs as
 an app (called an add-on before 2026) from this repository. It is the same
 image as the Docker install, with the same web UI; what differs is set up
-below.
+below. Supervised installs are deprecated and unsupported by Home Assistant.
 
 ## Requirements
 
