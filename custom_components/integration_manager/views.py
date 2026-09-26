@@ -335,8 +335,9 @@ async def async_change_ha_version(installer: Installer, updater: HaUpdater, targ
                 await hass.async_add_executor_job(updater.cancel_config_change)
             elif mode == "rebuild":
                 await hass.async_add_executor_job(_drop_change_restore, cfg)
-            await hass.async_add_executor_job(backupkit.prune, cfg, installer.settings.backup_keep,
-                                              installer.protected_backups() | {backup["name"]})
+            # protected_backups() reads ha.json, the rebuild plan and the backups directory: in the job too
+            await hass.async_add_executor_job(lambda: backupkit.prune(cfg, installer.settings.backup_keep,
+                                                                      installer.protected_backups() | {backup["name"]}))
         finally:
             installer.busy = False
     warnings: list[str] = []

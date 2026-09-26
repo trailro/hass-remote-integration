@@ -36,6 +36,7 @@ from custom_components.integration_manager import installer as installer_mod
 from custom_components.integration_manager import scheduler as scheduler_mod
 from custom_components.integration_manager.installer import Installer, State
 from tests.test_patches import DIFF, PatchTestCase
+from tests.test_review_backup import _volume
 from tests.test_watchdog import DOMAIN, _Base as WatchdogBase
 
 
@@ -542,6 +543,41 @@ class BackupViewsOffTheLoopTest(unittest.TestCase):
         with mock.patch.object(backupkit, "prune", return_value=[]):
             asyncio.run(sch._daily(None))
         self.assertEqual(protected.on_loop, [False])
+
+    def test_a_home_assistant_version_change_prunes_in_the_executor(self):
+        """POST /api/ha/update and /api/ha/rollback: async_change_ha_version evaluated protected_backups() as
+        prune's argument, on the loop."""
+        from custom_components.integration_manager import ha_updater
+
+        cfg = _volume()
+        self.addCleanup(shutil.rmtree, cfg, True)
+        hass = SimpleNamespace(config=SimpleNamespace(config_dir=cfg, path=lambda *p: os.path.join(cfg, *p)),
+                               async_add_executor_job=_job)
+        protected = _Where(set)
+
+        async def async_backup(label=""):
+            return await _job(backupkit.create, cfg, label)
+
+        installer = SimpleNamespace(hass=hass, busy=False, running="demo", running_tag="v2",
+                                    settings=SimpleNamespace(backup_keep=50), async_backup=async_backup,
+                                    protected_backups=protected, min_ha_of=lambda *_a: None)
+        with mock.patch.object(views, "HA_VERSION", "2026.8.3"), mock.patch.object(views.events, "emit"):
+            result = asyncio.run(views.async_change_ha_version(installer, ha_updater.HaUpdater(hass), "2026.9.0", "keep", "test"))
+        self.assertEqual(result["config"], "keep")
+        self.assertEqual(protected.on_loop, [False])
+
+    def test_the_mqtt_backup_prunes_in_the_executor(self):
+        from custom_components.integration_manager.manager_device import ManagerDevice
+
+        protected = _Where(set)
+        dev = ManagerDevice.__new__(ManagerDevice)
+        dev.hass = self.hass
+        dev.installer = SimpleNamespace(async_backup_exclusive=mock.AsyncMock(return_value={"name": "m.zip"}),
+                                        config_dir=self.cfg, settings=SimpleNamespace(backup_keep=5), protected_backups=protected)
+        with mock.patch.object(backupkit, "prune", return_value=[]) as prune:
+            self.assertTrue(asyncio.run(dev._do_backup())["ok"])
+        self.assertEqual(protected.on_loop, [False])
+        self.assertEqual(prune.call_args.args, (self.cfg, 5, {"m.zip"}))
 
 
 class ImportViewsOffTheLoopTest(unittest.TestCase):
