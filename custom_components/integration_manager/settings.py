@@ -61,13 +61,16 @@ class Settings:
         self.path = os.path.join(state_dir, "settings.json")
         self.data = dict(DEFAULTS)
         self.load_error: str | None = None
+        self._unread: str | None = None  # the file is there but could not be read: a save would replace it with the defaults
         try:
             with open(self.path, encoding="utf-8") as fh:
                 loaded = json.load(fh)
         except FileNotFoundError:
             return
         except OSError as err:
-            self._report(f"settings.json cannot be read ({type(err).__name__}: {err}): the defaults are used until it can", hass)
+            self._unread = f"{type(err).__name__}: {err}"
+            self._report(f"settings.json cannot be read ({self._unread}): the defaults are used and no setting is saved, "
+                         "so the file is not replaced; fix it and restart", hass)
             return
         except ValueError:  # also a text that is not UTF-8
             self._report(f"settings.json is not valid JSON: the defaults are used (tokens included) {self._keep_corrupt()}", hass)
@@ -104,6 +107,11 @@ class Settings:
 
     async def async_save(self) -> None:
         """Copied now, on the loop that changes it; written by the ordered writer."""
+        if self._unread is not None:
+            # the defaults in memory would replace a file that only could not be read (a permission, an I/O error):
+            # the tokens and allowed hosts in it would be gone for good
+            raise OSError(f"not saved: settings.json could not be read when the manager started ({self._unread}), and "
+                          "saving would replace it with the defaults; fix the file and restart")
         await writer.async_write(self.path, self.data, indent=1, mode=0o600)
 
     @property
