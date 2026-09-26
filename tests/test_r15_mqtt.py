@@ -13,7 +13,7 @@ SCAN = [["homeassistant/device/+/config", "hass_demo/#"]]
 
 class BoundToItsBrokerTest(_Case):
     async def test_another_broker_never_completes_it_and_its_own_does(self):
-        port_a, port_b = self.port, _closed_port()
+        port_a, port_b = self.port, _closed_port(self.port)
         pub, _res, _scan = await self.fail_uninstall()  # broker A unreachable
         a, b = _Broker({**OURS, **KEPT}), _Broker(dict(KEPT))
         by_port = {port_a: a, port_b: b}  # a throwaway client reaches the broker the settings name at that moment
@@ -37,7 +37,7 @@ class BoundToItsBrokerTest(_Case):
         self.assertEqual(self.on_disk(), {})
 
     async def test_an_identity_sweep_on_another_broker_keeps_it(self):
-        port_b = _closed_port()
+        port_b = _closed_port(self.port)
         await self.fail_uninstall()
         pub = self.publisher(running="hass_other", port=port_b)
         mp.write_json(os.path.join(self.dir, "integration_manager", "mqtt_identity.json"), {"base": "hass_demo", "prefix": "homeassistant"})
@@ -47,7 +47,7 @@ class BoundToItsBrokerTest(_Case):
         self.assertEqual(set(self.on_disk()), {"hass_demo"})
 
     async def test_starting_that_identity_on_another_broker_keeps_it(self):
-        port_b = _closed_port()
+        port_b = _closed_port(self.port)
         await self.fail_uninstall()
         for running, enabled in (("hass_demo", True), ("hass_demo", False)):
             pub = self.publisher(running=running, enabled=enabled, port=port_b, force_base_topic=True)
@@ -61,7 +61,7 @@ class BoundToItsBrokerTest(_Case):
             self.assertEqual(set(self.on_disk()), {"hass_demo"})
 
     async def test_a_second_outage_on_another_broker_keeps_both(self):
-        port_a, port_b = self.port, _closed_port()
+        port_a, port_b = self.port, _closed_port(self.port)
         await self.fail_uninstall()
         pub = self.publisher(port=port_b)
         await self.uninstall(pub)  # installed again on B, uninstalled while B is down too
@@ -69,7 +69,7 @@ class BoundToItsBrokerTest(_Case):
 
 
     async def test_an_uninstall_on_another_broker_names_the_one_that_still_waits(self):
-        port_a, port_b = self.port, _closed_port()
+        port_a, port_b = self.port, _closed_port(self.port)
         await self.fail_uninstall()
         b = _Broker({**OURS, **KEPT})
         with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a: b.client(*a)):
@@ -85,7 +85,7 @@ class RecordsWithoutABrokerTest(_Case):
     async def test_bound_to_the_broker_configured_when_they_are_read(self):
         mp.write_json(os.path.join(self.dir, "integration_manager", "mqtt_cleanup_pending.json"),
                       {"pending": {"hass_demo": {"prefix": "homeassistant", "error": "OSError: down", "since": "t"}}})
-        port_b = _closed_port()
+        port_b = _closed_port(self.port)
         pub = self.publisher()  # read with broker A configured
         self.assertEqual(self.on_disk()["hass_demo"]["broker"], {"host": "127.0.0.1", "port": self.port, "tls": False, "username": ""})
         b = _Broker({**OURS, **KEPT})
