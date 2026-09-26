@@ -100,15 +100,21 @@ log says so and the next start tries again.
 ## The Supervisor token
 
 The Supervisor gives the app a token (`SUPERVISOR_TOKEN`, and the older name
-`HASSIO_TOKEN`). With it, anything in the app could read the app's options,
-the password included, and change them. HRI reads the options with it at boot
-and then removes both variables from its environment, so Home Assistant inside
-the app and the integration it runs do not inherit them.
+`HASSIO_TOKEN`). With it, code in the app can read and rewrite the app's
+options through the Supervisor API. HRI uses it at boot, then removes both
+variables from its environment, so Home Assistant inside the app and the
+integration it runs do not inherit them: dropping the token stops that code
+from reading or rewriting the app's options through the Supervisor API.
 
-This keeps the token out of reach of ordinary code; it is not a sandbox. The
-container's init process (PID 1, Docker's init) still holds the token in its
-own environment, and everything in the container runs as root, so an
-integration determined to read it can. Install integrations you trust.
+It does not hide the password from code running in the app.
+`/data/options.json` (root, `0600`) and the `HRI_PASSWORD` environment
+variable are readable by any integration, everything in the container running
+as root, exactly as `HRI_PASSWORD` is in a plain Docker install. The password
+protects the web UI and API from the network, not from the integration.
+
+Nor is it a sandbox: the container's init process (PID 1, Docker's init)
+still holds the token in its own environment, so an integration determined to
+read it can. Install integrations you trust.
 
 ## Files
 
