@@ -123,7 +123,7 @@ Put your settings in a `.env` file next to `docker-compose.yml`:
 ```bash
 TZ=Europe/Berlin          # your time zone
 HRI_PORT=8087             # port of the UI
-# HRI_VERSION=0.24.0      # optional: pin a release (default: latest)
+# HRI_VERSION=0.25.0      # optional: pin a release (default: latest)
 # HRI_REGISTRY=docker.io/trailro26  # optional: pull from Docker Hub (default: ghcr.io/trailro)
 # HRI_PASSWORD=...        # optional: require a password for the UI and API
 # HRI_APT_PACKAGES=ffmpeg  # optional: Debian packages installed at boot (what pip cannot install)
@@ -355,7 +355,7 @@ every 30 s with the image's Python, and holds off for the first 20 minutes (see
 [Troubleshooting](#troubleshooting)).
 
 The top bar shows the running version and the commit its image was built from
-(`v0.24.0 · 1a2b3c4`), linking to that release. When GitHub has newer releases
+(`v0.25.0 · 1a2b3c4`), linking to that release. When GitHub has newer releases
 (checked with the other update checks), a banner links the release notes of
 each, newest first; hiding it lasts in that browser until a newer release.
 
@@ -653,7 +653,7 @@ to report a problem, see [SECURITY.md](SECURITY.md).
 |---|---|---|
 | `HRI_PORT` | `8087` | Port of the UI, the API and the image's healthcheck; a change applies at the next boot, and one pinned in `.storage/http` by an older setup or a restored backup is dropped. A value that is not a port number (1-65535) stops the container at boot, with a line in the log |
 | `HRI_NAME` | `hass-remote-integration` | Container and volume name |
-| `HRI_VERSION` | `latest` | Image tag Compose pulls, for example `0.24.0` |
+| `HRI_VERSION` | `latest` | Image tag Compose pulls, for example `0.25.0` |
 | `HRI_REGISTRY` | `ghcr.io/trailro` | Registry Compose pulls from: `ghcr.io/trailro` or `docker.io/trailro26` (Docker Hub), the same image. A compose file from 0.16.0 or older ignores it: download it again |
 | `TZ` | `UTC` | Time zone; an unknown zone falls back to UTC, with an error in the log |
 | `HA_VERSION_LATEST` | `1` | `0` installs the image's default Home Assistant (`HA_VERSION_DEFAULT`, the version the image was built with) on a fresh volume instead of the newest |
