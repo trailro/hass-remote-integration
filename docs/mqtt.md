@@ -338,11 +338,15 @@ the category), and the rest of the rule applies.
 
 When `integration_manager/mqtt_rules.json` cannot be read (not valid JSON, not
 a rules object, a read error), which entities it excludes is unknown, so the
-container fails closed: it does not connect to the broker, publishes nothing
-and takes no command. The main HA keeps its entities, unavailable after the
-retained `offline`. `GET /api/mqtt/status` names the problem in `rules_error`
-and `connect_error`, and the log says it. The damaged file stays where it is,
-with a copy as `mqtt_rules.json.corrupt-<time>` (the newest 3 are kept). Rule
+container fails closed: it does not open its connection to the broker,
+publishes nothing and takes no command (an uninstall cleanup still pending
+clears its retained topics on short connections of its own). The main HA
+keeps its entities, unavailable after the retained `offline`. `GET
+/api/mqtt/status` names the problem in `rules_error` and `connect_error`, the
+MQTT page shows it next to the rules, and the log says it. The damaged file
+stays where it is. When it is not valid JSON or holds no rules object, a copy
+is kept as `mqtt_rules.json.corrupt-<time>` (the newest 3, mode 600); a file
+that cannot be read at all gets none. Rule
 changes from the Entities page or `POST /api/mqtt/rules` are refused with the
 same reason, so none overwrites the file. Fix the file, or remove it to start
 over without rules, then press *Reconnect*, save the MQTT settings or
