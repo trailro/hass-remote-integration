@@ -27,8 +27,9 @@ Set `HRI_PASSWORD`, or `HRI_PASSWORD_FILE` (a Docker secret), to require one:
 - Browsers get the cookie `hri_session_<port>`, valid 30 days (an old
   `hri_session` cookie moves over by itself). As the Home Assistant app,
   whose port inside is always 8087, it is `hri_session_<the app's host
-  name>`, so two apps on one host keep their sessions apart; ingress needs
-  no cookie.
+  name>`, so two apps on one host keep their sessions apart; on the host
+  network, where the host name is the host's, it is the port again, the one
+  the Supervisor gave the app. Ingress needs no cookie.
 - **Log out** (top bar; not shown through the app's ingress) and a password
   change end every session in every browser, one opened a moment before
   included, across restarts and restores. If the volume cannot record a logout
@@ -54,6 +55,14 @@ ingress proxies ([below](#home-assistant-ingress-the-app)): anything under
 webhooks (`/api/webhook/<id>`) and other callbacks included. There is no
 allowlist, so an integration that receives webhooks works only without a
 password.
+
+As the Home Assistant app on the host network ([app](app.md#host-network)),
+the port is on every interface of the host. There, with no password set,
+every request that is not the app's ingress gets `403` and a line saying to
+set the app's password: pages, the API, webhooks and the boot status page
+(only `/api/alive` still answers there, for the healthcheck). With a password
+the rules above apply. A Docker install with `network_mode: host` is not
+detected: set a password there.
 
 Browsers send cookies to every port of a host name, so another service on
 the same IP address or name receives the session cookie and can overwrite it;
@@ -119,7 +128,9 @@ with the prefix stripped. A request counts as ingress only when both hold:
   from the Supervisor's options; never set it on a Docker install);
 - the TCP peer of the connection is the Supervisor, `172.30.32.2`. Headers do
   not count: an `X-Ingress-Path`, `X-Hass-Source` or `X-Remote-User-Name` sent
-  from anywhere else changes nothing.
+  from anywhere else changes nothing. On the host network the Supervisor
+  reaches the app at the host's side of its own network (`172.30.32.1`), and
+  the peer is still its address.
 
 For those requests HRI drops the `X-Forwarded-*` headers before Home
 Assistant's forwarded middleware (which would answer `400`), and skips the

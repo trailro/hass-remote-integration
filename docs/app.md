@@ -63,8 +63,10 @@ Not options:
 
 - the time zone is the one set in Home Assistant (**Settings > System >
   General**), which the Supervisor passes to the app;
-- the port inside the app is always 8087. Change the port on your network on
-  the app's **Network** tab, or clear it to turn the port off;
+- the port inside the app is 8087. Change the port on your network on
+  the app's **Network** tab, or clear it to turn the port off. An HRI Manager
+  instance on the host network is the exception: see [Host
+  network](#host-network);
 - `HRI_PASSWORD_FILE`, dev mode and the diagnostics variables are for Docker
   installs.
 
@@ -231,6 +233,43 @@ on, integrations that need raw sockets, such as ARP/DHCP scanners and
 nmap-style device trackers, may not work in the app. A plain Docker install
 is not affected.
 
+## Host network
+
+An integration that finds its devices by mDNS, SSDP or UDP broadcast finds
+nothing from the app's own network: the container does not see the LAN's
+multicast and broadcast. An instance created with [HRI
+Manager](https://github.com/trailro/hass-remote-integration-manager) can run
+on the host's network instead (its **Host network** choice, off by default;
+the app from this repository never does). What changes then:
+
+- **The port.** The instance's `ingress_port` is `0`: the Supervisor picks a
+  free port for it (62000 to 65500), keeps it for the app from then on, and
+  sends the sidebar panel there. HRI asks the Supervisor for that port at
+  every start of a fresh container and listens on it, the healthcheck
+  included; the app's log names it (`app: port …, host network`). Two
+  instances on one host never share a port.
+- **The port is on your network.** On the host network it listens on every
+  interface of the host, the Network tab has nothing to turn off, and a port
+  without a password would be HRI open to anyone on the LAN. So without the
+  app's `password`, every request to the port that is not the sidebar panel
+  gets `403` ("Set the app's password to use hass-remote-integration on its
+  port"), the page shown while Home Assistant installs too; only
+  `/api/alive`, the healthcheck, still answers there. With a password the
+  port works as the app's port always does, behind HRI's login.
+- **Home Assistant is not announced.** The Home Assistant inside does not
+  announce itself on the LAN (`_home-assistant._tcp`), so the companion apps
+  and a new Home Assistant's onboarding never offer it as a server; the
+  integration's own zeroconf browsing works.
+
+What it costs: the app shares the host's network namespace. The integration
+sees and can use every interface of the host and reaches every service the
+host listens on, `localhost` included, as a program on the host would. Choose
+it only for an integration that needs discovery.
+
+A plain Docker install with `network_mode: host` gets none of this
+automatically: `HRI_PORT` is the port there too, HRI cannot tell that the port
+is on the LAN, and without `HRI_PASSWORD` it is open. Set a password.
+
 ## Access
 
 The web UI opens two ways, with a different gate each:
@@ -249,7 +288,9 @@ The web UI opens two ways, with a different gate each:
   `X-Remote-User-Id` must be in the Supervisor's exact spelling: the
   Supervisor forwards a browser's own copy spelled in another case in place
   of its own, so such a request gets `403`, with or without `ingress_users`.
-- **On the app's port** (8087 on the host by default): as a Docker install,
+- **On the app's port** (8087 on the host by default; on the [host
+  network](#host-network), the port the Supervisor gave the app, refused
+  without the app's password): as a Docker install,
   with HRI's own password, session cookie and host guard
   ([Security](security.md)). If you use only the panel, clear the port on the
   app's **Network** tab; nothing is then reachable without Home Assistant.
