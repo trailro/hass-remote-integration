@@ -141,6 +141,8 @@ manager's own backups leave out):
   the first start installs Home Assistant again, which takes a few minutes and
   needs internet access;
 - log files, Python caches, `deps/` and `tts/`;
+- the cached HACS list of the Install page (`hacs_catalog.json`), fetched
+  again at the first search;
 - `backups/`, the manager's own backups: copies of the same state, which would
   otherwise be stored again in every Home Assistant backup. Download the ones
   you want to keep from **System**;

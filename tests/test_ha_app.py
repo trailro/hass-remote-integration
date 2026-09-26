@@ -149,6 +149,7 @@ class AppConfigTest(unittest.TestCase):
             "integration_manager/restore-pending-1.zip", "integration_manager/restore-pending.json",
             "integration_manager/staging-restore-1/deep/f", "integration_manager/import-extracted/.storage/x",
             "integration_manager/import.tar", "integration_manager/backups/x", "integration_manager/pre-restore-x/y",
+            "integration_manager/hacs_catalog.json",
         ]
         for rel in files:
             (root / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -160,8 +161,23 @@ class AppConfigTest(unittest.TestCase):
                     ".storage/http", "integration_manager/events.jsonl", "integration_manager/mqtt_identity.json"):
             self.assertIn(rel, want)
         for rel in ("venv-2026.9.3/bin/python", "backups/hri-1.zip", "home-assistant.log", "integration_manager/auth_key",
-                    ".storage/tmpab12cd_9", "integration_manager/staging-restore-1/deep/f"):
+                    ".storage/tmpab12cd_9", "integration_manager/staging-restore-1/deep/f",
+                    "integration_manager/hacs_catalog.json"):
             self.assertNotIn(rel, want)
+
+    def test_the_hacs_catalog_cache_is_in_no_backup(self):
+        """hacs_catalog.json (about 1.3 MB) is a cache catalog.py fetches again: out of HRI's backups, out of the
+        Supervisor's, and a restore leaves the live copy alone."""
+        self.assertIn("*_hass_remote_integration/integration_manager/hacs_catalog.json", self.cfg["backup_exclude"])
+        cfg = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, cfg, True)
+        for rel in (backupkit.MARKER, "integration_manager/hacs_catalog.json", "integration_manager/registry.json"):
+            os.makedirs(os.path.dirname(os.path.join(cfg, rel)), exist_ok=True)
+            with open(os.path.join(cfg, rel), "w", encoding="utf-8") as fh:
+                fh.write("{}")
+        names = {rel for _path, rel in backupkit.iter_files(cfg)}
+        self.assertNotIn("integration_manager/hacs_catalog.json", names)
+        self.assertIn("integration_manager/registry.json", names)
 
 
 class AppDiscoveryTest(unittest.TestCase):
