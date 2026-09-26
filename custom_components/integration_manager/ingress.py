@@ -56,17 +56,20 @@ def from_supervisor(request: web.Request) -> bool:
     return str(ip) == SUPERVISOR_IP
 
 
-def user_headers_exact(names) -> bool:
-    """The Supervisor's spelling, from the header names as received: X-Remote-User-Id once and X-Remote-User-Name at
-    most once, no other spelling of either (the Supervisor forwards a client's copy spelled another way)."""
+def user_headers(names) -> str:
+    """How the user headers came, from the header names as received: "user" when X-Remote-User-Id is there once and
+    X-Remote-User-Name at most once, both in the Supervisor's spelling; "none" when neither is there in any spelling
+    (a session the Supervisor opened without user data); "bad" for anything else, a client's copy among them."""
     count = {USER_HEADER: 0, USER_ID_HEADER: 0}
     for name in names:
         for own in count:
             if name.casefold() == own.casefold():
                 if name != own:
-                    return False
+                    return "bad"
                 count[own] += 1
-    return count[USER_ID_HEADER] == 1 and count[USER_HEADER] <= 1
+    if count == {USER_HEADER: 0, USER_ID_HEADER: 0}:
+        return "none"
+    return "user" if count[USER_ID_HEADER] == 1 and count[USER_HEADER] <= 1 else "bad"
 
 
 def is_ingress(request: web.Request) -> bool:
@@ -85,10 +88,15 @@ def install_ingress(hass, csp: str) -> bool:
     async def hri_ingress(request: web.Request, handler):
         if not from_supervisor(request):
             return await handler(request)
-        if not user_headers_exact(k.decode("utf-8", "surrogateescape") for k, _ in request.raw_headers):
-            _LOGGER.warning("ingress: the user headers are not the Supervisor's own (a client's copy): refused %s %s", request.method, request.path)
+        shape = user_headers(k.decode("utf-8", "surrogateescape") for k, _ in request.raw_headers)
+        if shape == "bad":
+            _LOGGER.warning("ingress: a user header not spelled or sent as the Supervisor sends it: refused %s %s", request.method, request.path)
             return web.Response(status=403, content_type="text/plain", headers={"Content-Security-Policy": csp},
                                 text="This Home Assistant user may not open hass-remote-integration (the user headers are not the Supervisor's).")
+        if shape == "none" and users:
+            _LOGGER.warning("ingress: no user in the ingress session: refused %s %s", request.method, request.path)
+            return web.Response(status=403, content_type="text/plain", headers={"Content-Security-Policy": csp},
+                                text="This Home Assistant user may not open hass-remote-integration (the app's ingress_users option).")
         user = request.headers.get(USER_HEADER, "")
         if users and user.casefold() not in users:
             _LOGGER.warning("ingress: Home Assistant user %r is not in ingress_users: refused %s %s", user, request.method, request.path)
