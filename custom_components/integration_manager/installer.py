@@ -228,15 +228,22 @@ INSTANCE_ENV = "HRI_INSTANCE"
 INSTANCE_RE = re.compile(r"[a-z0-9][a-z0-9_]{0,31}")
 
 
+# set by the entrypoint of the app when the Supervisor did not say which app this is (and HRI_INSTANCE is not set)
+INSTANCE_UNKNOWN_ENV = "HRI_INSTANCE_UNKNOWN"
+
+
 def configured_instance() -> tuple[str | None, str | None]:
-    """HRI_INSTANCE as (instance, problem): (None, None) unset or empty, (name, None) valid, (None, why) invalid."""
+    """HRI_INSTANCE as (instance, problem): (None, None) unset or empty, (name, None) valid, (None, why) invalid or,
+    in the app, unknown.  The problem says what is wrong and how to fix it; what it costs is the caller's to say."""
     raw = os.environ.get(INSTANCE_ENV, "")
     if raw == "":
+        if os.environ.get(INSTANCE_UNKNOWN_ENV) == "1":
+            # an HRI Manager instance whose slug went unread would take the plain name another container may hold
+            return None, "the app's slug could not be read from the Supervisor, so its instance name is unknown: restart the app"
         return None, None
     if INSTANCE_RE.fullmatch(raw):
         return raw, None
-    return None, (f"{INSTANCE_ENV}={raw[:40]!r} is not an instance name (1 to 32 of a-z, 0-9 and _, not starting with _): "
-                  "MQTT stays disconnected until it is corrected or removed")
+    return None, f"{INSTANCE_ENV}={raw[:40]!r} is not an instance name (1 to 32 of a-z, 0-9 and _, not starting with _): correct or remove it"
 
 
 # what 0.25.x and older recorded: the plain identity of the integration they ran, the discovery prefix and the broker
@@ -282,12 +289,14 @@ class MqttIdentity:
     (``record_problem``) gives no identity at all: MQTT stays disconnected and says why, since a new identity would
     leave the old names on the broker and re-create every entity on the main Home Assistant.
 
-    An invalid HRI_INSTANCE is never used and never dropped silently: the publisher refuses to connect and says why."""
+    An invalid HRI_INSTANCE (or, in the app, an unknown one: HRI_INSTANCE_UNKNOWN) is never used and never dropped
+    silently: an integration that would take it gets no identity and the publisher says why; one that keeps a
+    remembered identity connects under it, with the problem shown as a warning."""
 
     def __init__(self, path: str, domain_provider: Any) -> None:
         self.path = path
         self._domain = domain_provider
-        self.instance, self.problem = configured_instance()
+        self.instance, self.instance_problem = configured_instance()
         self.record: dict[str, Any] = {}  # mqtt_identity.json as last read or written: replaced as a whole, never in place
         self.record_problem: str | None = None
 
@@ -327,16 +336,30 @@ class MqttIdentity:
 
     def target(self, domain: str | None) -> str | None:
         """What the rule gives an integration that never published from here; None for an invalid HRI_INSTANCE."""
-        return None if self.problem else instance_key(domain, self.instance)
+        return None if self.instance_problem else instance_key(domain, self.instance)
 
     def key(self, domain: str | None) -> str | None:
         if self.record_problem:
             return None
         return self.remembered(domain) or self.target(domain)
 
+    def problem_for(self, domain: str | None) -> str | None:
+        """Why ``domain`` has no identity to connect with; None when it has one."""
+        if self.record_problem:
+            return self.record_problem
+        if self.instance_problem and not self.remembered(domain):
+            return f"{self.instance_problem}; MQTT stays disconnected until then"
+        return None
+
+    def warning_for(self, domain: str | None) -> str | None:
+        """The HRI_INSTANCE problem an integration with a remembered identity does not suffer from, but still has."""
+        if self.instance_problem and not self.record_problem and (base := self.remembered(domain)):
+            return f"{self.instance_problem} (not used: {domain} keeps {base}, the identity this volume published it under)"
+        return None
+
     def blocking(self) -> str | None:
-        """Why the running integration has no identity to connect with; None when it has one (or nothing runs)."""
-        return self.record_problem or self.problem
+        """problem_for the running integration."""
+        return self.problem_for(self._domain())
 
     def source(self, domain: str | None) -> str | None:
         """remembered, instance, default, invalid; None with nothing running."""
@@ -346,15 +369,15 @@ class MqttIdentity:
             return "invalid"
         if self.remembered(domain):
             return "remembered"
-        if self.problem:
+        if self.instance_problem:
             return "invalid"
         return "instance" if self.instance else "default"
 
     def describe(self) -> dict[str, Any]:
         domain = self._domain()
         base, target = self.key(domain), self.target(domain)
-        return {"identity_source": self.source(domain), "identity_instance": self.instance, "identity_problem": self.blocking(),
-                "identity_move_to": target if base and target and target != base else None}
+        return {"identity_source": self.source(domain), "identity_instance": self.instance, "identity_problem": self.problem_for(domain),
+                "identity_warning": self.warning_for(domain), "identity_move_to": target if base and target and target != base else None}
 
     def stamp(self, base: str) -> dict[str, Any]:
         """What a record of ``base`` says besides the names: the integration it belongs to (empty when ``base`` is not
@@ -554,9 +577,13 @@ class Installer:
         self.state = self._load_state()
         self.mqtt_identity = MqttIdentity(os.path.join(self.state_dir, "mqtt_identity.json"), lambda: self.state.domain)
         self.mqtt_identity.load()
-        if self.mqtt_identity.problem:
-            _LOGGER.error("MQTT: %s", self.mqtt_identity.problem)
-            events.emit("mqtt", self.mqtt_identity.problem)
+        if not self.mqtt_identity.record_problem:  # that one was logged as it was read
+            if why := self.mqtt_identity.blocking():
+                _LOGGER.error("MQTT: %s", why)
+                events.emit("mqtt", why)
+            elif why := self.mqtt_identity.warning_for(self.state.domain):
+                _LOGGER.warning("MQTT: %s", why)
+                events.emit("mqtt", why)
         self._sweep_scratch()  # after the state: a set-aside copy goes back when the record still describes it
         self.updates = dict(self.state.release_updates or {})  # the badge and the update entity survive a restart
         self._migrate_version_dirs()

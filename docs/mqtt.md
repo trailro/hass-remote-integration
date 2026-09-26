@@ -46,7 +46,9 @@ for the same entity id as another integration's (`sensor.hass_hri_probe_health`)
 the one created second gets a suffix, as below. The MQTT page shows the base
 topic in use and where it comes from; `GET /api/mqtt/status` says the same in
 `identity_source` (`default`, `instance`, `remembered`, `invalid`, or `null`
-with nothing running), `identity_instance` and `identity_problem`.
+with nothing running), `identity_instance`, `identity_problem` (why MQTT has no
+identity) and `identity_warning` (an `HRI_INSTANCE` problem a remembered
+identity leaves unused).
 
 ### The rule
 
@@ -83,10 +85,22 @@ with an fsync of the file and its directory, and only when it changes.
 
 `HRI_INSTANCE` is 1 to 32 characters of `a`-`z`, `0`-`9` and `_`, not starting
 with `_`; every HRI Manager instance name fits. Any other value is refused: it
-is never used and never replaced by the plain name. MQTT stays disconnected
-(`connect_error` and the MQTT page name the value and why), the log and the
-timeline say so at every start, and the preflight of every install lists it as
-a warning. The integration itself runs; fix or remove the variable and restart.
+is never used and never replaced by the plain name. An integration that would
+take it (rule 2) gets no identity: MQTT stays disconnected (`connect_error`,
+`identity_problem` and the MQTT page name the value and why), the log says so as
+an error and the timeline at every start, and the preflight of every install
+lists it as a warning. An integration that keeps a remembered identity (rule 1)
+does not need it: MQTT connects under that identity, and the same places show
+the value as a warning (`identity_warning`, a warning in the log). The
+integration itself runs either way; fix or remove the variable and restart.
+
+In the Home Assistant OS app the instance name comes from the app's slug, which
+the app reads from the Supervisor at start. When the Supervisor did not answer
+(and `HRI_INSTANCE` is not set), the app runs with `HRI_INSTANCE_UNKNOWN=1`,
+and the name counts as invalid in the same way: an integration with a
+remembered identity keeps connecting, one without stays disconnected with "the
+app's slug could not be read from the Supervisor ...: restart the app" rather
+than take the plain name, which another container may hold, and keep it.
 
 ### Two instances of the same integration
 

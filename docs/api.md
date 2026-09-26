@@ -62,7 +62,7 @@ Exceptions:
 - `GET /api/mqtt/status`: see the [MQTT reference](mqtt.md).
   `retained_cleanup_pending` is a list of `{base_topic, broker, other_broker,
   deferred, error, since}`, the configured broker's first. `identity_source`,
-  `identity_instance`, `identity_problem` and `identity_move_to` say where the
+  `identity_instance`, `identity_problem`, `identity_warning` and `identity_move_to` say where the
   base topic comes from ([Identity](mqtt.md#identity)).
 - `POST /api/mqtt/move_identity` `{"to": "<identity>"}`: moves the running
   integration to `identity_move_to`, which `to` must repeat; only while MQTT is

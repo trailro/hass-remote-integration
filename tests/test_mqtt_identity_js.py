@@ -48,6 +48,13 @@ class BrokerLineTest(unittest.TestCase):
         self.assertIn("deletes those entities and devices", o["confirms"][0])
         self.assertEqual(o["sent"], [["api/mqtt/move_identity", {"to": "hass_demo-garage"}]])
 
+    def test_an_unused_invalid_instance_is_a_warning_next_to_the_kept_identity(self):
+        o = self.out["warned"]
+        self.assertIn("hass_demo/…", o["text"])
+        self.assertIn("HRI_INSTANCE='<i>x</i>' is not an instance name (not used: demo keeps hass_demo", o["text"])
+        self.assertEqual(o["italic"], 0)
+        self.assertIsNone(o["button"])
+
     def test_invalid_is_the_reason_and_escaped(self):
         o = self.out["invalid"]
         self.assertIn("HRI_INSTANCE='<b>x</b>' is not an instance name", o["text"])
