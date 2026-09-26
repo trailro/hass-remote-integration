@@ -100,7 +100,9 @@ answers it, so an install is never cut short that way.
 Keep the Watchdog on. HRI turns it on at the first start as an app, once for
 its folder (`integration_manager/app-watchdog-enabled` records that it did):
 if you turn it off afterwards, it stays off. If that first attempt fails, the
-log says so and the next start tries again.
+log says so and the next start tries again. A restore from **System** keeps
+that record; a restore of a Home Assistant backup of the app made before 0.25
+removes it, and the next start turns the Watchdog on again.
 
 ## The Supervisor token
 
