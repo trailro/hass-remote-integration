@@ -323,7 +323,11 @@ class FileLogHandler(logging.Handler):
                 rec = {**rec, "message": "", "exc": None}
             return rec, matched
 
+        # ids grow in file order: one not below (above) the last read is a record read already, from a file that
+        # rotated between two reads (process.log read, then read again as process.log.1).  Dropped rather than
+        # rotations locked out: the lock is emit's, and the reads are long
         if not since_id:
+            below: int | None = None
             for p in self._files():
                 lines = _read_lines(p)
                 done = False
@@ -334,6 +338,9 @@ class FileLogHandler(logging.Handler):
                     if rec.get("id", 0) <= 0:
                         done = True
                         break
+                    if below is not None and rec["id"] >= below:
+                        continue
+                    below = rec["id"]
                     newest = max(newest, rec["id"])
                     if (c := candidate(rec)) is None or keep is not None and not keep(c[0]) or not c[1]:
                         continue
@@ -356,10 +363,11 @@ class FileLogHandler(logging.Handler):
                     files.append(fh)
                     if _first_id(fh) <= since_id:
                         break  # this file holds since_id: the older ones hold nothing newer
+                done_to = since_id
                 for fh in reversed(files):
                     fh.seek(0)
                     for line in fh:
-                        if (rid := _line_id(line)) is not None and rid <= since_id:
+                        if (rid := _line_id(line)) is not None and rid <= done_to:
                             continue
                         if (rec := _record(line)) is None:
                             continue  # a line still being written (its id is not passed: it is shown once it is whole)
@@ -370,6 +378,7 @@ class FileLogHandler(logging.Handler):
                             if (keep is None or keep(c[0])) and c[1]:
                                 out.append(c[0])
                         newest = rec.get("id", newest)
+                        done_to = max(done_to, newest)
                     if truncated:
                         break
             finally:
