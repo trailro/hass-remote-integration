@@ -110,11 +110,12 @@ integration determined to read it can. Install integrations you trust.
 
 ## Files
 
-The app's folder is its `/config`: `/addon_configs/<id>_hass_remote_integration`
-on the host (the `addon_configs` share of the Samba app). The layout is the
-one in [Files on the volume](files.md). Stopping the app gives Home Assistant
-inside up to 240 seconds to save its registries. That is a ceiling, not a
-wait: a clean stop takes well under a second.
+The app's folder is its `/config`: `/app_configs/<id>_hass_remote_integration`
+on the host (the `app_configs` share of the Samba app; `addon_configs` before
+Supervisor 2026.06). The layout is the one in [Files on the volume](files.md).
+Stopping the app gives Home Assistant inside up to 240 seconds to save its
+registries. That is a ceiling, not a wait: a clean stop takes well under a
+second.
 
 Uninstalling the app leaves this folder on the host, about 800 MB with the
 installed Home Assistant, unless you tick the option to delete the app's data
