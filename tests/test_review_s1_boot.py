@@ -397,7 +397,14 @@ class OlderThanTheConfigurationTest(unittest.TestCase):
             return json.load(fh)["from"]
 
     def prepare(self, fits=True, newest=None, installs=()):
-        lines = []
+        lines, held = [], []
+        real_sleep = self.ep.time.sleep
+
+        def sleep(seconds):
+            if self.ep._status.get("kind") != "refused":
+                return real_sleep(seconds)
+            held.append(dict(self.ep._status))
+            raise SystemExit(128 + 15)  # what _on_sigterm raises: a stop ends the wait
 
         def install(version):
             if version in installs:
@@ -410,6 +417,8 @@ class OlderThanTheConfigurationTest(unittest.TestCase):
                 mock.patch.object(self.ep, "ensure_apt_packages", lambda state: None), \
                 mock.patch.object(self.ep, "ensure_extra_requirements", lambda version: None), \
                 mock.patch.object(self.ep, "install", side_effect=install) as installed, \
+                mock.patch.object(self.ep.time, "sleep", sleep), \
+                mock.patch.object(self.ep, "start_status_server", return_value=None) as server, \
                 mock.patch.object(self.ep, "log", lines.append):
             try:
                 python, code = self.ep._prepare(), None
@@ -417,14 +426,21 @@ class OlderThanTheConfigurationTest(unittest.TestCase):
                 python, code = None, err.code
         with open(os.path.join(self.cfg, "integration_manager", "ha.json"), encoding="utf-8") as fh:
             state = json.load(fh)
-        return SimpleNamespace(python=python, code=code, state=state, lines=lines, installed=installed)
+        return SimpleNamespace(python=python, code=code, state=state, lines=lines, installed=installed, held=held, server=server)
 
     def assert_refused(self, r, wanted):
         self.assertIsNone(r.python, f"Home Assistant {wanted} was started on a configuration {NEW} wrote")
-        self.assertEqual(r.code, 1)
+        # held, not exited (an exit was a restart every few seconds): the status page shows why until a stop
+        self.assertEqual(len(r.held), 1, "exited instead of waiting")
+        self.assertEqual(r.code, 128 + 15, "the stop ends the wait")
+        self.assertEqual(r.held[0]["kind"], "refused")
+        self.assertIn(r.state["last_error"], r.held[0]["phase"])
+        self.assertIn("restart the container", r.held[0]["phase"])
+        r.server.assert_called_once()  # _prepare alone: no boot server of main() to show it
         self.assertIn(f"Home Assistant {wanted} was not started", r.state["last_error"])
         self.assertIn(f"last written by Home Assistant {NEW}", r.state["last_error"])
         self.assertTrue(any("was not started" in line for line in r.lines), r.lines)
+        self.assertFalse(any(f"booting {wanted}" in line for line in r.lines), r.lines)  # never claimed, then refused
         self.assertFalse(os.path.lexists(os.path.join(self.cfg, "venv-current")))
         self.assertEqual(self.storage(), NEW)
 

@@ -155,7 +155,8 @@ def latest_stable() -> str | None:
             best = v
     return best
 
-# "kind": what keeps Home Assistant from running - "install", or "restore_hold" (hold_after_failed_rollback)
+# "kind": what keeps Home Assistant from running - "install", "restore_hold" (hold_after_failed_rollback) or "refused"
+# (hold_refused_boot)
 _status = {"phase": "starting", "version": None, "started": time.time(), "kind": "install"}
 
 
@@ -332,9 +333,14 @@ def install_status() -> dict:
     """The install status for an /api/ caller (a healthcheck, a script waiting for the manager API).  A monitor
     that reads "installing" must not be told that for the minutes a failed restore holds the boot."""
     held = _status.get("kind") == "restore_hold"
-    error = ("Home Assistant is not started: a restore failed and could not be put back; the manager API is not up"
-             if held else f"Home Assistant is still being installed or prepared ({_status.get('phase')}); the manager API is not up yet")
-    return {**_status, "elapsed": int(time.time() - _status["started"]), "installing": not held, "restore_failed": held, "error": error}
+    if held:
+        error = "Home Assistant is not started: a restore failed and could not be put back; the manager API is not up"
+    elif _status.get("kind") == "refused":
+        error = f"Home Assistant is not started: {_status.get('phase')}; the manager API is not up"
+    else:
+        error = f"Home Assistant is still being installed or prepared ({_status.get('phase')}); the manager API is not up yet"
+    return {**_status, "elapsed": int(time.time() - _status["started"]), "installing": _status.get("kind") == "install",
+            "restore_failed": held, "error": error}
 
 
 def password_configured() -> bool:
@@ -390,7 +396,8 @@ class _StatusHandler(http.server.BaseHTTPRequestHandler):
             status = install_status()
             if hide:
                 status = {"installing": status["installing"], "error": "the manager API is not up yet (Home Assistant "
-                          + ("is still being installed or prepared)" if status["installing"] else "is not started)")}
+                          + ("is still being installed or prepared)" if status["installing"] else
+                             "was not started: its start was refused)" if _status.get("kind") == "refused" else "is not started)")}
             self._send(503, "application/json", json.dumps(status).encode())
             return
         if _status.get("kind") != "install":
@@ -403,12 +410,14 @@ class _StatusHandler(http.server.BaseHTTPRequestHandler):
             tail = _log_tail()
         if hide:
             heading = ("Home Assistant is still being installed or prepared …" if _status.get("kind") == "install"
-                       else "Home Assistant is not started")
+                       else REFUSED_TITLE if _status.get("kind") == "refused" else "Home Assistant is not started")
             detail = "<p>the details are in the container log · this page refreshes itself</p>"
         else:
             heading = _status.get("title") or f"Installing Home Assistant {_status['version']} …"
             detail = (f"<p>phase: <b>{html.escape(str(_status['phase']))}</b> · {int(time.time() - _status['started'])} s so far"
                       " · this page refreshes itself</p>")
+            if _status.get("kind") == "refused":  # a reason and what to do, not a phase that is running
+                detail = f"<p>{html.escape(str(_status['phase']))}</p>"
         log_block = f"<pre style='font:12px ui-monospace;color:#8b98a5;white-space:pre-wrap'>{html.escape(tail)}</pre>" if tail else ""
         body = (
             "<!doctype html><meta charset=utf-8><meta http-equiv=refresh content=5>"
@@ -933,6 +942,28 @@ def hold_after_failed_rollback(result: dict | None, apply) -> dict | None:
     return result
 
 
+REFUSED_TITLE = "Home Assistant was not started: its start was refused"
+REFUSED_RESTART = ("None of these is picked up while this page is shown: restart the container (or the app) once it is done. "
+                   "This page stays until then")
+REFUSED_SLEEP_S = 3600
+
+
+def hold_refused_boot(reason: str) -> None:
+    """The start of Home Assistant was refused (older than the configuration): wait here, never exit.  An exit was
+    a restart every few seconds (Docker's restart policy, the app's Watchdog) with the reason only in the log and in
+    ha.json.  The status page shows the reason (only that the start was refused, with a password) and /api/alive
+    answers 200, so nothing restarts the container; a SIGTERM ends the wait (_on_sigterm), and the next start decides
+    again from ha.json."""
+    _status.update(title=REFUSED_TITLE, version=None, started=time.time(), kind="refused", phase=f"{reason}. {REFUSED_RESTART}")
+    srv = start_status_server() if _boot_server is None else None  # the boot's own server shows this status already
+    try:
+        while True:
+            time.sleep(REFUSED_SLEEP_S)
+    finally:
+        if srv:
+            stop_status_server(srv)
+
+
 def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
     """After the install, before the boot: a restore or a clean start that
     belongs to a version change applies only when that version is the one
@@ -1040,7 +1071,8 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
             state["desired"] = current
             state.pop("change", None)
             return current
-        log(f"the {what} for Home Assistant {wanted} did not happen and there is no other version to stay on; booting {wanted}")
+        # not "booting": the guard in _prepare may still refuse it (the configuration a newer version wrote)
+        log(f"the {what} for Home Assistant {wanted} did not happen and there is no other version to stay on")
     # booting the target can migrate .storage in any mode (keep included):
     # from here on a crash loop must bring back the pre-change backup
     change["applied"] = True
@@ -1389,13 +1421,13 @@ def _prepare() -> str:
                   f"Assistant {writer}, which an older version cannot read. Run {writer} or newer (the image that ran it, "
                   f"or \"desired\": \"{writer}\" in integration_manager/ha.json), or restore a backup made on Home "
                   f"Assistant {wanted} or older")
-        log(f"{reason}; exiting")
+        log(f"{reason}. {REFUSED_RESTART} (waiting, with the reason on the manager port)")
         # only the reason is recorded: what this boot chose instead (a substitute version, a switch marked applied)
         # is not, so the next boot decides again from what the operator asked for
         refused = load_state()
         refused["last_error"] = reason
         save_state(refused)
-        sys.exit(1)
+        hold_refused_boot(reason)
 
     if current and current != wanted and venv_ok(current) and not fell_back and failures < MAX_BOOT_FAILURES:
         # (a version that just crashed its way into a fallback is not a rollback target)

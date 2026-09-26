@@ -7,6 +7,7 @@ E2  after a downgrade with a clean start every device has a new id: the new conf
     still retained with the same unique ids, and the main HA refused them until the orphan sweep, five minutes later.
 E3  _rollback_full read restore-pending.json on the event loop.
 E4  the message of a damaged mqtt_rules.json did not name Reconnect.
+E5  a start the never-older guard refused exited 1: a restart every few seconds, the reason only in the log.
 """
 
 import asyncio
@@ -223,6 +224,150 @@ class DamagedRulesNameReconnectTest(unittest.TestCase):
         with self.assertLogs("custom_components.integration_manager.mqtt_rules", "ERROR"):
             problem = MqttRules(path).problem
         self.assertIn("press Reconnect on the MQTT page, save the MQTT settings, or restart", problem)
+
+
+REASON = ("Home Assistant 2026.8.3 was not started: the configuration on this volume was last written by Home Assistant "
+          "2026.9.2, which an older version cannot read")
+
+
+class RefusedStartHoldsTest(unittest.TestCase):
+    """E5: a start refused by the never-older guard exited 1, and Docker's restart policy (or the app's Watchdog)
+    restarted it every few seconds with the reason only in the log.  It now waits with the status page up."""
+
+    def setUp(self):
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            self.port = sock.getsockname()[1]
+        self.cfg = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.cfg, True)
+        env = {k: v for k, v in os.environ.items() if k not in ("HRI_PASSWORD", "HRI_PASSWORD_FILE")}
+        patcher = mock.patch.dict(os.environ, {**env, "HRI_PORT": str(self.port)}, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.ep = entrypoint_for(self, self.cfg)
+        os.makedirs(self.ep.STATE_DIR)
+
+    def get(self, path):
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}", timeout=5) as resp:
+                return resp.status, resp.read().decode()
+        except urllib.error.HTTPError as err:
+            with err:
+                return err.code, err.read().decode()
+
+    def during_hold(self):
+        seen = {}
+
+        def sleep(_s):
+            seen.update(alive=self.get("/api/alive"), page=self.get("/"), api=self.get("/api/status"))
+            raise SystemExit(128 + signal.SIGTERM)  # what _on_sigterm raises
+
+        with mock.patch.object(self.ep.time, "sleep", sleep), self.assertRaises(SystemExit):
+            self.ep.hold_refused_boot(REASON)
+        with self.assertRaises(OSError):  # its own status server is gone with the wait
+            socket.create_connection(("127.0.0.1", self.port), timeout=2).close()
+        return seen
+
+    def test_the_page_says_why_and_that_a_restart_is_needed(self):
+        seen = self.during_hold()
+        self.assertEqual(seen["alive"][0], 200, "a watchdog would restart it")
+        code, body = seen["page"]
+        self.assertEqual(code, 503)
+        self.assertIn("its start was refused", body)
+        self.assertIn("last written by Home Assistant 2026.9.2", body)
+        self.assertIn("restart the container (or the app)", body)
+        status = json.loads(seen["api"][1])
+        self.assertFalse(status["installing"])
+        self.assertIn("2026.9.2", status["error"])
+
+    def test_with_a_password_only_that_the_start_was_refused(self):
+        with mock.patch.dict(os.environ, {"HRI_PASSWORD": "pw"}):
+            seen = self.during_hold()
+        self.assertEqual(seen["alive"][0], 200)
+        _code, body = seen["page"]
+        self.assertIn("its start was refused", body)
+        self.assertNotIn("2026.", body)
+        status = json.loads(seen["api"][1])
+        self.assertEqual(set(status), {"installing", "error"})
+        self.assertIn("refused", status["error"])
+        self.assertNotIn("2026.", status["error"])
+
+    def test_the_boot_server_is_used_when_there_is_one(self):
+        with mock.patch.object(self.ep, "_boot_server", object()), \
+                mock.patch.object(self.ep, "start_status_server") as start, \
+                mock.patch.object(self.ep.time, "sleep", side_effect=SystemExit(143)), self.assertRaises(SystemExit):
+            self.ep.hold_refused_boot(REASON)
+        start.assert_not_called()
+
+
+class RefusedStartUntilSigtermTest(unittest.TestCase):
+    """E5, the whole entrypoint in a process: the refused start keeps running with /api/alive at 200, ha.json keeps
+    last_error, and SIGTERM ends it at once with the code of a stop."""
+
+    def test_waits_then_stops_on_sigterm(self):
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        cfg = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, cfg, True)
+        for rel, text in ((".HA_VERSION", "2026.9.2\n"), (os.path.join("integration_manager", "ha.json"),
+                                                            json.dumps({"desired": "2026.9.2", "current": "2026.9.2", "proven": "2026.9.2"}))):
+            os.makedirs(os.path.dirname(os.path.join(cfg, rel)), exist_ok=True)
+            with open(os.path.join(cfg, rel), "w", encoding="utf-8") as fh:
+                fh.write(text)
+        os.makedirs(os.path.join(cfg, ".storage"))
+        _venv(cfg, "2026.8.3")  # the newest venv here, older than the configuration: 2026.9.2 does not install
+        child = textwrap.dedent(f"""
+            import ast, sys
+            from unittest import mock
+            sys.path.insert(0, {ROOT!r})
+            import entrypoint as ep
+
+            patches = [mock.patch.object(ep, "latest_stable", return_value=None), mock.patch.object(ep, "fits_this_python", return_value=True),
+                       mock.patch.object(ep, "ensure_apt_packages", lambda state: None),
+                       mock.patch.object(ep, "ensure_extra_requirements", lambda version: None),
+                       mock.patch.object(ep, "install", return_value=False), mock.patch.object(ep, "apply_app_options", return_value=None)]
+            for p in patches:
+                p.start()
+            tree = ast.parse(open(ep.__file__).read())
+            block = next(n for n in tree.body if isinstance(n, ast.If) and "__main__" in ast.unparse(n.test))
+            exec(compile(ast.Module(body=block.body, type_ignores=[]), ep.__file__, "exec"), ep.__dict__)
+        """)
+        env = {k: v for k, v in os.environ.items() if k not in ("HRI_PASSWORD", "HRI_PASSWORD_FILE", "HRI_APP", "SUPERVISOR_TOKEN")}
+        env.update(HRI_CONFIG=cfg, HRI_PORT=str(port), HA_VERSION_LATEST="0", HA_VERSION_DEFAULT="2026.8.3", HA_VERSION_MIN="")
+        proc = subprocess.Popen([sys.executable, "-c", child], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            deadline, page = time.monotonic() + 30, None
+            while time.monotonic() < deadline and proc.poll() is None:
+                try:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/alive", timeout=2) as resp:
+                        alive = resp.status
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=2):
+                        pass
+                except urllib.error.HTTPError as err:
+                    with err:
+                        body = err.read().decode()
+                    if "its start was refused" in body:
+                        page = body
+                        break
+                except OSError:
+                    pass
+                time.sleep(0.1)
+            self.assertIsNone(proc.poll(), "the refused start exited: a restart policy would loop it")
+            self.assertEqual(alive, 200)
+            self.assertIn("last written by Home Assistant 2026.9.2", page)
+            time.sleep(1)
+            self.assertIsNone(proc.poll(), "still waiting")
+            with open(os.path.join(cfg, "integration_manager", "ha.json"), encoding="utf-8") as fh:
+                self.assertIn("last written by Home Assistant 2026.9.2", json.load(fh)["last_error"])
+            proc.send_signal(signal.SIGTERM)
+            out, _err = proc.communicate(timeout=15)
+            self.assertEqual(proc.returncode, 128 + signal.SIGTERM, out.decode()[-2000:])
+        finally:
+            proc.kill()
+            proc.wait()
+            proc.stdout.close()
+            proc.stderr.close()
 
 
 if __name__ == "__main__":

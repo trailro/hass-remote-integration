@@ -86,16 +86,17 @@ services:
 
 The boot status page, served until Home Assistant runs (`HRI_APT_PACKAGES`,
 PyPI lookup, version install, requirements, scheduled restore, removing unused
-venvs, a failed restore waiting for a retry), has no login. With a password
-set it says only that Home Assistant is being installed or is not started;
-the details are in the container log. With no password set, or to the app's
-ingress, it also shows the version, the phase (naming the `HRI_APT_PACKAGES`
-packages) and the backup a failed restore needs, and without a password the
-tail of the last install log. Under `/api/` it answers `503` with JSON
-(only `/api/alive`, the healthcheck, gets `200` and `{"alive": true}`):
-`installing` (`false` while a failed restore holds the boot) and `error`;
-with no password set, or to the app's ingress, also the version, the phase
-and `restore_failed`.
+venvs, a failed restore waiting for a retry, a start refused because a newer
+version wrote the configuration), has no login. With a password set it says
+only that Home Assistant is being installed, is not started, or that its
+start was refused; the details are in the container log. With no password
+set, or to the app's ingress, it also shows the version, the phase (naming
+the `HRI_APT_PACKAGES` packages), the backup a failed restore needs and why a
+start was refused, and without a password the tail of the last install log.
+Under `/api/` it answers `503` with JSON (only `/api/alive`, the healthcheck,
+gets `200` and `{"alive": true}`): `installing` (`false` while a failed
+restore or a refused start holds the boot) and `error`; with no password set,
+or to the app's ingress, also the version, the phase and `restore_failed`.
 
 ## Built-in protections
 
