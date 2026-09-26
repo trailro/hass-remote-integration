@@ -385,11 +385,13 @@ def _restart_in_place() -> bool:
     """A restart asked for from the manager, in the Home Assistant app, with no stop signal since: a SIGTERM is the
     Supervisor (or docker) stopping the app, which must stop.  Home Assistant's own handler records every signal
     under KEY_HA_STOP, also one that arrives while the restart's stop runs (async_stop then ignores it); the boot's
-    handler sets _boot_signalled.  A signal after the loop closed finds the default action: the process ends there."""
+    handler sets _boot_signalled.  A signal after the loop closed finds the default action: the process ends there.
+    Not with the app's Watchdog known to be on (HRI_APP_WATCHDOG=1, entrypoint.py): the process ends and the
+    Supervisor starts a fresh container, with Docker's start period for the HEALTHCHECK, which an exec does not get."""
     from homeassistant.helpers.signal import KEY_HA_STOP
 
     return (_restart_asked is not None and not _boot_signalled and _restart_asked.data.get(KEY_HA_STOP) is None
-            and bool(os.environ.get("HRI_APP")))
+            and bool(os.environ.get("HRI_APP")) and os.environ.get("HRI_APP_WATCHDOG") != "1")
 
 
 def _time_zone() -> str:

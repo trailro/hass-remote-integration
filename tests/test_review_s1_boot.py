@@ -222,6 +222,7 @@ class AppWatchdogTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"SUPERVISOR_TOKEN": "t0ken-secret"}), \
                 mock.patch.object(self.ep, "APP_OPTIONS_FILE", options), \
                 mock.patch.object(self.ep, "enable_app_watchdog", enable), \
+                mock.patch.object(self.ep, "read_app_watchdog", lambda token: None), \
                 mock.patch.object(self.ep, "_prepare", mock.Mock(side_effect=SystemExit(7))), \
                 mock.patch.object(self.ep, "start_status_server", lambda: None), \
                 mock.patch.object(self.ep, "restrict_umask", lambda: 0):
@@ -250,6 +251,116 @@ class AppWatchdogTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 7, "reached the boot, not an exit of its own")
         prepare.assert_called_once()
         enable.assert_not_called()
+
+
+class AppWatchdogRestartModeTest(unittest.TestCase):
+    """With the app's Watchdog on, a restart HRI asks for ends the process and the Supervisor starts a fresh container:
+    an exec in place gets no HEALTHCHECK start period, so a slow install after it could mark the container unhealthy
+    and have the Supervisor restart it mid-install.  The entrypoint reads the toggle at boot, while it has the token,
+    and passes it on as HRI_APP_WATCHDOG; unknown restarts in place, as with the toggle off."""
+
+    def setUp(self):
+        self.tmp = _tmp(self)
+        self.ep = entrypoint_for(self, self.tmp)
+        os.makedirs(self.ep.STATE_DIR)
+        self.lines = []
+        for target, name, value in ((self.ep, "log", self.lines.append), (run, "_restart_asked", None),
+                                    (run, "_boot_signalled", False)):
+            patch = mock.patch.object(target, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    @staticmethod
+    def _answer(body):
+        resp = mock.MagicMock()
+        resp.__enter__.return_value.read.return_value = body
+        return resp
+
+    def test_it_reads_the_toggle_with_the_apps_token(self):
+        for watchdog in (True, False):
+            with self.subTest(watchdog=watchdog):
+                body = json.dumps({"result": "ok", "data": {"watchdog": watchdog, "slug": "x"}}).encode()
+                with mock.patch.object(self.ep.urllib.request, "urlopen", return_value=self._answer(body)) as urlopen:
+                    self.assertIs(self.ep.read_app_watchdog("t0ken-secret"), watchdog)
+                request = urlopen.call_args.args[0]
+                self.assertEqual((request.full_url, request.get_method()), ("http://supervisor/addons/self/info", "GET"))
+                self.assertEqual(request.get_header("Authorization"), "Bearer t0ken-secret")
+                self.assertLessEqual(urlopen.call_args.kwargs["timeout"], 10)
+
+    def test_unknown_is_none_and_logged_without_the_token(self):
+        refused = urllib.error.HTTPError("http://supervisor/addons/self/info", 403, "Forbidden", {}, None)
+        self.addCleanup(refused.close)
+        answers = [urllib.error.URLError("Name or service not known"), TimeoutError("timed out"), refused,
+                   self._answer(b"not json"), self._answer(b'{"result": "ok", "data": {}}'),
+                   self._answer(b'{"result": "ok", "data": {"watchdog": "yes"}}')]
+        for answer in answers:
+            with self.subTest(answer=answer):
+                self.lines.clear()
+                kwargs = {"side_effect": answer} if isinstance(answer, BaseException) else {"return_value": answer}
+                with mock.patch.object(self.ep.urllib.request, "urlopen", **kwargs):
+                    self.assertIsNone(self.ep.read_app_watchdog("t0ken-secret"))  # never raises
+                self.assertTrue(any("Watchdog setting could not be read" in line for line in self.lines), self.lines)
+                self.assertFalse([line for line in self.lines if "t0ken" in line])
+        with mock.patch.object(self.ep.urllib.request, "urlopen") as urlopen:
+            self.assertIsNone(self.ep.read_app_watchdog(""))
+        urlopen.assert_not_called()
+
+    def _main(self, env, read):
+        options = os.path.join(self.tmp, "options.json")
+        with open(options, "w", encoding="utf-8") as fh:
+            json.dump({"password": "pw"}, fh)
+        order, seen = [], {}
+
+        def prepare():
+            seen["var"] = os.environ.get("HRI_APP_WATCHDOG")
+            raise SystemExit(7)
+
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(self.ep, "APP_OPTIONS_FILE", options), \
+                mock.patch.object(self.ep, "enable_app_watchdog", lambda token: order.append(("enable", token))), \
+                mock.patch.object(self.ep, "read_app_watchdog", lambda token: order.append(("read", token)) or read), \
+                mock.patch.object(self.ep, "_prepare", prepare), \
+                mock.patch.object(self.ep, "start_status_server", lambda: None), \
+                mock.patch.object(self.ep, "restrict_umask", lambda: 0):
+            if "SUPERVISOR_TOKEN" not in env:
+                os.environ.pop("SUPERVISOR_TOKEN", None)
+                os.environ.pop("HASSIO_TOKEN", None)
+            with self.assertRaises(SystemExit):
+                self.ep.main()
+        return order, seen["var"]
+
+    def test_main_reads_it_after_turning_it_on_and_exports_it(self):
+        for read, var in ((True, "1"), (False, "0"), (None, None)):
+            with self.subTest(read=read):
+                order, seen = self._main({"SUPERVISOR_TOKEN": "t0ken-secret", "HRI_APP_WATCHDOG": "stale"}, read)
+                self.assertEqual(order, [("enable", "t0ken-secret"), ("read", "t0ken-secret")])
+                self.assertEqual(seen, var)
+
+    def test_the_restarted_entrypoint_keeps_what_it_inherits(self):
+        for inherited in ("0", "1"):
+            with self.subTest(inherited=inherited):
+                order, seen = self._main({"HRI_APP": "1", "HRI_APP_WATCHDOG": inherited}, True)
+                self.assertEqual(order, [], "no token: nothing is asked")
+                self.assertEqual(seen, inherited)
+
+    def test_run_py_restarts_in_place_unless_the_watchdog_is_known_on(self):
+        run._ask_restart(SimpleNamespace(data={}))
+        for var, in_place in (("1", False), ("0", True), (None, True)):
+            with self.subTest(var=var), mock.patch.dict(os.environ, {"HRI_APP": "1"}):
+                os.environ.pop("HRI_APP_WATCHDOG", None)
+                if var is not None:
+                    os.environ["HRI_APP_WATCHDOG"] = var
+                self.assertIs(run._restart_in_place(), in_place)
+
+    def test_with_the_watchdog_on_the_process_ends(self):
+        calls = []
+        with mock.patch.dict(os.environ, {"HRI_APP": "1", "HRI_APP_WATCHDOG": "1"}), \
+                mock.patch.object(run.os, "execvp", lambda f, argv: calls.append("execvp")), \
+                mock.patch.object(run.os, "_exit", lambda rc: calls.append(("_exit", rc))), \
+                mock.patch.object(run.logbuffer, "stop_queue", return_value=False):
+            run._ask_restart(SimpleNamespace(data={}))
+            run._exit(0)
+        self.assertEqual(calls, [("_exit", 0)], "the Supervisor's Watchdog starts a fresh container")
 
 
 def _venv(cfg, version):
