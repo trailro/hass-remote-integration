@@ -47,7 +47,9 @@ VOLUME ["/config"]
 EXPOSE 8087
 
 # Without this Docker cannot tell whether the container is alive.  There is no curl in the image, so its
-# own Python asks HRI_PORT (read at runtime, not the 8087 baked in above) for /api/alive.  Liveness only:
+# own Python asks the port HRI listens on for /api/alive: the one the entrypoint wrote to /run/hri-port as the Home
+# Assistant app (the Supervisor may give it another port than the image's, and Docker runs this with the image's
+# environment, not the entrypoint's), otherwise HRI_PORT, read at runtime.  Liveness only:
 # while Home Assistant installs, the entrypoint's status page answers it 200, so an install is never
 # "unhealthy" (the Supervisor's watchdog restarts an unhealthy app, and after a restart in place the start
 # period does not apply again); once Home Assistant runs, the manager has no view there and answers 404,
@@ -56,6 +58,6 @@ EXPOSE 8087
 # first steps) and a slow first answer; 20 minutes, as when the probe waited for the install, and a probe
 # that fails in there never counts: the first answer flips the container to healthy at once.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20m --retries=3 \
-    CMD ["python", "-c", "import http.client, os; c = http.client.HTTPConnection('127.0.0.1', int(os.environ.get('HRI_PORT') or 8087), timeout=5); c.request('GET', '/api/alive'); raise SystemExit(0 if c.getresponse().status < 500 else 1)"]
+    CMD ["python", "-c", "import http.client, os; f = '/run/hri-port'; p = int(open(f).read()) if os.path.isfile(f) else int(os.environ['HRI_PORT']); c = http.client.HTTPConnection('127.0.0.1', p, timeout=5); c.request('GET', '/api/alive'); raise SystemExit(0 if c.getresponse().status < 500 else 1)"]
 
 CMD ["python", "/app/entrypoint.py"]

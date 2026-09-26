@@ -28,7 +28,9 @@ def entrypoint_for(test, cfg, **env):
             sys.modules["entrypoint"] = previous
 
     test.addCleanup(restore)
-    return importlib.import_module("entrypoint")
+    module = importlib.import_module("entrypoint")
+    module.PORT_FILE = os.path.join(cfg, "hri-port")  # the container's own file is what its HEALTHCHECK reads
+    return module
 
 
 class FakeInstaller:

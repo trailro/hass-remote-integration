@@ -67,9 +67,14 @@ class ShapeTest(Requires):
             self.assertNotIn(absent, _directive())
 
     def test_the_port_is_read_at_runtime(self):
+        """The file the entrypoint writes as the app (the Supervisor's port), else HRI_PORT: no port in the probe."""
+        import entrypoint
+
         code = _probe_argv()[2]
         self.assertIn("HRI_PORT", code)
         self.assertIn("os.environ", code)
+        self.assertIn(repr(entrypoint.PORT_FILE), code)
+        self.assertNotIn("8087", code)
 
     def test_it_asks_the_liveness_path(self):
         """/api/alive: the entrypoint's status server answers it 200 while Home Assistant installs, the manager
@@ -108,9 +113,16 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 class ProbeTest(Requires):
     """The string the Dockerfile ships, run against a server that answers like the manager does."""
 
-    def _run(self, port: int) -> int:
+    def _run(self, port: int, port_file: str | None = None) -> int:
+        """The probe with HRI_PORT=port, and ``port_file`` in place of the entrypoint's file (none by default: the file
+        of the container the tests run in is not theirs)."""
+        import entrypoint
+
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        code = _probe_argv()[2].replace(repr(entrypoint.PORT_FILE), repr(port_file or os.path.join(tmp, "none")))
         env = dict(os.environ, HRI_PORT=str(port))
-        return subprocess.run([sys.executable, "-c", _probe_argv()[2]], env=env,
+        return subprocess.run([sys.executable, "-c", code], env=env,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60).returncode
 
     def _serving(self, status: int) -> int:
@@ -135,6 +147,28 @@ class ProbeTest(Requires):
     def test_a_server_error_is_not_healthy(self):
         self.assertEqual(self._serving(503), 1)
         self.assertEqual(self._serving(500), 1)
+
+    def test_the_apps_port_file_wins_over_hri_port(self):
+        """As the app the Supervisor may give another port (ingress_port 0): Docker runs the probe with the image's
+        HRI_PORT, so the port the entrypoint wrote is the one asked."""
+        handler = type("H", (_Handler,), {"status": 404})
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        closed = sock.getsockname()[1]
+        sock.close()
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        port_file = os.path.join(tmp, "hri-port")
+        with open(port_file, "w", encoding="utf-8") as fh:
+            fh.write(f"{srv.server_address[1]}\n")  # as entrypoint.write_port_file
+        self.assertEqual(self._run(closed, port_file), 0)
+        with open(port_file, "w", encoding="utf-8") as fh:
+            fh.write(f"{closed}\n")
+        self.assertEqual(self._run(srv.server_address[1], port_file), 1)
 
     def test_a_manager_that_answers_nothing_is_unhealthy(self):
         sock = socket.socket()
