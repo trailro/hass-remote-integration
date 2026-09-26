@@ -6,6 +6,7 @@ the direct port under a host name outside the allowed list (documented); HRI_COO
 shared the session cookie name."""
 
 import asyncio
+import http.client
 import http.server
 import json
 import logging
@@ -56,11 +57,14 @@ def _request(secure=False):
 
 # ----- S1-5 ---------------------------------------------------------------------------------------
 
+SUPERVISOR_USER = (("X-Remote-User-Id", "abc123"), ("X-Remote-User-Name", "alice"))  # as the Supervisor spells them
+
+
 class StatusApiWithPasswordTest(unittest.TestCase):
     """/api/ on the boot status page: with a password, a caller that is not the app's ingress learns only that the
     manager is not up (the healthcheck needs no more), not the version, the phase or a failed restore."""
 
-    def _get(self, path="/api/status", supervisor=None, held=False, **env):
+    def _get(self, path="/api/status", supervisor=None, held=False, headers=(), **env):
         ep = entrypoint_for(self, _tmp(self), **{"HRI_APP": "", "HRI_INGRESS_USERS": "", "HRI_PASSWORD": "",
                                                 "HRI_PASSWORD_FILE": "", **env})
         if held:
@@ -71,14 +75,17 @@ class StatusApiWithPasswordTest(unittest.TestCase):
         with patch:
             srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ep._StatusHandler)
             threading.Thread(target=srv.serve_forever, daemon=True).start()
-            try:
-                req = urllib.request.Request(f"http://127.0.0.1:{srv.server_address[1]}{path}", headers={"Host": "localhost"})
+            try:  # http.client sends the header names as written (urllib capitalizes them)
+                conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=5)
                 try:
-                    with urllib.request.urlopen(req, timeout=5) as resp:
-                        return resp.status, resp.read()
-                except urllib.error.HTTPError as err:
-                    with err:
-                        return err.code, err.read()
+                    conn.putrequest("GET", path, skip_host=True, skip_accept_encoding=True)
+                    for name, value in (("Host", "localhost"), *headers):
+                        conn.putheader(name, value)
+                    conn.endheaders()
+                    resp = conn.getresponse()
+                    return resp.status, resp.read()
+                finally:
+                    conn.close()
             finally:
                 srv.shutdown()
                 srv.server_close()
@@ -109,7 +116,7 @@ class StatusApiWithPasswordTest(unittest.TestCase):
                          (503, "2026.9.3", "apt-get install ffmpeg jq", False))
 
     def test_the_apps_ingress_still_sees_the_details(self):
-        status, body = self._get(supervisor="127.0.0.1", HRI_APP="1", HRI_PASSWORD="pw")
+        status, body = self._get(supervisor="127.0.0.1", headers=SUPERVISOR_USER, HRI_APP="1", HRI_PASSWORD="pw")
         self.assertEqual((status, json.loads(body)["version"]), (503, "2026.9.3"))
 
 
@@ -160,7 +167,7 @@ class StatusPageWithPasswordTest(unittest.TestCase):
         self.assertIn(b"apt-get install ffmpeg jq", body)
 
     def test_the_apps_ingress_still_sees_the_details(self):
-        status, body = self._get("/", supervisor="127.0.0.1", HRI_APP="1", HRI_PASSWORD="pw")
+        status, body = self._get("/", supervisor="127.0.0.1", headers=SUPERVISOR_USER, HRI_APP="1", HRI_PASSWORD="pw")
         self.assertEqual(status, 503)
         self.assertIn(b"apt-get install ffmpeg jq", body)
         self.assertIn(b"2026.9.3", body)
