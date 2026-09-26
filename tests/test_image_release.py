@@ -79,5 +79,43 @@ class ReleaseTagsTest(unittest.TestCase):
         self.assertNotIn("PRERELEASE:", wf)  # the event payload no longer decides what is a pre-release
 
 
+@unittest.skipUnless(os.path.isfile(WORKFLOW), "the workflows are not copied next to the tests")
+class CheckoutTest(unittest.TestCase):
+    def setUp(self):
+        with open(WORKFLOW, encoding="utf-8") as fh:
+            self.wf = yaml.safe_load(fh)
+
+    def _checkouts(self):
+        for name, job in self.wf["jobs"].items():
+            for step in job["steps"]:
+                if str(step.get("uses", "")).startswith("actions/checkout@"):
+                    yield name, step.get("with") or {}
+
+    def test_a_release_tag_is_checked_out_as_a_tag(self):
+        """S5-1: actions/checkout resolves an unqualified ref as a branch before a tag (ref-helper getCheckoutInfo): a
+        branch named like the release tag, which anyone with push access can create, would be built and published as
+        the release image.  Every checkout of the release names the tag in full."""
+        tagged = []
+        for name, step in self._checkouts():
+            if name == "app-version":
+                self.assertEqual(step["ref"], "${{ github.event.repository.default_branch }}")
+                continue
+            self.assertEqual(step["ref"], "refs/tags/${{ env.TAG }}", name)
+            tagged.append(name)
+        self.assertEqual(sorted(tagged), ["compose", "dockerhub-overview", "image"])
+        for name in tagged:
+            # TAG stays the bare tag (a manual run's input included): the version gates compare it with the release
+            # names, the overview links /blob/$TAG/, the registry tags are its semver
+            self.assertEqual(self.wf["jobs"][name]["env"]["TAG"], "${{ github.event.release.tag_name || inputs.tag }}")
+        with open(WORKFLOW, encoding="utf-8") as fh:
+            self.assertNotRegex(fh.read(), r"ref:\s*\$\{\{\s*env\.TAG")
+
+    def test_no_checkout_leaves_the_token_in_git_config(self):
+        """S5-5: a persisted token is in .git/config for every later step of the job; app-version's has contents:
+        write.  Its push gets the token for that command only (tests/test_ha_app.py AppVersionStepTest)."""
+        jobs = [name for name, step in self._checkouts() if step.get("persist-credentials") is not False]
+        self.assertEqual(jobs, [])
+
+
 if __name__ == "__main__":
     unittest.main()

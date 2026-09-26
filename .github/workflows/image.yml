@@ -59,9 +59,11 @@ jobs:
             echo "::error::the DOCKERHUB_TOKEN secret is not set: add a Docker Hub access token (Read, Write & Delete) as a repository secret, then run this workflow again"
             exit 1
           fi
+      # refs/tags/ in full, in every job: actions/checkout takes a bare name for a branch before a tag, and a branch
+      # named like the release tag would be built and published as the release
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ env.TAG }}
+          ref: refs/tags/${{ env.TAG }}
           fetch-depth: 0
           persist-credentials: false
       - id: commit
@@ -143,7 +145,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ env.TAG }}
+          ref: refs/tags/${{ env.TAG }}
           persist-credentials: false
       - name: Upload
         env:
@@ -172,7 +174,7 @@ jobs:
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ env.TAG }}
+          ref: refs/tags/${{ env.TAG }}
           fetch-depth: 0
           persist-credentials: false
       - id: newest
@@ -239,6 +241,8 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
+          # the token that can write is not left in .git/config: only the pull and the push below get it
+          persist-credentials: false
       - name: Set app/config.yaml version
         # newest stable from the releases (see the image job), and never lower than what the file names already
         env:
@@ -266,5 +270,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -q -m "app: version $version, the image of $TAG is published" -- app/config.yaml
+          # the token as actions/checkout would have set it, in the environment of these two commands only: never on a
+          # command line, never in .git/config, masked in the log
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$auth"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth"
           git pull -q --rebase origin "$BRANCH"   # a merge since the checkout
           git push origin "HEAD:$BRANCH"

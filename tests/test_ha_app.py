@@ -2,6 +2,7 @@
 the environment a plain Docker install sets, what the Supervisor's backup of it leaves out, and that it is the only
 app the Supervisor finds in this repository."""
 
+import base64
 import fnmatch
 import json
 import os
@@ -276,14 +277,21 @@ class AppVersionStepTest(unittest.TestCase):
             git("tag", tag, cwd=self.work)
         git("push", "-q", "origin", "HEAD:main", "--tags", cwd=self.work)
 
-    def _run(self, tag, releases=(("v0.24.0", False), ("v0.25.0", False), ("v0.26.0b1", True))):
+    def _run(self, tag, releases=(("v0.24.0", False), ("v0.25.0", False), ("v0.26.0b1", True)), token="ghs_t0ken"):
         # what GitHub says about the releases (image.yml asks `gh release list`), not what the event payload said
         stubs = Stubs(self, {"releases": [{"tagName": t, "isPrerelease": pre, "isDraft": False} for t, pre in releases]})
+        # the real git, behind a wrapper that records each command with the configuration its environment carries
+        self.git_log = stubs.dir / "git.log"
+        wrapper = stubs.dir / "bin" / "git"
+        wrapper.write_text('#!/bin/bash\nprintf \'%s\\t%s\\t%s\\t%s\\n\' "$1" "${GIT_CONFIG_COUNT:-}" "${GIT_CONFIG_KEY_0:-}" '
+                           f'"${{GIT_CONFIG_VALUE_0:-}}" >> "{self.git_log}"\nexec {shutil.which("git")} "$@"\n', encoding="utf-8")
+        wrapper.chmod(0o755)
         env = stubs.env(**{**{k: v for k, v in self.env.items() if k != "PATH"}, "TAG": tag, "BRANCH": "main",
-                           "GITHUB_REPOSITORY": "trailro/hass-remote-integration"})
+                           "GITHUB_REPOSITORY": "trailro/hass-remote-integration", "GH_TOKEN": token})
         proc = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", self.script], cwd=self.work, env=env,
                               capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.output = proc.stdout + proc.stderr
         shown = subprocess.run(["git", "--git-dir", str(self.remote), "show", "main:app/config.yaml"], env=self.env,
                                capture_output=True, text=True, check=True).stdout
         return _yaml_text(shown)["version"], proc.stdout
@@ -304,6 +312,30 @@ class AppVersionStepTest(unittest.TestCase):
         original = _yaml(APP_CONFIG)
         original.pop("version")
         self.assertEqual(rest, original)  # only the version line changed
+
+    def test_the_token_goes_to_the_pull_and_the_push_only(self):
+        """S5-5: the checkout persists no credentials, so the contents: write token is not in .git/config for every
+        step and command; the pull and the push get it in their own environment, never on a command line or in the
+        log (only masked)."""
+        wf = _yaml(ROOT / ".github" / "workflows" / "image.yml")
+        checkout = next(s for s in wf["jobs"]["app-version"]["steps"] if str(s.get("uses", "")).startswith("actions/checkout@"))
+        self.assertIs(checkout["with"].get("persist-credentials"), False)
+        token = "ghs_" + "S3cr3tT0k3n" * 3
+        version, _ = self._run("v0.25.0", token=token)
+        self.assertEqual(version, "0.25.0")
+        header = "AUTHORIZATION: basic " + base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        calls = [line.split("\t") for line in self.git_log.read_text(encoding="utf-8").splitlines()]
+        with_token = [c[0] for c in calls if c[3]]
+        self.assertEqual(with_token, ["pull", "push"], calls)
+        for c in calls:
+            if c[3]:
+                self.assertEqual(c[1:], ["1", "http.https://github.com/.extraheader", header])
+        self.assertNotIn(token, self.output)
+        encoded = header.split()[-1]
+        self.assertEqual([line for line in self.output.splitlines() if encoded in line], [f"::add-mask::{encoded}"])
+        config = (self.work / ".git" / "config").read_text(encoding="utf-8")
+        self.assertNotIn(encoded, config)
+        self.assertNotIn("extraheader", config)
 
     def test_a_stable_patch_after_a_newer_prerelease_moves_the_version(self):
         """v0.26.0 is a pre-release with a plain tag: by the raw tags it was the newest, and v0.25.1 was skipped."""
