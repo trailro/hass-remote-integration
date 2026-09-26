@@ -16,9 +16,9 @@ const base = { host: 'core-mosquitto', port: 1883, tls: false, identity_problem:
 const out = {};
 for (const [name, s] of Object.entries({
   default: { ...base, has_identity: true, wanted_base_topic: 'hass_demo', identity_source: 'default' },
-  instance: { ...base, has_identity: true, wanted_base_topic: 'hass_demo_garage', identity_source: 'instance', identity_instance: 'garage' },
+  instance: { ...base, has_identity: true, wanted_base_topic: 'hass_demo-garage', identity_source: 'instance', identity_instance: 'garage' },
   remembered: { ...base, has_identity: true, wanted_base_topic: 'hass_demo', identity_source: 'remembered', identity_instance: 'garage',
-                identity_move_to: 'hass_demo_garage' },
+                identity_move_to: 'hass_demo-garage' },
   invalid: { ...base, has_identity: false, wanted_base_topic: null, identity_source: 'invalid',
              identity_problem: "HRI_INSTANCE='<b>x</b>' is not an instance name: MQTT stays disconnected until it is corrected or removed" },
 })) {

@@ -1,4 +1,4 @@
-"""Per-instance MQTT identity: HRI_INSTANCE gives hass_<domain>_<instance>, so two containers (two HRI Manager instances)
+"""Per-instance MQTT identity: HRI_INSTANCE gives hass_<domain>-<instance>, so two containers (two HRI Manager instances)
 of the same integration can share one broker and one main Home Assistant.  What a volume already published under stays:
 an instance created before this (hass_hri_probe, its entities on the main HA) keeps its base topic, client id and
 discovery unique ids when HRI_INSTANCE appears.  An invalid HRI_INSTANCE is refused loudly."""
@@ -94,7 +94,7 @@ class IdentityRuleTest(_Dir):
 
     def test_a_fresh_volume_takes_the_instance(self):
         ident = self.identity("garage")
-        self.assertEqual(ident.key("hri_probe"), "hass_hri_probe_garage")
+        self.assertEqual(ident.key("hri_probe"), "hass_hri_probe-garage")
         self.assertEqual(ident.source("hri_probe"), "instance")
         self.assertIsNone(ident.describe()["identity_move_to"])
 
@@ -103,29 +103,29 @@ class IdentityRuleTest(_Dir):
         ident = self.identity("garage", LEGACY)
         self.assertEqual(ident.key("hri_probe"), "hass_hri_probe")
         self.assertEqual(ident.describe(), {"identity_source": "remembered", "identity_instance": "garage", "identity_problem": None,
-                                            "identity_move_to": "hass_hri_probe_garage"})
+                                            "identity_move_to": "hass_hri_probe-garage"})
 
     def test_a_legacy_record_of_another_integration_holds_nothing(self):
         ident = self.identity("garage", {**LEGACY, "base": "hass_other"})
-        self.assertEqual(ident.key("hri_probe"), "hass_hri_probe_garage")
+        self.assertEqual(ident.key("hri_probe"), "hass_hri_probe-garage")
 
     def test_the_remembered_instance_stays_whatever_hri_instance_says_now(self):
-        record = {**LEGACY, "base": "hass_hri_probe_old", "domain": "hri_probe"}
-        for env, move_to in (("new", "hass_hri_probe_new"), (None, "hass_hri_probe"), ("old", None)):
+        record = {**LEGACY, "base": "hass_hri_probe-old", "domain": "hri_probe"}
+        for env, move_to in (("new", "hass_hri_probe-new"), (None, "hass_hri_probe"), ("old", None)):
             ident = self.identity(env, record)
-            self.assertEqual(ident.key("hri_probe"), "hass_hri_probe_old", env)
+            self.assertEqual(ident.key("hri_probe"), "hass_hri_probe-old", env)
             self.assertEqual(ident.describe()["identity_move_to"], move_to, env)
 
     def test_a_record_names_its_integration(self):
         """hass_x_foo recorded for the integration x_foo is not the instance foo of x."""
         self.domain = "x"
         ident = self.identity("bar", {**LEGACY, "base": "hass_x_foo", "domain": "x_foo"})
-        self.assertEqual(ident.key("x"), "hass_x_bar")
+        self.assertEqual(ident.key("x"), "hass_x-bar")
         self.assertEqual(ident.key("x_foo"), "hass_x_foo")
 
     def test_a_released_record_holds_nothing(self):
         ident = self.identity("garage", {**LEGACY, "domain": "hri_probe", "released": True})
-        self.assertEqual(ident.key("hri_probe"), "hass_hri_probe_garage")
+        self.assertEqual(ident.key("hri_probe"), "hass_hri_probe-garage")
 
     def test_an_invalid_instance_is_never_used(self):
         ident = self.identity("Garage")
@@ -138,9 +138,9 @@ class IdentityRuleTest(_Dir):
         self.assertIsNone(ident.describe()["identity_move_to"])
 
     def test_a_damaged_record_is_no_record(self):
-        for record in ([], {"base": 3}, {"base": "hass_hri_probe_Bad", "domain": "hri_probe"}):
+        for record in ([], {"base": 3}, {"base": "hass_hri_probe-Bad", "domain": "hri_probe"}):
             ident = self.identity("garage", record)
-            self.assertEqual(ident.key("hri_probe"), "hass_hri_probe_garage", record)
+            self.assertEqual(ident.key("hri_probe"), "hass_hri_probe-garage", record)
 
 
 class InstallerIdentityTest(unittest.TestCase):
@@ -170,7 +170,7 @@ class InstallerIdentityTest(unittest.TestCase):
         self.assertEqual(inst.instance_key, "hass_hri_probe")
         inst.state.domain = None  # the uninstall stops it first
         self.assertEqual(inst.identity_for("hri_probe"), "hass_hri_probe")
-        self.assertEqual(inst.identity_for("other"), "hass_other_garage")
+        self.assertEqual(inst.identity_for("other"), "hass_other-garage")
 
 
 class PreflightNoticeTest(unittest.TestCase):
@@ -192,23 +192,23 @@ def _publisher(identity, domain):
     return pub
 
 
-def _names(pub, entity_ids):
+def _names(pub, entity_ids, domain="demo"):
     """Everything the publisher derives from its identity, by kind."""
     topics = {pub._status_topic(), pub._health_topic(), pub._manager_topic(), pub._cmd_base(), pub._call_base(), pub._manager_cmd_base()}
-    topics |= {pub._topic_for(eid, "demo") for eid in entity_ids}
+    topics |= {pub._topic_for(eid, domain) for eid in entity_ids}
     registry = SimpleNamespace(async_get=lambda _eid: None)
     with mock.patch.object(disc.er, "async_get", return_value=registry):
-        comps = [disc.build_component(None, State(eid, "on"), pub._topic_for(eid, "demo"), pub._cmd_base(), pub.prefix) for eid in entity_ids]
-    disc_id, block = disc.device_block(None, None, "demo", pub.prefix)
+        comps = [disc.build_component(None, State(eid, "on"), pub._topic_for(eid, domain), pub._cmd_base(), pub.prefix) for eid in entity_ids]
+    disc_id, block = disc.device_block(None, None, domain, pub.prefix)
     mgr_id, mgr_block, mgr_comps = disc.manager_device(
         pub.base_topic, pub.prefix, {"status": pub._status_topic(), "health": pub._health_topic(), "manager": pub._manager_topic(),
-                                     "cmd": pub._manager_cmd_base()}, "demo", "0.26.0", True)
+                                     "cmd": pub._manager_cmd_base()}, domain, "0.26.0", True)
     unique_ids = {c["unique_id"] for c in comps} | {c["unique_id"] for c in mgr_comps.values()}
     topics |= {pub._discovery_topic(disc_id), pub._discovery_topic(mgr_id)}
     for c in comps + list(mgr_comps.values()):
         topics |= {v for k, v in c.items() if k.endswith("_topic") and isinstance(v, str)}
         topics |= {a["topic"] for a in c.get("availability", [])}
-    return {"topics": topics, "client_id": {pub.client_id}, "unique_ids": unique_ids,
+    return {"topics": topics, "client_id": {pub.client_id}, "unique_ids": unique_ids, "discovery_ids": {disc_id, mgr_id},
             "devices": set(block["identifiers"]) | set(mgr_block["identifiers"]) | {mgr_block["name"]},
             "manager_entity_ids": set(mgr_comps)}
 
@@ -223,7 +223,7 @@ class TwoInstancesTest(_Dir):
         os.makedirs(other)
         with _env("garage"):
             b = _publisher(MqttIdentity(os.path.join(other, "mqtt_identity.json"), lambda: "demo"), "demo")
-        self.assertEqual((a.base_topic, b.base_topic), ("hass_demo", "hass_demo_garage"))
+        self.assertEqual((a.base_topic, b.base_topic), ("hass_demo", "hass_demo-garage"))
         names_a, names_b = _names(a, entity_ids), _names(b, entity_ids)
         for kind in names_a:
             self.assertTrue(names_a[kind], kind)
@@ -232,10 +232,65 @@ class TwoInstancesTest(_Dir):
         for t in names_b["topics"]:
             self.assertFalse(t.startswith("hass_demo/"), t)
         for t in names_a["topics"]:
-            self.assertFalse(t.startswith("hass_demo_garage/"), t)
+            self.assertFalse(t.startswith("hass_demo-garage/"), t)
         # and the retained-data ownership test of one never claims the other's discovery config
         config_b = json.dumps({"origin": disc.origin(b.prefix)}).encode()
-        self.assertFalse(a._is_ours("homeassistant/device/hass_demo_garage_demo_nodevice/config", config_b, a.base_topic))
+        self.assertFalse(a._is_ours("homeassistant/device/hass_demo-garage_demo_nodevice/config", config_b, a.base_topic))
+
+
+class UnambiguousIdentityTest(_Dir):
+    """No identity is another's: not an instance against another integration's plain name, not two instances of one
+    integration whose names only differ by what follows a "_", and no unique id of one is another's."""
+
+    def pub(self, domain, instance):
+        sub = os.path.join(self.dir, f"{domain}-{instance}")
+        os.makedirs(sub)
+        with _env(instance):
+            return _publisher(MqttIdentity(os.path.join(sub, "mqtt_identity.json"), lambda: domain), domain)
+
+    def assert_share_nothing(self, a, b, entity_ids_a, entity_ids_b, domain_a, domain_b):
+        names_a, names_b = _names(a, entity_ids_a, domain_a), _names(b, entity_ids_b, domain_b)
+        for kind in names_a:
+            self.assertFalse(names_a[kind] & names_b[kind], (kind, names_a[kind] & names_b[kind]))
+        # parity takes a unique id or a device identifier that starts with its prefix for its own
+        self.assertFalse(a.prefix.startswith(b.prefix) or b.prefix.startswith(a.prefix), (a.prefix, b.prefix))
+        for t in names_b["topics"]:
+            self.assertFalse(t.startswith(a.base_topic + "/"), t)
+        for t in names_a["topics"]:
+            self.assertFalse(t.startswith(b.base_topic + "/"), t)
+
+    def test_an_instance_is_not_another_integrations_plain_name(self):
+        """Integration hri, instance probe, next to the integration hri_probe with no instance."""
+        instance, plain = self.pub("hri", "probe"), self.pub("hri_probe", None)
+        self.assertEqual((instance.base_topic, plain.base_topic), ("hass_hri-probe", "hass_hri_probe"))
+        self.assert_share_nothing(instance, plain, ["sensor.power"], ["sensor.power"], "hri", "hri_probe")
+        # nor does a record of what the integration hri_probe published count for hri's instance probe
+        with _env("probe"):
+            ident = MqttIdentity(os.path.join(self.dir, "legacy.json"), lambda: "hri")
+        mp.write_json(ident.path, LEGACY)
+        ident.load()
+        self.assertEqual(ident.key("hri"), "hass_hri-probe")
+
+    def test_no_unique_id_of_an_instance_is_the_plain_ones(self):
+        """hass_a_ + binary_sensor.foo would be the instance binary's sensor.foo with a "_" between them."""
+        plain, instance = self.pub("a", None), self.pub("a", "binary")
+        self.assert_share_nothing(plain, instance, ["binary_sensor.foo"], ["sensor.foo"], "a", "a")
+
+    def test_two_instances_whose_names_share_a_start(self):
+        garage, garage_binary = self.pub("x", "garage"), self.pub("x", "garage_binary")
+        self.assert_share_nothing(garage, garage_binary, ["binary_sensor.foo", "sensor.manager"], ["sensor.foo"], "x", "x")
+        config = json.dumps({"origin": disc.origin(garage_binary.prefix)}).encode()
+        self.assertFalse(garage._is_ours("homeassistant/device/hass_x-garage_binary_manager/config", config, garage.base_topic))
+
+    def test_the_separator_is_in_no_domain_and_fits_every_name(self):
+        from homeassistant.core import valid_domain
+
+        self.assertFalse(valid_domain("a" + disc.INSTANCE_SEP + "b"))
+        self.assertIsNone(inst_mod._DOMAIN_RE.match("a" + disc.INSTANCE_SEP + "b"))
+        # a discovery node or object id (Home Assistant's mqtt TOPIC_MATCHER), a topic level, a client id of the
+        # characters MQTT brokers take
+        self.assertRegex(disc.INSTANCE_SEP, r"\A[a-zA-Z0-9_-]\Z")
+        self.assertNotIn(disc.INSTANCE_SEP, "+#/$\0")
 
 
 class PublisherIdentityTest(_Case):
@@ -281,11 +336,11 @@ class PublisherIdentityTest(_Case):
     async def test_a_fresh_volume_records_the_instance_and_keeps_it(self):
         ident = self.identity("garage")
         pub = self.pub_with(ident)
-        self.assertEqual(pub.wanted_base_topic, "hass_hri_probe_garage")
+        self.assertEqual(pub.wanted_base_topic, "hass_hri_probe-garage")
         await pub.hass.async_add_executor_job(pub._remember_identity, pub.wanted_base_topic, "homeassistant")
         self.assertEqual(self.record()["domain"], "hri_probe")
         self.assertEqual(ident.source("hri_probe"), "remembered")
-        self.assertEqual(self.identity(None).key("hri_probe"), "hass_hri_probe_garage")  # HRI_INSTANCE removed later: kept
+        self.assertEqual(self.identity(None).key("hri_probe"), "hass_hri_probe-garage")  # HRI_INSTANCE removed later: kept
 
     async def test_an_invalid_instance_never_connects(self):
         mp.write_json(os.path.join(self.dir, "integration_manager", "mqtt_identity.json"), LEGACY)
@@ -321,21 +376,21 @@ class PublisherIdentityTest(_Case):
         ident = self.identity("garage")
         pub = self.pub_with(ident)
         cleared = self.moving(pub)
-        self.assertEqual(await pub.async_move_identity("hass_hri_probe_other"),
-                         {"ok": False, "error": "the identity to move to is hass_hri_probe_garage now, not hass_hri_probe_other: reload the page"})
+        self.assertEqual(await pub.async_move_identity("hass_hri_probe-other"),
+                         {"ok": False, "error": "the identity to move to is hass_hri_probe-garage now, not hass_hri_probe-other: reload the page"})
         pub._connected = False
-        res = await pub.async_move_identity("hass_hri_probe_garage")
+        res = await pub.async_move_identity("hass_hri_probe-garage")
         self.assertFalse(res["ok"])
         self.assertIn("not connected", res["error"])
         self.assertEqual((cleared, ident.key("hri_probe")), ([], "hass_hri_probe"))  # a refusal changes nothing
         pub._connected = True
-        res = await pub.async_move_identity("hass_hri_probe_garage")
-        self.assertEqual(res, {"ok": True, "from": "hass_hri_probe", "to": "hass_hri_probe_garage"})
+        res = await pub.async_move_identity("hass_hri_probe-garage")
+        self.assertEqual(res, {"ok": True, "from": "hass_hri_probe", "to": "hass_hri_probe-garage"})
         self.assertEqual(cleared, [("hass_hri_probe", "homeassistant", True)])  # documents and discovery configs of the old names
         self.assertEqual({k: v for k, v in self.record().items() if k != "broker"},
-                         {"base": "hass_hri_probe_garage", "prefix": "homeassistant", "domain": "hri_probe"})
-        self.assertEqual(self.identity(None).key("hri_probe"), "hass_hri_probe_garage")
-        self.assertEqual(await pub.async_move_identity("hass_hri_probe_garage"),
+                         {"base": "hass_hri_probe-garage", "prefix": "homeassistant", "domain": "hri_probe"})
+        self.assertEqual(self.identity(None).key("hri_probe"), "hass_hri_probe-garage")
+        self.assertEqual(await pub.async_move_identity("hass_hri_probe-garage"),
                          {"ok": False, "error": "nothing to move: the identity is the one the rule gives"})
 
     async def test_a_failed_move_sweep_is_retried_from_the_record(self):
@@ -345,15 +400,15 @@ class PublisherIdentityTest(_Case):
         pub = self.pub_with(ident)
         self.moving(pub)
         pub._clear_retained_under.side_effect = lambda *a, **k: None
-        self.assertTrue((await pub.async_move_identity("hass_hri_probe_garage"))["ok"])
+        self.assertTrue((await pub.async_move_identity("hass_hri_probe-garage"))["ok"])
         self.assertEqual((self.record()["base"], self.record()["released"]), ("hass_hri_probe", True))
-        self.assertEqual(self.identity("garage").key("hri_probe"), "hass_hri_probe_garage")
+        self.assertEqual(self.identity("garage").key("hri_probe"), "hass_hri_probe-garage")
 
     async def test_status_says_where_the_base_topic_comes_from(self):
         ident = self.identity("garage")
         pub = self.pub_with(ident)
         self.assertEqual(pub.public_config()["identity_source"], "instance")
-        self.assertEqual(pub.public_config()["base_topic"], "hass_hri_probe_garage")
+        self.assertEqual(pub.public_config()["base_topic"], "hass_hri_probe-garage")
 
 
 if __name__ == "__main__":

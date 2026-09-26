@@ -57,6 +57,7 @@ import jsonio
 from jsonio import ha_vkey, is_stable_tag, tag_key, vkey, write_json
 
 from . import change_report, events, patches
+from .discovery import INSTANCE_SEP
 from .settings import Settings
 
 _LOGGER = logging.getLogger(__name__)
@@ -214,10 +215,11 @@ def _rmtree_under(path: str, base: str) -> None:
 
 
 def instance_key(domain: str | None, instance: str | None = None) -> str | None:
-    """Identity everything published derives from (hass_<domain>, or hass_<domain>_<instance>); None when nothing runs."""
+    """Identity everything published derives from (hass_<domain>, or hass_<domain>-<instance>); None when nothing runs.
+    The ``-`` (discovery.INSTANCE_SEP) is in no domain: domain hri with instance probe is not the domain hri_probe."""
     if not domain:
         return None
-    return f"hass_{domain}_{instance}" if instance else f"hass_{domain}"
+    return f"hass_{domain}{INSTANCE_SEP}{instance}" if instance else f"hass_{domain}"
 
 
 INSTANCE_ENV = "HRI_INSTANCE"
@@ -242,7 +244,7 @@ class MqttIdentity:
 
     The rule: the identity this volume last published under for the running integration (``mqtt_identity.json``,
     which the publisher writes at every connection) is kept, whatever HRI_INSTANCE says now; only an integration that
-    never published from this volume takes hass_<domain>_<HRI_INSTANCE>, or hass_<domain> without it.  So an install
+    never published from this volume takes hass_<domain>-<HRI_INSTANCE>, or hass_<domain> without it.  So an install
     that published as hass_<domain> before instances existed keeps its topics, client id and discovery unique ids, and
     with them its entity ids on the main Home Assistant.  A record written before instances existed names no domain:
     it counts only for the integration whose plain hass_<domain> it holds.  ``release`` (the MQTT page's Move) drops the
@@ -271,7 +273,7 @@ class MqttIdentity:
             return base if base == plain else None
         if rec["domain"] != domain:
             return None
-        if base == plain or (base.startswith(f"{plain}_") and INSTANCE_RE.fullmatch(base[len(plain) + 1:])):
+        if base == plain or (base.startswith(plain + INSTANCE_SEP) and INSTANCE_RE.fullmatch(base[len(plain) + 1:])):
             return base
         return None
 

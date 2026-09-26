@@ -26,17 +26,24 @@ or `status` publishes under `<name>-integration/<domain>/<object_id>`, so its
 documents never land on the command, call or result topics.
 
 `hass_<domain>` in these topics is the base topic, which is also the client id
-and the start of every discovery id: `hass_<domain>_<instance>` for a container
+and the start of every discovery id: `hass_<domain>-<instance>` for a container
 with `HRI_INSTANCE` set ([Identity](#identity)).
 
 ## Identity
 
 The identity is the name everything published derives from: the base topic,
 the client id, the availability topics, the discovery ids and unique ids
-(`<identity>_<entity_id>`), and the manager device
-(`hass-remote-integration (<identity>)`, `sensor.<identity>_health`, ...). It
-is `hass_<domain>` for the running integration, or `hass_<domain>_<instance>`
-when the container has `HRI_INSTANCE=<instance>`. The MQTT page shows the base
+(`hass_<domain>_<entity_id>`, `hass_<domain>-<instance>-<entity_id>`), and the
+manager device (`hass-remote-integration (<identity>)`, `sensor.<identity>_health`,
+...). It is `hass_<domain>` for the running integration, or
+`hass_<domain>-<instance>` when the container has `HRI_INSTANCE=<instance>`.
+The `-` is in no integration domain (Home Assistant's and HRI's allow only
+`a`-`z`, `0`-`9` and `_`), so an instance never takes another integration's
+name: `hass_hri-probe` (integration `hri`, instance `probe`) is not
+`hass_hri_probe` (integration `hri_probe`). The main HA builds entity ids from
+names with `-` turned into `_`, so there an instance's manager device may ask
+for the same entity id as another integration's (`sensor.hass_hri_probe_health`);
+the one created second gets a suffix, as below. The MQTT page shows the base
 topic in use and where it comes from; `GET /api/mqtt/status` says the same in
 `identity_source` (`default`, `instance`, `remembered`, `invalid`, or `null`
 with nothing running), `identity_instance` and `identity_problem`.
@@ -47,7 +54,7 @@ with nothing running), `identity_instance` and `identity_problem`.
    identity it published under (`remembered`), whatever `HRI_INSTANCE` says
    now: the names on the broker and the entities on the main HA stay as they
    are.
-2. Otherwise it is `hass_<domain>_<HRI_INSTANCE>` (`instance`), or
+2. Otherwise it is `hass_<domain>-<HRI_INSTANCE>` (`instance`), or
    `hass_<domain>` with `HRI_INSTANCE` unset or empty (`default`).
 
 What a volume published is recorded in `integration_manager/mqtt_identity.json`
@@ -75,13 +82,13 @@ Two containers running the same integration on one broker need different
 identities: with the same one they take each other's connection (one client id)
 and clear each other's retained data. Set `HRI_INSTANCE` in one of them (HRI
 Manager sets it for each instance it creates), or in both, to different values.
-`hass_demo` and `hass_demo_garage` share no topic, client id, discovery id or
+`hass_demo` and `hass_demo-garage` share no topic, client id, discovery id or
 unique id, so both mirror to one main HA side by side. Their entities there
 take the ids they have in each container, so of two with the same id the one
 created second gets a suffix (`switch.door_2`).
 
 The container that already published keeps its names (rule 1). To give it the
-instance identity on purpose, use **Move to hass_<domain>_<instance>** on the
+instance identity on purpose, use **Move to hass_<domain>-<instance>** on the
 MQTT page (or `POST /api/mqtt/move_identity` with `{"to": "<identity>"}`,
 the identity the page shows), while MQTT is connected. It clears everything
 published under the old identity, as a change of integration does: **the main

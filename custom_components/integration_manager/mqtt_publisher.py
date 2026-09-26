@@ -770,7 +770,7 @@ class MqttPublisher:
 
     @property
     def prefix(self) -> str:
-        return self._live_prefix or ((self._key_provider() or "hass_none") + "_")
+        return self._live_prefix or disc.identity_prefix(self._key_provider() or "hass_none")
 
     @property
     def client_id(self) -> str:
@@ -1253,7 +1253,7 @@ class MqttPublisher:
             return ("published_at" in doc and "integration" in doc) or "call_topic" in doc
         # exact origin of THIS identity: instance hass_a must not clear hass_a_b's configs
         origin_name = str((doc.get("origin") or {}).get("name", ""))
-        return origin_name == disc.origin(base_topic + "_")["name"]
+        return origin_name == disc.origin(disc.identity_prefix(base_topic))["name"]
 
     def probe_foreign(self, base_topic: str) -> dict[str, Any]:
         """Blocking: what sits retained under <base>/# that is NOT ours."""
@@ -1658,7 +1658,7 @@ class MqttPublisher:
         if self._stopping:
             return
         self._live_base = base
-        self._live_prefix = base + "_"
+        self._live_prefix = disc.identity_prefix(base)
         self._tls_checked_at, self._tls_error, self._last_disconnect = 0.0, "", ""  # new settings: report afresh
         self._connected_at, self._broker_max_packet = 0.0, 0
         old = self._client
