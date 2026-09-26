@@ -396,7 +396,7 @@ class _StatusHandler(http.server.BaseHTTPRequestHandler):
         if _status.get("kind") != "install":
             tail = ""  # the log is of the last install, nothing to do with a restore that failed
         elif password_configured():
-            tail = "(the install log is shown after login, on the System page)"  # no login exists yet: show only the phase
+            tail = "(the install log is integration_manager/ha-install.log on the volume)"  # no login exists yet: show only the phase
         else:
             # without a password the manager shows the same log to anyone once it runs; until then this is the
             # only place pip's progress appears (pip writes into the file, not into the container log)

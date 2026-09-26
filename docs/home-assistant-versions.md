@@ -40,7 +40,8 @@ the default, so `HA_VERSION_DEFAULT` only names a version something booted.
 ## Updating
 
 On **System**, choose a version and install it. The process restarts, the new
-Home Assistant is installed into a new venv (the page shows progress) and the
+Home Assistant is installed into a new venv (the page shows progress;
+with a password set, only that it is installing) and the
 integration's requirements are reinstalled there. Every version change, up or
 down, first takes a backup of the current configuration. Before restarting,
 the page warns when the target is older than the minimum Home Assistant the
