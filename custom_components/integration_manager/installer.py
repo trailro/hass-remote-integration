@@ -2908,7 +2908,14 @@ class Installer:
 
         if (why := manager_domain_error(domain)):
             return {"ok": False, "error": why}
-        if backupkit.pending(self.config_dir):
+        if self.busy:
+            return {"ok": False, "error": "another action is running"}
+        self.busy = True  # while restore-pending.json is read: a restore scheduled meanwhile would go unseen
+        try:
+            pending = await self.hass.async_add_executor_job(backupkit.pending, self.config_dir)
+        finally:
+            self.busy = False
+        if pending:
             return {"ok": False, "error": self.rollback_restore_refusal() or "a restore is scheduled for the next restart: restart (or cancel it) first"}
         if (why := self._replace_guard(domain, replace)):
             return {"ok": False, "error": why, "replace_required": True, "current": self.installed_domain}
