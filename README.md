@@ -635,16 +635,19 @@ reference](docs/mqtt.md).
 
 ## Security
 
-There is **no login by default**, and anyone who can reach the port controls the
-container: it installs code from GitHub, runs patches and calls services. Treat
-the port like SSH access to the container and **do not expose it to the
+There is **no login by default**, and anyone who can reach the port controls
+the container: it installs code from GitHub, runs patches and calls services.
+Treat the port like SSH access to the container and **do not expose it to the
 internet**. Set `HRI_PASSWORD` or `HRI_PASSWORD_FILE` to require a password;
 that also refuses Home Assistant's webhooks on the port. Over plain HTTP the
 password travels unencrypted: use a reverse proxy with TLS (and
 `HRI_COOKIE_SECURE=1`), or bind the port to `127.0.0.1` and tunnel. Secrets are
 write-only in the UI and masked on the log pages and in diagnostics, but
-`docker logs` holds what the integration logged. See [Security](docs/security.md);
-to report a problem, see [SECURITY.md](SECURITY.md).
+`docker logs` holds what the integration logged. As the Home Assistant app, the
+sidebar panel (ingress) uses Home Assistant's login instead of the password;
+limit it with `ingress_users` ([app](docs/app.md#access)). See
+[Security](docs/security.md); to report a problem, see
+[SECURITY.md](SECURITY.md).
 
 ## Configuration reference
 
@@ -667,7 +670,7 @@ to report a problem, see [SECURITY.md](SECURITY.md).
 | `HRI_TRACE_IMPORT` | unset | Diagnostics: log who imports the given packages |
 | `HRI_DEBUG` | unset | `1` turns on debug logging for the manager and blocking-call detection on the event loop; unset, empty, `0`, `false`, `no` or `off` leaves them off |
 | `HRI_PASSWORD` | unset | Password for the web UI and API; unset or empty means no login, only spaces or tabs (or bytes that are not UTF-8) keeps the UI closed until it is fixed. One that ends with a space or tab works in the login form but never as `Authorization: Bearer` (HTTP drops it from the header) |
-| `HRI_PASSWORD_FILE` | unset | File holding the password, for example a Docker secret; wins over `HRI_PASSWORD`, and must not be empty |
+| `HRI_PASSWORD_FILE` | unset | File holding the password, for example a Docker secret; wins over `HRI_PASSWORD`. Empty, unreadable or not UTF-8 keeps the UI closed until it is fixed |
 | `HRI_COOKIE_SECURE` | unset | `1`, `true`, `yes` or `on` (any case) marks the session cookie `Secure` (behind a reverse proxy with TLS); any other value does not, with a warning in the log unless it is `0`, `false`, `no` or `off` |
 
 ### Files on the volume

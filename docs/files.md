@@ -57,10 +57,11 @@ the manager:
 
 | File | When it cannot be used |
 |---|---|
-| `settings.json` | Unreadable, invalid JSON or not an object: default settings, no tokens, reported in the log, on the timeline and as a notification. Invalid JSON or a non-object is kept as `settings.json.corrupt-<stamp>` (newest three, mode 600) before the next save. |
+| `settings.json` | Unreadable, invalid JSON or not an object: default settings, no tokens, reported in the log, on the timeline and as a notification. Invalid JSON or a non-object is kept as `settings.json.corrupt-<stamp>` (newest three, mode 600) before the next save. An unreadable file (a permission, an I/O error) is never replaced: every save is refused with the reason until it is fixed and the container restarted. |
 | `state.json` | Unreadable: kept as `state.json.corrupt-<stamp>` (newest three), reported on the timeline and as a notification. An integration that alone has config entries, a deployed copy with `manifest.json` and a stored version is recorded as running again (version from the marker by the code, or none), with stop, rollback and update. Otherwise nothing runs, and the notification says so. |
 | `mqtt.json` | Unparsable or not an object (`[]`): default settings, MQTT disabled, warned in the log and on the timeline until the MQTT page saves. |
 | `mqtt_rules.json` | Unreadable, invalid JSON or not a rules object: which entities it excludes is unknown, so MQTT fails closed (no connection, nothing published, no command taken; the main HA keeps its entities, unavailable) and rule changes are refused; reported in the log, on the MQTT page and as `rules_error` in `GET /api/mqtt/status`. The file stays in place; invalid JSON or not a rules object is also copied as `mqtt_rules.json.corrupt-<stamp>` (newest three, mode 600), an unreadable file is not. To recover, fix the file or put it back from the copy (or remove it to start over without rules), then press *Reconnect* on the MQTT page, save the MQTT settings, or restart: the rules are read again before connecting. |
+| `auth_revoked` | Unreadable or not a number: every session issued before that boot ends, at every boot until the next logout writes it again. |
 | `registry.json` | Wrong shape or invalid JSON (empty, trailing comma): ignored, with a log line saying what was expected; adding an entry from the UI first keeps it as `registry.json.corrupt-<stamp>`. |
 
 In `settings.json`, a switch written as `"true"`/`"false"`, `"on"`/`"off"`,

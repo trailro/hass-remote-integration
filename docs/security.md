@@ -29,14 +29,15 @@ Set `HRI_PASSWORD`, or `HRI_PASSWORD_FILE` (a Docker secret), to require one:
   whose port inside is always 8087, it is `hri_session_<the app's host
   name>`, so two apps on one host keep their sessions apart; ingress needs
   no cookie.
-- **Log out** (top bar) and a password change end every session in every
-  browser, one opened a moment before included, across restarts and restores.
-  If the volume cannot record a logout (full or read-only), the page says so
-  and it holds only until the next restart: then sessions issued between the
-  last recorded logout and this one are valid again (until they expire), and
-  later ones end. Log out again once the volume is fixed. The record is
-  synced to the disk before the logout answers; one that cannot be read at
-  boot (damaged) ends every session issued before that boot.
+- **Log out** (top bar; not shown through the app's ingress) and a password
+  change end every session in every browser, one opened a moment before
+  included, across restarts and restores. If the volume cannot record a logout
+  (full or read-only), the page says so and it holds only until the next
+  restart: then sessions issued between the last recorded logout and this one
+  are valid again (until they expire), and later ones end. Log out again once
+  the volume is fixed. The record is synced to the disk before the logout
+  answers; one that cannot be read at boot (damaged) ends every session issued
+  before that boot, at every boot until the next logout writes it again.
 - The signing key (`auth_key`) is created on the first boot with a password
   and after a restore. If the volume cannot take it, a key held in memory is
   used (log and timeline say so) and every session ends at the next restart,
@@ -47,10 +48,12 @@ Set `HRI_PASSWORD`, or `HRI_PASSWORD_FILE` (a Docker secret), to require one:
   timeline). Logged-in browsers keep working. A restart of the container or
   the process clears the counts.
 
-The password covers every path on the port: anything under `/api/` without a
-session or `Bearer` header gets `401`, Home Assistant's webhooks
-(`/api/webhook/<id>`) and other callbacks included. There is no allowlist, so
-an integration that receives webhooks works only without a password.
+The password covers every path on the port, except the requests the app's
+ingress proxies ([below](#home-assistant-ingress-the-app)): anything under
+`/api/` without a session or `Bearer` header gets `401`, Home Assistant's
+webhooks (`/api/webhook/<id>`) and other callbacks included. There is no
+allowlist, so an integration that receives webhooks works only without a
+password.
 
 Browsers send cookies to every port of a host name, so another service on
 the same IP address or name receives the session cookie and can overwrite it;
@@ -111,8 +114,8 @@ As a Home Assistant app ([app](app.md#access)) the UI is also served through
 Home Assistant's ingress: the Supervisor proxies the panel to the same port
 with the prefix stripped. A request counts as ingress only when both hold:
 
-- the app is running as the app (`HRI_APP`, set from the Supervisor's options
-  at boot; never on a Docker install);
+- the app is running as the app (`HRI_APP`, which HRI sets itself at boot
+  from the Supervisor's options; never set it on a Docker install);
 - the TCP peer of the connection is the Supervisor, `172.30.32.2`. Headers do
   not count: an `X-Ingress-Path`, `X-Hass-Source` or `X-Remote-User-Name` sent
   from anywhere else changes nothing.
