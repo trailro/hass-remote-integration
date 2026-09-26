@@ -272,19 +272,43 @@ class BuildPrepareView(ManagerView):
                 await self.updater.validate(ha)  # before anything is installed, let alone replaced
             except ValueError as err:
                 return self.json({"ok": False, "error": f"Home Assistant {ha}: {err}", "steps": steps})
-        res = await self.installer.install(ref, domain=domain, replace=bool(body.get("replace")), archive_ref=commit or ref)
+        from .views import _HA_CHANGE_LOCK, _ha_change_lock_taken
+
+        if ha_changes:
+            # What refuses the change below is refused before the install, which may replace (remove) the
+            # integration there is: that lock is then held from here to the change, and the install's busy is
+            # released with no await before the change checks it.  A pending restore refuses the install itself.
+            if _ha_change_lock_taken() or self.installer.busy:
+                return self.json({"ok": False, "error": "a Home Assistant version change or another action is running (an install, start, stop, import, restore or full rollback): try again in a moment", "steps": steps})
+            await _HA_CHANGE_LOCK.acquire()  # free: checked above, with no await since
+        try:
+            res = await self.installer.install(ref, domain=domain, replace=bool(body.get("replace")), archive_ref=commit or ref)
+        finally:
+            if ha_changes:
+                _HA_CHANGE_LOCK.release()  # async_change_ha_version takes it again before anything else can run
         steps.append({"step": "install", **res})
         if not res.get("ok"):
             return self.json({"ok": False, "error": f"install: {res.get('error')}", "steps": steps})
-        if res.get("replaced") and self.publisher is not None:
-            await self.publisher.async_reconnect()  # the MQTT identity follows the new integration
         # a reinstall of the running copy refreshed the files under the process: its old code keeps running until a restart
         restart_required = bool(res.get("redeployed"))
+        ha_error = None
+        if ha_changes:
+            try:
+                from .views import async_change_ha_version  # the same backup and change record as the System page
+
+                st = await async_change_ha_version(self.installer, self.updater, ha, "keep", "environment builder")
+                steps.append({"step": "ha", "ok": True, "desired": st["desired"], "backup": st["backup"]})
+                restart_required = True
+            except (ValueError, OSError) as err:
+                steps.append({"step": "ha", "ok": False, "error": str(err)})
+                ha_error = f"Home Assistant {ha}: {err}"
+        if res.get("replaced") and self.publisher is not None:
+            await self.publisher.async_reconnect()  # the MQTT identity follows the new integration
+        if ha_error:
+            return self.json({"ok": False, "error": ha_error, "steps": steps})
         if ha and not ha_changes and ha_state.get("pending"):
             # the running version was chosen explicitly: an older intention to
             # move to another version at the next restart contradicts it
-            from .views import _HA_CHANGE_LOCK, _ha_change_lock_taken
-
             if _ha_change_lock_taken() or self.installer.busy:
                 return self.json({"ok": False, "error": "a Home Assistant version change or another action is running (an install, start, stop, import, restore or full rollback): try again in a moment", "steps": steps})
             try:
@@ -296,16 +320,6 @@ class BuildPrepareView(ManagerView):
             steps.append({"step": "ha", "ok": True, "desired": ha, "note": f"cancelled the scheduled move to {ha_state.get('desired')}"
                           + (f" (dropped: {', '.join(dropped)})" if dropped else "")})
             events.emit("ha", f"scheduled Home Assistant {ha_state.get('desired')} cancelled: {ha} chosen in the environment builder", version=ha)
-        if ha_changes:
-            try:
-                from .views import async_change_ha_version  # the same backup and change record as the System page
-
-                st = await async_change_ha_version(self.installer, self.updater, ha, "keep", "environment builder")
-                steps.append({"step": "ha", "ok": True, "desired": st["desired"], "backup": st["backup"]})
-                restart_required = True
-            except (ValueError, OSError) as err:
-                steps.append({"step": "ha", "ok": False, "error": str(err)})
-                return self.json({"ok": False, "error": f"Home Assistant {ha}: {err}", "steps": steps})
         deferred = False
         if body.get("start") and ha_changes:
             # the requirements and the setup must happen in the target venv, which
