@@ -561,9 +561,12 @@ class DebugFlagTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"HRI_DEBUG": value}), \
                 mock.patch.object(run, "_run_loop", return_value=0), \
                 mock.patch.object(run, "_quiet_loggers", return_value=[]), \
+                mock.patch.object(run, "_detect_blocking", False), \
                 mock.patch("homeassistant.block_async_io.enable") as enable:
             run._boot_with_logging()
-        return enable.called, logger.level == logging.DEBUG
+            detect = run._detect_blocking  # _boot turns the detector on once hass exists
+        enable.assert_not_called()  # not before hass exists
+        return detect, logger.level == logging.DEBUG
 
     def test_off_however_it_is_spelled(self):
         for value in ("", "0", "false", "no", "off", " OFF ", "False"):

@@ -106,6 +106,7 @@ WATCHDOG_DRAIN_S = 5
 _stop_watchdog: threading.Thread | None = None  # armed once, by whichever of the two paths gets there first
 _boot_settled = False  # this boot's boot_failures count is resolved: marked ok, or taken back after a stop
 _boot_signalled = False  # the boot signal handler stopped this boot (a cancelled boot task is then a clean stop)
+_detect_blocking = False  # HRI_DEBUG: Home Assistant's blocking-call detector, turned on in _boot
 # The Home Assistant app: the Supervisor runs it with no restart policy and starts it again only with the app's Watchdog
 # toggle on (off by default), so a restart asked for from the manager that ends the process left the app stopped.
 # There it starts over in the same container instead, as the image does (Dockerfile CMD, WORKDIR = its folder).
@@ -219,6 +220,15 @@ async def _boot() -> int:
     if not await conf_util.async_ensure_config_exists(hass):
         _LOGGER.error("Could not create a default configuration.yaml")
         return 1
+    if _detect_blocking:
+        # what bootstrap.async_setup_hass always does, at the same point: log file/listdir/import calls on the event
+        # loop, raise on time.sleep and blocking HTTP.  Dev only: it wraps open() and friends, and a strict hit in an
+        # integration's code raises instead of only slowing the loop down.  Not before hass and the loader's data
+        # exist: reporting a call looks its integration up there (2026.5.0 imports dateutil on the loop while it
+        # creates hass, and the report raised KeyError: 'integrations').
+        from homeassistant import block_async_io
+
+        block_async_io.enable()
     await hass.async_add_executor_job(conf_util.process_ha_config_upgrade, hass)
     await _mount_local_lib_path(CONFIG_DIR)
 
@@ -932,12 +942,8 @@ def _boot_with_logging() -> int:
     # off as settings.bool_ reads it: HRI_DEBUG=0 (or false, no, off) in an .env turned it on
     if os.environ.get("HRI_DEBUG", "").strip().lower() not in ("", "0", "false", "no", "off"):
         logging.getLogger("custom_components.integration_manager").setLevel(logging.DEBUG)
-        # what bootstrap.async_setup_hass always does: log file/listdir/import calls on the event loop, raise on
-        # time.sleep and blocking HTTP.  Dev only: it wraps open() and friends, and a strict hit in an
-        # integration's code raises instead of only slowing the loop down
-        from homeassistant import block_async_io
-
-        block_async_io.enable()
+        global _detect_blocking
+        _detect_blocking = True  # turned on in _boot, once hass exists
     return _run_loop(_boot)
 
 
