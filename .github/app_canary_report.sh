@@ -130,7 +130,7 @@ if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
 else
   write git push -q origin "$BRANCH"
 fi
-if write gh pr create --head "$BRANCH" --base main --title "record the app platform versions: $versions" --body-file "$tmp/pr.md"; then
+if write gh pr create --head "$BRANCH" --base main --title "app canary: $MOVED" --body-file "$tmp/pr.md"; then
   created=1
 else
   created=0
