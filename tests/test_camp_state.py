@@ -271,7 +271,11 @@ class FullVolumeAnswersJsonTest(unittest.TestCase):
         self.assertIn("log_format", st.data)
 
     def test_the_registry_post_says_why(self):
-        inst = SimpleNamespace(add_to_registry=mock.Mock(side_effect=OSError(28, "No space left on device")))
+        async def job(func, *args):
+            return await asyncio.get_running_loop().run_in_executor(None, func, *args)
+
+        inst = SimpleNamespace(add_to_registry=mock.Mock(side_effect=OSError(28, "No space left on device")),
+                               hass=SimpleNamespace(async_add_executor_job=job))
         res = _body(asyncio.run(views.RegistryView(inst).post(_request({"domain": "demo", "repo": "owner/demo"}))))
         self.assertFalse(res["ok"])
         self.assertIn("No space left on device", res["error"])

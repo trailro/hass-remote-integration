@@ -225,6 +225,7 @@ class RequirementOptionsTest(unittest.TestCase):
         inst.versions_dir = os.path.join(inst.state_dir, "versions")
         inst.state = State(installed={"demo": {"versions": {"2.0": {"requirements": requirements, "min_ha": min_ha}}, "running_tag": None}})
         inst.busy = False
+        inst.hass = _hass()  # start() reads restore-pending.json in the executor
         os.makedirs(inst._version_dir("demo", "2.0"))
         return inst
 

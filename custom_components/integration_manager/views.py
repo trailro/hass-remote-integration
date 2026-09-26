@@ -170,7 +170,8 @@ class RegistryView(ManagerView):
         if not _REPO_RE.match(repo) or ".." in repo:
             return self.json({"ok": False, "error": "repo must be owner/name"})
         try:
-            spec = self.installer.add_to_registry(str(body.get("domain", "")), repo, str(body.get("name") or "")[:80] or None)
+            spec = await self.installer.hass.async_add_executor_job(  # reads and writes the registry files
+                self.installer.add_to_registry, str(body.get("domain", "")), repo, str(body.get("name") or "")[:80] or None)
         except ValueError as err:
             return self.json({"ok": False, "error": str(err)})
         except OSError as err:  # a full volume: the UI shows the reason instead of aiohttp's HTML 500

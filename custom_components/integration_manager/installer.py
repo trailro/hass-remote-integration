@@ -1000,7 +1000,7 @@ class Installer:
             min_ha = None  # the preview still shows the manifest
         rec = self.state.installed.get(domain, {})
         cur_tag = rec.get("running_tag")
-        old = (self._manifest_at(self._version_dir(domain, cur_tag)) if cur_tag else None) or {}
+        old = (await self.hass.async_add_executor_job(self._manifest_at, self._version_dir(domain, cur_tag)) if cur_tag else None) or {}
         old_req, new_req = set(old.get("requirements", [])), set(new.get("requirements", []))
         notes = next((r.get("notes") for r in (self._releases_cache.get(domain) or (0, []))[1] if r.get("tag") == tag), None)
         return {"domain": domain, "tag": tag, "compared_to": cur_tag, "notes": notes,
@@ -1032,7 +1032,9 @@ class Installer:
         if not old or old == new_domain:
             return {}
         pre = await self.async_backup(f"pre-replace-{old}")
-        await self.hass.async_add_executor_job(backupkit.prune, self.config_dir, self.settings.backup_keep, self.protected_backups() | {pre["name"]})
+        keep = self.settings.backup_keep
+        # protected_backups() reads ha.json, the rebuild plan and the backups directory: in the executor too
+        await self.hass.async_add_executor_job(lambda: backupkit.prune(self.config_dir, keep, self.protected_backups() | {pre["name"]}))
         await self._remove_domain(old)
         events.emit("replace", f"{old} replaced by {new_domain}; backup {pre['name']} taken first", old=old, new=new_domain, backup=pre["name"])
         return {"replaced": old, "pre_replace_backup": pre["name"]}
@@ -1046,7 +1048,14 @@ class Installer:
         if not tag_ok(tag) or (archive_ref is not None and not tag_ok(archive_ref)):
             # both become a GitHub URL path, the tag also a directory of the version store
             return {"ok": False, "error": f"invalid tag {str(tag)[:80]!r}"}
-        if backupkit.pending(self.config_dir):
+        if self.busy:
+            return {"ok": False, "error": "another action is running"}
+        self.busy = True  # while restore-pending.json is read: a restore scheduled meanwhile would go unseen
+        try:
+            pending = await self.hass.async_add_executor_job(backupkit.pending, self.config_dir)
+        finally:
+            self.busy = False
+        if pending:
             return {"ok": False, "error": self.rollback_restore_refusal() or "a restore is scheduled for the next restart: restart (or cancel it) first"}
         domain = domain or self.installed_domain
         if (why := manager_domain_error(domain)):
@@ -1178,7 +1187,11 @@ class Installer:
             return {"ok": False, "error": "another action is running"}
         import backupkit
 
-        scheduled = backupkit.pending_archive(self.config_dir)
+        self.busy = True  # while restore-pending.json is read: a restore scheduled meanwhile would go unseen
+        try:
+            scheduled = await self.hass.async_add_executor_job(backupkit.pending_archive, self.config_dir)
+        finally:
+            self.busy = False
         rollback = self._rollback_undo if scheduled is not None and self._rollback_undo and self._rollback_undo[2] == os.path.basename(scheduled) else None
         # the version a full rollback left, started again: the rollback is undone and its restore dropped with it
         undo = rollback if own_restore is None and rollback == (domain, tag, os.path.basename(scheduled or "")) else None
@@ -1214,7 +1227,8 @@ class Installer:
                 # exactly what a rollback wants.
                 label = f"pre-update-{domain}-{rec['running_tag']}" if switching and rec.get("running_tag") else f"pre-start-{domain}-{tag}"
                 pre = await self.async_backup(label)
-                await self.hass.async_add_executor_job(backupkit.prune, self.config_dir, self.settings.backup_keep, self.protected_backups() | {pre["name"]})
+                keep = self.settings.backup_keep
+                await self.hass.async_add_executor_job(lambda: backupkit.prune(self.config_dir, keep, self.protected_backups() | {pre["name"]}))
                 backup = pre["name"]
             deploy_started = True
             deployed = await self.hass.async_add_executor_job(self._ensure_deployed, domain, tag)
@@ -2437,8 +2451,8 @@ class Installer:
 
     async def _requirements_for(self, domain: str) -> list[str]:
         """Manifest requirements plus those of the integration's dependencies."""
-        manifest = self.installed_manifest(domain) or {}
-        return list(manifest.get("requirements", [])) + await self.dependency_requirements(domain)
+        manifest = await self.hass.async_add_executor_job(self.installed_manifest, domain) or {}  # opens manifest.json
+        return list(manifest.get("requirements", [])) + await self.dependency_requirements(domain, manifest=manifest)
 
     async def dependency_requirements(self, domain: str | None = None, manifest: dict[str, Any] | None = None) -> list[str]:
         manifest = manifest or self.installed_manifest(domain)
@@ -2912,7 +2926,7 @@ class Installer:
                 return {"ok": False, "error": f"no {domain} with a manifest.json under {cands['dir']}" if cands["exists"]
                         else f"dev source directory {cands['dir']} does not exist (bind-mount it: see docker-compose.dev.yml)"}
             if domain not in self.registry():
-                self.add_to_registry(domain, "", cand.get("name"), local=True)
+                await self.hass.async_add_executor_job(self.add_to_registry, domain, "", cand.get("name"), True)  # reads and writes the registries
                 registered = True
             stamp = os.urandom(8).hex()
             manifest = await self.hass.async_add_executor_job(self._store_local, cand["path"], domain, tag, stamp)
