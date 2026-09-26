@@ -132,7 +132,7 @@ def test_install_and_start(shell, shell_json, stash):
     # "startup" until Docker's health check (every 30 s) has seen the API
     _wait("the app's state is started", lambda: _state(shell_json, slug) == "started", 300)
     folder = f"/mnt/data/supervisor/app_configs/{slug}"
-    venvs = shell.run_check(f"ls -d {folder}/venv-*")
+    venvs = shell.run_check(f"find {folder} -maxdepth 1 -name 'venv-*'")  # venv-current links to a /config path
     assert venvs, "no venv in the app's folder: the backup check below would prove nothing"
     logger.info("venvs: %s", venvs)
     stash["folder"] = folder
