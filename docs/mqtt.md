@@ -220,10 +220,14 @@ What is masked appears as `***` in the command history (`GET
 - a service's error message, run through the same rules as the Logs page
   ([Security](security.md)): a password, a `?token=` URL, an `Authorization:
   Bearer …`, or a credential after an auth scheme in what the caller sent
-  (`token: Basic …`). An ordinary failure stays readable word for word.
+  (`token: Basic …`). An ordinary failure stays readable word for word;
+- a manager action's `error` and `note`, by the Logs page rules, in its
+  history row, on `manager/result`, in the retained manager document and on
+  the timeline.
 
-Only what is sent is masked, never an entity's state or attributes
-([Entity document](#entity-document)). Masking reads at most 4 KB
+Of what the container publishes, only its own words are masked (these, and
+the health document's reasons and `last_error`), never an entity's state or
+attributes ([Entity document](#entity-document)). Masking reads at most 4 KB
 ([Limits](#limits)), so it never holds up the connection.
 
 ## Service calls

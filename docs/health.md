@@ -41,12 +41,12 @@ is the first bad verdict after a boot; the way back to `ok` once at INFO.
 | `integration` | The running integration's domain; `null` when none runs |
 | `tag`, `version` | The running version's tag, and the version in its manifest |
 | `loaded` | Whether Home Assistant has loaded the domain |
-| `entries` | Its config entries: `title`, `state`, `reason`, `disabled_by` |
+| `entries` | Its config entries: `title`, `state`, `reason` (masked as on the Logs page), `disabled_by` |
 | `restart_required` | A change waits for a restart of the process |
-| `last_error` | The manager's last recorded error, or empty |
+| `last_error` | The manager's last recorded error, or empty; masked as on the Logs page |
 | `patch` | The last computed summary of its patches, or `null` |
 | `state` | `ok`, `degraded`, `error` or `stopped` |
-| `reason` | Why the verdict is not `ok`; empty when it is |
+| `reason` | Why the verdict is not `ok`, masked as on the Logs page; empty when it is |
 | `entities` | Its enabled entities, those without a unique id included |
 | `entities_with_state`, `entities_unavailable`, `entities_unknown` | Of those: how many have a state, and how many are `unavailable` or `unknown` |
 | `last_state_update`, `last_state_update_age_s` | The newest changed value or attribute (local time with its offset) and its age in seconds; `null` without a state |
