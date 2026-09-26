@@ -152,11 +152,15 @@ def test_backup_leaves_out_the_venv(shell, shell_json, stash):
     size = int("".join(shell.run_check(f"stat -c %s {path}")))
     logger.info("backup %s: %d bytes", backup, size)
     assert size < MAX_BACKUP, f"the app's backup is {size} bytes: backup_exclude no longer leaves out the venv"
+    outer = shell.run_check(f"tar -tf {path}")
+    logger.info("the backup holds %s", outer)
+    member = next(m for m in outer if slug in m)
     # counted in the VM: the list itself is long for a serial console
-    listing = f"tar -xOf {path} ./{slug}.tar.gz | tar -tzf -"
-    count = lambda pattern: int("".join(shell.run_check(f"{listing} | grep -cE '{pattern}' || true", timeout=300)))  # noqa: E731
+    listing = f"tar -xOf {path} '{member}' | tar -t{'z' if member.endswith('.gz') else ''}f -"
+    count = lambda pattern: int(shell.run_check(f"{{ {listing}; }} 2>/dev/null | grep -cE '{pattern}' || true", timeout=300)[-1])  # noqa: E731
     total, venv, state = count("."), count("(^|/)venv-"), count("(^|/)integration_manager/")
     logger.info("the app's archive: %d members, %d of a venv, %d of integration_manager/", total, venv, state)
+    assert total > 0, f"could not list {member} of the backup"
     assert venv == 0, "the venv is in the backup"
     assert state > 0, "the app's state is not in the backup"
 
