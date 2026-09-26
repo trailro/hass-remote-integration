@@ -64,6 +64,7 @@ from homeassistant.helpers.event import async_call_later, async_track_time_inter
 from jsonio import ha_vkey, is_stable_tag, read_json, vkey, write_json
 
 from . import events, preflight, writer
+from .diagnostics import scrub_text
 from .discovery import MANAGER_ACTIONS
 from .http_util import ManagerView
 from .memdiag import _proc_status
@@ -470,7 +471,9 @@ class ManagerDevice:
             "resources": self.resources,
             "patches": inst._patch_status(domain) or "none",  # noqa: SLF001
             "running_action": self._running,
-            "last_action": self.last_action,
+            # retained on the broker and recorded by the main HA: an integration's own error text is masked like on the UI
+            "last_action": self.last_action and {k: scrub_text(v) if k in ("error", "note") and isinstance(v, str) else v
+                                                 for k, v in self.last_action.items()},
             "commands": self.publisher.config.manager_commands,
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         }
