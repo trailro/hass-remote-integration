@@ -321,7 +321,7 @@ is published:
 
 | Field | Value | Notes |
 |---|---|---|
-| `exclude` | true/false | an entity excluded while the container was down is removed from the main HA at the next connection |
+| `exclude` | true/false | an entity excluded while the container was down is removed from the main HA by the orphan sweep, five minutes after the start ([After a restore](#after-a-restore-import-or-rebuild)) |
 | `name` | text | |
 | `enabled_by_default` | true/false | reaches an entity the main HA already has only after it restarts |
 | `entity_category` | `config` or `diagnostic` | refused when the main HA would not take it for the published platform; reaches an existing entity only after the main HA restarts |
