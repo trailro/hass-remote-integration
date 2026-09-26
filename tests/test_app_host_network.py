@@ -277,5 +277,57 @@ class CookieNameTest(unittest.TestCase):
         self.assertEqual(self._name(HRI_APP="1", HRI_HOST_NETWORK="", HRI_PORT="8087"), "hri_session_homeassistant")
 
 
+class ZeroconfTest(unittest.TestCase):
+    """zeroconf's async_setup announces Home Assistant by calling a function of its module once Home Assistant starts."""
+
+    def setUp(self):
+        try:
+            import run
+            from homeassistant.components import zeroconf
+        except ImportError as err:  # pragma: no cover - outside the container's HA venv
+            self.skipTest(f"Home Assistant's zeroconf is not importable: {err}")
+        self.run, self.zeroconf = run, zeroconf
+        original = getattr(zeroconf, run.ZEROCONF_ANNOUNCE)
+        self.addCleanup(setattr, zeroconf, run.ZEROCONF_ANNOUNCE, original)
+        self.original = original
+
+    def test_the_announcement_is_looked_up_by_name_when_it_runs(self):
+        """What the replacement relies on, in this Home Assistant (CI runs it on the floor version too): the start
+        callback loads the name from the module's globals at call time, not a reference bound at import."""
+        start = next(c for c in self.zeroconf.async_setup.__code__.co_consts
+                     if inspect.iscode(c) and c.co_name == "_async_zeroconf_hass_start")
+        self.assertIn(self.run.ZEROCONF_ANNOUNCE, start.co_names)
+        self.assertNotIn(self.run.ZEROCONF_ANNOUNCE, start.co_freevars)
+        self.assertIn("_home-assistant._tcp", self.zeroconf.ZEROCONF_TYPE)
+
+    def test_on_the_host_network_nothing_is_announced(self):
+        with mock.patch.dict(os.environ, {"HRI_HOST_NETWORK": "1"}):
+            self.assertTrue(self.run._suppress_zeroconf_announcement())
+        replaced = getattr(self.zeroconf, self.run.ZEROCONF_ANNOUNCE)
+        self.assertIsNot(replaced, self.original)
+        aio_zc = mock.AsyncMock()
+        with self.assertLogs(self.run._LOGGER, logging.INFO):
+            asyncio.run(replaced(aio_zc, object()))
+        aio_zc.async_register_service.assert_not_called()
+        self.assertIn("_suppress_zeroconf_announcement", inspect.getsource(self.run._boot))
+
+    def test_otherwise_it_is_left_alone(self):
+        for value in ("", "0"):
+            with self.subTest(value=value), mock.patch.dict(os.environ, {"HRI_HOST_NETWORK": value}):
+                self.assertFalse(self.run._suppress_zeroconf_announcement())
+                self.assertIs(getattr(self.zeroconf, self.run.ZEROCONF_ANNOUNCE), self.original)
+
+    def test_a_home_assistant_without_it_says_so(self):
+        import homeassistant.components as components
+
+        bare = types.ModuleType("homeassistant.components.zeroconf")
+        with mock.patch.dict(os.environ, {"HRI_HOST_NETWORK": "1"}), \
+                mock.patch.dict(sys.modules, {"homeassistant.components.zeroconf": bare}), \
+                mock.patch.object(components, "zeroconf", bare, create=True), \
+                self.assertLogs(self.run._LOGGER, logging.ERROR) as logs:
+            self.assertFalse(self.run._suppress_zeroconf_announcement())
+        self.assertTrue(any("announces itself" in line for line in logs.output), logs.output)
+
+
 if __name__ == "__main__":
     unittest.main()
