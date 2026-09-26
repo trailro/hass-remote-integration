@@ -3822,8 +3822,12 @@ class MqttPublisher:
         self.stats["entities_last_run"] = n
         self.stats["last_full_republish"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         if self._identity_sweep_due:
-            # the identity changed while the broker was unreachable: what the old names left retained goes now
-            self._identity_sweep_due = not await self.hass.async_add_executor_job(self._sweep_old_identity, self.base_topic)
+            # the identity changed while the broker was unreachable: what the old names left retained goes now.  Under
+            # the connection lock, like every other write of the record: a Move between the check above and the sweep
+            # would otherwise have its release overwritten with the old names, and the move undone
+            async with self._conn_lock:
+                if self._identity_sweep_due and self._connected and not self._moving:
+                    self._identity_sweep_due = not await self.hass.async_add_executor_job(self._sweep_old_identity, self.base_topic)
         if self.config.discovery_enabled and self._orphan_sweep_due and self._boot_components is None:
             await self._async_read_boot_components()
         if self.config.discovery_enabled:

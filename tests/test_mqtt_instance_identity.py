@@ -4,6 +4,7 @@ an instance created before this (hass_hri_probe, its entities on the main HA) ke
 discovery unique ids when HRI_INSTANCE appears.  An invalid HRI_INSTANCE is refused loudly."""
 
 import asyncio
+import collections
 import contextlib
 import json
 import os
@@ -11,6 +12,7 @@ import random
 import re
 import shutil
 import tempfile
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -604,6 +606,45 @@ class PublisherIdentityTest(_Case):
         self.assertEqual(self.identity(None).key("hri_probe"), "hass_hri_probe-garage")
         self.assertEqual(await pub.async_move_identity("hass_hri_probe-garage"),
                          {"ok": False, "error": "nothing to move: the identity is the one the rule gives"})
+
+    async def test_a_republish_during_a_move_never_sweeps_under_the_old_names(self):
+        """A full republish whose identity sweep was due, arriving while a Move waits for its settings: the sweep waits
+        for the move (the connection lock) instead of recording the old names again over the release."""
+        mp.write_json(os.path.join(self.dir, "integration_manager", "mqtt_identity.json"), {**LEGACY, "broker": {**BROKER, "port": self.port}})
+        ident = self.identity("garage")
+        pub = self.pub_with(ident)
+        self.moving(pub)
+        pub.hass.states = SimpleNamespace(async_all=lambda: [])
+        pub.stats = collections.defaultdict(int)
+        pub._orphan_sweep_due, pub._resync_excluded, pub._undiscover_due = False, False, False
+        pub._last_full = 0.0
+        for name in ("_publish_manager_discovery", "publish_manager", "_publish_discovery_all", "_publish_services"):
+            mock.patch.object(pub, name).start()
+        pub._identity_sweep_due = True
+        entered, gate = threading.Event(), threading.Event()
+
+        def slow_load():
+            entered.set()
+            gate.wait(5)
+            return pub.config
+
+        def connect():  # what a connect under the new names does: its own sweep, then the live names
+            pub._identity_sweep_due = False
+            pub._live_base, pub._live_prefix = pub.wanted_base_topic, disc.identity_prefix(pub.wanted_base_topic)
+
+        pub._load.side_effect = slow_load
+        pub._connect.side_effect = connect
+        sweep = mock.patch.object(pub, "_sweep_old_identity", wraps=pub._sweep_old_identity).start()
+        move = asyncio.ensure_future(pub.async_move_identity("hass_hri_probe-garage"))
+        await asyncio.get_running_loop().run_in_executor(None, entered.wait, 5)
+        republish = asyncio.ensure_future(pub.async_republish_all())
+        await asyncio.sleep(0.05)
+        gate.set()
+        self.assertTrue((await move)["ok"])
+        await republish
+        self.assertEqual(sweep.call_args_list, [])
+        self.assertEqual((self.record()["base"], self.record()["domain"]), ("hass_hri_probe-garage", "hri_probe"))
+        self.assertEqual(self.identity("garage").key("hri_probe"), "hass_hri_probe-garage")
 
     async def test_a_failed_move_sweep_is_retried_from_the_record(self):
         """The broker did not take the clear: the record keeps the old names (released), so the next connect sweeps them."""
