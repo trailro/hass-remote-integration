@@ -140,9 +140,10 @@ restart a window after that. *Restart process* still restarts.
 
 Every action is visible: a timeline entry naming the reason (a reload says
 `health degraded for 20 min (…): reloading <domain>'s entries`), the attempt
-number and the next step; a persistent notification at the boot after a
-restart; and `watchdog` in `GET /api/status`, which **System** shows under the
-setting.
+number and the next step; after a restart, a persistent notification about
+three minutes into the next boot (the watchdog starts two minutes after the
+boot and first looks a minute later); and `watchdog` in `GET /api/status`,
+which **System** shows under the setting.
 
 ## Resource history
 
