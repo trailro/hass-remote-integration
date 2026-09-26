@@ -35,16 +35,24 @@ skipped with a line in the log.
 Not in a backup, so a restore never rolls them back:
 
 - the timeline, resource history, change reports and last known release
-  versions;
-- the login key and the logout record;
+  versions (`events.jsonl`, `resource_history.json`, `change_reports.json`,
+  `latest_versions.json`);
+- the login key and the logout record (`auth_key`, `auth_revoked`);
+- `.storage/core.uuid`, the installation id of Home Assistant in the
+  container;
 - `.storage/http`, the port Home Assistant was set up with (it would pin a
   foreign `HRI_PORT`; one restored from an older archive is dropped at the
   next boot);
 - `.storage/tmp…`, a store file Home Assistant is writing at that moment;
 - `.storage/*.pre-import` (and `*.pre-import.done`), originals an import set
   aside;
-- `mqtt_identity.json` and `mqtt_cleanup_pending.json`, since the broker is
-  outside the volume.
+- `mqtt_identity.json`, `mqtt_cleanup_pending.json` and
+  `mqtt_undiscover.json`, since the broker is outside the volume;
+- what the boot rebuilds or is only in flight: the Home Assistant venvs
+  (`venv-*`), logs (`*.log`, `*.log.*`), caches (`__pycache__`, `*.pyc`,
+  `deps`, `tts`), the backups themselves, `integration_manager/*.tmp`,
+  staging folders, a scheduled restore and its record, `pre-restore-*`, and an
+  import's `import.tar` and `import-extracted`.
 
 A backup of the Docker volume made with other tools can leave out `venv-*`
 the same way: each is about 800 MB, and the boot installs the one it needs
