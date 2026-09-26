@@ -134,5 +134,54 @@ class YamlOnlyHealthTest(WatchdogBase):
         inst.restart.assert_not_awaited()
 
 
+# ----- S2-2 -----------------------------------------------------------------------------------------
+
+class RefusalsExpireTest(WatchdogBase):
+    def test_a_setup_that_never_ends_stops_holding_the_watchdog_off(self):
+        inst = self.installer()
+        inst._entries_of = lambda dom: [SimpleNamespace(state=SimpleNamespace(value="setup_in_progress"), disabled_by=None, title="Hub")]
+        sch = self.scheduler(inst)
+        for _ in range(16):
+            self.tick(sch)
+        inst.restart.assert_not_awaited()
+        self.assertTrue(self.lines("still setting up"), self.emitted)
+        for _ in range(Installer.SETUP_WAIT_S // 60 - 1):
+            self.tick(sch)
+        inst.restart.assert_not_awaited()  # the smoke test's hang limit has not passed yet
+        for _ in range(3):
+            self.tick(sch)
+        inst.restart.assert_awaited_once()  # before the fix: refused for the life of the process
+
+    def test_a_setup_that_ends_is_not_counted_against_the_next_one(self):
+        inst = self.installer()
+        setting_up = [SimpleNamespace(state=SimpleNamespace(value="setup_in_progress"), disabled_by=None, title="Hub")]
+        inst._entries_of = lambda dom: setting_up
+        sch = self.scheduler(inst)
+        for _ in range(16):
+            self.tick(sch)
+        self.assertIsNotNone(sch._setup_since)
+        self.verdict = {"state": "ok", "reason": ""}
+        self.tick(sch)
+        self.assertIsNone(sch._setup_since)
+
+    def test_a_blocked_deferred_start_does_not_hold_it_off(self):
+        inst = self.installer()
+        inst.state.pending_start = {"domain": DOMAIN, "tag": "1.0", "ha": "2020.1.0",
+                                    "blocked": "Home Assistant is 2026.9.0, not 2020.1.0 (the update failed or was rolled back)"}
+        sch = self.scheduler(inst)
+        for _ in range(16):
+            self.tick(sch)
+        inst.restart.assert_awaited_once()  # before the fix: "a start is deferred" forever
+
+    def test_a_deferred_start_that_still_applies_still_refuses(self):
+        inst = self.installer()
+        inst.state.pending_start = {"domain": DOMAIN, "tag": "1.0", "ha": None}
+        sch = self.scheduler(inst)
+        for _ in range(16):
+            self.tick(sch)
+        inst.restart.assert_not_awaited()
+        self.assertTrue(self.lines("a start is deferred"))
+
+
 if __name__ == "__main__":
     unittest.main()

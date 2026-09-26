@@ -110,6 +110,7 @@ class _Base(unittest.TestCase):
         sch._refused = False
         sch._reloaded_at = sch._ok_since = None
         sch._reload_skip_said = False
+        sch._setup_since = None
         sch._announced = True  # the boot notification has its own test
         # nothing else is scheduled on the volume: the blocking checks answer "clear"
         sch._scheduled_refusal = lambda: None
