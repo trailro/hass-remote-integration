@@ -73,9 +73,10 @@ The boot status page, served until Home Assistant runs (`HRI_APT_PACKAGES`,
 PyPI lookup, version install, requirements, scheduled restore, removing unused
 venvs, a failed restore waiting for a retry), is not protected. It shows the
 phase (naming the `HRI_APT_PACKAGES` packages), the backup a failed restore
-needs and, with no password set, the tail of the last install log. While a
-failed restore holds the boot, `/api/` answers `503` with `installing: false`
-and `restore_failed: true`.
+needs and, with no password set, the tail of the last install log. Under
+`/api/` it answers `503` with JSON: `installing` (`false` while a failed
+restore holds the boot) and `error`; with no password set, or to the app's
+ingress, also the version, the phase and `restore_failed`.
 
 ## Built-in protections
 
