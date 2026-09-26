@@ -220,6 +220,11 @@ class LoopLag:
         return out
 
 
+def _scrubbed_action(res: dict[str, Any]) -> dict[str, Any]:
+    """The outcome of an action with the integration's own words in it (error, note) masked like on the UI."""
+    return {k: scrub_text(v) if k in ("error", "note") and isinstance(v, str) else v for k, v in res.items()}
+
+
 class ManagerDevice:
     version = MANAGER_VERSION
 
@@ -472,8 +477,7 @@ class ManagerDevice:
             "patches": inst._patch_status(domain) or "none",  # noqa: SLF001
             "running_action": self._running,
             # retained on the broker and recorded by the main HA: an integration's own error text is masked like on the UI
-            "last_action": self.last_action and {k: scrub_text(v) if k in ("error", "note") and isinstance(v, str) else v
-                                                 for k, v in self.last_action.items()},
+            "last_action": self.last_action and _scrubbed_action(self.last_action),
             "commands": self.publisher.config.manager_commands,
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         }
@@ -568,13 +572,14 @@ class ManagerDevice:
         self.last_action = res
         if rec is not None:
             self.publisher._finish(rec, "ok" if res.get("ok") else "failed", res.get("error"))  # noqa: SLF001
+        shown = _scrubbed_action(res)  # on the broker and in the timeline, as in the retained document
         # before the publish: a stop already under way, or a broker that never confirms, must not cost the timeline
         events.emit("mqtt", f"manager action {action} from MQTT: "
-                    + (("ok" + (f", {res['note']}" if res.get("note") else "") + ("; restarting" if restart else "")) if res.get("ok") else f"failed: {res.get('error')}"),
+                    + (("ok" + (f", {shown['note']}" if shown.get("note") else "") + ("; restarting" if restart else "")) if shown.get("ok") else f"failed: {shown.get('error')}"),
                     action=action)
         # the publish hands both messages to paho before its first await, so they still reach the broker
         # while HA stops; what it waits for afterwards is only the confirmation
-        await self.publisher.async_publish_manager_result(res)
+        await self.publisher.async_publish_manager_result(shown)
         if started is not None:
             await self.publisher.async_after_start(started)
         return res
