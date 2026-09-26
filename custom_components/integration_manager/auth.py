@@ -36,6 +36,7 @@ from urllib.parse import quote
 
 from aiohttp import web
 from homeassistant.core import HomeAssistant
+from jsonio import fsync_dir
 
 from . import events
 from .http_util import ManagerView, with_body
@@ -170,12 +171,17 @@ class Auth:
             return False
 
     def load_revoked(self) -> None:
-        """Blocking."""
+        """Blocking.  No file: no logout yet.  A file that is there but cannot be read as a number (torn by a
+        power loss before this wrote it with fsync, or damaged) held a logout: every session issued before now
+        ends, rather than the ones that logout ended coming back."""
         try:
             with open(self.revoked_path or "", encoding="utf-8") as fh:
-                self.generation = int(fh.read().strip() or 0)
-        except (OSError, ValueError):
+                self.generation = int(fh.read().strip())
+        except FileNotFoundError:
             self.generation = 0
+        except (OSError, ValueError) as err:
+            self.generation = int(time.time())
+            _LOGGER.warning("%s unreadable (%s): every session issued before now has ended", self.revoked_path, type(err).__name__)
 
     def revoke_all(self) -> None:
         """Blocking: every session issued until now ends, also one issued in
@@ -190,7 +196,10 @@ class Auth:
             if self.revoked_path:
                 with open(self.revoked_path + ".tmp", "w", encoding="utf-8") as fh:
                     fh.write(str(generation))
+                    fh.flush()
+                    os.fsync(fh.fileno())
                 os.replace(self.revoked_path + ".tmp", self.revoked_path)
+                fsync_dir(os.path.dirname(self.revoked_path))  # the rename: without it a power loss brings the old file back
         finally:
             self.generation = generation
 

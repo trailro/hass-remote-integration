@@ -31,7 +31,9 @@ Set `HRI_PASSWORD`, or `HRI_PASSWORD_FILE` (a Docker secret), to require one:
   If the volume cannot record a logout (full or read-only), the page says so
   and it holds only until the next restart: then sessions issued between the
   last recorded logout and this one are valid again (until they expire), and
-  later ones end. Log out again once the volume is fixed.
+  later ones end. Log out again once the volume is fixed. The record is
+  synced to the disk before the logout answers; one that cannot be read at
+  boot (damaged) ends every session issued before that boot.
 - The signing key (`auth_key`) is created on the first boot with a password
   and after a restore. If the volume cannot take it, a key held in memory is
   used (log and timeline say so) and every session ends at the next restart,
