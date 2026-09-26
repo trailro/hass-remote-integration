@@ -3,6 +3,35 @@
 Every version's changes are in the
 [GitHub releases](https://github.com/trailro/hass-remote-integration/releases).
 
+## 0.26.0
+
+- **Two instances of the same integration can share a broker.** A new
+  `HRI_INSTANCE=<name>` publishes under `hass_<domain>-<name>` (base topic,
+  client id, discovery and unique ids, manager device). An HRI Manager
+  instance derives it from its app slug (`local_hri_<name>`). Docker: set it
+  in `.env` and download the compose file again. See
+  [MQTT](https://github.com/trailro/hass-remote-integration/blob/main/docs/mqtt.md).
+- **Nothing moves by itself:** an integration this volume already published
+  keeps its identity, whatever `HRI_INSTANCE` says; existing installs and
+  existing manager instances keep their topics, unique ids and entity ids.
+  **Move to …** on the MQTT page switches on purpose (by default it leaves
+  the old names on the broker; clearing them is explicit). An invalid
+  `HRI_INSTANCE`, an app slug the Supervisor could not give, or a damaged
+  `mqtt_identity.json` keeps MQTT off with the reason, never picks a name.
+  Rolling back to 0.25.x after publishing under an instance identity moves it
+  back to the plain name.
+- **Host network for HRI Manager instances** (HRI Manager 0.2.0): the
+  integration sees the LAN's mDNS, SSDP and broadcast. HRI listens on the
+  port the Supervisor gives the app, and the sidebar panel works as before.
+  On the host network the port needs the app's password: without one every
+  request that is not the sidebar panel gets `403`. Home Assistant inside
+  does not announce itself on the LAN (zeroconf, SSDP); the integration's
+  discovery works. The app from this repository is not affected.
+- **Healthcheck:** reads the port the app was given (`/run/hri-port`), else
+  `HRI_PORT`.
+- **CI** checks that the newest released HRI Manager accepts
+  `app/config.yaml`.
+
 ## 0.25.2
 
 - **HRI's backups are now in the Home Assistant backup of the app.** Until
