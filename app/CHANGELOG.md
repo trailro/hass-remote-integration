@@ -30,3 +30,7 @@ Every version's changes are in the
   one host do not log each other out.
 - **Smaller backups:** the cached HACS list is left out of Home Assistant
   backups and HRI's own.
+- **A refused start waits instead of looping:** when HRI will not start an
+  older Home Assistant on a configuration a newer one wrote (for example
+  after restoring an old backup), the app stays up and its page says why;
+  after you fix it, restart the app.
