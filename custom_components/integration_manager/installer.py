@@ -1720,8 +1720,8 @@ class Installer:
 
                 self.state.last_error = scrub_text(str(err))
                 self._save_state()
-                events.emit("error", f"stop {domain} failed: {err}", domain=domain)
-                return {"ok": False, "error": str(err), "restart_required": True}
+                events.emit("error", f"stop {domain} failed: {self.state.last_error}", domain=domain)
+                return {"ok": False, "error": self.state.last_error, "restart_required": True}
             self._cancel_smoke()
             cancelled = self.cancel_pending_start()  # "stop" also means "and do not start anything at the restart"
             stays_loaded = self._stays_loaded_until_restart(domain)
@@ -1843,7 +1843,7 @@ class Installer:
 
                 self.state.last_error = scrub_text(str(err))
                 self._save_state()
-                return {"ok": False, "error": str(err), "restart_required": True}
+                return {"ok": False, "error": self.state.last_error, "restart_required": True}
             self.state.last_action = f"uninstalled {domain}"
             self._save_state()
             events.emit("uninstall", f"{domain} uninstalled (versions, files, config entries)", domain=domain)
