@@ -130,7 +130,12 @@ restart. After a restart the clock starts from that boot, and the window
 doubles for each attempt (15 → 30 → 60 → 120 → 240 minutes, then stays). At the
 daily maximum it gives up, says so once and waits until the integration has
 been `ok` for a whole window, or until restarts age out of the 24-hour count.
-All of this survives the restart it triggers, in `state.json`.
+All of this survives the restart it triggers, in `state.json`. When
+`state.json` cannot be written (a full or read-only volume), no automatic
+restart happens: the boot after it would read a record without that restart,
+with the cap and the backoff reset, and could loop. The watchdog says so on
+the timeline, in the log and under the setting, and tries again a window
+later; *Restart process* still restarts.
 
 Every action is visible: a timeline entry naming the reason (a reload says
 `health degraded for 20 min (…): reloading <domain>'s entries`), the attempt

@@ -249,28 +249,30 @@ def _full_disk(*_args, **_kwargs):
 
 
 class WatchdogOnAFullDiskTest(WatchdogBase):
-    """R3-10a: the restart the comment at restart() promises actually happens."""
+    """R3-10a: a full disk no longer ends the tick with an OSError.  Since S2-3 the automatic restart is
+    refused while the ledger cannot be written (the boot would read it without that restart, and loop)."""
 
-    def test_a_full_disk_no_longer_stops_the_tick_before_the_restart(self):
+    def test_a_full_disk_no_longer_stops_the_tick_and_refuses_the_restart(self):
         inst = self.installer()
         inst._save_state = _full_disk
         sch = self.scheduler(inst)
         for _ in range(16):
-            self.tick(sch)
-        inst.restart.assert_awaited_once()  # before the fix: OSError out of every tick, forever
+            self.tick(sch)  # before R3-10a: OSError out of every tick, forever
+        inst.restart.assert_not_awaited()
+        self.assertTrue(self.lines("could not be written to state.json"), self.emitted)
 
-    def test_the_record_is_kept_in_memory_so_the_cap_still_applies_this_process(self):
+    def test_the_restart_happens_once_the_disk_takes_the_record_again(self):
         inst = self.installer(watchdog_max_per_day=1)
         inst._save_state = _full_disk
         sch = self.scheduler(inst)
         for _ in range(16):
             self.tick(sch)
-        self.assertEqual(inst.watchdog_record()["attempts"], 1)
-        inst.restart.reset_mock()
-        for _ in range(600):
+        self.assertEqual(inst.watchdog_record()["attempts"], 0)  # a refused restart costs no step
+        del inst._save_state  # the class's own write again
+        for _ in range(16):
             self.tick(sch)
-        inst.restart.assert_not_awaited()
-        self.assertTrue(self.lines("is the maximum"), "the daily cap is still enforced from memory")
+        inst.restart.assert_awaited_once()
+        self.assertEqual(inst.watchdog_record()["attempts"], 1)
 
     def test_the_full_disk_is_said_once_per_write_not_swallowed(self):
         inst = self.installer()

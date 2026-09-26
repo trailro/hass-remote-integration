@@ -183,5 +183,41 @@ class RefusalsExpireTest(WatchdogBase):
         self.assertTrue(self.lines("a start is deferred"))
 
 
+# ----- S2-3 -----------------------------------------------------------------------------------------
+
+class LedgerNotWrittenTest(WatchdogBase):
+    def test_no_automatic_restart_on_a_ledger_that_was_not_written(self):
+        inst = self.installer()
+        inst._save_state = _full_disk
+        sch = self.scheduler(inst)
+        for _ in range(16):
+            self.tick(sch)
+        inst.restart.assert_not_awaited()  # before the fix: restarted, and the boot read a record without it
+        status = inst.watchdog_status()
+        self.assertEqual((status["restarts_24h"], status["attempts"]), (0, 0))
+        self.assertIn("not restarted", status["last"]["next"])
+        self.assertIn("No space left on device", status["last"]["next"])
+        self.assertEqual(len(self.lines("could not be written to state.json")), 1)
+
+    def test_it_is_said_once_a_window_not_once_a_minute(self):
+        inst = self.installer()
+        inst._save_state = _full_disk
+        sch = self.scheduler(inst)
+        for _ in range(16 + 15):
+            self.tick(sch)
+        self.assertEqual(len(self.lines("could not be written to state.json")), 1)
+        inst.restart.assert_not_awaited()
+
+    def test_the_error_is_logged(self):
+        inst = self.installer()
+        inst._save_state = _full_disk
+        sch = self.scheduler(inst)
+        quiet = installer_mod._LOGGER
+        with mock.patch.object(quiet, "error") as log:
+            for _ in range(16):
+                self.tick(sch)
+        self.assertTrue(any("not restarting the process" in str(c.args[0]) for c in log.call_args_list))
+
+
 if __name__ == "__main__":
     unittest.main()
