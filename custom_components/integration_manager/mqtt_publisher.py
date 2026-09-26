@@ -3092,14 +3092,17 @@ class MqttPublisher:
                 gone |= moved
                 live = {key for key, c in comps.items() if isinstance(c, dict) and c.get("unique_id") and key not in gone}
                 if did not in groups:
+                    # a device no longer announced (its entities gone, or all under new device ids after a rebuild):
+                    # cleared, so no retained config keeps owning their unique ids on the consumer
                     if gone and not live and self._publish(topic, None, qos=1):
                         cleared_devices += 1
-                    elif moved and live:
-                        # entities still setting up keep the config: only the moved ones get their removal form
-                        doc["components"] = {**comps, **{key: {"platform": p} for key, p in moved.items() if p}}
+                    elif gone and live:
+                        # entities still setting up keep the config: the others (gone or moved) get their removal form
+                        removal = {key: {"platform": p} for key, p in gone.items() if p}
+                        doc["components"] = {**comps, **removal}
                         self._last_hash.pop(topic, None)
-                        if self._publish(topic, _dumps(doc), qos=1):
-                            removed_components += len(moved)
+                        if removal and self._publish(topic, _dumps(doc), qos=1):
+                            removed_components += len(removal)
                     continue
                 current = {_comp_key(eid) for eid in groups[did][1]}
                 extra = {key: platform for key, platform in gone.items() if key not in current and platform}

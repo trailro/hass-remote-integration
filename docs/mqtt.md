@@ -563,9 +563,11 @@ Entities that a restore, an import or a rebuild took away before a restart are
 removed from the main HA five minutes after Home Assistant in the container has
 started (only entities that exist neither as a state nor in its entity
 registry by then). An entity that moved to another device while the
-container was down is dropped from its old device's config at the same time
-(the config is cleared when nothing else is left in it), and the device it
-moved to is announced again a few seconds later.
+container was down (a clean start gives every device a new id) is dropped
+from its old device's config at the same time. A config of a device no longer
+announced is cleared, or, when entities still setting up are left in it,
+keeps them with a removal form for every other one. The devices the entities
+moved to are announced again a few seconds later.
 
 ## What the main Home Assistant needs
 
