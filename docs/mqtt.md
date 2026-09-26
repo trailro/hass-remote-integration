@@ -69,6 +69,18 @@ integration, a volume that only ran with MQTT disabled) takes rule 2. The
 manager's own backups leave `mqtt_identity.json` out ([Backups](backups.md)), so
 a backup restored into another container takes that container's identity.
 
+Only a missing `mqtt_identity.json` is a volume that never published. One that
+cannot be read, is not JSON, or has a shape no version wrote (a hand edit, a
+damaged volume; a record without an integration is accepted only as exactly
+what 0.25.x wrote: `base`, `prefix`, `broker`, with a plain `hass_<domain>`)
+gives no identity at all: MQTT stays disconnected with the reason
+(`identity_problem`, the MQTT page, the log, the timeline, and the preflight of
+every install), rather than taking a new identity that would leave the old
+names on the broker and have the main HA create every entity again. Correct the
+file, or remove it to publish as a volume that never published, then save the
+MQTT settings or press Reconnect: the file is read again. The record is written
+with an fsync of the file and its directory, and only when it changes.
+
 `HRI_INSTANCE` is 1 to 32 characters of `a`-`z`, `0`-`9` and `_`, not starting
 with `_`; every HRI Manager instance name fits. Any other value is refused: it
 is never used and never replaced by the plain name. MQTT stays disconnected

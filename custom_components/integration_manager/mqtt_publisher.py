@@ -1226,6 +1226,8 @@ class MqttPublisher:
             self._arm_republish_timer()
         if self.rules.problem:  # fixed or removed since: read again before anything is published
             await self.hass.async_add_executor_job(self.rules.load)
+        if self._identity and self._identity.record_problem:  # the same for mqtt_identity.json
+            await self.hass.async_add_executor_job(self._identity.load)
         if self.config.enabled:
             await self.hass.async_add_executor_job(self._connect)
         self.publish_health()  # status() shows the new identity's verdict right away
@@ -1401,14 +1403,14 @@ class MqttPublisher:
         belong to (which keeps that identity from then on: installer.MqttIdentity)."""
         if not base:
             return
-        record = {"base": base, "prefix": prefix, "broker": self._broker_identity(),
-                  **(self._identity.stamp(base) if self._identity else {})}
+        record = {"base": base, "prefix": prefix, "broker": self._broker_identity()}
         try:
-            write_json(self._identity_file(), record, fsync=False)
+            if self._identity is None:
+                write_json(self._identity_file(), record)
+            elif stamp := self._identity.stamp(base):
+                self._identity.write({**record, **stamp})
         except OSError:
-            return
-        if self._identity:
-            self._identity.adopt(record)
+            pass
 
     def _clear_retained_under(self, base_topic: str, discovery_prefix: str, docs: bool = True) -> int | None:
         """Blocking: every retained topic of ours under <base>/# (unless
@@ -1624,9 +1626,9 @@ class MqttPublisher:
             # main HA shows them unavailable after the retained "offline", and keeps them)
             self.stats["connect_error"] = f"not connecting: {self.rules.problem}"
             return
-        if self._identity and self._identity.problem:
+        if self._identity and (why := self._identity.blocking()):
             # never published under a name nobody chose, and never under the plain one the user did not ask for either
-            self.stats["connect_error"] = f"not connecting: {self._identity.problem}"
+            self.stats["connect_error"] = f"not connecting: {why}"
             return
         base = self.wanted_base_topic
         if not base:
