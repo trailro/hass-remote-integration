@@ -111,8 +111,9 @@ than take the plain name, which another container may hold, and keep it.
 
 Two containers running the same integration on one broker need different
 identities: with the same one they take each other's connection (one client id)
-and clear each other's retained data. Set `HRI_INSTANCE` in one of them (HRI
-Manager sets it for each instance it creates), or in both, to different values.
+and clear each other's retained data. Set `HRI_INSTANCE` in one of them, or in
+both, to different values (an HRI Manager instance derives it from its app slug,
+`local_hri_<name>`; the manager sets nothing).
 `hass_demo` and `hass_demo-garage` share no topic, client id, discovery id or
 unique id, so both mirror to one main HA side by side. Their entities there
 take the ids they have in each container, so of two with the same id the one
@@ -143,6 +144,19 @@ happens to the old names is your choice:
 Nothing else moves an identity: removing or changing `HRI_INSTANCE` later keeps
 the one recorded. The Move offers whatever the rule gives now, so it also takes
 a container back to the plain `hass_<domain>` after `HRI_INSTANCE` was removed.
+
+### Rolling back to a release without instances
+
+A release before the one that brought `HRI_INSTANCE` (0.25.x or older) knows
+only `hass_<domain>`. Rolling HRI back to one after a container published under
+`hass_<domain>-<instance>` moves it back to the plain name: that release clears
+what the recorded instance identity left retained (so the main HA deletes those
+entities and devices, with their customisations) and publishes everything
+again as `hass_<domain>`, where the main HA creates the entities anew. If
+another container publishes the same integration as plain `hass_<domain>` on
+that broker, the two then take each other's connection and clear each other's
+retained data. Updating again keeps the plain name, the one published last;
+Move goes back to the instance identity.
 
 ## Connection
 
