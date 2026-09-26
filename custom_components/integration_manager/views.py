@@ -26,7 +26,7 @@ from jsonio import ha_vkey
 from homeassistant.helpers.http import HomeAssistantView
 
 from .diagnostics import scrub_text
-from .http_util import BadRequest, ManagerView, with_body, _json_object
+from .http_util import BadRequest, ManagerView, with_body, _bad, _json_object
 from .ingress import is_ingress
 
 from . import events, ha_import, notifications
@@ -720,7 +720,9 @@ class MqttActionView(ManagerView):
         if action == "move_identity":
             try:
                 body = await _json_object(request)
+                if not isinstance(body.get("clear", False), bool):
+                    raise BadRequest("clear must be true or false")
             except BadRequest as err:
-                return self.json({"ok": False, "error": str(err)})
-            return self.json(await self.publisher.async_move_identity(str(body.get("to") or "")))
+                return _bad(self, err)
+            return self.json(await self.publisher.async_move_identity(str(body.get("to") or ""), clear=body.get("clear", False)))
         return self.json_message("unknown action", status_code=400)
