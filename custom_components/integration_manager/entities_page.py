@@ -16,6 +16,7 @@ from homeassistant.core import valid_entity_id
 from homeassistant.helpers import entity_registry as er
 
 from . import discovery as disc
+from .diagnostics import scrub_text
 from .mqtt_publisher import platform_of, MqttPublisher, _json_default, _published_attributes, _published_state
 from .http_util import ManagerView, with_body
 
@@ -184,5 +185,5 @@ class EntityActionView(ManagerView):
         except ValueError as err:
             return self.json({"ok": False, "error": str(err)})
         except Exception as err:  # noqa: BLE001 - registry raises plain exceptions on conflicts
-            return self.json({"ok": False, "error": f"{type(err).__name__}: {err}"})
+            return self.json({"ok": False, "error": scrub_text(f"{type(err).__name__}: {err}")})
         return self.json_message("unknown action", status_code=400)
