@@ -214,7 +214,8 @@ runs its build code (`setup.py`, PEP 517 hooks), as an install would.
 typed in to the registry; if a branch moved since, Check again, and if GitHub
 cannot say which commit a ref points at, Prepare refuses. A release whose
 `hacs.json` declares a newer minimum Home Assistant cannot start on an older
-one: prepare it together with that Home Assistant version.
+one: prepare it together with that Home Assistant version. A minimum that is
+not a plain version number (`2024.1`, `2025.1.0b1`) is ignored.
 
 ### 2. Configure it
 
@@ -555,7 +556,10 @@ Two formats:
   `./` prefix and then name the file relative to the integration's directory
   (`a/const.py`), as `custom_components/<domain>/…`, or relative to
   site-packages for a library (`a/some_lib/module.py`); the domain on its own
-  (`a/<domain>/const.py`) is none of these and reports the file absent.
+  (`a/<domain>/const.py`) is none of these and reports the file absent. A diff
+  changes only its hunks' lines: the rest of the file keeps its bytes and line
+  endings (CRLF included), and a file that is not UTF-8 is reported `not
+  applicable (<file> is not UTF-8)` and never written.
 
 Two optional headers retire a patch on its own:
 
@@ -670,7 +674,7 @@ limit it with `ingress_users` ([app](docs/app.md#access)). See
 | `HRI_CALL_TIMEOUT` | `60` | Seconds a service call (over MQTT, from the Services page or `POST /api/services/call`) or a command may take before it is reported as a timeout; a whole number, else a warning and 60; below 1 uses 1 |
 | `HRI_TRACEMALLOC` | unset | Diagnostics: allocation tracing frames (costs memory); a value that is not a number traces 25 |
 | `HRI_TRACE_IMPORT` | unset | Diagnostics: log who imports the given packages |
-| `HRI_DEBUG` | unset | `1` turns on debug logging for the manager and blocking-call detection on the event loop; unset, empty, `0`, `false`, `no` or `off` leaves them off |
+| `HRI_DEBUG` | unset | `1` turns on debug logging for the manager and blocking-call detection on the event loop; unset, empty, `0`, `false`, `no` or `off` (any case) leaves them off, and any other value turns them on |
 | `HRI_PASSWORD` | unset | Password for the web UI and API; unset or empty means no login, only spaces or tabs (or bytes that are not UTF-8) keeps the UI closed until it is fixed. One that ends with a space or tab works in the login form but never as `Authorization: Bearer` (HTTP drops it from the header) |
 | `HRI_PASSWORD_FILE` | unset | File holding the password, for example a Docker secret; wins over `HRI_PASSWORD`. Empty, unreadable or not UTF-8 keeps the UI closed until it is fixed |
 | `HRI_COOKIE_SECURE` | unset | `1`, `true`, `yes` or `on` (any case) marks the session cookie `Secure` (behind a reverse proxy with TLS); any other value does not, with a warning in the log unless it is `0`, `false`, `no` or `off` |

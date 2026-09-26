@@ -404,12 +404,13 @@ oldest row is filtered as 2025.1 (device discovery needs 2024.11 anyway). See
 ### Entity and device lifecycle
 
 An entity disabled in the container stays on the main HA with its
-customisations, unavailable. It is still announced, with `enabled_by_default:
-false`, which the main HA applies only when creating an entity. Deleting it,
-renaming its entity id (the new id replaces it) or excluding it removes it
-there, also in the first five minutes after a start, while entities announced
-before the start are kept for the orphan sweep
-([After a restore](#after-a-restore-import-or-rebuild)).
+customisations, unavailable, also across a switch to another version (which
+clears only the documents of entities the new version no longer has). It is
+still announced, with `enabled_by_default: false`, which the main HA applies
+only when creating an entity. Deleting it, renaming its entity id (the new id
+replaces it) or excluding it removes it there, also in the first five minutes
+after a start, while entities announced before the start are kept for the
+orphan sweep ([After a restore](#after-a-restore-import-or-rebuild)).
 
 When it was the last entity of a device also gone from the container, the
 device's config is cleared too, so no empty device waits for the next full
