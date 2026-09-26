@@ -1,16 +1,20 @@
 """Review of b4cd1a1, MQTT side.  S3-1: the value of a text.set_value call for a text entity in password mode was kept
 in clear in the command history when the call was refused before it was masked (an oversized _id, a denied domain,
 a payload that does not parse), and a number was never masked at all.  S3-2: an entity moved to another device while
-the container was down stayed in its old device's retained config."""
+the container was down stayed in its old device's retained config.  S3-5: a version switch cleared the retained
+documents of disabled entities, whose discovery components stay and read them."""
 
 import json
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from homeassistant.core import State
+from homeassistant.helpers import entity_registry as er
 
 from custom_components.integration_manager import discovery as disc
 from custom_components.integration_manager import mqtt_publisher as mp
+from tests import test_camp_publish as camp
 from tests.test_e2e_pub_discovery import StartWindowCase, _entry
 from tests.test_r14_mqtt import _password_publisher
 
@@ -117,6 +121,27 @@ class MovedWhileDownTest(StartWindowCase):
         await self._sweep(self._demo_retained())
         self.assertEqual(self.published, [])
         self.assertEqual(self.pub.hass.loop.later, [])
+
+
+class VersionSwitchKeepsDisabledEntitiesTest(unittest.IsolatedAsyncioTestCase):
+    async def test_only_what_no_entity_has_any_more_is_cleared(self):
+        pub = camp._publisher(enabled=True, host="broker", force_base_topic=True, discovery_enabled=True)
+        pub._topics = {"sensor.live": f"{camp.BASE}/demo/sensor/live"}
+        pub.config.exclude_integrations = []
+        pub.rules.rules = {"sensor.hidden": {"exclude": True}}
+        registry = SimpleNamespace(entities={eid: SimpleNamespace(entity_id=eid, platform="demo")
+                                             for eid in ("sensor.live", "sensor.off", "sensor.hidden")})
+        pub.hass.states.get = lambda eid: object() if eid == "sensor.live" else None
+        doc = json.dumps({"published_at": "now", "integration": "demo"}).encode()
+        retained = {f"{camp.BASE}/demo/sensor/{name}": doc for name in ("live", "off", "hidden", "gone")}
+        pub._retained_scan = lambda *a, **k: retained
+        cleared = []
+        pub._clear_topics = lambda suffix, topics: cleared.extend(topics)
+        pub.async_republish_all = mock.AsyncMock(return_value=1)
+        pub.hass.async_add_executor_job = mock.AsyncMock(side_effect=lambda f, *a: f(*a))
+        with mock.patch.object(er, "async_get", return_value=registry):
+            self.assertEqual(await pub.async_clear_stale_docs(), 2)
+        self.assertEqual(sorted(cleared), [f"{camp.BASE}/demo/sensor/gone", f"{camp.BASE}/demo/sensor/hidden"])
 
 
 if __name__ == "__main__":
