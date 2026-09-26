@@ -83,10 +83,14 @@ those projects.
   the same host name is out of scope; see
   [Password and sessions](docs/security.md#password-and-sessions).
 - **GitHub Actions are pinned to commit SHAs and the base image to a digest**,
-  both updated by Dependabot. The Python packages the manager adds next to Home
-  Assistant are in `requirements.txt` with a lower bound, most with an upper
-  bound too (`regex` is date-versioned and has only a floor), resolved against
-  Home Assistant's constraints.
+  both updated by Dependabot. The exceptions are the app checks, which run
+  upstream code on purpose, in jobs with read-only repository access: CI runs
+  the Supervisor's own validation at the version in
+  `.github/app_versions.json`, and the weekly app canary the newest app linter
+  release and the Supervisor's and Home Assistant OS's own code. The Python
+  packages the manager adds next to Home Assistant are in `requirements.txt`
+  with a lower bound, most with an upper bound too (`regex` is date-versioned
+  and has only a floor), resolved against Home Assistant's constraints.
 - **State attributes are published as the integration sets them.** Only
   `access_token` and URLs carrying `token=` are left out, at any depth, and a
   token in the state is masked. Filtering by name (`password`, `pin`,
