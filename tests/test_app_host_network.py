@@ -136,6 +136,7 @@ class AppInfoTest(unittest.TestCase):
         self.assertEqual(seen, {"port": 62345, "env": {"HRI_PORT": "62345", "HRI_HOST_NETWORK": "1", "HRI_INSTANCE": "garage"}})
         with open(self.ep.PORT_FILE, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "62345\n")
+        self.assertTrue(any("host network without a password" in line for line in self.lines), self.lines)
         self.assertFalse([line for line in self.lines if "t0ken" in line])
 
     def test_the_restarted_entrypoint_keeps_what_it_inherits(self):
@@ -156,6 +157,124 @@ class AppInfoTest(unittest.TestCase):
         self.ep.PORT_FILE = os.path.join(self.tmp, "missing", "hri-port")
         self.ep.write_port_file(62345)
         self.assertTrue(any("not written" in line for line in self.lines), self.lines)
+
+
+class StatusPageTest(unittest.TestCase):
+    """The page served while Home Assistant installs, on the same port."""
+
+    def _get(self, path="/", supervisor=None, headers=None, **env):
+        env = {"HRI_APP": "", "HRI_INGRESS_USERS": "", "HRI_PASSWORD": "", "HRI_PASSWORD_FILE": "", **NOT_HOST, **env}
+        ep = entrypoint_for(self, _tmp(self), **env)
+        ep._status.update(phase="pip", version="2026.9.3", kind="install", title=None)
+        patch = mock.patch.object(ep, "SUPERVISOR_IP", supervisor) if supervisor else mock.patch.dict({})
+        with patch:
+            srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ep._StatusHandler)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            try:
+                conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=5)
+                try:
+                    conn.request("GET", path, headers=headers or LAN)
+                    resp = conn.getresponse()
+                    return resp.status, resp.read().decode("utf-8", "replace")
+                finally:
+                    conn.close()
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
+    def test_without_a_password_the_lan_is_refused(self):
+        for path in ("/", "/api/status", "/api/diag/health"):
+            with self.subTest(path=path):
+                status, body = self._get(path, HRI_APP="1", HRI_HOST_NETWORK="1")
+                self.assertEqual(status, 403)
+                self.assertIn("Set the app", body)
+
+    def test_the_healthcheck_path_still_answers(self):
+        self.assertEqual(self._get("/api/alive", HRI_APP="1", HRI_HOST_NETWORK="1"), (200, '{"alive": true}'))
+
+    def test_ingress_is_served(self):
+        self.assertEqual(self._get(supervisor="127.0.0.1", headers=INGRESS_HEADERS, HRI_APP="1", HRI_HOST_NETWORK="1")[0], 503)
+
+    def test_with_a_password_or_off_the_host_network_nothing_changes(self):
+        self.assertEqual(self._get(HRI_APP="1", HRI_HOST_NETWORK="1", HRI_PASSWORD="pw")[0], 503)
+        self.assertEqual(self._get(HRI_APP="1")[0], 503)
+        self.assertEqual(self._get(HRI_HOST_NETWORK="1")[0], 503, "a Docker install: HRI_APP is the app's own marker")
+
+
+class HomeAssistantPortTest(unittest.TestCase):
+    """HRI's middlewares as __init__.async_setup installs them, after Home Assistant's first ones, on a real socket."""
+
+    def _run(self, requests, supervisor=False, **env):
+        async_setup_forwarded, setup_request_context, setup_security_filter = _ha_http()
+        tmp = _tmp(self)
+
+        async def ok(request):
+            return web.Response(text="ok")
+
+        async def main():
+            app = web.Application()
+            setup_security_filter(app)
+            async_setup_forwarded(app, False, [])
+            setup_request_context(app, ContextVar("request", default=None))
+            hass = _hass(tmp, app)
+            with _env(**{**NOT_HOST, **env}):
+                ingress.install_ingress(hass, hostguard.CSP)
+                hostguard.install_host_guard(hass, SimpleNamespace(settings=SimpleNamespace(data={})))
+                await auth_mod.async_setup_auth(hass)
+            app.router.add_get("/", ok)
+            app.router.add_post("/api/webhook/x", ok)
+            out = []
+            with mock.patch.object(ingress, "SUPERVISOR_IP", "127.0.0.1" if supervisor else "172.30.32.2"):
+                async with TestClient(TestServer(app, host="127.0.0.1")) as client:
+                    for method, path, headers in requests:
+                        resp = await client.request(method, path, headers=headers, allow_redirects=False)
+                        out.append((resp.status, await resp.text(), resp.headers.get("Content-Security-Policy")))
+            return out
+
+        return asyncio.run(main())
+
+    def test_without_a_password_the_lan_gets_403(self):
+        with self.assertLogs(auth_mod._LOGGER, logging.WARNING) as logs:
+            out = self._run([("GET", "/", LAN), ("GET", "/api/alive", LAN), ("POST", "/api/webhook/x", LAN),
+                             ("GET", "/login", LAN)], HRI_APP="1", HRI_HOST_NETWORK="1")
+        self.assertEqual([status for status, _, _ in out], [403] * 4)
+        self.assertEqual(out[0][1], auth_mod.LAN_REFUSED)
+        self.assertEqual(out[0][2], hostguard.CSP)
+        self.assertTrue(any("host network without a password" in line for line in logs.output), logs.output)
+
+    def test_ingress_is_served(self):
+        out = self._run([("GET", "/", INGRESS_HEADERS)], supervisor=True, HRI_APP="1", HRI_HOST_NETWORK="1")
+        self.assertEqual(out[0][:2], (200, "ok"))
+
+    def test_with_a_password_the_password_guard_applies(self):
+        out = self._run([("GET", "/", LAN), ("GET", "/", {**LAN, "Authorization": "Bearer pw"})],
+                        HRI_APP="1", HRI_HOST_NETWORK="1", HRI_PASSWORD="pw")
+        self.assertEqual([status for status, _, _ in out], [302, 200])
+
+    def test_off_the_host_network_or_as_docker_nothing_changes(self):
+        self.assertEqual(self._run([("GET", "/", LAN)], HRI_APP="1")[0][:2], (200, "ok"))
+        self.assertEqual(self._run([("GET", "/", LAN)], HRI_HOST_NETWORK="1")[0][:2], (200, "ok"))
+
+    def test_a_frozen_app_refuses_to_run_open(self):
+        class Frozen(list):
+            def append(self, *a):
+                raise RuntimeError("frozen")
+
+        hass = _hass(_tmp(self), SimpleNamespace(middlewares=Frozen()))
+        with _env(HRI_APP="1", HRI_HOST_NETWORK="1"), self.assertLogs(auth_mod._LOGGER, logging.ERROR), \
+                self.assertRaises(RuntimeError):
+            asyncio.run(auth_mod.async_setup_auth(hass))
+
+
+class CookieNameTest(unittest.TestCase):
+    def _name(self, **env):
+        with _env(**env), mock.patch("socket.gethostname", return_value="homeassistant"):
+            return auth_mod._cookie_name()
+
+    def test_on_the_host_network_the_port_names_it(self):
+        """The host name is the host's there, the same for every app; the Supervisor's port is the app's alone."""
+        self.assertEqual(self._name(HRI_APP="1", HRI_HOST_NETWORK="1", HRI_PORT="62345"), "hri_session_62345")
+        self.assertEqual(self._name(HRI_APP="1", HRI_HOST_NETWORK="", HRI_PORT="8087"), "hri_session_homeassistant")
 
 
 if __name__ == "__main__":
