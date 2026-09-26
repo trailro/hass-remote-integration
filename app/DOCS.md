@@ -25,7 +25,8 @@ minutes; the web UI shows the progress. It needs internet access.
   the ones made since first. The backup taken right before the update to
   0.25.2 still leaves them out, and restoring one made on an older version
   of the app brings that version back, which leaves them out until you
-  update again.
+  update again. Those backups hold the tokens and MQTT password of the time
+  each was made: keep Home Assistant backups password-protected (encrypted).
 - Any logged-in Home Assistant user, administrator or not, can open the UI
   through Home Assistant (the panel is hidden from the others, not closed to
   them): the `ingress_users` option narrows it to the user names listed. Clear the

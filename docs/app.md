@@ -171,6 +171,13 @@ plus the backups pruning keeps on top of it (the pre-update backup, a
 pre-restore backup for 7 days, an upload for 7 days). Delete the ones you no
 longer need from **System**.
 
+Each of the manager's backups holds `integration_manager/settings.json` (its
+tokens) and `mqtt.json` (the broker password) as they were when it was made.
+So a Home Assistant backup of the app holds past credentials too, not only
+the current ones: a broker password you have since changed is still in it.
+Protect Home Assistant backups with a password: only then does Home
+Assistant encrypt the app's part of the backup.
+
 The app keeps running while Home Assistant backs it up. Around that, the
 app's `backup_pre` and `backup_post` commands set and clear
 `integration_manager/ha-backup-running`: meanwhile HRI prunes nothing and
