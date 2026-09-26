@@ -47,6 +47,26 @@ def _wait(what: str, check, timeout: float, every: float = 5):
         time.sleep(every)
 
 
+def _call(shell_json, cmd: str, timeout: int):
+    """A CLI call whose answer may come after the CLI gives up waiting: the Supervisor keeps an app start (and the
+    start at the end of a restore) open until the container's health check has passed or 120 s went by, the CLI
+    waits 30 s, and this app's health check passes only once Home Assistant is installed.  What happened is then
+    read from the app's state."""
+    try:
+        result = shell_json(cmd, timeout=timeout)
+    except ExecutionError as err:
+        if "deadline exceeded" not in str(err):
+            raise
+        logger.info("%s: the CLI stopped waiting (%s); the state says the rest", cmd, err)
+        return None
+    assert result.get("result") == "ok", f"{cmd}: {result}"
+    return result
+
+
+def _state(shell_json, slug: str) -> str:
+    return (shell_json(f"ha apps info {slug} --no-progress --raw-json").get("data") or {}).get("state") or ""
+
+
 def _status():
     try:
         with urllib.request.urlopen(STATUS, timeout=5) as resp:
@@ -105,20 +125,25 @@ def test_install_and_start(shell, shell_json, stash):
 
     result = shell_json(f"ha apps install {slug} --no-progress --raw-json", timeout=1200)
     assert result.get("result") == "ok", f"install: {result}"
-    result = shell_json(f"ha apps start {slug} --no-progress --raw-json", timeout=300)
-    assert result.get("result") == "ok", f"start: {result}"
+    _call(shell_json, f"ha apps start {slug} --no-progress --raw-json", 300)
+    _wait("the app's container runs", lambda: _state(shell_json, slug) in ("startup", "started"), 300)
     status = _wait("the app's /api/status (a fresh app installs Home Assistant first)", _status, 1200, every=10)
     logger.info("app answers: Home Assistant %s", status.get("ha_version"))
-    venvs = shell.run_check(f"ls -d /mnt/data/supervisor/app_configs/{slug}/venv-* 2>/dev/null || "
-                            f"ls -d /mnt/data/supervisor/addon_configs/{slug}/venv-*")
+    # "startup" until Docker's health check (every 30 s) has seen the API
+    _wait("the app's state is started", lambda: _state(shell_json, slug) == "started", 300)
+    folder = f"/mnt/data/supervisor/app_configs/{slug}"
+    venvs = shell.run_check(f"ls -d {folder}/venv-*")
     assert venvs, "no venv in the app's folder: the backup check below would prove nothing"
     logger.info("venvs: %s", venvs)
+    stash["folder"] = folder
 
 
 @pytest.mark.dependency(depends=["test_install_and_start"])
 @pytest.mark.timeout(900)
 def test_backup_leaves_out_the_venv(shell, shell_json, stash):
     slug = stash["slug"]
+    # a file only the backup can bring back: the restore below proves it restored this folder
+    shell.run_check(f"echo app-canary > {stash['folder']}/integration_manager/app-canary-marker")
     result = shell_json(f"ha backups new --app {slug} --name app-canary --no-progress --raw-json", timeout=600)
     assert result.get("result") == "ok", f"backup: {result}"
     backup = result["data"]["slug"]
@@ -138,13 +163,19 @@ def test_backup_leaves_out_the_venv(shell, shell_json, stash):
 
 @pytest.mark.dependency(depends=["test_backup_leaves_out_the_venv"])
 @pytest.mark.timeout(1500)
-def test_restore_brings_it_back(shell_json, stash):
-    slug, backup = stash["slug"], stash["backup"]
-    result = shell_json(f"ha backups restore {backup} --app {slug} --homeassistant=false --no-progress --raw-json",
-                        timeout=900)
-    assert result.get("result") == "ok", f"restore: {result}"
-    _wait("the app started after the restore",
-          lambda: shell_json(f"ha apps info {slug} --no-progress --raw-json").get("data", {}).get("state") == "started", 600)
+def test_restore_brings_it_back(shell, shell_json, stash):
+    slug, backup, folder = stash["slug"], stash["backup"], stash["folder"]
+    container = f"app_{slug}"
+    before = "".join(shell.run_check(f"docker inspect -f '{{{{.Id}}}}' {container}"))
+    shell.run_check(f"rm {folder}/integration_manager/app-canary-marker")
+    _call(shell_json, f"ha backups restore {backup} --app {slug} --homeassistant=false --no-progress --raw-json", 900)
+
+    def new_container():
+        now = "".join(shell.run_check(f"docker inspect -f '{{{{.Id}}}}' {container} 2>/dev/null || true"))
+        return now and now != before and _state(shell_json, slug) in ("startup", "started")
+    _wait("a new container of the app runs after the restore", new_container, 600)
+    assert shell.run_check(f"cat {folder}/integration_manager/app-canary-marker") == ["app-canary"], "not restored"
     # the venv stayed out of the backup, so the restored app installs Home Assistant again before it answers
     status = _wait("the restored app's /api/status", _status, 1200, every=10)
     logger.info("restored app answers: Home Assistant %s", status.get("ha_version"))
+    _wait("the restored app's state is started", lambda: _state(shell_json, slug) == "started", 300)
