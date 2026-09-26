@@ -147,7 +147,10 @@ that get a document.
 A vacuum's document also has `fan_speed` and `state` at the top level, where
 the main HA's MQTT vacuum reads them. That `state` is `null` when it is not one
 of the platform's six activities (`unknown`, `unavailable`), which the main HA
-would drop and keep showing the old activity.
+would drop and keep showing the old activity. Since that `state` no longer
+says `unavailable`, the document also has `availability` (`online` or
+`offline`), which the vacuum's availability reads: an unavailable vacuum is
+unavailable on the main HA, an unknown one available with no activity.
 
 A `device_tracker` with a latitude and a longitude sends the reset payload on
 its state topic, so the main instance places it in **its** zones (a state there
