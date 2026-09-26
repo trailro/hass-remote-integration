@@ -717,4 +717,10 @@ class MqttActionView(ManagerView):
         if action == "reconnect":
             await self.publisher.async_reconnect()
             return self.json({"ok": True, "status": self.publisher.status()})
+        if action == "move_identity":
+            try:
+                body = await _json_object(request)
+            except BadRequest as err:
+                return self.json({"ok": False, "error": str(err)})
+            return self.json(await self.publisher.async_move_identity(str(body.get("to") or "")))
         return self.json_message("unknown action", status_code=400)

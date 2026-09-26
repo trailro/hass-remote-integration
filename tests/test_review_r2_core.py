@@ -38,7 +38,7 @@ class FakePublisher:
     """Records the identity it would publish under, exactly where the real publisher
     reads it: _async_first_connect (started by async_start) and async_after_start."""
 
-    def __init__(self, hass, key_provider=None, health_provider=None, rules_provider=None):
+    def __init__(self, hass, key_provider=None, health_provider=None, rules_provider=None, identity=None):
         self._key_provider = key_provider
         self.connected_as = "<never connected>"
         self.after_start = []

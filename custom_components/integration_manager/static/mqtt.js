@@ -2,7 +2,8 @@ async function mqtt(){
   const s=await (await fetch('api/mqtt/status')).json();
   const skipped=s.oversized_skipped?` <span class="err">${s.oversized_skipped} document(s) skipped: ${esc(s.last_oversized||'')}</span>`:'';
   $('#mqconn').innerHTML=(s.enabled?(s.connected?`<span class="ok">connected</span>${s.protocol?' <span class="mut">'+esc(s.protocol)+'</span>':''}${s.subscribe_error?' <span class="err">'+esc(s.subscribe_error)+'</span>':''}`:`<span class="bad">disconnected</span> ${s.connect_error?'<span class="err">'+esc(s.connect_error)+'</span>':''}`):'<span class="warn">disabled</span>')+skipped;
-  $('#mqbroker').innerHTML=`${esc(s.host)}:${esc(s.port)}${s.tls?' · TLS':''} ·${s.has_identity?`<code>${esc(s.wanted_base_topic)}</code>/… <span class="mut">(derived from the running integration)</span>`:'<span class="warn">no identity: start an integration first, then MQTT connects as hass_&lt;domain&gt;</span>'}${s.identity_moved?' <span class="warn">identity changed: reconnect to move to '+esc(s.wanted_base_topic)+'</span>':''}${s.foreign_count?` <span class="bad">base topic in use by something else: ${s.foreign_count} foreign retained topics (e.g. ${esc((s.foreign_topics||[])[0]||'')})</span>`:''}`;
+  $('#mqbroker').innerHTML=`${esc(s.host)}:${esc(s.port)}${s.tls?' · TLS':''} ·${s.has_identity?`<code>${esc(s.wanted_base_topic)}</code>/… <span class="mut">(${mqIdentitySource(s)})</span>`:s.identity_problem?'':'<span class="warn">no identity: start an integration first, then MQTT connects as hass_&lt;domain&gt;</span>'}${s.identity_problem?' <span class="bad">'+esc(s.identity_problem)+'</span>':''}${s.identity_move_to?` <button id="mqmove" title="clears everything published under ${esc(s.wanted_base_topic)}: the main Home Assistant deletes those entities and devices and creates them again under ${esc(s.identity_move_to)}">Move to ${esc(s.identity_move_to)}</button>`:''}${s.identity_moved?' <span class="warn">identity changed: reconnect to move to '+esc(s.wanted_base_topic)+'</span>':''}${s.foreign_count?` <span class="bad">base topic in use by something else: ${s.foreign_count} foreign retained topics (e.g. ${esc((s.foreign_topics||[])[0]||'')})</span>`:''}`;
+  if($('#mqmove')) $('#mqmove').onclick=()=>mqMove(s.wanted_base_topic,s.identity_move_to);
   $('#mqcount').textContent=`${s.published} / ${s.cleared} · ${s.entities_last_run} of ${s.entities_total} entities with a state in the last run${s.entities_registry_only?` · ${s.entities_registry_only} registry-only (disabled/no state: no document, discovery only)`:''}`;
   $('#mqfull').textContent=`${s.last_full_republish||'—'} · incremental ${s.last_incremental_republish||'—'} (${s.entities_last_incremental??0} changed, ${s.unchanged_skipped||0} unchanged skipped so far)`;
   $('#mqrules').innerHTML=`${s.rules_error?'<span class="bad">'+esc(s.rules_error)+'</span> · ':''}${s.rules||0} per-entity rule(s): exclude, name, icon, category, device class and disabled-by-default, on the MQTT side only · exclude and name per entity on the <a href="entities" style="color:#58a6ff">entities page</a>, all of them <a href="#" id="mqrulesedit" style="color:#58a6ff">as JSON</a> (globs like <code>sensor.*_rssi</code> allowed)`;
@@ -17,10 +18,19 @@ async function mqtt(){
     tr.innerHTML=`<td class="mut" style="white-space:nowrap">${esc((c.received||'').slice(11))}</td><td>${esc(c.kind)}</td><td>${esc(c.what)}${c.id!=null?` <span class="mut">#${esc(String(c.id))}</span>`:''}</td><td class="mut" style="font-size:12px">${esc(c.data||'')}</td><td class="${cls}">${esc(c.state)}${c.error?' · '+esc(c.error):''}</td><td class="mut">${c.duration_ms??''}</td>`; ht.appendChild(tr);}
   $('#mqcall').textContent=`${s.services_published} services published${s.base_topic?` on ${s.base_topic}/services/<domain>`:''} · calls: ${s.calls} · last: ${s.last_call||'—'}${s.call_base?` · topic: ${s.call_base}/<domain>/<service> (JSON)`:''}`;
 }
+function mqIdentitySource(s){
+  if(s.identity_source==='remembered') return 'kept: this volume already published the running integration under it'+(s.identity_move_to?`; HRI_INSTANCE ${s.identity_instance?'<code>'+esc(s.identity_instance)+'</code>':'unset'} would give <code>${esc(s.identity_move_to)}</code>`:'');
+  if(s.identity_source==='instance') return `from HRI_INSTANCE <code>${esc(s.identity_instance)}</code>`;
+  return 'derived from the running integration; HRI_INSTANCE is not set';
+}
+async function mqMove(from,to){
+  if(!confirm(`Move the MQTT identity from ${from} to ${to}?\n\nEverything published under ${from} is cleared: the main Home Assistant deletes those entities and devices, with what was customised there (areas, names, labels), and creates them again under ${to}. The manager device's entity ids change with the name: automations and dashboards that use them must be updated.`)) return;
+  const r=await post('api/mqtt/move_identity',{to}); log(r.ok?`MQTT identity moved from ${r.from} to ${r.to}`:'ERROR: '+r.error); await mqtt(); mqttConfigLoad();
+}
 async function mqttConfigLoad(){
   const c=await (await fetch('api/mqtt/config')).json();
   for(const k of ['base_topic',...MQ_TEXT,...Object.keys(MQ_INT)]) $('#mq_'+k).value=c[k]??'';
-  MQ_BOOL.forEach(k=>$('#mq_'+k).checked=!!c[k]); $('#mq_base_topic').disabled=true; $('#mq_base_topic').title='derived from the running integration';
+  MQ_BOOL.forEach(k=>$('#mq_'+k).checked=!!c[k]); $('#mq_base_topic').disabled=true; $('#mq_base_topic').title=c.identity_source==='remembered'?'kept: this volume already published the running integration under it':c.identity_source==='instance'?'hass_<domain>_<HRI_INSTANCE>':'derived from the running integration';
   $('#mq_exclude_integrations').value=(c.exclude_integrations||[]).join(',');
 }
 const MQ_TEXT=['host','username','discovery_prefix','ca_certs','main_ha_version'], MQ_INT={port:1883,republish_interval_s:300,full_republish_interval_min:60}, MQ_BOOL=['enabled','discovery_enabled','force_base_topic','manager_discovery','manager_commands','tls','tls_insecure'];

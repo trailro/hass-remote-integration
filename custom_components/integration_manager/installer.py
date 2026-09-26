@@ -213,9 +213,105 @@ def _rmtree_under(path: str, base: str) -> None:
     shutil.rmtree(real, ignore_errors=True)
 
 
-def instance_key(domain: str | None) -> str | None:
-    """Identity everything published derives from; None when nothing runs."""
-    return f"hass_{domain}" if domain else None
+def instance_key(domain: str | None, instance: str | None = None) -> str | None:
+    """Identity everything published derives from (hass_<domain>, or hass_<domain>_<instance>); None when nothing runs."""
+    if not domain:
+        return None
+    return f"hass_{domain}_{instance}" if instance else f"hass_{domain}"
+
+
+INSTANCE_ENV = "HRI_INSTANCE"
+# every name HRI Manager gives an instance fits (its names.py: a letter, then up to 19 of a-z, 0-9 and _), and so does a
+# plain Docker user's own: 1 to 32 of a-z, 0-9 and _, not starting with _
+INSTANCE_RE = re.compile(r"[a-z0-9][a-z0-9_]{0,31}")
+
+
+def configured_instance() -> tuple[str | None, str | None]:
+    """HRI_INSTANCE as (instance, problem): (None, None) unset or empty, (name, None) valid, (None, why) invalid."""
+    raw = os.environ.get(INSTANCE_ENV, "")
+    if raw == "":
+        return None, None
+    if INSTANCE_RE.fullmatch(raw):
+        return raw, None
+    return None, (f"{INSTANCE_ENV}={raw[:40]!r} is not an instance name (1 to 32 of a-z, 0-9 and _, not starting with _): "
+                  "MQTT stays disconnected until it is corrected or removed")
+
+
+class MqttIdentity:
+    """The identity the MQTT side of an integration uses: base topic, client id, discovery ids, manager device.
+
+    The rule: the identity this volume last published under for the running integration (``mqtt_identity.json``,
+    which the publisher writes at every connection) is kept, whatever HRI_INSTANCE says now; only an integration that
+    never published from this volume takes hass_<domain>_<HRI_INSTANCE>, or hass_<domain> without it.  So an install
+    that published as hass_<domain> before instances existed keeps its topics, client id and discovery unique ids, and
+    with them its entity ids on the main Home Assistant.  A record written before instances existed names no domain:
+    it counts only for the integration whose plain hass_<domain> it holds.  ``release`` (the MQTT page's Move) drops the
+    record's claim, and the publisher's move clears the old names and records the new ones.
+
+    An invalid HRI_INSTANCE is never used and never dropped silently: the publisher refuses to connect and says why."""
+
+    def __init__(self, path: str, domain_provider: Any) -> None:
+        self.path = path
+        self._domain = domain_provider
+        self.instance, self.problem = configured_instance()
+        self.record: dict[str, Any] = {}  # mqtt_identity.json as last read or written: replaced as a whole, never in place
+
+    def load(self) -> None:
+        """Blocking."""
+        rec = jsonio.read_json(self.path, {})
+        self.record = rec if isinstance(rec, dict) else {}
+
+    def remembered(self, domain: str | None) -> str | None:
+        rec = self.record
+        base = rec.get("base")
+        if not domain or not isinstance(base, str) or rec.get("released"):
+            return None
+        plain = instance_key(domain)
+        if "domain" not in rec:
+            return base if base == plain else None
+        if rec["domain"] != domain:
+            return None
+        if base == plain or (base.startswith(f"{plain}_") and INSTANCE_RE.fullmatch(base[len(plain) + 1:])):
+            return base
+        return None
+
+    def target(self, domain: str | None) -> str | None:
+        """What the rule gives an integration that never published from here; None for an invalid HRI_INSTANCE."""
+        return None if self.problem else instance_key(domain, self.instance)
+
+    def key(self, domain: str | None) -> str | None:
+        return self.remembered(domain) or self.target(domain)
+
+    def source(self, domain: str | None) -> str | None:
+        """remembered, instance, default, invalid; None with nothing running."""
+        if not domain:
+            return None
+        if self.remembered(domain):
+            return "remembered"
+        if self.problem:
+            return "invalid"
+        return "instance" if self.instance else "default"
+
+    def describe(self) -> dict[str, Any]:
+        domain = self._domain()
+        base, target = self.key(domain), self.target(domain)
+        return {"identity_source": self.source(domain), "identity_instance": self.instance, "identity_problem": self.problem,
+                "identity_move_to": target if base and target and target != base else None}
+
+    def stamp(self, base: str) -> dict[str, Any]:
+        """What a record of ``base`` says besides the names: the integration it belongs to."""
+        domain = self._domain()
+        return {"domain": domain} if domain and base == self.key(domain) else {}
+
+    def adopt(self, record: dict[str, Any]) -> None:
+        self.record = dict(record)
+
+    def release(self) -> None:
+        """Blocking: the record stops holding the running integration's identity.  Its names stay (the publisher's
+        move clears what they left retained, and a failed sweep is retried from them)."""
+        rec = {**self.record, "released": True}
+        write_json(self.path, rec, fsync=False)
+        self.record = rec
 
 
 @dataclass
@@ -358,6 +454,7 @@ class Installer:
     manager: Any = None
     # set by __init__: FlowDriver.reload_entry, the path of the manual Reload button; the watchdog's first step
     reload_entry: Any = None
+    mqtt_identity: MqttIdentity | None = None  # set in __init__; without one (tests) the identity is the plain hass_<domain>
 
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
@@ -392,6 +489,11 @@ class Installer:
         self.state_load_error: str | None = None  # a damaged state.json, reported by the boot reconcile
         os.makedirs(self.versions_dir, exist_ok=True)
         self.state = self._load_state()
+        self.mqtt_identity = MqttIdentity(os.path.join(self.state_dir, "mqtt_identity.json"), lambda: self.state.domain)
+        self.mqtt_identity.load()
+        if self.mqtt_identity.problem:
+            _LOGGER.error("MQTT: %s", self.mqtt_identity.problem)
+            events.emit("mqtt", self.mqtt_identity.problem)
         self._sweep_scratch()  # after the state: a set-aside copy goes back when the record still describes it
         self.updates = dict(self.state.release_updates or {})  # the badge and the update entity survive a restart
         self._migrate_version_dirs()
@@ -673,7 +775,11 @@ class Installer:
 
     @property
     def instance_key(self) -> str | None:
-        return instance_key(self.state.domain)
+        return self.identity_for(self.state.domain)
+
+    def identity_for(self, domain: str | None) -> str | None:
+        """The MQTT identity of ``domain`` on this volume (MqttIdentity)."""
+        return self.mqtt_identity.key(domain) if self.mqtt_identity else instance_key(domain)
 
     def site_packages_for(self, domain: str | None) -> str:
         spec = self.spec(domain)
@@ -1882,7 +1988,7 @@ class Installer:
             pass
         if self.on_domain_removed is not None:
             try:
-                self.last_identity_cleared = await self.on_domain_removed(instance_key(domain) or "") or 0
+                self.last_identity_cleared = await self.on_domain_removed(self.identity_for(domain) or "") or 0
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("retained MQTT documents of %s not cleared: %s", domain, err)
 
