@@ -244,6 +244,18 @@ count.
 - **A failed install on a volume that has run something** ends the boot with
   the reason, and the version you had stays recorded: starting an older
   version on a newer configuration is the one thing the container must not do.
+- **A version older than the configuration** is never started, whatever chose
+  it: a switch whose restore or clean start did not happen (a Home Assistant
+  backup of the app restored while one was scheduled), the newest release an
+  older image's Python supports, the fallback after a failed install. The
+  version that last wrote the configuration is the one in `/config/.HA_VERSION`,
+  which Home Assistant writes itself. The boot ends with the reason in the log
+  and in `integration_manager/ha.json` (`last_error`, shown on **System** once
+  Home Assistant runs again), and the wanted version is left as it was. To go
+  on, run that version or newer (the image that ran it, or
+  `"desired": "<that version>"` in `ha.json`), or restore a backup made on the
+  older version. A downgrade with **keep**, and one whose restore or clean
+  start ran, boot as before.
 
 What happened (a fallback, a failed install) stays on **System** until the
 next version change and is announced once as a notification.
