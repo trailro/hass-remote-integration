@@ -5,7 +5,7 @@
   PORT_FILE), the network (HRI_HOST_NETWORK) and a manager instance's name from its slug (HRI_INSTANCE).
 - Without a password, the port answers nothing but ingress there: it is on every interface of the host, the LAN too
   (auth.py's guard, and the status page served while Home Assistant installs).  With one, the password guard as ever.
-- Home Assistant's zeroconf does not announce this headless Home Assistant on the LAN.
+- Home Assistant's zeroconf and ssdp do not announce this headless Home Assistant on the LAN.
 - The session cookie takes the port there: the host name is the host's, the port the app's own."""
 
 import asyncio
@@ -326,6 +326,139 @@ class ZeroconfTest(unittest.TestCase):
                 mock.patch.object(components, "zeroconf", bare, create=True), \
                 self.assertLogs(self.run._LOGGER, logging.ERROR) as logs:
             self.assertFalse(self.run._suppress_zeroconf_announcement())
+        self.assertTrue(any("announces itself" in line for line in logs.output), logs.output)
+
+
+class _AnyName(types.ModuleType):
+    """A stand-in for async-upnp-client, which Home Assistant installs only for an integration that needs ssdp: every
+    name is a class that keeps its keyword arguments."""
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        cls = type(name, (), {"__init__": lambda self, *args, **kwargs: self.__dict__.update(kwargs)})
+        setattr(self, name, cls)
+        return cls
+
+
+class SsdpTest(unittest.TestCase):
+    """ssdp's Server starts the UPnP servers that announce Home Assistant, from one method its async_start registers
+    for Home Assistant's start; the Scanner that discovers devices is another object.  The module needs
+    async-upnp-client (a stand-in where it is not installed) and is imported by the hook the first time, as Home
+    Assistant's loader imports it."""
+
+    def setUp(self):
+        try:
+            import run
+            import homeassistant.components as components
+        except ImportError as err:  # pragma: no cover - outside the container's HA venv
+            self.skipTest(f"Home Assistant is not importable: {err}")
+        self.run = run
+        self.ssdp_dir = pathlib.Path(components.__path__[0]) / "ssdp"
+        # the package's __init__ imports the scanner and the rest of async-upnp-client: only server.py runs here
+        package = types.ModuleType("homeassistant.components.ssdp")
+        package.__path__ = [str(self.ssdp_dir)]
+        modules = {"homeassistant.components.ssdp": package}
+        try:
+            import async_upnp_client  # noqa: F401
+        except ImportError:
+            for name in ("async_upnp_client", "async_upnp_client.const", "async_upnp_client.server",
+                         "async_upnp_client.ssdp"):
+                modules[name] = _AnyName(name)
+        patch = mock.patch.dict(sys.modules, modules)
+        patch.start()
+        self.addCleanup(patch.stop)
+        for name in (run.SSDP_SERVER_MODULE, "homeassistant.components.ssdp.common"):
+            sys.modules.pop(name, None)
+        self.addCleanup(self._unhook)
+
+    def _unhook(self):
+        sys.meta_path[:] = [f for f in sys.meta_path if not isinstance(f, self.run._SsdpServerHook)]
+
+    def _import(self):
+        import importlib
+
+        return importlib.import_module(self.run.SSDP_SERVER_MODULE)
+
+    def test_the_servers_are_started_by_the_method_async_start_looks_up_when_it_runs(self):
+        """What the replacement relies on, in this Home Assistant (CI runs it on the floor version too)."""
+        server = self._import()
+        announce = getattr(server.Server, self.run.SSDP_ANNOUNCE)
+        self.assertIn(self.run.SSDP_ANNOUNCE, server.Server.async_start.__code__.co_names)
+        self.assertEqual(server.HassUpnpServiceDevice.DEVICE_DEFINITION.device_type,
+                         "urn:home-assistant.io:device:HomeAssistant:1")
+
+        def names(code):
+            return set(code.co_names).union(*(names(c) for c in code.co_consts if inspect.iscode(c)))
+
+        self.assertTrue({"UpnpServer", "HassUpnpServiceDevice", "async_start"} <= names(announce.__code__))
+        functions = [f for f in (*vars(server).values(), *vars(server.Server).values()) if inspect.isfunction(f)]
+        device_users = {f.__name__ for f in functions if "HassUpnpServiceDevice" in names(f.__code__)}
+        self.assertEqual(device_users, {self.run.SSDP_ANNOUNCE}, "the announced device is used nowhere else")
+        init = compile((self.ssdp_dir / "__init__.py").read_text(encoding="utf-8"), "ssdp/__init__.py", "exec")
+        setup = next(c for c in init.co_consts if inspect.iscode(c) and c.co_name == "async_setup")
+        self.assertTrue({"Scanner", "Server", "async_start"} <= names(setup), "the scanner starts on its own")
+
+    def _started(self, server_module):
+        """Server.async_start as the component calls it, then the listener it registers for Home Assistant's start."""
+        from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+
+        hass = SimpleNamespace(bus=mock.Mock())
+        server = server_module.Server(hass)
+        with mock.patch.object(server_module, "get_url", side_effect=AssertionError("announced")), \
+                mock.patch.object(server_module, "async_build_source_set", side_effect=AssertionError("announced")):
+            asyncio.run(server.async_start())
+            listener = next(c.args[1] for c in hass.bus.async_listen_once.call_args_list
+                            if c.args[0] == EVENT_HOMEASSISTANT_STARTED)
+            with self.assertLogs(self.run._LOGGER, logging.INFO) as logs:
+                asyncio.run(listener(object()))
+        asyncio.run(server.async_stop())
+        self.assertEqual(server._upnp_servers, [])
+        return logs.output
+
+    def test_on_the_host_network_nothing_is_announced(self):
+        with mock.patch.dict(os.environ, {"HRI_HOST_NETWORK": "1"}):
+            self.assertTrue(self.run._suppress_ssdp_announcement())
+            self.assertTrue(self.run._suppress_ssdp_announcement())  # a second boot step hooks once
+        self.assertEqual(sum(isinstance(f, self.run._SsdpServerHook) for f in sys.meta_path), 1)
+        server = self._import()
+        self.assertIsInstance(server.__loader__, self.run._SsdpServerLoader)
+        self.assertIn("class Server", inspect.getsource(server), "the module's source is still readable")
+        logs = self._started(server)
+        self.assertTrue(any("not announced" in line for line in logs), logs)
+        self.assertIn("_suppress_ssdp_announcement", inspect.getsource(self.run._boot))
+
+    def test_a_module_already_imported_is_replaced_at_once(self):
+        server = self._import()
+        original = getattr(server.Server, self.run.SSDP_ANNOUNCE)
+        with mock.patch.dict(os.environ, {"HRI_HOST_NETWORK": "1"}):
+            self.assertTrue(self.run._suppress_ssdp_announcement())
+        self.assertIsNot(getattr(server.Server, self.run.SSDP_ANNOUNCE), original)
+        self.assertFalse(any(isinstance(f, self.run._SsdpServerHook) for f in sys.meta_path))
+
+    def test_otherwise_it_is_left_alone(self):
+        for value in ("", "0"):
+            with self.subTest(value=value), mock.patch.dict(os.environ, {"HRI_HOST_NETWORK": value}):
+                self.assertFalse(self.run._suppress_ssdp_announcement())
+        self.assertFalse(any(isinstance(f, self.run._SsdpServerHook) for f in sys.meta_path))
+        server = self._import()
+        self.assertNotIsInstance(server.__loader__, self.run._SsdpServerLoader)
+        self.assertEqual(getattr(server.Server, self.run.SSDP_ANNOUNCE).__qualname__, f"Server.{self.run.SSDP_ANNOUNCE}")
+
+    def test_the_hook_touches_no_other_module(self):
+        hook = self.run._SsdpServerHook()
+        for name in ("homeassistant.components.ssdp", "homeassistant.components.ssdp.scanner",
+                     "homeassistant.components.ssdp.common", "homeassistant.components.zeroconf"):
+            with self.subTest(name=name):
+                self.assertIsNone(hook.find_spec(name, None))
+
+    def test_a_home_assistant_without_it_says_so(self):
+        bare = types.ModuleType(self.run.SSDP_SERVER_MODULE)
+        bare.Server = type("Server", (), {})
+        with mock.patch.dict(os.environ, {"HRI_HOST_NETWORK": "1"}), \
+                mock.patch.dict(sys.modules, {self.run.SSDP_SERVER_MODULE: bare}), \
+                self.assertLogs(self.run._LOGGER, logging.ERROR) as logs:
+            self.assertFalse(self.run._suppress_ssdp_announcement())
         self.assertTrue(any("announces itself" in line for line in logs.output), logs.output)
 
 
