@@ -212,8 +212,8 @@ What is masked appears as `***` in the command history (`GET
   topics, with `text.set_value` over MQTT or from the Services page, also
   inside a service error that quotes it (the result sent to the caller keeps
   it), also when the call is refused, and whether it is sent as text or as a
-  number; a `text.set_value` payload that does not parse cannot tell which
-  entity it is for and is kept as `***` whole;
+  number; a `text.set_value` payload that does not parse to a JSON object
+  cannot tell which entity it is for and is kept as `***` whole;
 - values of keys named like a secret, by the names and rule in
   [Security](security.md#mqtt-command-history), also in a rejected command's
   reason where it quotes the payload;

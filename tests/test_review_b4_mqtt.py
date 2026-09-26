@@ -56,6 +56,16 @@ class PasswordValueMaskedOnEveryRefusalTest(unittest.TestCase):
         self.assertEqual(self.pub.history[-1]["state"], "rejected")
         self.assertNotIn(SECRET, self._history())
 
+    def test_a_payload_that_is_not_an_object(self):
+        # the password sent as the whole payload: JSON, but no entity to tell whether it is a secret
+        for payload in (json.dumps(SECRET), json.dumps([SECRET]), "480913"):
+            with self.subTest(payload=payload):
+                self._call(payload)
+                self.assertEqual(self.pub.history[-1]["state"], "rejected")
+                self.assertEqual(self.pub.history[-1]["data"], "***")
+                self.assertNotIn(SECRET, self._history())
+                self.assertNotIn("480913", self._history())
+
     def test_a_number(self):
         self._call({"entity_id": "text.pw", "value": 480913, "_id": "x" * (mp.CALL_ID_MAX_BYTES + 10)})
         self.assertNotIn("480913", self._history())
