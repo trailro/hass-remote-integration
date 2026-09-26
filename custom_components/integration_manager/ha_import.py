@@ -231,7 +231,8 @@ def _inspect(config_dir: str, tar_path: str, out_dir: str, password: str | None,
         except Refused:
             raise
         except Exception as err:  # noqa: BLE001 - wrong key / corrupt archive
-            raise ValueError(f"cannot read the backup contents (wrong encryption key?): {type(err).__name__}: {err}") from None
+            why = "wrong encryption key?" if meta.get("protected") else "corrupt or truncated archive"
+            raise ValueError(f"cannot read the backup contents ({why}): {type(err).__name__}: {err}") from None
     finally:
         os.remove(inner_path)
     if unpack_too_big:
