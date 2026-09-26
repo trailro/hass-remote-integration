@@ -6,6 +6,7 @@ E1  with HRI_DEBUG=1 Home Assistant 2026.5.0 could not boot: run.py turned on th
 E2  after a downgrade with a clean start every device has a new id: the new configs went out while the old ones were
     still retained with the same unique ids, and the main HA refused them until the orphan sweep, five minutes later.
 E3  _rollback_full read restore-pending.json on the event loop.
+E4  the message of a damaged mqtt_rules.json did not name Reconnect.
 """
 
 import asyncio
@@ -208,6 +209,20 @@ class RollbackReadsPendingOffTheLoopTest(unittest.TestCase):
         self.assertTrue(res["ok"], res)
         self.assertEqual(busy, [True])
         self.assertEqual(through.count(pending), 1, "read on the event loop")
+
+
+class DamagedRulesNameReconnectTest(unittest.TestCase):
+    """E4: the text of a damaged mqtt_rules.json (rules_error, and connect_error built from it) names the three ways
+    to read the file again that docs/mqtt.md and docs/files.md give: Reconnect, saving the settings, a restart."""
+
+    def test_reconnect_is_named(self):
+        path = os.path.join(tempfile.mkdtemp(), "mqtt_rules.json")
+        self.addCleanup(shutil.rmtree, os.path.dirname(path), True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("{not json")
+        with self.assertLogs("custom_components.integration_manager.mqtt_rules", "ERROR"):
+            problem = MqttRules(path).problem
+        self.assertIn("press Reconnect on the MQTT page, save the MQTT settings, or restart", problem)
 
 
 if __name__ == "__main__":
