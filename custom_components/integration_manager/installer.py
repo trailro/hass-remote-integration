@@ -252,6 +252,9 @@ def configured_instance() -> tuple[str | None, str | None]:
 _LEGACY_RECORD_KEYS = frozenset({"base", "prefix", "broker"})
 _LEGACY_BASE_RE = re.compile(r"hass_[a-z0-9_]{1,64}")
 IDENTITY_FILE = "integration_manager/mqtt_identity.json"
+# where the id format of an identity comes from (MqttIdentity.id_format_source); the plain identity's is recorded
+ID_FORMAT_SOURCES = frozenset({"scan", "scan_empty", "chosen"})
+ID_FORMAT_SOURCE_INSTANCE = "instance"
 
 
 def _record_shape_problem(rec: Any) -> str | None:
@@ -315,7 +318,8 @@ class MqttIdentity:
         self.instance, self.instance_problem = configured_instance()
         self.record: dict[str, Any] = {}  # mqtt_identity.json as last read or written: replaced as a whole, never in place
         self.record_problem: str | None = None
-        self._decided: dict[str, int] = {}  # plain base -> the id format the retained configs gave it (decide)
+        # plain base -> (the id format the retained configs or the MQTT page gave it, where it came from: decide)
+        self._decided: dict[str, tuple[int, str]] = {}
         self.undecided: tuple[str, str] | None = None  # (base, why) while no scan could decide its id format
 
     def load(self) -> None:
@@ -410,7 +414,10 @@ class MqttIdentity:
         domain = self._domain()
         if not domain or base != self.key(domain):
             return {}
-        return {"domain": domain, "pinned": base == self.remembered(domain), "id_format": self.id_format(base) or ID_FORMAT_UNDECIDED}
+        stamp = {"domain": domain, "pinned": base == self.remembered(domain), "id_format": self.id_format(base) or ID_FORMAT_UNDECIDED}
+        if INSTANCE_SEP not in base and (source := self.id_format_source(base)) and source != "recorded":
+            stamp["id_format_source"] = source
+        return stamp
 
     def id_format(self, base: str) -> int | None:
         """The id format of identity ``base``: ID_FORMAT for an instance; for the plain identity what the record holding
@@ -418,21 +425,41 @@ class MqttIdentity:
         is still unknown (the publisher reads the retained discovery configs, and announces nothing until then)."""
         if INSTANCE_SEP in base:
             return ID_FORMAT
-        return self.recorded_id_format(base) or self._decided.get(base)
+        decided = self._decided.get(base)
+        return self.recorded_id_format(base) or (decided[0] if decided else None)
+
+    def id_format_source(self, base: str) -> str | None:
+        """Where the id format of ``base`` comes from: ``instance``; for the plain identity ``scan`` (its retained
+        discovery configs), ``scan_empty`` (a scan that found none of them: a broker ACL that hides them decides this
+        too), ``chosen`` (the MQTT page), or ``recorded`` (a record that does not say: 0.26.0 or older); None while
+        unknown."""
+        if INSTANCE_SEP in base:
+            return ID_FORMAT_SOURCE_INSTANCE
+        if self.recorded_id_format(base):
+            source = self.record.get("id_format_source")
+            return source if source in ID_FORMAT_SOURCES else "recorded"
+        decided = self._decided.get(base)
+        return decided[1] if decided else None
 
     def recorded_id_format(self, base: str) -> int | None:
         """The id format the record holds for the plain identity ``base`` (LEGACY_ID_FORMAT without one: 0.26.0 or
-        older); None when it holds another identity or leaves ``base`` undecided, which is when the MQTT page may
-        still choose it (``decide``)."""
+        older); None when it holds another identity or leaves ``base`` undecided (``decide``, ``choose``)."""
         rec = self.record
         if self.record_problem or rec.get("base") != base:
             return None
         return rec.get("id_format", LEGACY_ID_FORMAT) or None
 
-    def decide(self, base: str, id_format: int) -> None:
-        """What the retained discovery configs of ``base`` say, or the MQTT page's choice: kept until a record of
-        ``base`` is written with it."""
-        self._decided[base] = id_format
+    def decide(self, base: str, id_format: int, source: str = "scan") -> None:
+        """What the retained discovery configs of ``base`` say (``source`` scan or scan_empty), or the MQTT page's
+        choice: kept until a record of ``base`` is written with it."""
+        self._decided[base] = (id_format, source)
+
+    def choose(self, base: str, id_format: int) -> None:
+        """Blocking: the MQTT page's choice of the id format of the plain identity ``base``; written at once where the
+        record holds ``base`` (it replaces the format recorded), else with the record the next connection writes."""
+        self.decide(base, id_format, "chosen")
+        if not self.record_problem and self.record.get("base") == base and (stamp := self.stamp(base)):
+            self.write({**self.record, **stamp, "id_format": id_format, "id_format_source": "chosen"})
 
     def pin(self, base: str) -> bool:
         """Blocking: the running integration keeps ``base`` from now on, if the record holds it and does not keep it
@@ -452,7 +479,7 @@ class MqttIdentity:
         write_json(self.path, record, fsync=True)
         self.record, self.record_problem = dict(record), None
         # a record of another identity (a Move): a Move back reads the retained configs again
-        self._decided = {base: fmt for base, fmt in self._decided.items() if base == record.get("base")}
+        self._decided = {base: decided for base, decided in self._decided.items() if base == record.get("base")}
 
     def release(self) -> None:
         """Blocking: the record stops holding the running integration's identity.  Its names stay (the publisher's

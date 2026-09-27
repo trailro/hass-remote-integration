@@ -732,7 +732,9 @@ class MqttActionView(ManagerView):
                 fmt = body.get("format")
                 if type(fmt) is not int or fmt not in (LEGACY_ID_FORMAT, ID_FORMAT):
                     raise BadRequest(f"format must be {LEGACY_ID_FORMAT} (hass_<domain>_ ids) or {ID_FORMAT} (hass_<domain>- ids)")
+                if not isinstance(body.get("confirm", False), bool):
+                    raise BadRequest("confirm must be true or false")
             except BadRequest as err:
                 return _bad(self, err)
-            return self.json(await self.publisher.async_set_id_format(fmt))
+            return self.json(await self.publisher.async_set_id_format(fmt, confirm=body.get("confirm", False)))
         return self.json_message("unknown action", status_code=400)

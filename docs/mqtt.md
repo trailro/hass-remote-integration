@@ -150,7 +150,7 @@ That read needs the broker to let the container subscribe to
 whose ACL silently drops those messages makes the read find nothing, so a
 volume that published `_` ids and lost its record takes `-`, and the main HA
 creates every entity again as a duplicate: give the container's MQTT user read
-access to the discovery prefix, or set the format by hand (below).
+access to the discovery prefix, or change the format on the MQTT page (below).
 
 When the read is not complete (the broker refuses the subscription, the
 connection of the read drops, its time limit ends it while configs are still
@@ -173,24 +173,39 @@ with `ids_undecided`) and the preflight say why, and the status names no
 nothing meanwhile: `GET /api/parity` answers `ids_undecided: true` with the
 reason, and `POST /api/cutover/status` says it in `ids_undecided`.
 
-Where the broker cannot tell (a refused subscription or a store over the
-maximum fails every time; an ACL that hides the configs, or a broker that lost
-its retained messages, tells nothing), set the format on the MQTT page:
+The MQTT page shows the format and where it came from (`id_format` and
+`id_format_source` in `GET /api/mqtt/status`: `recorded` by 0.26.0 or older,
+`scan` from this identity's retained configs, `scan_empty` from a read that
+found none of them, `chosen` on the page, `instance`); `mqtt_identity.json`
+keeps the source next to the format. Where the read cannot decide (a refused
+subscription or a store over the maximum fails every time), the page offers
 **Keep hass_<domain>_…** (`1`) if this volume, or the one it was restored from,
-announced the plain identity to the main HA with 0.26.0 or older, **Use
+announced the plain identity to the main HA with 0.26.0 or older, and **Use
 hass_<domain>-…** (`2`) if it never did (`POST /api/mqtt/id_format`
-`{"format": 1}`). A wrong choice makes the main HA create every entity again,
-as duplicates. The choice is offered while `mqtt_identity.json` does not hold
-the plain identity with a format (`id_format_choosable` in
-`GET /api/mqtt/status`); the file is read again first, and once recorded the
-format is not changed by hand. Over a live connection it is recorded and
-announced at once; otherwise at the next connection.
+`{"format": 1}`; `id_format_choosable` in the status). A wrong choice makes the
+main HA create every entity again, as duplicates.
+
+Where the read decided wrong (an ACL that hides the configs, or a broker that
+lost its retained messages, reads as `scan_empty` and gives `-`), **Change id
+format** on the MQTT page switches a decided plain identity to the other
+format, behind a confirmation (`{"format": 1, "confirm": true}`; without
+`confirm` a change is refused; `id_format_changeable` in the status). Use it
+only when the automatic decision was wrong: it re-creates this container's
+entities on the main HA. The new format is recorded at once; the discovery
+configs of this identity's exact origin in the old format are cleared, then
+everything is announced again in the new one, so the main HA deletes the old
+entities first. Entity ids stay only if the old entities are gone first, and
+areas, names and labels set on the main HA do not follow. Over a live
+connection this happens at once; otherwise at the next connection. The file
+is read again before any choice. An instance has no choice: it always uses
+`-`.
 
 The manager's backups leave `mqtt_identity.json` out, so a restore into
 another container takes that container's identity; with it goes the id format.
 A restore onto a fresh volume decides the format from the broker, as above: the
 configs this identity left retained keep `_`. If the broker lost its retained
-configs too, nothing tells: set the format on the MQTT page.
+configs too, nothing tells and the read gives `-`: change it on the MQTT page
+if the volume restored had `_` ids.
 
 What stays: two containers whose plain identities were both published with
 0.26.0 or older, of domains like `a` and `a_binary`, keep ids that one can take
@@ -265,7 +280,9 @@ discovery off. With 0.26.0 itself both sets stay until you delete one on the
 main HA. 0.26.0 rewrites `mqtt_identity.json` without `id_format`, so after an
 update again the volume keeps the `_` ids 0.26.0 announced, and the orphan
 sweep (five minutes after the start) clears the `-` configs it left: the main
-HA deletes the original entities and keeps the `_2` ones.
+HA deletes the original entities and keeps the `_2` ones. To keep the
+original ones instead, use **Change id format** (to `2`) on the MQTT page
+before that: the `_` configs are cleared instead.
 
 ## Connection
 
