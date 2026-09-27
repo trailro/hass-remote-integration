@@ -85,8 +85,10 @@ gives no identity at all: MQTT stays disconnected with the reason
 (`identity_problem`, the MQTT page, the log, the timeline, and the preflight of
 every install), rather than taking a new identity that would leave the old
 names on the broker and have the main HA create every entity again. Correct the
-file, or remove it to publish as a volume that never published, then save the
-MQTT settings or press Reconnect: the file is read again. The record is written
+file, or remove it (the identity is then chosen as for a volume that never
+published, and the plain `hass_<domain>` keeps the `_` ids its retained
+discovery configs still hold: [Id format](#id-format)), then save the MQTT
+settings or press Reconnect: the file is read again. The record is written
 with an fsync of the file and its directory, and only when it changes.
 
 `HRI_INSTANCE` is 1 to 32 characters of `a`-`z`, `0`-`9` and `_`, not starting
