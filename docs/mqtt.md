@@ -143,12 +143,51 @@ connection first reads the retained discovery configs under the discovery
 prefix: one with this identity's exact origin and `hass_<domain>_` ids means
 this volume published them, and it keeps `_`; none means `-`. So removing a
 damaged record does not make the main HA create the entities again, and a Move
-back to the plain identity keeps `_` while what it left is still retained. When
-that read fails or stops at its maximum, the record gets `"id_format": 0`: the
-documents are published, but no discovery config is announced or removed until
-a full republish reads them in full (at the connection, then hourly), and
-`identity_warning` (the MQTT page, `GET /api/mqtt/status`) and the preflight say
-why.
+back to the plain identity keeps `_` while what it left is still retained.
+
+That read needs the broker to let the container subscribe to
+`<prefix>/device/+/config` and to deliver the retained configs there. A broker
+whose ACL silently drops those messages makes the read find nothing, so a
+volume that published `_` ids and lost its record takes `-`, and the main HA
+creates every entity again as a duplicate: give the container's MQTT user read
+access to the discovery prefix, or set the format by hand (below).
+
+When the read is not complete (the broker refuses the subscription, the
+connection of the read drops, its time limit ends it while configs are still
+arriving, or it stops at its maximum of 64 MB), the record gets
+`"id_format": 0` and the documents are published, but the container announces
+no discovery config and removes none over its connection: the orphan sweep and
+the removal of deleted or excluded entities wait. An entity excluded or deleted
+meanwhile stays on the main HA until the format is decided; the orphan sweep
+then removes it (at the earliest five minutes after the start). Undo on the
+Cutover page (and turning discovery off), a Move with clear, and an uninstall
+still clear the retained configs that carry this identity's exact origin,
+through a client of their own, whatever the format. The read is tried again at
+the next connection and at every full republish (every
+`full_republish_interval_min` minutes, or **Republish**; not within a minute of
+the previous read), and `identity_warning` (the MQTT page, `GET /api/mqtt/status`
+with `ids_undecided`) and the preflight say why. The Cutover page compares
+nothing meanwhile: `GET /api/parity` answers `ids_undecided: true` with the
+reason, and `POST /api/cutover/status` says it in `ids_undecided`.
+
+Where the broker cannot tell (a refused subscription or a store over the
+maximum fails every time; an ACL that hides the configs, or a broker that lost
+its retained messages, tells nothing), set the format on the MQTT page:
+**Keep hass_<domain>_…** (`1`) if this volume, or the one it was restored from,
+announced the plain identity to the main HA with 0.26.0 or older, **Use
+hass_<domain>-…** (`2`) if it never did (`POST /api/mqtt/id_format`
+`{"format": 1}`). A wrong choice makes the main HA create every entity again,
+as duplicates. The choice is offered while `mqtt_identity.json` does not hold
+the plain identity with a format (`id_format_choosable` in
+`GET /api/mqtt/status`); the file is read again first, and once recorded the
+format is not changed by hand. Over a live connection it is recorded and
+announced at once; otherwise at the next connection.
+
+The manager's backups leave `mqtt_identity.json` out, so a restore into
+another container takes that container's identity; with it goes the id format.
+A restore onto a fresh volume decides the format from the broker, as above: the
+configs this identity left retained keep `_`. If the broker lost its retained
+configs too, nothing tells: set the format on the MQTT page.
 
 What stays: two containers whose plain identities were both published with
 0.26.0 or older, of domains like `a` and `a_binary`, keep ids that one can take
