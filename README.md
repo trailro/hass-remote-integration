@@ -70,7 +70,9 @@ recorder. It runs exactly one integration and publishes it.
 - The container holds **one integration**, with any number of its versions in
   a version store. For a second integration, run a second container.
 - Everything it publishes is named after the integration: MQTT base topic and
-  client id `hass_<domain>`, discovery ids `hass_<domain>_...`. Containers of
+  client id `hass_<domain>`, discovery ids `hass_<domain>-...` (a volume that
+  published with 0.26.0 or older keeps its `hass_<domain>_...`: [Id
+  format](docs/mqtt.md#id-format)). Containers of
   different integrations share one broker and one main HA without clashing.
   Two containers of the *same* integration share them only with different
   `HRI_INSTANCE` values (`hass_<domain>-<instance>`); with the same names they
@@ -314,7 +316,8 @@ device shared by both instances through a TCP bridge.
    configuration at the next restart, or a smoke test is pending: restart or
    wait first. Your main HA then creates the entities, and the page watches
    until all exist. Entity ids stay the same, but the unique ids are new
-   (`hass_<domain>_<entity id>`), so areas, labels and custom names have to be
+   (`hass_<domain>-<entity id>`; `hass_<domain>_<entity id>` on a volume that
+   published with 0.26.0 or older), so areas, labels and custom names have to be
    set again.
 4. Changed your mind? *Undo* removes every discovery config again, so your
    main HA drops the entities. The manager device stays while
@@ -635,7 +638,8 @@ Everything goes under `hass_<domain>/` (`hass_<domain>-<instance>/` with
 `call/<domain>/<service>` with results on `result/...`, and the manager device
 (`manager`, and `manager/cmd/<action>` with `manager_commands`). Discovery (off
 by default) publishes one device-based config per device under
-`<prefix>/device/hass_<domain>_<device>/config`. Per-entity MQTT rules rename,
+`<prefix>/device/hass_<domain>-<device>/config` (`hass_<domain>_<device>` on a
+volume that published with 0.26.0 or older). Per-entity MQTT rules rename,
 exclude or adjust what is published; `tls` encrypts the broker connection. The
 full topic list, payloads and limits, and what your main HA needs, are in [MQTT
 reference](docs/mqtt.md).
