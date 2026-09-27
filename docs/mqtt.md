@@ -183,7 +183,9 @@ The MQTT page shows the format and where it came from (`id_format` and
 `scan` from this identity's retained configs (also for a record of 0.26.0 or
 older that its `-` configs overrule), `scan_empty` from a read that
 found none of them, `chosen` on the page, `instance`); `mqtt_identity.json`
-keeps the source next to the format. Where the read cannot decide (a refused
+keeps the source next to the format as `id_format_source`, except for
+`recorded`: a record of 0.26.0 or older gets `"id_format": 1` with no
+`id_format_source`, and the status derives `recorded` from its absence. Where the read cannot decide (a refused
 subscription or a store over the maximum fails every time), the page offers
 **Keep hass_<domain>_…** (`1`) if this volume, or the one it was restored from,
 announced the plain identity to the main HA with 0.26.0 or older, and **Use
@@ -195,7 +197,9 @@ Where the read decided wrong (an ACL that hides the configs, or a broker that
 lost its retained messages, reads as `scan_empty` and gives `-`), **Change id
 format** on the MQTT page switches a decided plain identity to the other
 format, behind a confirmation (`{"format": 1, "confirm": true}`; without
-`confirm` a change is refused; `id_format_changeable` in the status). Use it
+`confirm` a change is refused; `id_format_changeable` in the status). The
+format already in use changes nothing (`"changed": false`): the record, its
+source and what is announced stay as they are. Use it
 only when the automatic decision was wrong: it re-creates this container's
 entities on the main HA. The new format is recorded at once; the discovery
 configs of this identity's exact origin in the old format are cleared, then

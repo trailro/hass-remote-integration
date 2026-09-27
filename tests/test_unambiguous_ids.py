@@ -728,6 +728,35 @@ class IdFormatTest(_Case):
         res = await pub.async_set_id_format(disc.LEGACY_ID_FORMAT)
         self.assertEqual((res["ok"], res["changed"], self.store.cleared), (True, False, []))
 
+    async def test_the_format_in_use_again_is_a_no_op(self):
+        """Nothing to confirm and nothing to do: the record (and where the format came from) stays as it is, nothing is
+        logged, cleared or announced again, with or without confirm.  A real change still needs the confirm."""
+        pub = await self.connected(disc.LEGACY_ID_FORMAT)  # "id_format": 1 without a source, as a 0.26.0 record gets it
+        self.assertNotIn("id_format_source", self.record())
+        self.assertEqual(pub._id_format_status("hass_demo")["id_format_source"], "recorded")
+        pub.async_republish_all = mock.AsyncMock(return_value=0)
+        self.emit.reset_mock()
+        with open(self.path, "rb") as fh:
+            before = fh.read()
+        for confirm in (False, True):
+            with self.subTest(confirm=confirm):
+                with mock.patch.object(mp._LOGGER, "warning") as warning:
+                    res = await pub.async_set_id_format(disc.LEGACY_ID_FORMAT, confirm=confirm)
+                self.assertEqual(res, {"ok": True, "identity": "hass_demo", "id_format": disc.LEGACY_ID_FORMAT, "prefix": "hass_demo_",
+                                       "recorded": True, "changed": False})
+                with open(self.path, "rb") as fh:
+                    self.assertEqual(fh.read(), before)
+                self.assertEqual(pub._id_format_status("hass_demo")["id_format_source"], "recorded")
+                warning.assert_not_called()
+                self.emit.assert_not_called()
+                pub.async_republish_all.assert_not_called()
+                self.assertFalse(pub._ids_switch_due)
+        res = await pub.async_set_id_format(disc.ID_FORMAT)
+        self.assertFalse(res["ok"])
+        self.assertIn("confirm", res["error"])
+        with open(self.path, "rb") as fh:
+            self.assertEqual(fh.read(), before)
+
     async def test_a_change_while_disconnected_clears_at_the_connection(self):
         pub = await self.connected(disc.LEGACY_ID_FORMAT)
         pub._connected = False
