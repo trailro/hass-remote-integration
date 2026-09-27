@@ -544,6 +544,7 @@ class IdFormatTest(_Case):
     def status(pub):
         pub.hass.states = mock.Mock(async_all=lambda: [], get=lambda _eid: None)
         pub.stats, pub.history, pub._health_last = getattr(pub, "stats", {}), [], {"state": "ok"}
+        pub._connected, pub._moving = getattr(pub, "_connected", False), getattr(pub, "_moving", False)
         pub._cleanup_pending, pub._cleanup_pending_lock = getattr(pub, "_cleanup_pending", {}), threading.Lock()
         with mock.patch.object(mp.er, "async_get", return_value=mock.Mock(entities={})), \
                 mock.patch.object(pub, "recent_commands", return_value=[]):
@@ -566,16 +567,93 @@ class IdFormatTest(_Case):
                 self.assertTrue(pub._id_format_choosable(pub.wanted_base_topic))
                 pub.async_republish_all = mock.AsyncMock(return_value=0)
                 res = await pub.async_set_id_format(fmt)
-                self.assertEqual(res, {"ok": True, "identity": "hass_demo", "id_format": fmt, "prefix": prefix, "recorded": True})
+                self.assertEqual(res, {"ok": True, "identity": "hass_demo", "id_format": fmt, "prefix": prefix, "recorded": True,
+                                       "changed": False})
                 self.assertEqual((pub._ids_undecided, pub.prefix, self.record()["id_format"]), ("", prefix, fmt))
                 self.assertIsNone(pub._identity.describe()["identity_warning"])
                 pub.async_republish_all.assert_awaited_once()  # announced under it at once
-                # recorded: what it announced from then on is not changed by hand
+                # recorded: what it announced from then on changes only as a confirmed change
                 self.assertFalse(pub._id_format_choosable("hass_demo"))
                 res = await pub.async_set_id_format(3 - fmt)
                 self.assertFalse(res["ok"])
-                self.assertIn(f"holds id_format {fmt} for hass_demo", res["error"])
+                self.assertIn(f"hass_demo uses id format {fmt} (chosen on the MQTT page)", res["error"])
                 self.assertEqual(self.record()["id_format"], fmt)
+
+    async def test_an_automatic_decision_can_be_changed_with_confirm(self):
+        """A legacy volume that lost its record, on a broker whose ACL hides the configs: the scan finds nothing and
+        decides hass_demo-, and records it.  The MQTT page still changes it, as a confirmed action: recorded, the
+        configs this identity announced in the format it leaves are cleared first (only those), then it republishes."""
+        pub = self.pub_with(self.identity(), discovery_enabled=True)
+        await self.connect_names(pub)
+        self.assertEqual((self.record()["id_format"], self.record()["id_format_source"]), (disc.ID_FORMAT, "scan_empty"))
+        pub._client, pub._connected, pub._moving = self.store.live(), True, False
+        pub._broker_max_packet, pub._oversized_warned = 0, set()
+        wrong = self.both_formats("hass_demo-")
+        self.store.retained.pop(_config("hass_demo", "hass_demo_")[0])  # what it announced since: hass_demo- only
+        status = self.status(pub)
+        self.assertEqual({k: status[k] for k in ("id_format", "id_format_source", "id_format_choosable", "id_format_changeable", "prefix")},
+                         {"id_format": disc.ID_FORMAT, "id_format_source": "scan_empty", "id_format_choosable": False,
+                          "id_format_changeable": True, "prefix": "hass_demo-"})
+        pub.async_republish_all = mock.AsyncMock(return_value=0)
+        before = dict(self.store.retained)
+        res = await pub.async_set_id_format(disc.LEGACY_ID_FORMAT)  # not confirmed: nothing changes
+        self.assertFalse(res["ok"])
+        self.assertIn("hass_demo uses id format 2 (decided by a broker scan that found none of its configs)", res["error"])
+        self.assertIn("confirm", res["error"])
+        self.assertEqual((self.record()["id_format"], self.store.retained, pub.prefix), (disc.ID_FORMAT, before, "hass_demo-"))
+        pub.async_republish_all.assert_not_called()
+        res = await pub.async_set_id_format(disc.LEGACY_ID_FORMAT, confirm=True)
+        self.assertEqual(res, {"ok": True, "identity": "hass_demo", "id_format": disc.LEGACY_ID_FORMAT, "prefix": "hass_demo_",
+                               "recorded": True, "changed": True})
+        self.assertEqual((self.record()["id_format"], self.record()["id_format_source"]), (disc.LEGACY_ID_FORMAT, "chosen"))
+        manager = "homeassistant/device/hass_demo_manager/config"
+        self.assertEqual(sorted(self.store.cleared), sorted([wrong, manager]))  # announced again at once under hass_demo_
+        pub.async_republish_all.assert_awaited_once()
+        self.assertFalse(pub._ids_switch_due)
+        status = self.status(pub)
+        self.assertEqual((status["id_format"], status["id_format_source"], status["prefix"]), (disc.LEGACY_ID_FORMAT, "chosen", "hass_demo_"))
+        # the same format again: nothing to confirm, nothing cleared
+        self.store.cleared = []
+        res = await pub.async_set_id_format(disc.LEGACY_ID_FORMAT)
+        self.assertEqual((res["ok"], res["changed"], self.store.cleared), (True, False, []))
+
+    async def test_a_change_while_disconnected_clears_at_the_connection(self):
+        pub = await self.connected(disc.LEGACY_ID_FORMAT)
+        pub._connected = False
+        self.both_formats("hass_demo_")
+        res = await pub.async_set_id_format(disc.ID_FORMAT, confirm=True)
+        self.assertEqual((res["ok"], res["recorded"], self.record()["id_format"], self.store.cleared), (True, True, disc.ID_FORMAT, []))
+        self.assertTrue(pub._ids_switch_due)
+        pub._connected = True
+        await pub._async_clear_other_id_format()
+        self.assertEqual(sorted(self.store.cleared), ["homeassistant/device/hass_demo_demo_nodevice/config",
+                                                      "homeassistant/device/hass_demo_manager/config"])
+        self.assertFalse(pub._ids_switch_due)
+
+    async def test_the_status_says_where_the_id_format_comes_from(self):
+        def fields(pub):
+            status = self.status(pub)
+            return tuple(status[k] for k in ("id_format", "id_format_source", "id_format_choosable", "id_format_changeable"))
+
+        # before the first connection nothing is offered: no one-click choice on a healthy volume
+        pub = self.pub_with(self.identity())
+        self.assertEqual(fields(pub), (None, None, False, False))
+        await self.connect_names(pub)
+        self.assertEqual(fields(pub), (disc.ID_FORMAT, "scan_empty", False, True))
+        os.remove(self.path)
+        self.store.retained.update([_config("hass_demo", "hass_demo_")])
+        pub = self.pub_with(self.identity())
+        await self.connect_names(pub)
+        self.assertEqual(fields(pub), (disc.LEGACY_ID_FORMAT, "scan", False, True))
+        mp.write_json(self.path, {"base": "hass_demo", "prefix": "homeassistant", "broker": {**BROKER, "port": self.port},
+                                  "domain": "demo", "pinned": True})  # 0.26.0's
+        self.assertEqual(fields(self.pub_with(self.identity())), (disc.LEGACY_ID_FORMAT, "recorded", False, True))
+        os.remove(self.path)
+        pub = await self.undecided()
+        self.assertEqual(fields(pub), (None, None, True, False))
+        pub = self.pub_with(self.identity("garage"))
+        await self.connect_names(pub)
+        self.assertEqual(fields(pub), (disc.ID_FORMAT, "instance", False, False))
 
     async def test_the_choice_reads_the_record_again(self):
         pub = await self.undecided()
@@ -583,7 +661,7 @@ class IdFormatTest(_Case):
         pub.async_republish_all = mock.AsyncMock()
         res = await pub.async_set_id_format(disc.ID_FORMAT)
         self.assertFalse(res["ok"])
-        self.assertIn("holds id_format 1", res["error"])
+        self.assertIn("uses id format 1 (recorded)", res["error"])
         self.assertEqual(self.record()["id_format"], disc.LEGACY_ID_FORMAT)
         pub.async_republish_all.assert_not_called()
 
@@ -713,7 +791,8 @@ class IdFormatViewTest(unittest.IsolatedAsyncioTestCase):
         for body, content_type in (([], "application/json"), (ValueError("Expecting value"), "application/json"), ({}, "application/json"),
                                    ({"format": 0}, "application/json"), ({"format": 3}, "application/json"),
                                    ({"format": "1"}, "application/json"), ({"format": True}, "application/json"),
-                                   ({"format": 1.0}, "application/json"), ({"format": 1}, "text/plain")):
+                                   ({"format": 1.0}, "application/json"), ({"format": 1}, "text/plain"),
+                                   ({"format": 1, "confirm": "yes"}, "application/json"), ({"format": 1, "confirm": 1}, "application/json")):
             with self.subTest(body=body, content_type=content_type):
                 call, publisher = self.post(body, content_type)
                 self.assertEqual((await call).status, 400)
@@ -721,9 +800,10 @@ class IdFormatViewTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_choice_reaches_the_publisher(self):
         for fmt in (disc.LEGACY_ID_FORMAT, disc.ID_FORMAT):
-            call, publisher = self.post({"format": fmt})
-            self.assertEqual(json.loads((await call).body), {"ok": True})
-            publisher.async_set_id_format.assert_awaited_once_with(fmt)
+            for body, confirm in (({"format": fmt}, False), ({"format": fmt, "confirm": True}, True)):
+                call, publisher = self.post(body)
+                self.assertEqual(json.loads((await call).body), {"ok": True})
+                publisher.async_set_id_format.assert_awaited_once_with(fmt, confirm=confirm)
 
 
 class DisjointIdsTest(unittest.TestCase):

@@ -583,6 +583,10 @@ def _published_state(state: str) -> str:
     return _TOKEN_VALUE.sub(r"\1***", state) if _TOKEN_URL.search(state) else state
 
 
+_ID_FORMAT_SOURCE_TEXT = {"recorded": "recorded", "scan": "decided by its retained discovery configs",
+                          "scan_empty": "decided by a broker scan that found none of its configs", "chosen": "chosen on the MQTT page"}
+
+
 def _has_ids_of(payload: bytes, prefix: str) -> bool:
     """A retained device config holding a device identifier or a unique id that starts with ``prefix``."""
     try:
@@ -642,6 +646,8 @@ class MqttPublisher:
     # discovery config goes out and none is swept until a full republish reads them (_async_decide_id_format)
     _ids_undecided = ""
     _ids_tried_at = 0.0  # time.monotonic() of the last read that was to decide it
+    # the MQTT page changed the id format: the configs announced in the other one are cleared before the next discovery
+    _ids_switch_due = False
     # the last CONNACK was a refusal: paho follows it with a disconnection ("Unspecified error"), which must not replace the reason
     _refused = False
     # manager device discovery topics announced to the main HA (kept on disk), None before a record exists (a new install, or
@@ -817,8 +823,10 @@ class MqttPublisher:
                     f"retained discovery configs under {prefix}/, which could not be read in full ({err}); read again by "
                     f"the next full republish (not within {IDS_RETRY_MIN_S} s of this read), or choose the id format on "
                     "the MQTT page")
-        legacy = any(self._is_ours(t, p, base) and _has_ids_of(p, base + "_") for t, p in found.items())
-        self._identity.decide(base, disc.LEGACY_ID_FORMAT if legacy else disc.ID_FORMAT)
+        ours = [p for t, p in found.items() if self._is_ours(t, p, base)]
+        legacy = any(_has_ids_of(p, base + "_") for p in ours)
+        # none of ours: also what a broker ACL that hides the configs shows, which the MQTT page can correct
+        self._identity.decide(base, disc.LEGACY_ID_FORMAT if legacy else disc.ID_FORMAT, "scan" if ours else "scan_empty")
         _LOGGER.info("MQTT: %s uses %s ids (%s)", base, f"{base}_" if legacy else f"{base}-",
                      "found in its retained discovery configs" if legacy else "none of its retained discovery configs has the older ones")
         return ""
@@ -3966,6 +3974,8 @@ class MqttPublisher:
                     self._identity_sweep_due = not await self.hass.async_add_executor_job(self._sweep_old_identity, self.base_topic)
         if self._ids_undecided:
             await self._async_decide_id_format()
+        if self._ids_switch_due:
+            await self._async_clear_other_id_format()
         if self.config.discovery_enabled and self._orphan_sweep_due and self._boot_components is None and not self._ids_undecided:
             await self._async_read_boot_components()
         if self.config.discovery_enabled:
@@ -4015,17 +4025,55 @@ class MqttPublisher:
             await self.hass.async_add_executor_job(self._remember_identity, base, self.config.discovery_prefix)
         _LOGGER.info("MQTT: discovery of %s announced under %s ids", base, self._live_prefix)
 
-    def _id_format_choosable(self, base: str | None) -> bool:
-        """The MQTT page may set the id format of ``base``: a plain identity the record does not hold with one."""
-        return bool(self._identity is not None and base and disc.INSTANCE_SEP not in base
-                    and self._identity.recorded_id_format(base) is None)
+    async def _async_clear_other_id_format(self) -> None:
+        """After the MQTT page changed the id format: the configs of this exact origin in the format it left are cleared
+        before those in the new one go out, so the main HA removes the old entities first and the new ones can take
+        their entity ids.  Retried by the next full republish while the configs cannot be read or cleared."""
+        async with self._conn_lock:
+            base = self._live_base
+            if not (self._ids_switch_due and self._connected and not self._moving and base) or self._ids_undecided:
+                return
+            if other := self._other_id_prefix(base):
+                try:
+                    found = await self.hass.async_add_executor_job(
+                        self._retained_scan, "idswitch", [(f"{self.config.discovery_prefix}/device/+/config", 1)])
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.warning("MQTT: could not read the discovery configs %s left in %s ids (%s): retried at the next "
+                                    "full republish", base, other, err)
+                    return
+                stale = [t for t, p in found.items() if self._in_other_id_format(t, p, base, other)]
+                cleared = [t for t in stale if self._publish(t, None, qos=1)]
+                if len(cleared) < len(stale):
+                    return
+            else:
+                cleared = []
+            self._ids_switch_due = False
+        if cleared:
+            _LOGGER.info("MQTT: cleared %s discovery configs %s announced in %s ids", len(cleared), base, other)
+            events.emit("mqtt", f"cleared {len(cleared)} discovery configs of {base} in the id format it left")
+            await asyncio.sleep(2)  # the main HA removes those entities before the new ones ask for their entity ids
 
-    async def async_set_id_format(self, id_format: int) -> dict[str, Any]:
+    def _id_format_choosable(self, base: str | None) -> bool:
+        """The MQTT page offers both id formats of ``base``: a plain identity whose format no read could decide."""
+        return bool(self._identity is not None and base and disc.INSTANCE_SEP not in base
+                    and self._ids_undecided and self._live_base == base)
+
+    def _id_format_status(self, base: str | None) -> dict[str, Any]:
+        """The id format of ``base`` for the MQTT page, where it came from, and whether the page offers both formats
+        (undecided) or a confirmed change of a decided one."""
+        fmt = self._identity.id_format(base) if self._identity is not None and base else None
+        return {"id_format": fmt, "id_format_source": self._identity.id_format_source(base) if fmt else None,
+                "id_format_choosable": self._id_format_choosable(base),
+                "id_format_changeable": bool(fmt and disc.INSTANCE_SEP not in base)}
+
+    async def async_set_id_format(self, id_format: int, confirm: bool = False) -> dict[str, Any]:
         """The MQTT page's choice of the id format of the running plain identity, where the retained discovery configs
         cannot decide it (a broker whose ACL hides or refuses them, a store over the scan's maximum, a restore onto a
-        fresh volume whose broker lost them too): LEGACY_ID_FORMAT keeps the hass_<domain>_ ids this volume published,
-        ID_FORMAT takes hass_<domain>-.  Only while the record does not hold it with a format (reloaded first: it is
-        not read again while running); recorded and announced at once over a live connection, else at the next."""
+        fresh volume whose broker lost them too), or decided it wrong: LEGACY_ID_FORMAT keeps the hass_<domain>_ ids
+        this volume published, ID_FORMAT takes hass_<domain>-.  Changing a format already decided or recorded needs
+        ``confirm``: the configs in the old one are cleared (_async_clear_other_id_format) and the main HA creates the
+        entities again.  The record is reloaded first (it is not read again while running); recorded at once where it
+        holds the identity, and announced at once over a live connection, else at the next."""
         async with self._conn_lock:
             if self._identity is None:
                 return {"ok": False, "error": "no identity to choose the ids of"}
@@ -4035,24 +4083,28 @@ class MqttPublisher:
                 return {"ok": False, "error": self._identity.blocking() or "no integration runs: there is no identity to choose the ids of"}
             if disc.INSTANCE_SEP in base:
                 return {"ok": False, "error": f"{base} is an instance identity: its ids always use -"}
-            if not self._id_format_choosable(base):
-                return {"ok": False, "error": f"mqtt_identity.json holds id_format {self._identity.recorded_id_format(base)} for {base}: "
-                                              "the ids this volume announced; another format makes the main Home Assistant create "
-                                              "every entity again"}
-            self._identity.decide(base, id_format)
+            current = self._identity.id_format(base)
+            changed = current is not None and current != id_format
+            if changed and not confirm:
+                where = _ID_FORMAT_SOURCE_TEXT.get(self._identity.id_format_source(base) or "", "recorded")
+                return {"ok": False, "error": f"{base} uses id format {current} ({where}): changing it re-creates this "
+                                              "container's entities on the main Home Assistant; confirm it to change it"}
+            await self.hass.async_add_executor_job(self._identity.choose, base, id_format)
             live = self._live_base == base
+            self._ids_switch_due = self._ids_switch_due or changed
             if live:
                 self._set_ids_undecided(base, "")
                 self._live_prefix = self._prefix_for(base)
                 if self._connected and not self._moving:
                     await self.hass.async_add_executor_job(self._remember_identity, base, self.config.discovery_prefix)
             prefix = self._prefix_for(base)
-        _LOGGER.warning("MQTT: id format of %s set on the MQTT page: %s ids", base, prefix)
+        _LOGGER.warning("MQTT: id format of %s set on the MQTT page: %s ids%s", base, prefix, " (changed)" if changed else "")
         events.emit("mqtt", f"id format of {base} set by hand: {prefix} ids")
         if live and self._connected:
+            await self._async_clear_other_id_format()
             await self.async_republish_all()
         return {"ok": True, "identity": base, "id_format": id_format, "prefix": prefix,
-                "recorded": self._identity.recorded_id_format(base) == id_format}
+                "recorded": self._identity.recorded_id_format(base) == id_format, "changed": changed}
 
     def status(self) -> dict[str, Any]:
         named = bool(self._live_base or self.wanted_base_topic)  # no identity: no topic is used, "hass_none" is no name
@@ -4071,9 +4123,9 @@ class MqttPublisher:
                                                                   "identity_instance": None, "identity_problem": None,
                                                                   "identity_move_to": None}),
             "retained_cleanup_pending": self.retained_cleanup_pending(),  # uninstalled identities a broker did not take yet
-            # why discovery waits for the id format, and whether the MQTT page may set it (async_set_id_format)
+            # why discovery waits for the id format; the format, where it came from, and what the MQTT page offers
             "ids_undecided": self._ids_undecided,
-            "id_format_choosable": self._id_format_choosable(self.wanted_base_topic),
+            **self._id_format_status(self.wanted_base_topic),
             "prefix": self.prefix if named and not self._ids_undecided else None,  # undecided: announced under neither
             "force_base_topic": self.config.force_base_topic,
             "tls": self.config.tls,

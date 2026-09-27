@@ -80,6 +80,27 @@ class BrokerLineTest(unittest.TestCase):
         self.assertEqual(o["sent"], [["api/mqtt/id_format", {"format": 1}]])
         self.assertEqual(self.out["undecided_new"]["sent"], [["api/mqtt/id_format", {"format": 2}]])
 
+    def test_a_decided_id_format_is_shown_with_where_it_came_from(self):
+        self.assertIn("ids hass_demo-… (decided by a broker scan that found none of its configs)", self.out["decided_empty"]["text"])
+        self.assertIn("ids hass_demo_… (recorded)", self.out["decided_legacy"]["text"])
+        self.assertIn("ids hass_demo-garage-… (an instance always uses -)", self.out["instance_ids"]["text"])
+        for name in ("decided_empty", "decided_legacy", "instance_ids"):
+            self.assertEqual(self.out[name]["formats"], [], name)  # no one-click Keep/Use once decided
+        for name in ("default", "instance", "remembered", "undecided", "instance_ids"):
+            self.assertIsNone(self.out[name]["change"], name)
+
+    def test_a_decided_id_format_changes_only_behind_a_confirm_that_says_its_cost(self):
+        for name, (to, ids) in {"decided_empty": (1, "hass_demo_…"), "decided_legacy": (2, "hass_demo-…")}.items():
+            o = self.out[name]
+            self.assertEqual(o["change"], "Change id format")
+            self.assertEqual(len(o["confirms"]), 1)
+            self.assertIn(f"to {to} ({ids} ids)", o["confirms"][0])
+            self.assertIn("only when the automatic decision was wrong", o["confirms"][0])
+            self.assertIn("re-creates this container's entities on the main Home Assistant", o["confirms"][0])
+            self.assertIn("Entity ids stay only if the old entities are gone first; areas, names and labels set there do not follow",
+                          o["confirms"][0])
+            self.assertEqual(o["sent"], [["api/mqtt/id_format", {"format": to, "confirm": True}]])
+
     def test_invalid_is_the_reason_and_escaped(self):
         o = self.out["invalid"]
         self.assertIn("HRI_INSTANCE='<b>x</b>' is not an instance name", o["text"])

@@ -10,7 +10,7 @@ import { El, pageEsc } from './dom.mjs';
 const STATIC = process.argv[2];
 const src = fs.readFileSync(path.join(STATIC, 'mqtt.js'), 'utf8');
 const lines = src.split('\n');
-const broker = lines.filter(l => ["$('#mqbroker').innerHTML=", "if($('#mqmove'))", "if($('#mqidfmt1'))"].some(p => l.trimStart().startsWith(p))).join('\n');
+const broker = lines.filter(l => ["$('#mqbroker').innerHTML=", "if($('#mqmove'))", "if($('#mqidfmt1'))", "if($('#mqidfmtchange'))"].some(p => l.trimStart().startsWith(p))).join('\n');
 const helpers = src.slice(src.indexOf('function mqIdentitySource('), src.indexOf('async function mqttConfigLoad('));
 const base = { host: 'core-mosquitto', port: 1883, tls: false, identity_problem: null, identity_warning: null, identity_move_to: null, identity_instance: null };
 const out = {};
@@ -26,6 +26,12 @@ for (const [name, s] of Object.entries({
   undecided: { ...base, has_identity: true, wanted_base_topic: 'hass_demo', identity_source: 'default', id_format_choosable: true,
                identity_warning: 'discovery waits: whether hass_demo keeps the ids it published with 0.26.0 or older is decided by ...' },
   undecided_new: { ...base, has_identity: true, wanted_base_topic: 'hass_demo', identity_source: 'default', id_format_choosable: true },
+  decided_empty: { ...base, has_identity: true, wanted_base_topic: 'hass_demo', identity_source: 'default', id_format: 2,
+                   id_format_source: 'scan_empty', id_format_changeable: true },
+  decided_legacy: { ...base, has_identity: true, wanted_base_topic: 'hass_demo', identity_source: 'remembered', id_format: 1,
+                    id_format_source: 'recorded', id_format_changeable: true },
+  instance_ids: { ...base, has_identity: true, wanted_base_topic: 'hass_demo-garage', identity_source: 'instance', identity_instance: 'garage',
+                  id_format: 2, id_format_source: 'instance' },
   invalid: { ...base, has_identity: false, wanted_base_topic: null, identity_source: 'invalid',
              identity_problem: "HRI_INSTANCE='<b>x</b>' is not an instance name: MQTT stays disconnected until it is corrected or removed" },
 })) {
@@ -40,7 +46,9 @@ for (const [name, s] of Object.entries({
   if (button) { button.onclick(); await new Promise(r => setTimeout(r, 0)); }
   const formats = [el.querySelector('#mqidfmt1'), el.querySelector('#mqidfmt2')].filter(Boolean);
   if (formats.length) { formats[name.endsWith('_new') ? 1 : 0].onclick(); await new Promise(r => setTimeout(r, 0)); }
+  const change = el.querySelector('#mqidfmtchange');
+  if (change) { change.onclick(); await new Promise(r => setTimeout(r, 0)); }
   out[name] = { text: el.textContent, bold: el.querySelectorAll('b').length, italic: el.querySelectorAll('i').length, button: button ? button.textContent : null,
-                formats: formats.map(b => b.textContent), box: box ? box.checked : null, sent, confirms };
+                formats: formats.map(b => b.textContent), change: change ? change.textContent : null, box: box ? box.checked : null, sent, confirms };
 }
 console.log(JSON.stringify(out));

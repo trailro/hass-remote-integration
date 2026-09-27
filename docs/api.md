@@ -65,7 +65,10 @@ Exceptions:
   `identity_instance`, `identity_problem`, `identity_warning` and `identity_move_to` say where the
   base topic comes from ([Identity](mqtt.md#identity)); `identity_warning` also says why discovery waits
   while the [id format](mqtt.md#id-format) is undecided, and `ids_undecided` holds that reason alone (empty
-  once decided). `id_format_choosable` is true while `POST /api/mqtt/id_format` may set it.
+  once decided). `id_format` (`1`, `2`, `null` while unknown) and `id_format_source` (`recorded`, `scan`,
+  `scan_empty`, `chosen`, `instance`) say which ids the identity uses and where that came from;
+  `id_format_choosable` is true while no read could decide it (the page offers both formats), and
+  `id_format_changeable` while a plain identity's decided format may be changed with `confirm`.
 - `POST /api/mqtt/move_identity` `{"to": "<identity>", "clear": false}`: moves
   the running integration to `identity_move_to`, which `to` must repeat; only
   while MQTT is connected. `clear` (default `false`) also clears the old names
@@ -74,16 +77,19 @@ Exceptions:
   offline ([Two instances](mqtt.md#two-instances-of-the-same-integration)).
   Answers `{ok, from, to, cleared}` or `{ok: false, error}`; a body that is not
   a JSON object, or a `clear` that is not `true` or `false`, is a `400`.
-- `POST /api/mqtt/id_format` `{"format": 1}`: sets the [id format](mqtt.md#id-format)
-  of the running plain identity where the broker cannot decide it: `1` keeps the
-  `hass_<domain>_` ids this volume published with 0.26.0 or older, `2` takes
-  `hass_<domain>-`; the wrong one makes the main HA create every entity again,
-  as duplicates. `mqtt_identity.json` is read again first; refused (`ok: false`)
-  for an instance, and where the record already holds the identity with a
-  format. Recorded and announced at once over a live connection, else at the
-  next connection. Answers `{ok, identity, id_format, prefix, recorded}` or
-  `{ok: false, error}`; a body that is not a JSON object, or a `format` that is
-  not the integer `1` or `2`, is a `400`.
+- `POST /api/mqtt/id_format` `{"format": 1, "confirm": false}`: sets the [id format](mqtt.md#id-format)
+  of the running plain identity: `1` keeps the `hass_<domain>_` ids this volume
+  published with 0.26.0 or older, `2` takes `hass_<domain>-`; the wrong one
+  makes the main HA create every entity again, as duplicates. Changing a format
+  already decided or recorded needs `"confirm": true` (refused without it): the
+  discovery configs of this identity's exact origin in the old format are
+  cleared, then everything is announced in the new one. `mqtt_identity.json` is
+  read again first; refused (`ok: false`) for an instance. Recorded at once
+  where the record holds the identity, and announced at once over a live
+  connection, else at the next connection. Answers `{ok, identity, id_format,
+  prefix, recorded, changed}` or `{ok: false, error}`; a body that is not a JSON
+  object, a `format` that is not the integer `1` or `2`, or a `confirm` that is
+  not `true` or `false`, is a `400`.
 - `GET /api/summary` includes `manager_update`: the running release and the
   newer ones the banner shows.
 - `GET /api/status` `health`: the verdict published on MQTT (`state`,
