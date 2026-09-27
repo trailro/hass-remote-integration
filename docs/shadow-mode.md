@@ -93,7 +93,8 @@ extra connection: a growing count means the integration leaks them on unload.
 4. **Cutover page**: *Enable discovery*, then watch until every entity exists
    on the main HA.
 5. Automations on the main HA keep working: the entity ids are the same. The
-   unique ids are new (`hass_<domain>_<entity id>`), so areas, labels and
+   unique ids are new (`hass_<domain>-<entity id>`, `hass_<domain>_<entity id>`
+   on a volume that published with 0.26.0 or older), so areas, labels and
    custom names set on the removed entities have to be set again. Commands
    reach the container over `hass_<domain>/cmd/...`, service calls over
    `hass_<domain>/call/...`.

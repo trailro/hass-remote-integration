@@ -19,7 +19,7 @@ Assistant, and how retained data is cleaned up.
 | `hass_<domain>/manager` | retained JSON, every 60 s: updates, resources |
 | `hass_<domain>/manager/cmd/<action>` | manager actions (with `manager_commands`) |
 | `hass_<domain>/manager/result` | outcome of a manager action, not retained |
-| `<prefix>/device/hass_<domain>_<device>/config` | HA device-based discovery |
+| `<prefix>/device/hass_<domain>-<device>/config` | HA device-based discovery (`hass_<domain>_<device>` on a volume that published with 0.26.0 or older: [Id format](#id-format)) |
 
 An integration named `call`, `cmd`, `result`, `services`, `manager`, `health`
 or `status` publishes under `<name>-integration/<domain>/<object_id>`, so its
@@ -33,7 +33,8 @@ with `HRI_INSTANCE` set ([Identity](#identity)).
 
 The identity is the name everything published derives from: the base topic,
 the client id, the availability topics, the discovery ids and unique ids
-(`hass_<domain>_<entity_id>`, `hass_<domain>-<instance>-<entity_id>`), and the
+(`hass_<domain>-<entity_id>`, `hass_<domain>-<instance>-<entity_id>`; `hass_<domain>_<entity_id>`
+on a volume that published with 0.26.0 or older: [Id format](#id-format)), and the
 manager device (`hass-remote-integration (<identity>)`, `sensor.<identity>_health`,
 ...). It is `hass_<domain>` for the running integration, or
 `hass_<domain>-<instance>` when the container has `HRI_INSTANCE=<instance>`.
@@ -48,7 +49,7 @@ topic in use and where it comes from; `GET /api/mqtt/status` says the same in
 `identity_source` (`default`, `instance`, `remembered`, `invalid`, or `null`
 with nothing running), `identity_instance`, `identity_problem` (why MQTT has no
 identity) and `identity_warning` (an `HRI_INSTANCE` problem a remembered
-identity leaves unused).
+identity leaves unused, or why discovery waits for the [id format](#id-format)).
 
 ### The rule
 
@@ -107,6 +108,60 @@ remembered identity keeps connecting, one without stays disconnected with "the
 app's slug could not be read from the Supervisor ...: restart the app" rather
 than take the plain name, which another container may hold, and keep it.
 
+### Id format
+
+Unique ids, device identifiers and device discovery ids are the identity, a
+separator and the rest: `hass_demo-sensor.power`, `hass_demo-<device id>`,
+`hass_demo-demo_nodevice` (the device-less entities of the integration `demo`).
+The manager device's discovery id is `<identity>_manager` in every format. An
+instance always uses `-`. The plain identity `hass_<domain>` uses:
+
+- `-` on a volume that never published it: `"id_format": 2` in
+  `mqtt_identity.json`.
+- `_` on a volume that published it with 0.26.0 or older
+  (`hass_demo_sensor.power`), for good: its record has no `id_format`, and gets
+  `"id_format": 1` at the next connection. Nothing it announced changes and
+  nothing is migrated: unique ids, device identifiers, discovery topics and the
+  entity ids on the main HA stay what they were.
+
+Why: a `_` is also inside domains, so with `_` the ids of two plain identities
+can meet. `hass_a_` + `binary_sensor.x` is `hass_a_binary_` + `sensor.x`, and
+`hass_a_` + `binary_demo_nodevice` is `hass_a_binary_` + `demo_nodevice`: the
+Cutover page of container `a` took container `a_binary`'s entities for orphans
+of its own, and **Remove orphans** sent an empty config to `a_binary`'s device,
+which deleted its entities on the main HA. No domain, entity id, device id or
+instance name holds a `-`, so with `-` no identity's ids are another's. Moving
+an existing volume to `-` would have the main HA create every entity again (new
+unique ids), which is why a volume keeps the format it published.
+
+When the record does not say (no `mqtt_identity.json`: a fresh volume, or one
+whose damaged file was removed; or a [Move](#two-instances-of-the-same-integration)
+back to the plain identity, when the record holds the instance), the
+connection first reads the retained discovery configs under the discovery
+prefix: one with this identity's exact origin and `hass_<domain>_` ids means
+this volume published them, and it keeps `_`; none means `-`. So removing a
+damaged record does not make the main HA create the entities again, and a Move
+back to the plain identity keeps `_` while what it left is still retained. When
+that read fails or stops at its maximum, the record gets `"id_format": 0`: the
+documents are published, but no discovery config is announced or removed until
+a full republish reads them in full (at the connection, then hourly), and
+`identity_warning` (the MQTT page, `GET /api/mqtt/status`) and the preflight say
+why.
+
+What stays: two containers whose plain identities were both published with
+0.26.0 or older, of domains like `a` and `a_binary`, keep ids that one can take
+for the other's. The Cutover page may list the other's entities as orphans, but
+no container deletes another's entities: **Remove orphans** clears a device this
+container does not announce only when its retained config on the broker carries
+this container's exact origin (the others are skipped and named in `not_ours`),
+and the orphan sweep, Undo, a Move and an uninstall only ever take configs of
+that exact origin. Only where both announce the very same id do they still
+meet: `a`'s `binary_sensor.x` and `a_binary`'s `sensor.x` are both
+`hass_a_binary_sensor.x`, and the main HA keeps one entity for that unique id;
+an integration `binary_demo` without devices in `a` and `demo` in `a_binary`
+share one discovery config, which each overwrites. A Move to an instance
+identity ends it, at the cost of new entities on the main HA.
+
 ### Two instances of the same integration
 
 Two containers running the same integration on one broker need different
@@ -157,6 +212,12 @@ another container publishes the same integration as plain `hass_<domain>` on
 that broker, the two then take each other's connection and clear each other's
 retained data. Updating again keeps the plain name, the one published last;
 Move goes back to the instance identity.
+
+A volume whose plain identity uses `-` ids (`"id_format": 2`: it first
+published with a release after 0.26.0) announces `hass_<domain>_` ids once
+rolled back to 0.26.0 or older: the main HA takes them for new entities, which
+get `_2` entity ids while the others hold theirs. Roll such a volume back with
+discovery off, or delete those entities on the main HA afterwards.
 
 ## Connection
 

@@ -63,7 +63,8 @@ Exceptions:
   `retained_cleanup_pending` is a list of `{base_topic, broker, other_broker,
   deferred, error, since}`, the configured broker's first. `identity_source`,
   `identity_instance`, `identity_problem`, `identity_warning` and `identity_move_to` say where the
-  base topic comes from ([Identity](mqtt.md#identity)).
+  base topic comes from ([Identity](mqtt.md#identity)); `identity_warning` also says why discovery waits
+  while the [id format](mqtt.md#id-format) is undecided.
 - `POST /api/mqtt/move_identity` `{"to": "<identity>", "clear": false}`: moves
   the running integration to `identity_move_to`, which `to` must repeat; only
   while MQTT is connected. `clear` (default `false`) also clears the old names
@@ -252,7 +253,11 @@ Assistant version switch or backup import scheduled for the next restart.
 `POST /api/parity/remove_orphans` is refused while discovery is off, except for
 the manager device while `manager_discovery` announces it. A manager-device
 orphan is removed by its component key; a unique id that is no component of
-that device is refused.
+that device is refused. An orphan on a device this container does not announce
+is removed with an empty config for that device, and only when the device's
+retained config on the broker carries this container's exact origin: the others
+(another container's device, or a config that could not be read) are left, and
+listed in `skipped` and in `not_ours` ([Id format](mqtt.md#id-format)).
 
 A matched row of `GET /api/parity` carries `state_comparable`. `button`,
 `scene`, `notify` and `event` are never compared by state (no state topic on
