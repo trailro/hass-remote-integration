@@ -814,8 +814,9 @@ class MqttPublisher:
             found = self._retained_scan("ids", [(f"{prefix}/device/+/config", 1)], strict=True)
         except Exception as err:  # noqa: BLE001
             return (f"discovery waits: whether {base} keeps the ids it published with 0.26.0 or older is decided by the "
-                    f"retained discovery configs under {prefix}/, which could not be read in full ({err}); read again at "
-                    "the next connection and full republish, or choose the id format on the MQTT page")
+                    f"retained discovery configs under {prefix}/, which could not be read in full ({err}); read again by "
+                    f"the next full republish (not within {IDS_RETRY_MIN_S} s of this read), or choose the id format on "
+                    "the MQTT page")
         legacy = any(self._is_ours(t, p, base) and _has_ids_of(p, base + "_") for t, p in found.items())
         self._identity.decide(base, disc.LEGACY_ID_FORMAT if legacy else disc.ID_FORMAT)
         _LOGGER.info("MQTT: %s uses %s ids (%s)", base, f"{base}_" if legacy else f"{base}-",
@@ -4073,7 +4074,7 @@ class MqttPublisher:
             # why discovery waits for the id format, and whether the MQTT page may set it (async_set_id_format)
             "ids_undecided": self._ids_undecided,
             "id_format_choosable": self._id_format_choosable(self.wanted_base_topic),
-            "prefix": self.prefix if named else None,
+            "prefix": self.prefix if named and not self._ids_undecided else None,  # undecided: announced under neither
             "force_base_topic": self.config.force_base_topic,
             "tls": self.config.tls,
             # what a full republish publishes a document for: excluded entities (by integration or by a rule) not counted

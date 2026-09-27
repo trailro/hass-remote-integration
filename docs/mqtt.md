@@ -162,11 +162,14 @@ meanwhile stays on the main HA until the format is decided; the orphan sweep
 then removes it (at the earliest five minutes after the start). Undo on the
 Cutover page (and turning discovery off), a Move with clear, and an uninstall
 still clear the retained configs that carry this identity's exact origin,
-through a client of their own, whatever the format. The read is tried again at
-the next connection and at every full republish (every
-`full_republish_interval_min` minutes, or **Republish**; not within a minute of
-the previous read), and `identity_warning` (the MQTT page, `GET /api/mqtt/status`
-with `ids_undecided`) and the preflight say why. The Cutover page compares
+through a client of their own, whatever the format. The read is tried again by
+every full republish (the one after each connection to the broker, paho's
+automatic reconnects included, one every `full_republish_interval_min`
+minutes, and **Republish**), but not within a minute of the previous read;
+only a new connection of the manager (a restart, saving the MQTT settings)
+reads at once. `identity_warning` (the MQTT page, `GET /api/mqtt/status`
+with `ids_undecided`) and the preflight say why, and the status names no
+`prefix` meanwhile. The Cutover page compares
 nothing meanwhile: `GET /api/parity` answers `ids_undecided: true` with the
 reason, and `POST /api/cutover/status` says it in `ids_undecided`.
 
