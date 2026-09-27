@@ -451,11 +451,14 @@ class MqttIdentity:
             return
         write_json(self.path, record, fsync=True)
         self.record, self.record_problem = dict(record), None
+        # a record of another identity (a Move): a Move back reads the retained configs again
+        self._decided = {base: fmt for base, fmt in self._decided.items() if base == record.get("base")}
 
     def release(self) -> None:
         """Blocking: the record stops holding the running integration's identity.  Its names stay (the publisher's
         move clears what they left retained, and a failed sweep is retried from them).  A record of 0.25.x gets the
         integration it held: released, it would name none."""
+        self._decided.pop(self.record.get("base"), None)
         self.write({**self.record, "domain": self._domain(), "released": True})
 
 
