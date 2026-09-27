@@ -275,14 +275,26 @@ class ParityActionView(ManagerView):
             # Removing the entity from the parent's registry would make its MQTT
             # integration publish an empty DEVICE config (removing every sibling).
             # The documented way is the removal form for that one component.
-            removed, skipped = [], []
+            # A device not announced here is cleared with an empty config, which removes every entity of it: only one
+            # whose retained config carries our origin (the id came from a prefix another identity's ids may start with)
+            retained = await self.publisher.async_retained_ours(o.get("discovery_id") for o in todo)
+            ours = {d for d, mine in retained.items() if mine}
+            removed, skipped, not_ours = [], [], []
             for o in todo:
-                if o.get("discovery_id") and self.publisher.remove_discovered_component(o["discovery_id"], o["our_entity_id"], o["parent_domain"]):
+                if o.get("discovery_id") and self.publisher.remove_discovered_component(o["discovery_id"], o["our_entity_id"], o["parent_domain"],
+                                                                                        retained_ours=ours):
                     removed.append(o["parent_entity_id"])
                 else:
                     skipped.append(o["parent_entity_id"])
-            return self.json({"ok": True, "removed": removed, "skipped": skipped + [x for x in ids if x not in by_id],
-                              "note": "removal forms published; the parent drops them within seconds"})
+                    if retained.get(o.get("discovery_id")) is False:
+                        not_ours.append(o["parent_entity_id"])
+            res = {"ok": True, "removed": removed, "skipped": skipped + [x for x in ids if x not in by_id],
+                   "note": "removal forms published; the parent drops them within seconds"}
+            if not_ours:
+                res["not_ours"] = not_ours
+                res["note"] += (f"; {len(not_ours)} skipped: their device is not announced here and its retained config does not "
+                                "carry this container's origin (another container's device, or unreadable)")
+            return self.json(res)
         return self.json_message("unknown action", status_code=400)
 
 

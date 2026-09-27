@@ -407,12 +407,13 @@ class OrphanWithDiscoveryOffTest(unittest.TestCase):
     def test_the_view_lets_a_manager_orphan_through_while_manager_discovery_announces_it(self):
         publisher = mock.Mock(base_topic=BASE)
         publisher.config.discovery_enabled, publisher.config.manager_discovery = False, True
+        publisher.async_retained_ours = mock.AsyncMock(return_value={})  # the manager device is announced: nothing to read
         view = parity.ParityActionView(mock.Mock(), mock.Mock(), publisher)
         with mock.patch.object(parity, "compute_parity", mock.AsyncMock(return_value={"orphans": [
                 {"parent_entity_id": "sensor.old", "discovery_id": f"{BASE}_manager", "our_entity_id": "sensor.old", "parent_domain": "sensor"}]})):
             res, _ = _call(view, "remove_orphans", {"entity_ids": ["sensor.old"]})
         self.assertTrue(res["ok"])
-        publisher.remove_discovered_component.assert_called_once_with(f"{BASE}_manager", "sensor.old", "sensor")
+        publisher.remove_discovered_component.assert_called_once_with(f"{BASE}_manager", "sensor.old", "sensor", retained_ours=set())
 
 
 class PreviewViaDeviceTest(unittest.TestCase):
