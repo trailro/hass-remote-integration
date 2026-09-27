@@ -477,6 +477,20 @@ class IdFormatTest(_Case):
         await pub._async_decide_id_format()
         self.assertEqual((self.scans, pub._ids_undecided), (["ids"], ""))
 
+    async def test_an_undecided_format_keeps_the_orphan_sweep_due(self):
+        """The timer's sweep while the format is undecided could clear nothing (no discovery config goes out): it stays
+        due, with the configs of earlier processes still to be read, for the full republish that decides the format."""
+        pub = await self.undecided(discovery_enabled=True)
+        pub._orphan_sweep_due, pub._boot_components = True, None
+        with mock.patch.object(mp.MqttPublisher, "_async_sweep_orphans") as sweep:
+            await pub._async_orphan_sweep_if_due()
+            sweep.assert_not_called()
+            self.assertEqual((pub._orphan_sweep_due, pub._boot_components), (True, None))
+            pub._ids_tried_at -= mp.IDS_RETRY_MIN_S
+            await pub._async_decide_id_format()
+            await pub._async_orphan_sweep_if_due()
+            sweep.assert_awaited_once()
+
     async def test_the_mqtt_page_sets_an_undecided_id_format(self):
         for fmt, prefix in ((disc.LEGACY_ID_FORMAT, "hass_demo_"), (disc.ID_FORMAT, "hass_demo-")):
             with self.subTest(fmt=fmt):
