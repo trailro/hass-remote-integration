@@ -500,6 +500,9 @@ class IdFormatTest(_Case):
                 with mock.patch("custom_components.integration_manager.installer.events.emit"):
                     ident = self.identity()
                 self.assertIn("id_format", ident.record_problem)
+                # removing it keeps the ids the broker still shows: it does not re-create every entity
+                self.assertIn("remove it: the identity is then chosen as for a volume that never published", ident.record_problem)
+                self.assertIn("hass_<domain> keeps the hass_<domain>_ ids its retained discovery configs still hold", ident.record_problem)
                 self.assertIsNone(ident.key("demo"))
 
 

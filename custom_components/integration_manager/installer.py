@@ -337,9 +337,11 @@ class MqttIdentity:
     def _unusable(self, why: str) -> None:
         self.record = {}
         self.record_problem = (f"{IDENTITY_FILE} {why}: the identity this volume published under is unknown, so MQTT stays "
-                               "disconnected. Correct the file, or remove it to publish as a volume that never published "
-                               "(what was published before stays on the broker, and the main Home Assistant keeps those "
-                               "entities)")
+                               "disconnected. Correct the file, or remove it: the identity is then chosen as for a "
+                               "volume that never published (hass_<domain>, or HRI_INSTANCE's), and hass_<domain> keeps "
+                               "the hass_<domain>_ ids its retained discovery configs still hold; under another "
+                               "identity, what was published before stays on the broker, and the main Home Assistant "
+                               "keeps those entities")
         _LOGGER.error("MQTT: %s", self.record_problem)
         events.emit("mqtt", self.record_problem)
 
