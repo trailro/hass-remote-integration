@@ -59,7 +59,7 @@ import jsonio
 from jsonio import ha_vkey, is_stable_tag, tag_key, vkey, write_json
 
 from . import change_report, events, patches
-from .discovery import INSTANCE_SEP
+from .discovery import ID_FORMAT, ID_FORMAT_UNDECIDED, INSTANCE_SEP, LEGACY_ID_FORMAT
 from .settings import Settings
 
 _LOGGER = logging.getLogger(__name__)
@@ -274,6 +274,9 @@ def _record_shape_problem(rec: Any) -> str | None:
     for flag in ("released", "pinned"):
         if not isinstance(rec.get(flag, False), bool):
             return f"has a {flag} flag that is not true or false"
+    # absent: written by 0.26.0 or older (LEGACY_ID_FORMAT for a plain identity)
+    if "id_format" in rec and (type(rec["id_format"]) is not int or rec["id_format"] not in (ID_FORMAT_UNDECIDED, LEGACY_ID_FORMAT, ID_FORMAT)):
+        return f"has an id_format no version wrote ({str(rec['id_format'])[:20]!r})"
     return None
 
 
@@ -298,7 +301,13 @@ class MqttIdentity:
 
     An invalid HRI_INSTANCE (or, in the app, an unknown one: HRI_INSTANCE_UNKNOWN) is never used and never dropped
     silently: an integration that would take it gets no identity and the publisher says why; one that keeps a
-    remembered identity connects under it, with the problem shown as a warning."""
+    remembered identity connects under it, with the problem shown as a warning.
+
+    The ids of the plain identity (``id_format``): hass_<domain>- for a volume that never published it, hass_<domain>_
+    for good where the record holds it from 0.26.0 or older (no id_format), so nothing it announced changes.  Where the
+    record does not hold it (a fresh volume, a deleted record, a Move), the retained discovery configs of this
+    identity decide (the publisher's scan, ``decide``): hass_<domain>_ ids among them keep that format.  An instance
+    always uses hass_<domain>-<instance>-."""
 
     def __init__(self, path: str, domain_provider: Any) -> None:
         self.path = path
@@ -306,6 +315,8 @@ class MqttIdentity:
         self.instance, self.instance_problem = configured_instance()
         self.record: dict[str, Any] = {}  # mqtt_identity.json as last read or written: replaced as a whole, never in place
         self.record_problem: str | None = None
+        self._decided: dict[str, int] = {}  # plain base -> the id format the retained configs gave it (decide)
+        self.undecided: tuple[str, str] | None = None  # (base, why) while no scan could decide its id format
 
     def load(self) -> None:
         """Blocking.  A record that cannot be used is logged and put on the timeline."""
@@ -359,10 +370,14 @@ class MqttIdentity:
         return None
 
     def warning_for(self, domain: str | None) -> str | None:
-        """The HRI_INSTANCE problem an integration with a remembered identity does not suffer from, but still has."""
+        """The HRI_INSTANCE problem an integration with a remembered identity does not suffer from, but still has; and
+        why its discovery waits, while the id format of its identity is undecided."""
+        found = []
         if self.instance_problem and not self.record_problem and (base := self.remembered(domain)):
-            return f"{self.instance_problem} (not used: {domain} keeps {base}, the identity this volume published it under)"
-        return None
+            found.append(f"{self.instance_problem} (not used: {domain} keeps {base}, the identity this volume published it under)")
+        if self.undecided and self.undecided[0] == self.key(domain):
+            found.append(self.undecided[1])
+        return "; ".join(found) or None
 
     def blocking(self) -> str | None:
         """problem_for the running integration."""
@@ -387,12 +402,28 @@ class MqttIdentity:
                 "identity_warning": self.warning_for(domain), "identity_move_to": target if base and target and target != base else None}
 
     def stamp(self, base: str) -> dict[str, Any]:
-        """What a record of ``base`` says besides the names: the integration it belongs to, and whether it is kept
-        already (empty when ``base`` is not the running integration's identity: such a record is not written)."""
+        """What a record of ``base`` says besides the names: the integration it belongs to, whether it is kept already,
+        and its id format (empty when ``base`` is not the running integration's identity: such a record is not
+        written)."""
         domain = self._domain()
         if not domain or base != self.key(domain):
             return {}
-        return {"domain": domain, "pinned": base == self.remembered(domain)}
+        return {"domain": domain, "pinned": base == self.remembered(domain), "id_format": self.id_format(base) or ID_FORMAT_UNDECIDED}
+
+    def id_format(self, base: str) -> int | None:
+        """The id format of identity ``base``: ID_FORMAT for an instance; for the plain identity what the record holding
+        it says (LEGACY_ID_FORMAT without id_format: 0.26.0 or older), else what ``decide`` was told; None when that
+        is still unknown (the publisher reads the retained discovery configs, and announces nothing until then)."""
+        if INSTANCE_SEP in base:
+            return ID_FORMAT
+        rec = self.record
+        if not self.record_problem and rec.get("base") == base and (fmt := rec.get("id_format", LEGACY_ID_FORMAT)):
+            return fmt
+        return self._decided.get(base)
+
+    def decide(self, base: str, id_format: int) -> None:
+        """What the retained discovery configs of ``base`` say: kept until a record of ``base`` is written with it."""
+        self._decided[base] = id_format
 
     def pin(self, base: str) -> bool:
         """Blocking: the running integration keeps ``base`` from now on, if the record holds it and does not keep it

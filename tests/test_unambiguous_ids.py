@@ -1,8 +1,15 @@
-"""Ids read back into "ours + rest": discovery.own_rest for a prefix ending in "-", and the manager device's identifier
-mapped back to the discovery id it is announced under."""
+"""Unique ids, device identifiers and discovery ids: the id format of each volume, ids read back into "ours + rest"
+(discovery.own_rest for a prefix ending in "-", the manager device's identifier mapped back to its discovery id), and
+no container clearing another's discovery config.
+
+The plain identity hass_<domain> put a "_" between itself and the rest (hass_a_ + sensor.x), and a "_" is also inside
+domains: hass_a_ + binary_sensor.x is hass_a_binary_ + sensor.x.  A volume that never published its plain identity
+uses hass_<domain>- (id_format 2); one that did keeps hass_<domain>_ for good, and nothing it announced changes.
+"""
 
 import asyncio
 import json
+import os
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -14,8 +21,11 @@ from paho.mqtt.reasoncodes import ReasonCode
 from custom_components.integration_manager import discovery as disc
 from custom_components.integration_manager import mqtt_publisher as mp
 from custom_components.integration_manager import parity
+from custom_components.integration_manager.installer import MqttIdentity
 from tests import test_camp_publish as camp
+from tests.test_mqtt_instance_identity import BROKER, LEGACY, _env, _names
 from tests.test_r9_mqtt import _call
+from tests.test_r13_mqtt import _Case
 
 A = "hass_a"
 TOPICS = dict.fromkeys(("status", "health", "manager", "cmd"), "t")
@@ -240,6 +250,215 @@ class DestructiveDiscoveryGateTest(unittest.TestCase):
             self.assertEqual(asyncio.run(a.pub.async_retained_ours([a.did, None])), {a.did: False})
         self.assertFalse(a.pub.remove_discovered_component(a.did, "sensor.y", "sensor"))  # nothing verified: refused
         self.assertEqual(self.store.cleared, [])
+
+
+
+def _config(base, prefix, entity_id="sensor.power", root="homeassistant"):
+    """What a container retains for a device-less device of the integration demo holding ``entity_id``."""
+    did = f"{prefix}demo_nodevice"
+    comp = {"platform": "sensor", "unique_id": prefix + entity_id, "default_entity_id": entity_id}
+    return (f"{root}/device/{did}/config",
+            json.dumps({"device": {"identifiers": [did]}, "origin": disc.origin(prefix), "components": {"sensor_power": comp}}).encode())
+
+
+class IdFormatTest(_Case):
+    """Which ids a volume announces under, decided once per identity and recorded in mqtt_identity.json."""
+
+    def setUp(self):
+        super().setUp()
+        self.store = _Store()
+        mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda _self, *a: self.store.throwaway(*a)).start()
+        self.scans = []
+        real = mp.MqttPublisher._retained_scan
+        mock.patch.object(mp.MqttPublisher, "_retained_scan",
+                          lambda pub, suffix, topics, *a, **k: self.scans.append(suffix) or real(pub, suffix, topics, *a, **k)).start()
+        self.path = os.path.join(self.dir, "integration_manager", "mqtt_identity.json")
+
+    def identity(self, env=None, domain="demo"):
+        with _env(env):
+            ident = MqttIdentity(self.path, lambda: domain)
+        ident.load()
+        return ident
+
+    def pub_with(self, ident, domain="demo", **config):
+        pub = self.publisher(**config)
+        pub._identity, pub._key_provider = ident, (lambda: ident.key(domain))
+        return pub
+
+    def record(self):
+        with open(self.path, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    async def connect_names(self, pub):
+        """What _connect does with the identity before the client: decide, sweep and record, the live names."""
+        base = pub.wanted_base_topic
+        pub._set_ids_undecided(base, await pub.hass.async_add_executor_job(pub._decide_id_format, base))
+        self.assertTrue(await pub.hass.async_add_executor_job(pub._sweep_old_identity, base))
+        pub._live_base, pub._live_prefix = base, pub._prefix_for(base)
+
+    async def test_a_fresh_volume_takes_unambiguous_ids(self):
+        # another container's hass_demo_binary_ configs start with hass_demo_ too: not ours, they decide nothing
+        self.store.retained.update([_config("hass_demo_binary", "hass_demo_binary_"), _config("hass_demo-garage", "hass_demo-garage-")])
+        pub = self.pub_with(self.identity())
+        await self.connect_names(pub)
+        self.assertEqual((pub.prefix, pub._ids_undecided, self.scans), ("hass_demo-", "", ["ids"]))
+        self.assertEqual((self.record()["base"], self.record()["id_format"]), ("hass_demo", disc.ID_FORMAT))
+        # recorded: the next start reads it, and scans nothing
+        self.scans.clear()
+        pub = self.pub_with(self.identity())
+        await self.connect_names(pub)
+        self.assertEqual((pub.prefix, self.scans), ("hass_demo-", []))
+
+    async def test_a_volume_that_published_keeps_its_ids_byte_identical(self):
+        """0.25.x's record (no domain) and 0.26.0's (domain, pinned): hass_<domain>_ ids, no scan, and every name
+        0.26.0 announced is the same string."""
+        broker = {**BROKER, "port": self.port}
+        records = {"0.25.x": {**LEGACY, "base": "hass_demo", "broker": broker},
+                   "0.26.0": {"base": "hass_demo", "prefix": "homeassistant", "broker": broker, "domain": "demo", "pinned": True}}
+        entity_ids = ["sensor.power", "binary_sensor.door", "switch.pump"]
+        for version, record in records.items():
+            with self.subTest(version):
+                mp.write_json(self.path, record)
+                pub = self.pub_with(self.identity())
+                await self.connect_names(pub)
+                self.assertEqual((pub.prefix, self.scans), ("hass_demo_", []))
+                self.assertEqual(self.record(), {**record, "domain": "demo", "pinned": True, "id_format": disc.LEGACY_ID_FORMAT})
+                # 0.26.0's names: the identity prefix was the base and a "_"
+                old_pub = mp.MqttPublisher.__new__(mp.MqttPublisher)
+                old_pub.config, old_pub._key_provider = pub.config, (lambda: "hass_demo")
+                old_pub._live_base, old_pub._live_prefix = "hass_demo", "hass_demo_"
+                names = _names(pub, entity_ids)
+                self.assertEqual(names, _names(old_pub, entity_ids))
+                self.assertIn("hass_demo_sensor.power", names["unique_ids"])
+                self.assertIn("hass_demo_demo_nodevice", names["discovery_ids"])
+                self.assertIn("hass_demo_manager", names["devices"])
+                # and the next start reads the record it wrote the same way
+                self.assertEqual(self.pub_with(self.identity()).prefix, "hass_demo_")
+
+    async def test_a_missing_record_follows_what_is_retained(self):
+        """A volume whose record was deleted (it was damaged): its own retained configs say which ids it announced."""
+        cases = {"hass_demo_": disc.LEGACY_ID_FORMAT, "hass_demo-": disc.ID_FORMAT}
+        for prefix, expected in cases.items():
+            with self.subTest(prefix):
+                if os.path.exists(self.path):
+                    os.remove(self.path)
+                self.store.retained = dict([_config("hass_demo", prefix), _config("hass_demo_binary", "hass_demo_binary_")])
+                pub = self.pub_with(self.identity())
+                await self.connect_names(pub)
+                self.assertEqual((pub.prefix, self.record()["id_format"]), (prefix, expected))
+
+    async def test_the_manager_device_alone_decides_too(self):
+        """Discovery off, manager_discovery on: the manager device's config is all that is retained."""
+        mid, block, comps = disc.manager_device("hass_demo", "hass_demo_", TOPICS, "demo", "", False)
+        self.store.retained[f"homeassistant/device/{mid}/config"] = json.dumps(
+            {"device": block, "origin": disc.origin("hass_demo_"), "components": {mp._comp_key(e): c for e, c in comps.items()}}).encode()
+        pub = self.pub_with(self.identity())
+        await self.connect_names(pub)
+        self.assertEqual(pub.prefix, "hass_demo_")
+
+    async def test_an_incomplete_scan_announces_nothing_until_one_decides(self):
+        self.store.retained.update([_config("hass_demo", "hass_demo_"), _config("hass_other", "hass_other_")])
+        pub = self.pub_with(self.identity(), discovery_enabled=True)
+        with mock.patch.object(mp, "RETAINED_SCAN_MAX_BYTES", 10):
+            await self.connect_names(pub)
+        self.assertIn("discovery waits", pub._ids_undecided)
+        self.assertEqual(self.record()["id_format"], disc.ID_FORMAT_UNDECIDED)  # the names are recorded, the format is not
+        self.assertIn("discovery waits", pub._identity.describe()["identity_warning"])  # status and preflight say why
+        pub._client, pub._connected, pub._moving = self.store.live(), True, False
+        pub._broker_max_packet, pub._oversized_warned = 0, set()
+        before = dict(self.store.retained)
+        self.assertFalse(pub._publish("homeassistant/device/hass_demo-demo_nodevice/config", "{}", qos=1))
+        self.assertFalse(pub._publish("homeassistant/device/hass_demo_demo_nodevice/config", None, qos=1))
+        self.assertTrue(pub._publish("hass_demo/status", "online", qos=1))  # the documents flow
+        pub._group_by_device = mock.Mock(side_effect=AssertionError("nothing is grouped for discovery"))
+        pub._publish_discovery_all()
+        self.assertEqual({t: p for t, p in self.store.retained.items() if t.startswith("homeassistant/")},
+                         {t: p for t, p in before.items() if t.startswith("homeassistant/")})
+        # a restart reads the record: still undecided, so it scans again
+        self.assertIsNone(self.identity().id_format("hass_demo"))
+        # the next full republish reads them in full: decided, recorded, announced from then on
+        await pub._async_decide_id_format()
+        self.assertEqual((pub._ids_undecided, pub.prefix, self.record()["id_format"]), ("", "hass_demo_", disc.LEGACY_ID_FORMAT))
+        self.assertIsNone(pub._identity.describe()["identity_warning"])
+
+    async def test_the_connect_decides_before_it_records(self):
+        for complete in (True, False):
+            with self.subTest(complete=complete):
+                if os.path.exists(self.path):
+                    os.remove(self.path)
+                self.store.retained = dict([_config("hass_demo", "hass_demo_"), _config("hass_other", "hass_other_")])
+                pub = self.pub_with(self.identity(), force_base_topic=True)
+                pub._client, pub._connected, pub.stats, pub._stopping, pub._cleanup_pending = None, False, {}, False, {}
+                with mock.patch.object(mp.MqttPublisher, "_new_client"), \
+                        mock.patch.object(mp, "RETAINED_SCAN_MAX_BYTES", mp.RETAINED_SCAN_MAX_BYTES if complete else 10):
+                    await pub.hass.async_add_executor_job(pub._connect)
+                self.assertEqual(pub.stats["connect_error"], "")
+                self.assertEqual((pub._live_prefix, bool(pub._ids_undecided)), ("hass_demo_", False) if complete else ("hass_demo-", True))
+                self.assertEqual(self.record()["id_format"], disc.LEGACY_ID_FORMAT if complete else disc.ID_FORMAT_UNDECIDED)
+
+    async def test_an_instance_never_scans(self):
+        pub = self.pub_with(self.identity("garage"))
+        await self.connect_names(pub)
+        self.assertEqual((pub.prefix, self.scans, self.record()["id_format"]), ("hass_demo-garage-", [], disc.ID_FORMAT))
+
+    async def test_a_move_to_the_plain_identity_asks_the_broker(self):
+        """The record holds the instance: what hass_demo left retained (a Move that did not clear it) decides."""
+        mp.write_json(self.path, {"base": "hass_demo-garage", "prefix": "homeassistant", "broker": {**BROKER, "port": self.port},
+                                  "domain": "demo", "pinned": True, "id_format": disc.ID_FORMAT})
+        ident = self.identity()
+        self.assertIsNone(ident.id_format("hass_demo"))
+        self.store.retained.update([_config("hass_demo", "hass_demo_")])
+        pub = self.pub_with(ident)
+        self.assertEqual(await pub.hass.async_add_executor_job(pub._decide_id_format, "hass_demo"), "")
+        self.assertEqual(pub._prefix_for("hass_demo"), "hass_demo_")
+
+    async def test_an_id_format_no_version_wrote_is_a_damaged_record(self):
+        for value in ("2", 3, -1, None, True, 2.0):
+            with self.subTest(value=value):
+                mp.write_json(self.path, {"base": "hass_demo", "prefix": "homeassistant", "domain": "demo", "id_format": value})
+                with mock.patch("custom_components.integration_manager.installer.events.emit"):
+                    ident = self.identity()
+                self.assertIn("id_format", ident.record_problem)
+                self.assertIsNone(ident.key("demo"))
+
+
+class DisjointIdsTest(unittest.TestCase):
+    """Containers a and a_binary share no unique id, device identifier or discovery id, and neither takes the
+    other's for its own, in any pair of formats; with hass_<domain>_ ids on both, what the prefix rule cannot tell
+    apart the origin gate does (DestructiveDiscoveryGateTest)."""
+
+    def pub(self, base, prefix):
+        pub = mp.MqttPublisher.__new__(mp.MqttPublisher)
+        pub.config = mp.MqttConfig(enabled=True)
+        pub._key_provider = lambda: base
+        pub._live_base, pub._live_prefix = base, prefix
+        return pub
+
+    def test_a_and_a_binary(self):
+        for prefix_a, prefix_b in (("hass_a-", "hass_a_binary-"), ("hass_a_", "hass_a_binary-"), ("hass_a-", "hass_a_binary_")):
+            with self.subTest(a=prefix_a, b=prefix_b):
+                a, b = self.pub(A, prefix_a), self.pub("hass_a_binary", prefix_b)
+                names_a = _names(a, ["binary_sensor.x", "sensor.power"], "binary_demo")
+                names_b = _names(b, ["sensor.x", "sensor.power"], "demo")
+                for kind in names_a:
+                    self.assertFalse(names_a[kind] & names_b[kind], kind)
+                # parity's rules for a hass_<domain>_ prefix take no rest with a "-" either: own_rest is the most they take
+                for one, other in ((a, names_b), (b, names_a)):
+                    for kind in ("unique_ids", "devices", "discovery_ids"):
+                        ids = [x for x in other[kind] if not (kind == "discovery_ids" and x.endswith("_manager"))]
+                        self.assertEqual([x for x in ids if disc.own_rest(one.prefix, x) is not None], [], (one.prefix, kind))
+
+    def test_the_legacy_pair_is_what_the_gate_is_for(self):
+        """hass_a_ + binary_sensor.x is hass_a_binary_ + sensor.x: the same unique id."""
+        a, b = self.pub(A, "hass_a_"), self.pub("hass_a_binary", "hass_a_binary_")
+        self.assertTrue(_names(a, ["binary_sensor.x"], "binary_demo")["unique_ids"] & _names(b, ["sensor.x"], "demo")["unique_ids"])
+
+    def test_identity_prefix(self):
+        self.assertEqual([disc.identity_prefix(A), disc.identity_prefix(A, disc.LEGACY_ID_FORMAT), disc.identity_prefix(A, disc.ID_FORMAT)],
+                         ["hass_a-", "hass_a_", "hass_a-"])
+        for fmt in (disc.LEGACY_ID_FORMAT, disc.ID_FORMAT):  # an instance whatever the format says
+            self.assertEqual(disc.identity_prefix("hass_a-garage", fmt), "hass_a-garage-")
+        self.assertEqual(disc.origin("hass_a-"), disc.origin("hass_a_"))  # the origin names the identity either way
 
 
 if __name__ == "__main__":
