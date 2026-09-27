@@ -822,6 +822,23 @@ class MqttPublisher:
                      "found in its retained discovery configs" if legacy else "none of its retained discovery configs has the older ones")
         return ""
 
+    def _other_id_prefix(self, base: str) -> str | None:
+        """What the ids of the plain identity ``base`` start with in the id format it does not use (hass_<domain>_ for
+        hass_<domain>- and back); None for an instance (always -) and while its format is unknown."""
+        if self._identity is None or not base or disc.INSTANCE_SEP in base or not (fmt := self._identity.id_format(base)):
+            return None
+        return disc.identity_prefix(base, disc.ID_FORMAT if fmt == disc.LEGACY_ID_FORMAT else disc.LEGACY_ID_FORMAT)
+
+    def _in_other_id_format(self, topic: str, payload: bytes, base: str, other: str) -> bool:
+        """A retained device config of ``base``'s exact origin announced in the id format ``base`` does not use now
+        (``other``: _other_id_prefix): a rollback to 0.26.0 with discovery on, a restore, a hand edit, or a change on
+        the MQTT page left it.  Its discovery id (the manager device's is <base>_manager in both) and its ids are in
+        that format, none in the current one; another container's never has this origin."""
+        did = topic.split("/")[-2]
+        return (topic == self._discovery_topic(did) and (did.startswith(other) or did == f"{base}_manager")
+                and self._is_ours(topic, payload, base) and _has_ids_of(payload, other)
+                and not _has_ids_of(payload, self._prefix_for(base)))
+
     def _set_ids_undecided(self, base: str, why: str) -> None:
         if why and why != self._ids_undecided:
             _LOGGER.warning("MQTT: %s", why)
@@ -3264,6 +3281,7 @@ class MqttPublisher:
         owner = {eid: did for did, (_block, comps) in groups.items() for eid in comps}
         moved_to: set[str] = set()
         removed_components, cleared_devices, docs = 0, 0, []
+        other = self._other_id_prefix(base)
         for topic, payload in found.items():
             if not self._is_ours(topic, payload, base):
                 continue
@@ -3274,6 +3292,12 @@ class MqttPublisher:
             if not isinstance(doc, dict):
                 continue
             if topic.startswith(f"{prefix}/device/"):
+                if topic != manager_topic and other and topic.split("/")[-2] not in groups \
+                        and self._in_other_id_format(topic, payload, base, other):
+                    # the main HA keeps these entities next to those announced now: the whole config goes
+                    if self._publish(topic, None, qos=1):
+                        cleared_devices += 1
+                    continue
                 if topic == manager_topic or not self.config.discovery_enabled:
                     continue
                 comps = doc.get("components") if isinstance(doc.get("components"), dict) else {}

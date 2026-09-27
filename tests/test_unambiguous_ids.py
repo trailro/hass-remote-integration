@@ -491,6 +491,46 @@ class IdFormatTest(_Case):
             await pub._async_orphan_sweep_if_due()
             sweep.assert_awaited_once()
 
+    async def connected(self, id_format, **config):
+        """hass_demo connected, its record holding ``id_format``, announcing sensor.power on its device-less device."""
+        mp.write_json(self.path, {"base": "hass_demo", "prefix": "homeassistant", "broker": {**BROKER, "port": self.port},
+                                  "domain": "demo", "pinned": True, "id_format": id_format})
+        pub = self.pub_with(self.identity(), discovery_enabled=True, **config)
+        await self.connect_names(pub)
+        pub._client, pub._connected, pub._moving = self.store.live(), True, False
+        pub._broker_max_packet, pub._oversized_warned = 0, set()
+        did = f"{pub.prefix}demo_nodevice"
+        comp = {"platform": "sensor", "unique_id": pub.prefix + "sensor.power", "default_entity_id": "sensor.power"}
+        pub._group_by_device = lambda: ({did: ({"identifiers": [did]}, {"sensor.power": comp})}, {})
+        pub._entity_gone = pub._excluded_now = lambda _eid: False
+        return pub
+
+    def both_formats(self, other):
+        """What the broker holds after a rollback to 0.26.0 with discovery on and an update again (or a restore, or a
+        hand edit): hass_demo's configs in both id formats, the manager device's config (one topic in every format)
+        still in ``other``, and the configs of hass_demo_binary and hass_demo-garage, whose ids start like either."""
+        mid, block, comps = disc.manager_device("hass_demo", other, TOPICS, "demo", "", False)
+        self.store.retained.update([
+            _config("hass_demo", "hass_demo_"), _config("hass_demo", "hass_demo-"),
+            _config("hass_demo_binary", "hass_demo_binary_"), _config("hass_demo_binary", "hass_demo_binary-"),
+            _config("hass_demo-garage", "hass_demo-garage-"),
+            (f"homeassistant/device/{mid}/config", json.dumps({"device": block, "origin": disc.origin(other),
+                                                               "components": {mp._comp_key(e): c for e, c in comps.items()}}).encode())])
+        return _config("hass_demo", other)[0]
+
+    async def test_the_orphan_sweep_clears_our_configs_in_the_other_id_format(self):
+        """Both of this identity's entity sets stay on the main HA until the sweep clears the configs in the format not
+        announced now; never the manager device's (it is announced again over them), never another container's."""
+        for current, other in ((disc.LEGACY_ID_FORMAT, "hass_demo-"), (disc.ID_FORMAT, "hass_demo_")):
+            with self.subTest(current=current):
+                self.store.retained, self.store.cleared = {}, []
+                pub = await self.connected(current)
+                leftover = self.both_formats(other)
+                before = dict(self.store.retained)
+                await pub._async_sweep_orphans()
+                self.assertEqual(self.store.cleared, [leftover])
+                self.assertEqual(self.store.retained, {t: p for t, p in before.items() if t != leftover})
+
     async def test_the_mqtt_page_sets_an_undecided_id_format(self):
         for fmt, prefix in ((disc.LEGACY_ID_FORMAT, "hass_demo_"), (disc.ID_FORMAT, "hass_demo-")):
             with self.subTest(fmt=fmt):
