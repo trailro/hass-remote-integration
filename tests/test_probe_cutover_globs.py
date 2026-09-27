@@ -49,7 +49,7 @@ def _run_parity(announced, parent_entities):
     hass = mock.Mock()
     hass.states.async_entity_ids.return_value = []
     hass.states.get.return_value = SimpleNamespace(state="on")
-    publisher = mock.Mock(prefix=PREFIX, base_topic=BASE)
+    publisher = mock.Mock(prefix=PREFIX, base_topic=BASE, _ids_undecided="")
     publisher.config.discovery_enabled, publisher.config.manager_discovery = True, True
     publisher.discovery_preview.return_value = [{
         "discovery_id": f"{BASE}_dev", "device": {"name": "dev"},

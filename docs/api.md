@@ -270,6 +270,12 @@ retained config on the broker carries this container's exact origin: the others
 (another container's device, or a config that could not be read) are left, and
 listed in `skipped` and in `not_ours` ([Id format](mqtt.md#id-format)).
 
+While the [id format](mqtt.md#id-format) is undecided, which entities on the
+main HA are this container's is unknown: `GET /api/parity` answers
+`{ok: false, ids_undecided: true, error}` instead of a comparison (so does
+`remove_orphans`, without `ids_undecided`), and `POST /api/cutover/status`
+carries the reason in `ids_undecided` (empty once decided).
+
 A matched row of `GET /api/parity` carries `state_comparable`. `button`,
 `scene`, `notify` and `event` are never compared by state (no state topic on
 the main HA; an event's state is a per-side timestamp), only by availability,

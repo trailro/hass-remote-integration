@@ -509,6 +509,23 @@ class IdFormatTest(_Case):
         self.assertIn("instance identity", res["error"])
         self.assertEqual(pub.prefix, "hass_demo-garage-")
 
+    async def test_parity_and_cutover_say_undecided_and_count_nothing(self):
+        pub = await self.undecided()
+        with self.assertRaises(parity.IdsUndecided):
+            await parity.compute_parity(_hass(), mock.Mock(), pub)
+        view = parity.ParityView(_hass(), mock.Mock(), pub)
+        with mock.patch.object(view, "json", side_effect=lambda d, **k: d):
+            res = await view.get(SimpleNamespace(headers={"X-Requested-With": "fetch"}, query={}))
+        self.assertEqual((res["ok"], res["ids_undecided"]), (False, True))
+        self.assertIn("id format undecided: nothing is compared until it is decided", res["error"])
+        self.assertNotIn("summary", res)
+        installer = SimpleNamespace(running="demo", running_tag="1.0", settings=SimpleNamespace(data={}), smoke={},
+                                    state=SimpleNamespace(pending_smoke=None))
+        pub.build_health, pub.stats = (lambda: {"state": "ok"}), {"connected": True}
+        self.assertIn("discovery waits", parity.CutoverView(_hass(), installer, pub)._status()["ids_undecided"])
+        pub._ids_undecided = ""
+        self.assertEqual(parity.CutoverView(_hass(), installer, pub)._status()["ids_undecided"], "")
+
     async def test_the_connect_decides_before_it_records(self):
         for complete in (True, False):
             with self.subTest(complete=complete):

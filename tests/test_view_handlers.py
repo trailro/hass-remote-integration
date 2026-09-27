@@ -56,6 +56,8 @@ class HandlerWiringTest(unittest.TestCase):
 
 
 class FakePublisher:
+    _ids_undecided = ""  # the id format is known
+
     def __init__(self):
         self.config = mock.Mock(discovery_enabled=True)
         self.stats = {"connected": True, "discovery_devices": 3}
