@@ -1329,9 +1329,13 @@ class MqttPublisher:
         under `topics` until the burst goes quiet, or until it holds
         RETAINED_SCAN_MAX_BYTES; returns {topic: payload}.  The network
         thread is always stopped, whatever happens.  ``strict``: RuntimeError
-        instead of what was read, when that maximum left messages unread."""
+        instead of what was read whenever it may be partial: that maximum left
+        messages unread, the time cap ended it while messages still arrived,
+        or the connection dropped (nothing arrives then either, which looks
+        like a quiet end)."""
         found: dict[str, bytes] = {}
         budget = [0, 0]  # bytes held, messages left unread once the budget was spent (paho's thread only)
+        dropped: list[Any] = []  # disconnections during the scan (paho's thread)
 
         def keep(_cl, _u, m) -> None:
             if not m.retain or not m.payload:
@@ -1344,6 +1348,7 @@ class MqttPublisher:
 
         deadline = time.monotonic() + 5
         c = self._throwaway_client(suffix, "scan", deadline, keep)
+        c.on_disconnect = lambda *a, **k: dropped.append(True)
         try:
             granted: list[Any] = []
             c.on_subscribe = lambda cl, u, mid, codes, props=None: granted.append(codes)
@@ -1352,9 +1357,14 @@ class MqttPublisher:
                 time.sleep(0.05)
             if not granted or any(getattr(g, "is_failure", False) for g in granted[0]):
                 raise RuntimeError("the broker refused the subscription (ACL?)")
-            self._collect_quiet(c, found, min_s=min_s)
+            cut = self._collect_quiet(c, found, min_s=min_s)
+            lost = bool(dropped) or not c.is_connected()
         finally:
             self._stop_client(c)
+        if strict and lost:
+            raise RuntimeError("the connection of the scan dropped before the retained messages were read")
+        if strict and cut:
+            raise RuntimeError(f"the scan stopped after {len(found)} retained topics while more were still arriving (its time limit)")
         if budget[1]:
             _LOGGER.warning("MQTT: the %s scan stopped at %s retained topics (%s bytes, its maximum): at least %s further "
                             "retained messages under %s were left unread",
@@ -1441,10 +1451,11 @@ class MqttPublisher:
             self._stop_client(c)
 
     @staticmethod
-    def _collect_quiet(c: mqtt.Client, found: dict[str, bytes], min_s: float = 2.0, quiet_s: float = 1.0, max_s: float = 15.0) -> None:
+    def _collect_quiet(c: mqtt.Client, found: dict[str, bytes], min_s: float = 2.0, quiet_s: float = 1.0, max_s: float = 15.0) -> bool:
         """Wait for the retained burst: at least min_s, then until nothing new
         arrived for quiet_s, capped at max_s (busy brokers with thousands of
-        retained configs need more than a fixed 3 s)."""
+        retained configs need more than a fixed 3 s).  True when max_s ended
+        it while topics were still arriving: what was read may be partial."""
         t0 = time.time()
         last_n, last_change = -1, t0
         while True:
@@ -1453,9 +1464,9 @@ class MqttPublisher:
             if len(found) != last_n:
                 last_n, last_change = len(found), now
             if now - t0 >= min_s and now - last_change >= quiet_s:
-                return
+                return False
             if now - t0 >= max_s:
-                return
+                return True
 
     def _identity_file(self) -> str:
         return self.hass.config.path("integration_manager", "mqtt_identity.json")

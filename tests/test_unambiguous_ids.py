@@ -10,6 +10,8 @@ uses hass_<domain>- (id_format 2); one that did keeps hass_<domain>_ for good, a
 import asyncio
 import json
 import os
+import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -381,6 +383,62 @@ class IdFormatTest(_Case):
         self.assertEqual((pub._ids_undecided, pub.prefix, self.record()["id_format"]), ("", "hass_demo_", disc.LEGACY_ID_FORMAT))
         self.assertIsNone(pub._identity.describe()["identity_warning"])
 
+    def throwaway(self, change):
+        """The store's throwaway client, changed by ``change`` before the scan uses it."""
+        def make(_self, *a):
+            c = self.store.throwaway(*a)
+            change(c)
+            return c
+        return mock.patch.object(mp.MqttPublisher, "_throwaway_client", make)
+
+    @staticmethod
+    def silent(code=0, drop=False):
+        """A subscription the broker answers with ``code`` and then sends nothing on (``drop``: the connection drops
+        after the SUBACK, and paho connects again: a client with no subscription)."""
+        def change(c):
+            def subscribe(topics):
+                c.on_subscribe(c, None, 1, [ReasonCode(PacketTypes.SUBACK, identifier=code) for _ in topics], None)
+                if drop:
+                    c.on_disconnect(c, None, None, ReasonCode(PacketTypes.DISCONNECT, identifier=0x80), None)
+                return mqtt.MQTT_ERR_SUCCESS, 1
+            c.subscribe = subscribe
+        return change
+
+    async def test_a_scan_that_may_be_partial_decides_nothing(self):
+        """A legacy volume without a record: its hass_demo_ configs are retained, but the read that would find them
+        stops on its time limit while they still arrive, loses its connection (nothing arrives, which looks quiet),
+        or is refused.  Deciding "-" there would announce every entity again as a duplicate: it stays undecided."""
+        def lost(c):
+            self.silent()(c)
+            c.is_connected = lambda: False
+
+        cases = {"its time limit": (mock.patch.object(mp.MqttPublisher, "_collect_quiet", staticmethod(lambda *a, **k: True)), "still arriving"),
+                 "a lost connection": (self.throwaway(lost), "connection of the scan dropped"),
+                 "a connection lost and back": (self.throwaway(self.silent(drop=True)), "connection of the scan dropped"),
+                 "a refused subscription": (self.throwaway(self.silent(code=0x87)), "refused the subscription")}
+        for name, (patch, reason) in cases.items():
+            with self.subTest(name):
+                if os.path.exists(self.path):
+                    os.remove(self.path)
+                self.store.retained = dict([_config("hass_demo", "hass_demo_")])
+                pub = self.pub_with(self.identity())
+                with patch:
+                    await self.connect_names(pub)
+                self.assertIn(reason, pub._ids_undecided)
+                self.assertIsNone(pub._identity.id_format("hass_demo"))
+                self.assertEqual((pub.prefix, self.record()["id_format"]), ("hass_demo-", disc.ID_FORMAT_UNDECIDED))
+                # a full read decides as before
+                pub._client, pub._connected, pub._moving = self.store.live(), True, False
+                await pub._async_decide_id_format()
+                self.assertEqual((pub._ids_undecided, pub.prefix, self.record()["id_format"]), ("", "hass_demo_", disc.LEGACY_ID_FORMAT))
+
+    async def test_only_the_strict_scan_refuses_a_partial_read(self):
+        self.store.retained = dict([_config("hass_demo", "hass_demo_")])
+        pub = self.pub_with(self.identity())
+        with mock.patch.object(mp.MqttPublisher, "_collect_quiet", staticmethod(lambda *a, **k: True)):
+            found = await pub.hass.async_add_executor_job(pub._retained_scan, "cleanup", [("homeassistant/device/+/config", 1)])
+        self.assertEqual(list(found), list(self.store.retained))
+
     async def test_the_connect_decides_before_it_records(self):
         for complete in (True, False):
             with self.subTest(complete=complete):
@@ -420,6 +478,25 @@ class IdFormatTest(_Case):
                     ident = self.identity()
                 self.assertIn("id_format", ident.record_problem)
                 self.assertIsNone(ident.key("demo"))
+
+
+class CollectQuietTest(unittest.TestCase):
+    def test_it_says_when_its_time_limit_ended_a_burst(self):
+        found, stop = {}, threading.Event()
+
+        def arrive():
+            while not stop.is_set():
+                found[f"t{len(found)}"] = b"x"
+                time.sleep(0.05)
+
+        feeder = threading.Thread(target=arrive)
+        feeder.start()
+        try:
+            self.assertIs(mp.MqttPublisher._collect_quiet(None, found, min_s=0.2, quiet_s=0.5, max_s=1.0), True)
+        finally:
+            stop.set()
+            feeder.join()
+        self.assertIs(mp.MqttPublisher._collect_quiet(None, found, min_s=0.2, quiet_s=0.3, max_s=5.0), False)
 
 
 class DisjointIdsTest(unittest.TestCase):
