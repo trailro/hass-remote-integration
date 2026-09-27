@@ -841,13 +841,18 @@ class MqttPublisher:
             if newer:
                 _LOGGER.warning("MQTT: %s uses %s- ids: its record from 0.26.0 or older says %s_, but its retained discovery "
                                 "configs hold %s- ones (a rollback to 0.26.0 and an update again); its %s_ configs are "
-                                "cleared by the orphan sweep", base, base, base, base, base)
-            return ""
-        legacy = any(_has_ids_of(p, base + "_") for p in ours)
-        # none of ours: also what a broker ACL that hides the configs shows, which the MQTT page can correct
-        self._identity.decide(base, disc.LEGACY_ID_FORMAT if legacy else disc.ID_FORMAT, "scan" if ours else "scan_empty")
-        _LOGGER.info("MQTT: %s uses %s ids (%s)", base, f"{base}_" if legacy else f"{base}-",
-                     "found in its retained discovery configs" if legacy else "none of its retained discovery configs has the older ones")
+                                "cleared", base, base, base, base, base)
+        else:
+            legacy = any(_has_ids_of(p, base + "_") for p in ours)
+            # none of ours: also what a broker ACL that hides the configs shows, which the MQTT page can correct
+            self._identity.decide(base, disc.LEGACY_ID_FORMAT if legacy else disc.ID_FORMAT, "scan" if ours else "scan_empty")
+            _LOGGER.info("MQTT: %s uses %s ids (%s)", base, f"{base}_" if legacy else f"{base}-",
+                         "found in its retained discovery configs" if legacy else "none of its retained discovery configs has the older ones")
+        # the manager device's config (one topic in both formats) announced over with the other identifier would leave
+        # the main HA that device empty: emptied first, as a change on the MQTT page does (_async_clear_other_id_format)
+        manager = self._discovery_topic(f"{base}_manager")
+        if manager in found and (other := self._other_id_prefix(base)) and self._in_other_id_format(manager, found[manager], base, other):
+            self._ids_switch_due = True
         return ""
 
     def _other_id_prefix(self, base: str) -> str | None:

@@ -287,7 +287,12 @@ main HA. 0.26.0 rewrites `mqtt_identity.json` without `id_format`; after an
 update again the container finds its own `-` configs still retained, keeps the
 `-` ids, and the orphan sweep (five minutes after the start) clears the `_`
 configs 0.26.0 announced: the main HA deletes the `_2` entities and keeps the
-original ones. That needs the read at the first connection to be complete and
+original ones. Where 0.26.0 announced the manager device (its config is one
+topic in both formats), that config holds its `_` identifier: the first
+connection clears it with the other `_` configs, as **Change id format** does,
+and announces it again a moment later, so the main HA deletes that device and
+creates the manager device again (its customisations do not follow) instead of
+keeping it empty next to the new one. That needs the read at the first connection to be complete and
 the `-` configs to be still retained; otherwise the volume keeps the `_` ids,
 the sweep clears the `-` configs, and the main HA keeps the `_2` entities. Use
 **Change id format** (to `2`) on the MQTT page before the sweep to keep the

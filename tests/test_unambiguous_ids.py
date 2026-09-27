@@ -575,6 +575,46 @@ class IdFormatTest(_Case):
         await self.connect_names(pub)
         self.assertEqual((pub.prefix, self.scans), ("hass_demo-", []))
 
+    async def test_a_rollback_to_0260_and_back_re_creates_the_manager_device(self):
+        """0.26.0 announced the manager device under hass_demo_manager on the topic every format shares.  Announced over
+        it with hass_demo-manager, the main HA would keep hass_demo_manager as an empty device: the connection's full
+        republish empties that config first, pauses as a change on the MQTT page does, then announces it again."""
+        self.both_formats("hass_demo_")
+        manager = "homeassistant/device/hass_demo_manager/config"
+        self.assertIn(b'"hass_demo_manager"', self.store.retained[manager])
+        pub = await self.connected(None, manager_discovery=True)
+        self.assertEqual(pub.prefix, "hass_demo-")
+        pub._manager_discovery = lambda: disc.manager_device("hass_demo", pub.prefix, TOPICS, "demo", "1", True)
+        groups = pub._group_by_device()[0]
+        pub._group_by_device = lambda: (groups, {"mirrored": 0, "disabled": 0})
+        pub.hass.states = mock.Mock(async_all=lambda: [])
+        pub.hass.is_running, pub._orphan_sweep_due, pub._boot_components = False, True, None
+        pub._identity_sweep_due, pub._resync_excluded, pub._undiscover_due = False, False, False
+        pub.stats, pub._pending_clears, pub._manager_announced, pub._boot_removed = {"services_published": 0}, set(), frozenset(), set()
+        pub.publish_health = pub.publish_manager = mock.Mock()
+        pub._publish_services = mock.AsyncMock()
+        timeline, retain = [], self.store.retain
+
+        def logged_retain(topic, payload):
+            if topic == manager:
+                timeline.append(json.loads(payload)["device"]["identifiers"] if payload else "emptied")
+            retain(topic, payload)
+
+        async def pause(seconds):
+            timeline.append(("pause", seconds))
+
+        with mock.patch.object(self.store, "retain", logged_retain), mock.patch.object(mp.asyncio, "sleep", pause):
+            await pub.async_republish_all()
+        self.assertEqual(timeline[:3], ["emptied", ("pause", 2), ["hass_demo-manager"]])
+        self.assertEqual(json.loads(self.store.retained[manager])["device"]["identifiers"], ["hass_demo-manager"])
+        self.assertNotIn(_config("hass_demo", "hass_demo_")[0], self.store.retained)
+        self.assertIn(_config("hass_demo", "hass_demo-")[0], self.store.retained)
+        self.assertFalse(pub._ids_switch_due)
+        # the next connection finds it in the format in use: nothing is emptied again
+        timeline.clear()
+        pub = await self.connected(disc.ID_FORMAT, manager_discovery=True)
+        self.assertFalse(pub._ids_switch_due)
+
     async def test_a_record_without_id_format_and_no_own_dash_configs_stays_legacy(self):
         """0.26.0's record, only hass_demo_ configs of this origin (other containers' hass_demo- and hass_demo_binary-
         ones do not count): hass_demo_, recorded as before, byte for byte, and scanned once."""
