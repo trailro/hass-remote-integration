@@ -22,7 +22,7 @@ from paho.mqtt.reasoncodes import ReasonCode
 
 from custom_components.integration_manager import discovery as disc
 from custom_components.integration_manager import mqtt_publisher as mp
-from custom_components.integration_manager import parity
+from custom_components.integration_manager import parity, views
 from custom_components.integration_manager.installer import MqttIdentity
 from tests import test_camp_publish as camp
 from tests.test_mqtt_instance_identity import BROKER, LEGACY, _env, _names
@@ -462,6 +462,53 @@ class IdFormatTest(_Case):
         await pub._async_decide_id_format()
         self.assertEqual((self.scans, pub._ids_undecided), (["ids"], ""))
 
+    async def test_the_mqtt_page_sets_an_undecided_id_format(self):
+        for fmt, prefix in ((disc.LEGACY_ID_FORMAT, "hass_demo_"), (disc.ID_FORMAT, "hass_demo-")):
+            with self.subTest(fmt=fmt):
+                if os.path.exists(self.path):
+                    os.remove(self.path)
+                pub = await self.undecided()
+                self.assertTrue(pub._id_format_choosable(pub.wanted_base_topic))
+                pub.async_republish_all = mock.AsyncMock(return_value=0)
+                res = await pub.async_set_id_format(fmt)
+                self.assertEqual(res, {"ok": True, "identity": "hass_demo", "id_format": fmt, "prefix": prefix, "recorded": True})
+                self.assertEqual((pub._ids_undecided, pub.prefix, self.record()["id_format"]), ("", prefix, fmt))
+                self.assertIsNone(pub._identity.describe()["identity_warning"])
+                pub.async_republish_all.assert_awaited_once()  # announced under it at once
+                # recorded: what it announced from then on is not changed by hand
+                self.assertFalse(pub._id_format_choosable("hass_demo"))
+                res = await pub.async_set_id_format(3 - fmt)
+                self.assertFalse(res["ok"])
+                self.assertIn(f"holds id_format {fmt} for hass_demo", res["error"])
+                self.assertEqual(self.record()["id_format"], fmt)
+
+    async def test_the_choice_reads_the_record_again(self):
+        pub = await self.undecided()
+        mp.write_json(self.path, {**self.record(), "id_format": disc.LEGACY_ID_FORMAT})  # corrected by hand while running
+        pub.async_republish_all = mock.AsyncMock()
+        res = await pub.async_set_id_format(disc.ID_FORMAT)
+        self.assertFalse(res["ok"])
+        self.assertIn("holds id_format 1", res["error"])
+        self.assertEqual(self.record()["id_format"], disc.LEGACY_ID_FORMAT)
+        pub.async_republish_all.assert_not_called()
+
+    async def test_a_choice_while_disconnected_applies_at_the_connection(self):
+        pub = self.pub_with(self.identity())
+        res = await pub.async_set_id_format(disc.LEGACY_ID_FORMAT)
+        self.assertEqual((res["ok"], res["recorded"], res["prefix"]), (True, False, "hass_demo_"))
+        self.assertFalse(os.path.exists(self.path))
+        await self.connect_names(pub)
+        self.assertEqual((self.scans, pub.prefix, self.record()["id_format"]), ([], "hass_demo_", disc.LEGACY_ID_FORMAT))
+
+    async def test_an_instance_has_no_id_format_to_choose(self):
+        pub = self.pub_with(self.identity("garage"))
+        await self.connect_names(pub)
+        self.assertFalse(pub._id_format_choosable(pub.wanted_base_topic))
+        res = await pub.async_set_id_format(disc.LEGACY_ID_FORMAT)
+        self.assertFalse(res["ok"])
+        self.assertIn("instance identity", res["error"])
+        self.assertEqual(pub.prefix, "hass_demo-garage-")
+
     async def test_the_connect_decides_before_it_records(self):
         for complete in (True, False):
             with self.subTest(complete=complete):
@@ -523,6 +570,33 @@ class CollectQuietTest(unittest.TestCase):
             stop.set()
             feeder.join()
         self.assertIs(mp.MqttPublisher._collect_quiet(None, found, min_s=0.2, quiet_s=0.3, max_s=5.0), False)
+
+
+class IdFormatViewTest(unittest.IsolatedAsyncioTestCase):
+    def post(self, body, content_type="application/json"):
+        async def payload():
+            if isinstance(body, Exception):
+                raise body
+            return body
+
+        publisher = SimpleNamespace(async_set_id_format=mock.AsyncMock(return_value={"ok": True}))
+        return views.MqttActionView(publisher).post(SimpleNamespace(content_type=content_type, json=payload), "id_format"), publisher
+
+    async def test_a_bad_request_is_a_400(self):
+        for body, content_type in (([], "application/json"), (ValueError("Expecting value"), "application/json"), ({}, "application/json"),
+                                   ({"format": 0}, "application/json"), ({"format": 3}, "application/json"),
+                                   ({"format": "1"}, "application/json"), ({"format": True}, "application/json"),
+                                   ({"format": 1.0}, "application/json"), ({"format": 1}, "text/plain")):
+            with self.subTest(body=body, content_type=content_type):
+                call, publisher = self.post(body, content_type)
+                self.assertEqual((await call).status, 400)
+                publisher.async_set_id_format.assert_not_called()
+
+    async def test_the_choice_reaches_the_publisher(self):
+        for fmt in (disc.LEGACY_ID_FORMAT, disc.ID_FORMAT):
+            call, publisher = self.post({"format": fmt})
+            self.assertEqual(json.loads((await call).body), {"ok": True})
+            publisher.async_set_id_format.assert_awaited_once_with(fmt)
 
 
 class DisjointIdsTest(unittest.TestCase):

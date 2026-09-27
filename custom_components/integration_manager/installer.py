@@ -418,13 +418,20 @@ class MqttIdentity:
         is still unknown (the publisher reads the retained discovery configs, and announces nothing until then)."""
         if INSTANCE_SEP in base:
             return ID_FORMAT
+        return self.recorded_id_format(base) or self._decided.get(base)
+
+    def recorded_id_format(self, base: str) -> int | None:
+        """The id format the record holds for the plain identity ``base`` (LEGACY_ID_FORMAT without one: 0.26.0 or
+        older); None when it holds another identity or leaves ``base`` undecided, which is when the MQTT page may
+        still choose it (``decide``)."""
         rec = self.record
-        if not self.record_problem and rec.get("base") == base and (fmt := rec.get("id_format", LEGACY_ID_FORMAT)):
-            return fmt
-        return self._decided.get(base)
+        if self.record_problem or rec.get("base") != base:
+            return None
+        return rec.get("id_format", LEGACY_ID_FORMAT) or None
 
     def decide(self, base: str, id_format: int) -> None:
-        """What the retained discovery configs of ``base`` say: kept until a record of ``base`` is written with it."""
+        """What the retained discovery configs of ``base`` say, or the MQTT page's choice: kept until a record of
+        ``base`` is written with it."""
         self._decided[base] = id_format
 
     def pin(self, base: str) -> bool:

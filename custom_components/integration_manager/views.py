@@ -26,6 +26,7 @@ from jsonio import ha_vkey
 from homeassistant.helpers.http import HomeAssistantView
 
 from .diagnostics import scrub_text
+from .discovery import ID_FORMAT, LEGACY_ID_FORMAT
 from .http_util import BadRequest, ManagerView, with_body, _bad, _json_object
 from .ingress import is_ingress
 
@@ -725,4 +726,13 @@ class MqttActionView(ManagerView):
             except BadRequest as err:
                 return _bad(self, err)
             return self.json(await self.publisher.async_move_identity(str(body.get("to") or ""), clear=body.get("clear", False)))
+        if action == "id_format":
+            try:
+                body = await _json_object(request)
+                fmt = body.get("format")
+                if type(fmt) is not int or fmt not in (LEGACY_ID_FORMAT, ID_FORMAT):
+                    raise BadRequest(f"format must be {LEGACY_ID_FORMAT} (hass_<domain>_ ids) or {ID_FORMAT} (hass_<domain>- ids)")
+            except BadRequest as err:
+                return _bad(self, err)
+            return self.json(await self.publisher.async_set_id_format(fmt))
         return self.json_message("unknown action", status_code=400)

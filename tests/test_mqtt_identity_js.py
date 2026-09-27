@@ -65,6 +65,21 @@ class BrokerLineTest(unittest.TestCase):
         self.assertEqual(o["italic"], 0)
         self.assertIsNone(o["button"])
 
+    def test_no_id_format_choice_where_the_record_holds_one(self):
+        for name in ("default", "instance", "remembered", "warned", "invalid"):
+            self.assertEqual(self.out[name]["formats"], [], name)
+
+    def test_an_undecided_id_format_can_be_chosen_with_its_cost(self):
+        o = self.out["undecided"]
+        self.assertIn("discovery waits", o["text"])
+        self.assertEqual(o["formats"], ["Keep hass_demo_…", "Use hass_demo-…"])
+        self.assertEqual(len(o["confirms"]), 1)
+        self.assertIn("1 keeps the ids this container published before (hass_demo_…", o["confirms"][0])
+        self.assertIn("2 takes the new unambiguous ids (hass_demo-…)", o["confirms"][0])
+        self.assertIn("Choosing wrong makes the main Home Assistant create every entity again, as duplicates", o["confirms"][0])
+        self.assertEqual(o["sent"], [["api/mqtt/id_format", {"format": 1}]])
+        self.assertEqual(self.out["undecided_new"]["sent"], [["api/mqtt/id_format", {"format": 2}]])
+
     def test_invalid_is_the_reason_and_escaped(self):
         o = self.out["invalid"]
         self.assertIn("HRI_INSTANCE='<b>x</b>' is not an instance name", o["text"])

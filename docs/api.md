@@ -41,7 +41,7 @@ Exceptions:
 | Builder / dev | `GET /api/catalog?q=`, `GET /api/build/options`, `POST /api/build/{check,prepare}`, `GET /api/dev`, `POST /api/dev/install` |
 | Configuration | `POST /api/flow/start`, `GET /api/flow/progress`, `POST/DELETE /api/flow/<id>`, `POST/DELETE /api/options/<flow_id>`, `GET/POST /api/yaml/<domain>`, `GET /api/entries`, `POST /api/entries/<entry_id>/{options,reload,delete}` |
 | Patches | `GET /api/patches/<domain>`, `POST /api/patches/<domain>/upload`, `POST /api/patches/<domain>/<name>/{apply,delete}`, `GET /api/patch_editor/<domain>?name=`, `POST /api/patch_editor/<domain>/{check,save}` |
-| MQTT | `GET/POST /api/mqtt/config`, `GET/POST /api/mqtt/rules`, `POST /api/mqtt/{reconnect,republish,move_identity}`, `GET /api/mqtt/discovery`, `GET /api/mqtt/commands` |
+| MQTT | `GET/POST /api/mqtt/config`, `GET/POST /api/mqtt/rules`, `POST /api/mqtt/{reconnect,republish,move_identity,id_format}`, `GET /api/mqtt/discovery`, `GET /api/mqtt/commands` |
 | Entities | `GET /api/entities`, `POST /api/entities/<entity_id>/{rename,name,disable,enable,delete,mqtt_exclude,mqtt_include,mqtt_name}`, `GET /api/devices`, `POST /api/devices/<device_id>/{name,delete}`, `GET /api/services`, `POST /api/services/call` |
 | System | `GET /api/ha`, `POST /api/ha/{update,rollback,check}`, `POST /api/restart`, `GET/POST /api/settings` |
 | Backups | `GET /api/backups`, `POST /api/backups/create`, `POST /api/backups/upload`, `GET /api/backups/<name>/download`, `POST /api/backups/<name>/{restore,delete}`, `POST /api/backups/restore/cancel` |
@@ -64,7 +64,8 @@ Exceptions:
   deferred, error, since}`, the configured broker's first. `identity_source`,
   `identity_instance`, `identity_problem`, `identity_warning` and `identity_move_to` say where the
   base topic comes from ([Identity](mqtt.md#identity)); `identity_warning` also says why discovery waits
-  while the [id format](mqtt.md#id-format) is undecided.
+  while the [id format](mqtt.md#id-format) is undecided, and `ids_undecided` holds that reason alone (empty
+  once decided). `id_format_choosable` is true while `POST /api/mqtt/id_format` may set it.
 - `POST /api/mqtt/move_identity` `{"to": "<identity>", "clear": false}`: moves
   the running integration to `identity_move_to`, which `to` must repeat; only
   while MQTT is connected. `clear` (default `false`) also clears the old names
@@ -73,6 +74,16 @@ Exceptions:
   offline ([Two instances](mqtt.md#two-instances-of-the-same-integration)).
   Answers `{ok, from, to, cleared}` or `{ok: false, error}`; a body that is not
   a JSON object, or a `clear` that is not `true` or `false`, is a `400`.
+- `POST /api/mqtt/id_format` `{"format": 1}`: sets the [id format](mqtt.md#id-format)
+  of the running plain identity where the broker cannot decide it: `1` keeps the
+  `hass_<domain>_` ids this volume published with 0.26.0 or older, `2` takes
+  `hass_<domain>-`; the wrong one makes the main HA create every entity again,
+  as duplicates. `mqtt_identity.json` is read again first; refused (`ok: false`)
+  for an instance, and where the record already holds the identity with a
+  format. Recorded and announced at once over a live connection, else at the
+  next connection. Answers `{ok, identity, id_format, prefix, recorded}` or
+  `{ok: false, error}`; a body that is not a JSON object, or a `format` that is
+  not the integer `1` or `2`, is a `400`.
 - `GET /api/summary` includes `manager_update`: the running release and the
   newer ones the banner shows.
 - `GET /api/status` `health`: the verdict published on MQTT (`state`,
