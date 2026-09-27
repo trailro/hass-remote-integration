@@ -815,7 +815,7 @@ class MqttPublisher:
         except Exception as err:  # noqa: BLE001
             return (f"discovery waits: whether {base} keeps the ids it published with 0.26.0 or older is decided by the "
                     f"retained discovery configs under {prefix}/, which could not be read in full ({err}); read again at "
-                    "the next connection and full republish")
+                    "the next connection and full republish, or choose the id format on the MQTT page")
         legacy = any(self._is_ours(t, p, base) and _has_ids_of(p, base + "_") for t, p in found.items())
         self._identity.decide(base, disc.LEGACY_ID_FORMAT if legacy else disc.ID_FORMAT)
         _LOGGER.info("MQTT: %s uses %s ids (%s)", base, f"{base}_" if legacy else f"{base}-",
@@ -3985,6 +3985,45 @@ class MqttPublisher:
             await self.hass.async_add_executor_job(self._remember_identity, base, self.config.discovery_prefix)
         _LOGGER.info("MQTT: discovery of %s announced under %s ids", base, self._live_prefix)
 
+    def _id_format_choosable(self, base: str | None) -> bool:
+        """The MQTT page may set the id format of ``base``: a plain identity the record does not hold with one."""
+        return bool(self._identity is not None and base and disc.INSTANCE_SEP not in base
+                    and self._identity.recorded_id_format(base) is None)
+
+    async def async_set_id_format(self, id_format: int) -> dict[str, Any]:
+        """The MQTT page's choice of the id format of the running plain identity, where the retained discovery configs
+        cannot decide it (a broker whose ACL hides or refuses them, a store over the scan's maximum, a restore onto a
+        fresh volume whose broker lost them too): LEGACY_ID_FORMAT keeps the hass_<domain>_ ids this volume published,
+        ID_FORMAT takes hass_<domain>-.  Only while the record does not hold it with a format (reloaded first: it is
+        not read again while running); recorded and announced at once over a live connection, else at the next."""
+        async with self._conn_lock:
+            if self._identity is None:
+                return {"ok": False, "error": "no identity to choose the ids of"}
+            await self.hass.async_add_executor_job(self._identity.load)
+            base = self.wanted_base_topic
+            if not base:
+                return {"ok": False, "error": self._identity.blocking() or "no integration runs: there is no identity to choose the ids of"}
+            if disc.INSTANCE_SEP in base:
+                return {"ok": False, "error": f"{base} is an instance identity: its ids always use -"}
+            if not self._id_format_choosable(base):
+                return {"ok": False, "error": f"mqtt_identity.json holds id_format {self._identity.recorded_id_format(base)} for {base}: "
+                                              "the ids this volume announced; another format makes the main Home Assistant create "
+                                              "every entity again"}
+            self._identity.decide(base, id_format)
+            live = self._live_base == base
+            if live:
+                self._set_ids_undecided(base, "")
+                self._live_prefix = self._prefix_for(base)
+                if self._connected and not self._moving:
+                    await self.hass.async_add_executor_job(self._remember_identity, base, self.config.discovery_prefix)
+            prefix = self._prefix_for(base)
+        _LOGGER.warning("MQTT: id format of %s set on the MQTT page: %s ids", base, prefix)
+        events.emit("mqtt", f"id format of {base} set by hand: {prefix} ids")
+        if live and self._connected:
+            await self.async_republish_all()
+        return {"ok": True, "identity": base, "id_format": id_format, "prefix": prefix,
+                "recorded": self._identity.recorded_id_format(base) == id_format}
+
     def status(self) -> dict[str, Any]:
         named = bool(self._live_base or self.wanted_base_topic)  # no identity: no topic is used, "hass_none" is no name
         return {
@@ -4002,6 +4041,9 @@ class MqttPublisher:
                                                                   "identity_instance": None, "identity_problem": None,
                                                                   "identity_move_to": None}),
             "retained_cleanup_pending": self.retained_cleanup_pending(),  # uninstalled identities a broker did not take yet
+            # why discovery waits for the id format, and whether the MQTT page may set it (async_set_id_format)
+            "ids_undecided": self._ids_undecided,
+            "id_format_choosable": self._id_format_choosable(self.wanted_base_topic),
             "prefix": self.prefix if named else None,
             "force_base_topic": self.config.force_base_topic,
             "tls": self.config.tls,
