@@ -266,9 +266,12 @@ the manager device while `manager_discovery` announces it. A manager-device
 orphan is removed by its component key; a unique id that is no component of
 that device is refused. An orphan on a device this container does not announce
 is removed with an empty config for that device, and only when the device's
-retained config on the broker carries this container's exact origin: the others
-(another container's device, or a config that could not be read) are left, and
-listed in `skipped` and in `not_ours` ([Id format](mqtt.md#id-format)).
+retained config on the broker carries this container's exact origin. The others
+are left, listed in `skipped` and by reason: `not_ours` (the config carries
+another origin: another container's device), `not_on_broker` (no config is
+retained for that device, so nothing shows it is this container's; delete such
+entities on the main HA) and `unreadable` (the configs could not be read in
+full: try again) ([Id format](mqtt.md#id-format)).
 
 While the [id format](mqtt.md#id-format) is undecided, which entities on the
 main HA are this container's is unknown: `GET /api/parity` answers

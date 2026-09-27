@@ -285,22 +285,26 @@ class ParityActionView(ManagerView):
             # A device not announced here is cleared with an empty config, which removes every entity of it: only one
             # whose retained config carries our origin (the id came from a prefix another identity's ids may start with)
             retained = await self.publisher.async_retained_ours(o.get("discovery_id") for o in todo)
-            ours = {d for d, mine in retained.items() if mine}
-            removed, skipped, not_ours = [], [], []
+            ours = {d for d, verdict in retained.items() if verdict == "ours"}
+            refused: dict[str, list[str]] = {"not_ours": [], "not_on_broker": [], "unreadable": []}
+            removed, skipped = [], []
             for o in todo:
                 if o.get("discovery_id") and self.publisher.remove_discovered_component(o["discovery_id"], o["our_entity_id"], o["parent_domain"],
                                                                                         retained_ours=ours):
                     removed.append(o["parent_entity_id"])
                 else:
                     skipped.append(o["parent_entity_id"])
-                    if retained.get(o.get("discovery_id")) is False:
-                        not_ours.append(o["parent_entity_id"])
+                    if (verdict := retained.get(o.get("discovery_id"))) in refused:
+                        refused[verdict].append(o["parent_entity_id"])
             res = {"ok": True, "removed": removed, "skipped": skipped + [x for x in ids if x not in by_id],
                    "note": "removal forms published; the parent drops them within seconds"}
-            if not_ours:
-                res["not_ours"] = not_ours
-                res["note"] += (f"; {len(not_ours)} skipped: their device is not announced here and its retained config does not "
-                                "carry this container's origin (another container's device, or unreadable)")
+            why = {"not_ours": "their device's retained config carries another origin (another container's device)",
+                   "not_on_broker": "their device has no retained config on the broker, so nothing shows it is this container's",
+                   "unreadable": "the retained configs of their device could not be read"}
+            for verdict, entity_ids in refused.items():
+                if entity_ids:
+                    res[verdict] = entity_ids
+                    res["note"] += f"; {len(entity_ids)} skipped, not announced here: {why[verdict]}"
             return self.json(res)
         return self.json_message("unknown action", status_code=400)
 

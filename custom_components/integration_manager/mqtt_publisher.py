@@ -3075,22 +3075,25 @@ class MqttPublisher:
             _LOGGER.info("MQTT: cleared %s retained documents of entities that no longer exist", len(stale))
         return len(stale)
 
-    async def async_retained_ours(self, discovery_ids) -> dict[str, bool]:
-        """Of ``discovery_ids``, those not announced now, each with whether its retained config on the broker carries
-        this identity's exact origin (False as well when it could not be read): what remove_discovered_component may
-        clear.  An id derived from a unique id or a device identifier that only starts with our prefix may be
-        another container's (hass_a_ + binary_demo_nodevice is hass_a_binary_ + demo_nodevice)."""
+    async def async_retained_ours(self, discovery_ids) -> dict[str, str]:
+        """Of ``discovery_ids``, those not announced now, each with what its retained config on the broker says:
+        ``ours`` (this identity's exact origin: what remove_discovered_component may clear), ``not_ours`` (another
+        origin), ``not_on_broker`` (none retained) or ``unreadable`` (the configs could not be read in full).  An id
+        derived from a unique id or a device identifier that only starts with our prefix may be another container's
+        (hass_a_ + binary_demo_nodevice is hass_a_binary_ + demo_nodevice)."""
         groups, _ = self._announced_groups()
         topics = {self._discovery_topic(d): d for d in set(discovery_ids) if d and d not in groups}
         if not topics:
             return {}
         try:
-            found = await self.hass.async_add_executor_job(self._retained_scan, "gate", [(t, 1) for t in topics])
+            # strict: a scan cut short would take a config it did not read for one that is not there
+            found = await self.hass.async_add_executor_job(lambda: self._retained_scan("gate", [(t, 1) for t in topics], strict=True))
         except Exception as err:  # noqa: BLE001 - unknown is not ours
             _LOGGER.warning("MQTT: could not read the retained discovery configs to be cleared (%s): none is cleared", err)
-            found = {}
+            return dict.fromkeys(topics.values(), "unreadable")
         base = self.base_topic
-        return {d: t in found and self._is_ours(t, found[t], base) for t, d in topics.items()}
+        return {d: "not_on_broker" if t not in found else "ours" if self._is_ours(t, found[t], base) else "not_ours"
+                for t, d in topics.items()}
 
     def remove_discovered_component(self, discovery_id: str, entity_id: str, platform: str,
                                     retained_ours: Collection[str] = ()) -> bool:
