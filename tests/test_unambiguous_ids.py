@@ -8,7 +8,9 @@ uses hass_<domain>- (id_format 2); one that did keeps hass_<domain>_ for good, a
 """
 
 import asyncio
+import contextlib
 import json
+import logging
 import os
 import threading
 import time
@@ -327,8 +329,8 @@ class IdFormatTest(_Case):
         self.assertEqual((pub.prefix, self.scans), ("hass_demo-", []))
 
     async def test_a_volume_that_published_keeps_its_ids_byte_identical(self):
-        """0.25.x's record (no domain) and 0.26.0's (domain, pinned): hass_<domain>_ ids, no scan, and every name
-        0.26.0 announced is the same string."""
+        """0.25.x's record (no domain) and 0.26.0's (domain, pinned): hass_<domain>_ ids, one scan (for hass_demo- ids
+        a rollback would have left) and none once recorded, and every name 0.26.0 announced is the same string."""
         broker = {**BROKER, "port": self.port}
         records = {"0.25.x": {**LEGACY, "base": "hass_demo", "broker": broker},
                    "0.26.0": {"base": "hass_demo", "prefix": "homeassistant", "broker": broker, "domain": "demo", "pinned": True}}
@@ -336,9 +338,10 @@ class IdFormatTest(_Case):
         for version, record in records.items():
             with self.subTest(version):
                 mp.write_json(self.path, record)
+                self.scans.clear()
                 pub = self.pub_with(self.identity())
                 await self.connect_names(pub)
-                self.assertEqual((pub.prefix, self.scans), ("hass_demo_", []))
+                self.assertEqual((pub.prefix, self.scans), ("hass_demo_", ["ids"]))
                 self.assertEqual(self.record(), {**record, "domain": "demo", "pinned": True, "id_format": disc.LEGACY_ID_FORMAT})
                 # 0.26.0's names: the identity prefix was the base and a "_"
                 old_pub = mp.MqttPublisher.__new__(mp.MqttPublisher)
@@ -349,8 +352,11 @@ class IdFormatTest(_Case):
                 self.assertIn("hass_demo_sensor.power", names["unique_ids"])
                 self.assertIn("hass_demo_demo_nodevice", names["discovery_ids"])
                 self.assertIn("hass_demo_manager", names["devices"])
-                # and the next start reads the record it wrote the same way
-                self.assertEqual(self.pub_with(self.identity()).prefix, "hass_demo_")
+                # and the next start reads the record it wrote the same way, without a scan
+                self.scans.clear()
+                pub = self.pub_with(self.identity())
+                await self.connect_names(pub)
+                self.assertEqual((pub.prefix, self.scans), ("hass_demo_", []))
 
     async def test_a_missing_record_follows_what_is_retained(self):
         """A volume whose record was deleted (it was damaged): its own retained configs say which ids it announced."""
@@ -492,9 +498,10 @@ class IdFormatTest(_Case):
             sweep.assert_awaited_once()
 
     async def connected(self, id_format, **config):
-        """hass_demo connected, its record holding ``id_format``, announcing sensor.power on its device-less device."""
-        mp.write_json(self.path, {"base": "hass_demo", "prefix": "homeassistant", "broker": {**BROKER, "port": self.port},
-                                  "domain": "demo", "pinned": True, "id_format": id_format})
+        """hass_demo connected, its record holding ``id_format`` (None: 0.26.0's, without one), announcing sensor.power
+        on its device-less device."""
+        record = {"base": "hass_demo", "prefix": "homeassistant", "broker": {**BROKER, "port": self.port}, "domain": "demo", "pinned": True}
+        mp.write_json(self.path, record if id_format is None else {**record, "id_format": id_format})
         pub = self.pub_with(self.identity(), discovery_enabled=True, **config)
         await self.connect_names(pub)
         pub._client, pub._connected, pub._moving = self.store.live(), True, False
@@ -530,6 +537,70 @@ class IdFormatTest(_Case):
                 await pub._async_sweep_orphans()
                 self.assertEqual(self.store.cleared, [leftover])
                 self.assertEqual(self.store.retained, {t: p for t, p in before.items() if t != leftover})
+
+    @contextlib.contextmanager
+    def logged(self, level):
+        """assertLogs on the publisher's logger, which _Case silences."""
+        logging.disable(logging.NOTSET)
+        try:
+            with self.assertLogs(mp._LOGGER, level) as logs:
+                yield logs
+        finally:
+            logging.disable(logging.CRITICAL)
+
+    async def test_a_rollback_to_0260_and_back_keeps_the_original_entities(self):
+        """A volume that started with hass_demo- ids, rolled back to 0.26.0 with discovery on (which announced
+        hass_demo_ ids, so the main HA made _2 twins of every entity, and rewrote the record without id_format), then
+        updated again: its own hass_demo- configs prove it published them, so it keeps hass_demo- and the sweep clears
+        the hass_demo_ configs, the twins; the originals stay."""
+        self.both_formats("hass_demo_")
+        pub = await self.connected(None)
+        self.assertEqual((pub.prefix, self.scans), ("hass_demo-", ["ids"]))
+        self.assertEqual((self.record()["id_format"], self.record()["id_format_source"]), (disc.ID_FORMAT, "scan"))
+        self.assertEqual(pub._id_format_status("hass_demo")["id_format_source"], "scan")
+        before = dict(self.store.retained)
+        with self.logged("INFO") as logs:
+            await pub._async_sweep_orphans()
+        # counted as what they are, not as empty devices
+        self.assertEqual([line for line in logs.output if "cleared" in line or "empty devices" in line],
+                         ["INFO:custom_components.integration_manager.mqtt_publisher:MQTT: cleared 1 discovery configs "
+                          "hass_demo announced in hass_demo_ ids, the id format it does not use"])
+        twins = _config("hass_demo", "hass_demo_")[0]
+        self.assertEqual(self.store.cleared, [twins])
+        self.assertEqual(self.store.retained, {t: p for t, p in before.items() if t != twins})
+        self.assertIn(_config("hass_demo", "hass_demo-")[0], self.store.retained)
+        # recorded: the next start reads it, and scans nothing
+        self.scans.clear()
+        pub = self.pub_with(self.identity())
+        await self.connect_names(pub)
+        self.assertEqual((pub.prefix, self.scans), ("hass_demo-", []))
+
+    async def test_a_record_without_id_format_and_no_own_dash_configs_stays_legacy(self):
+        """0.26.0's record, only hass_demo_ configs of this origin (other containers' hass_demo- and hass_demo_binary-
+        ones do not count): hass_demo_, recorded as before, byte for byte, and scanned once."""
+        self.store.retained.update([_config("hass_demo", "hass_demo_"), _config("hass_demo-garage", "hass_demo-garage-"),
+                                    _config("hass_demo_binary", "hass_demo_binary-")])
+        pub = await self.connected(None)
+        record = {"base": "hass_demo", "prefix": "homeassistant", "broker": {**BROKER, "port": self.port}, "domain": "demo", "pinned": True}
+        self.assertEqual((pub.prefix, self.scans), ("hass_demo_", ["ids"]))
+        self.assertEqual(self.record(), {**record, "id_format": disc.LEGACY_ID_FORMAT})
+        self.assertEqual(pub._id_format_status("hass_demo")["id_format_source"], "recorded")
+        await pub._async_sweep_orphans()
+        self.assertEqual(self.store.cleared, [])
+        self.scans.clear()
+        pub = self.pub_with(self.identity())
+        await self.connect_names(pub)
+        self.assertEqual((pub.prefix, self.scans), ("hass_demo_", []))
+
+    async def test_a_record_without_id_format_stays_legacy_when_the_scan_fails(self):
+        """The read that would find hass_demo- configs is incomplete: never undecided for an install that works, it
+        keeps hass_demo_ as before, and the log says so."""
+        self.both_formats("hass_demo_")
+        with mock.patch.object(mp, "RETAINED_SCAN_MAX_BYTES", 10), self.logged("WARNING") as logs:
+            pub = await self.connected(None)
+        self.assertEqual((pub.prefix, pub._ids_undecided, self.record()["id_format"]), ("hass_demo_", "", disc.LEGACY_ID_FORMAT))
+        self.assertNotIn("id_format_source", self.record())
+        self.assertTrue(any("hass_demo-" in line and "could not" in line for line in logs.output), logs.output)
 
     async def test_an_uninstall_ends_the_undecided_state(self):
         """No integration runs any more: there is no identity whose id format waits, and nothing says one does."""
