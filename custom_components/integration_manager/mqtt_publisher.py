@@ -4111,7 +4111,10 @@ class MqttPublisher:
             if disc.INSTANCE_SEP in base:
                 return {"ok": False, "error": f"{base} is an instance identity: its ids always use -"}
             current = self._identity.id_format(base)
-            changed = current is not None and current != id_format
+            if current == id_format:  # nothing to change: the record, where it came from and what is announced stay
+                return {"ok": True, "identity": base, "id_format": id_format, "prefix": self._prefix_for(base),
+                        "recorded": self._identity.recorded_id_format(base) == id_format, "changed": False}
+            changed = current is not None
             if changed and not confirm:
                 where = _ID_FORMAT_SOURCE_TEXT.get(self._identity.id_format_source(base) or "", "recorded")
                 return {"ok": False, "error": f"{base} uses id format {current} ({where}): changing it re-creates this "
