@@ -103,9 +103,16 @@ def _parent_client(hass: HomeAssistant, installer: Installer) -> ParentHA:
     return ParentHA(hass, str(st.data.get("parent_ha_url") or ""), str(st.data.get("parent_ha_token") or ""))
 
 
+class IdsUndecided(ValueError):
+    """The id format of this container's identity is unknown (MqttPublisher._ids_undecided): so is which of the
+    parent's entities are its own, and a guessed prefix would show every entity missing."""
+
+
 async def compute_parity(hass: HomeAssistant, installer: Installer, publisher: MqttPublisher, light: bool = False) -> dict[str, Any]:
     """light=True (the cutover wait, polled every 5 s): only the parent's
     entity registry, no states/devices (on a big parent get_states is MB)."""
+    if why := publisher._ids_undecided:  # noqa: SLF001
+        raise IdsUndecided(f"id format undecided: nothing is compared until it is decided ({why})")
     prefix = publisher.prefix
     client = _parent_client(hass, installer)
     t0 = time.monotonic()
@@ -225,7 +232,7 @@ class ParityView(ManagerView):
         try:
             parity = await compute_parity(self.hass, self.installer, self.publisher, light=request.query.get("light") == "1")
         except ValueError as err:
-            return self.json({"ok": False, "error": str(err)})
+            return self.json({"ok": False, "error": str(err), **({"ids_undecided": True} if isinstance(err, IdsUndecided) else {})})
         except Exception as err:  # noqa: BLE001
             return self.json({"ok": False, "error": f"{type(err).__name__}: {err}"})
         return self.json({"ok": True, **parity})
@@ -317,6 +324,7 @@ class CutoverView(ManagerView):
             "mqtt_connected": bool(self.publisher.stats.get("connected")),
             "discovery_enabled": self.publisher.config.discovery_enabled,
             "discovery_devices": self.publisher.stats.get("discovery_devices", 0),
+            "ids_undecided": self.publisher._ids_undecided,  # noqa: SLF001 - why nothing is announced or compared yet
             "parent_configured": bool(st.data.get("parent_ha_url")) and bool(st.data.get("parent_ha_token")),
             "smoke_pending": bool(self.installer.smoke.get("pending") or self.installer.state.pending_smoke),
         }

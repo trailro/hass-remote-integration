@@ -440,7 +440,7 @@ class ParityStateComparisonTest(unittest.TestCase):
         hass = mock.Mock()
         hass.states.async_entity_ids.return_value = []
         hass.states.get.return_value = SimpleNamespace(state=ours_state)
-        publisher = mock.Mock(prefix=PREFIX, base_topic=BASE)
+        publisher = mock.Mock(prefix=PREFIX, base_topic=BASE, _ids_undecided="")
         publisher.config.discovery_enabled, publisher.config.manager_discovery = True, True
         uid = PREFIX + entity_id
         publisher.discovery_preview.return_value = [{
