@@ -626,6 +626,21 @@ class IdFormatTest(_Case):
         self.assertEqual(await pub.hass.async_add_executor_job(pub._decide_id_format, "hass_demo"), "")
         self.assertEqual(pub._prefix_for("hass_demo"), "hass_demo_")
 
+    async def test_a_move_back_reads_the_broker_again(self):
+        """What the scan gave hass_demo does not outlive a Move away: a Move back reads what is retained by then."""
+        ident = self.identity()
+        pub = self.pub_with(ident)
+        await self.connect_names(pub)  # nothing retained: hass_demo-
+        self.assertEqual(ident.id_format("hass_demo"), disc.ID_FORMAT)
+        ident.release()  # a Move, as async_move_identity does it: released, then the new identity recorded
+        ident.write({"base": "hass_demo-garage", "prefix": "homeassistant", "broker": {**BROKER, "port": self.port},
+                     "domain": "demo", "pinned": True, "id_format": disc.ID_FORMAT})
+        self.assertIsNone(ident.id_format("hass_demo"))
+        self.store.retained.update([_config("hass_demo", "hass_demo_")])  # e.g. restored onto this broker meanwhile
+        self.scans.clear()
+        self.assertEqual(await pub.hass.async_add_executor_job(pub._decide_id_format, "hass_demo"), "")
+        self.assertEqual((self.scans, pub._prefix_for("hass_demo")), (["ids"], "hass_demo_"))
+
     async def test_an_id_format_no_version_wrote_is_a_damaged_record(self):
         for value in ("2", 3, -1, None, True, 2.0):
             with self.subTest(value=value):
