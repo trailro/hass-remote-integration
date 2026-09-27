@@ -381,8 +381,15 @@ class UnambiguousIdentityTest(_Dir):
         names_a, names_b = _names(a, entity_ids_a, domain_a), _names(b, entity_ids_b, domain_b)
         for kind in names_a:
             self.assertFalse(names_a[kind] & names_b[kind], (kind, names_a[kind] & names_b[kind]))
-        # parity takes a unique id or a device identifier that starts with its prefix for its own
-        self.assertFalse(a.prefix.startswith(b.prefix) or b.prefix.startswith(a.prefix), (a.prefix, b.prefix))
+        # parity takes a unique id or a device identifier for its own when own_rest gives its rest (a prefix ending in
+        # "-"), or when it starts with its prefix (hass_<domain>_ ids); the manager device's discovery id, <base>_manager,
+        # is only ever compared whole
+        for one, other in ((a, names_b), (b, names_a)):
+            for kind in ("unique_ids", "devices", "discovery_ids"):
+                ids = [x for x in other[kind] if not (kind == "discovery_ids" and x.endswith("_manager"))]
+                claimed = [x for x in ids if (disc.own_rest(one.prefix, x) is not None if one.prefix.endswith(disc.INSTANCE_SEP)
+                                              else x.startswith(one.prefix))]
+                self.assertEqual(claimed, [], (one.prefix, kind))
         for t in names_b["topics"]:
             self.assertFalse(t.startswith(a.base_topic + "/"), t)
         for t in names_a["topics"]:
@@ -401,7 +408,8 @@ class UnambiguousIdentityTest(_Dir):
         self.assertEqual(ident.key("hri"), "hass_hri-probe")
 
     def test_no_unique_id_of_an_instance_is_the_plain_ones(self):
-        """hass_a_ + binary_sensor.foo would be the instance binary's sensor.foo with a "_" between them."""
+        """hass_a_ + binary_sensor.foo would be the instance binary's sensor.foo with a "_" between them; hass_a- (a
+        volume that never published hass_a) starts hass_a-binary-, and own_rest refuses a rest with a "-" in it."""
         plain, instance = self.pub("a", None), self.pub("a", "binary")
         self.assert_share_nothing(plain, instance, ["binary_sensor.foo"], ["sensor.foo"], "a", "a")
 
@@ -483,7 +491,8 @@ class PublisherIdentityTest(_Case):
             self.assertTrue(await pub.hass.async_add_executor_job(pub._sweep_old_identity, pub.wanted_base_topic))
         self.assertEqual((broker.scans, broker.cleared), ([], []))
         self.assertEqual({k: v for k, v in self.record().items() if k != "broker"},
-                         {"base": "hass_hri_probe", "prefix": "homeassistant", "domain": "hri_probe", "pinned": True})
+                         {"base": "hass_hri_probe", "prefix": "homeassistant", "domain": "hri_probe", "pinned": True,
+                          "id_format": disc.LEGACY_ID_FORMAT})
         # the next boot reads that record: still the same names, with or without HRI_INSTANCE
         for env in ("garage", None, "other"):
             self.assertEqual(self.identity(env).key("hri_probe"), "hass_hri_probe", env)
@@ -628,7 +637,8 @@ class PublisherIdentityTest(_Case):
         self.assertEqual(cleared, [("hass_hri_probe", "homeassistant", True)])  # documents and discovery configs of the old names
         pub._disconnect.assert_called_once_with(False)  # no retained "offline" on a status topic just cleared
         self.assertEqual({k: v for k, v in self.record().items() if k != "broker"},
-                         {"base": "hass_hri_probe-garage", "prefix": "homeassistant", "domain": "hri_probe", "pinned": False})
+                         {"base": "hass_hri_probe-garage", "prefix": "homeassistant", "domain": "hri_probe", "pinned": False,
+                          "id_format": disc.ID_FORMAT})
         self.assertEqual(self.identity("garage").key("hri_probe"), "hass_hri_probe-garage")
         self.assertTrue(ident.pin("hass_hri_probe-garage"))  # its first connection held
         self.assertEqual(self.identity(None).key("hri_probe"), "hass_hri_probe-garage")

@@ -580,6 +580,20 @@ def _published_state(state: str) -> str:
     return _TOKEN_VALUE.sub(r"\1***", state) if _TOKEN_URL.search(state) else state
 
 
+def _has_ids_of(payload: bytes, prefix: str) -> bool:
+    """A retained device config holding a device identifier or a unique id that starts with ``prefix``."""
+    try:
+        doc = json.loads(payload)
+    except ValueError:
+        return False
+    if not isinstance(doc, dict):
+        return False
+    device = doc.get("device") if isinstance(doc.get("device"), dict) else {}
+    comps = doc.get("components") if isinstance(doc.get("components"), dict) else {}
+    ids = list(device.get("identifiers") or []) + [c.get("unique_id") for c in comps.values() if isinstance(c, dict)]
+    return any(isinstance(i, str) and i.startswith(prefix) for i in ids)
+
+
 def _comp_key(entity_id: str) -> str:
     return entity_id.replace(".", "_", 1)
 
@@ -621,6 +635,9 @@ class MqttPublisher:
     _stopping = False  # Home Assistant is stopping: no client may be created any more
     _identity: Any = None  # installer.MqttIdentity, set in __init__
     _identity_sweep_due = False  # the sweep of an identity that changed while disconnected failed: retried after a connect
+    # why the id format of the live identity is unknown (the retained discovery configs could not be read in full): no
+    # discovery config goes out and none is swept until a full republish reads them (_async_decide_id_format)
+    _ids_undecided = ""
     # the last CONNACK was a refusal: paho follows it with a disconnection ("Unspecified error"), which must not replace the reason
     _refused = False
     # manager device discovery topics announced to the main HA (kept on disk), None before a record exists (a new install, or
@@ -770,7 +787,42 @@ class MqttPublisher:
 
     @property
     def prefix(self) -> str:
-        return self._live_prefix or disc.identity_prefix(self._key_provider() or "hass_none")
+        return self._live_prefix or self._prefix_for(self._key_provider() or "hass_none")
+
+    def _prefix_for(self, base: str) -> str:
+        """identity_prefix in the id format of ``base`` (installer.MqttIdentity.id_format; the unambiguous one while it
+        is undecided, when nothing is announced).  Without an identity the key provider alone names it, with the ids
+        of 0.26.0."""
+        if self._identity is None:
+            return disc.identity_prefix(base, disc.LEGACY_ID_FORMAT)
+        return disc.identity_prefix(base, self._identity.id_format(base) or disc.ID_FORMAT)
+
+    def _decide_id_format(self, base: str) -> str:
+        """Blocking: the id format of the plain identity ``base`` when mqtt_identity.json does not say it (a volume that
+        never published it, a deleted record, a Move back to it): hass_<domain>_ ids in a retained discovery config of
+        this identity (its exact origin) mean it published them, and keeps them; none means hass_<domain>-.  Returns
+        why it is still undecided (the configs could not be read in full), empty once decided."""
+        if self._identity is None or self._identity.id_format(base) is not None:
+            return ""
+        prefix = self.config.discovery_prefix
+        try:
+            found = self._retained_scan("ids", [(f"{prefix}/device/+/config", 1)], strict=True)
+        except Exception as err:  # noqa: BLE001
+            return (f"discovery waits: whether {base} keeps the ids it published with 0.26.0 or older is decided by the "
+                    f"retained discovery configs under {prefix}/, which could not be read in full ({err}); tried again at "
+                    "every full republish")
+        legacy = any(self._is_ours(t, p, base) and _has_ids_of(p, base + "_") for t, p in found.items())
+        self._identity.decide(base, disc.LEGACY_ID_FORMAT if legacy else disc.ID_FORMAT)
+        _LOGGER.info("MQTT: %s uses %s ids (%s)", base, f"{base}_" if legacy else f"{base}-",
+                     "found in its retained discovery configs" if legacy else "none of its retained discovery configs has the older ones")
+        return ""
+
+    def _set_ids_undecided(self, base: str, why: str) -> None:
+        if why and why != self._ids_undecided:
+            _LOGGER.warning("MQTT: %s", why)
+        self._ids_undecided = why
+        if self._identity is not None:
+            self._identity.undecided = (base, why) if why else None
 
     @property
     def client_id(self) -> str:
@@ -1272,11 +1324,12 @@ class MqttPublisher:
         foreign = [t for t, p in found.items() if not self._is_ours(t, p, base_topic)]
         return {"foreign": sorted(foreign)[:20], "foreign_count": len(foreign), "ours": len(found) - len(foreign)}
 
-    def _retained_scan(self, suffix: str, topics: list[tuple[str, int]], min_s: float = 2.0) -> dict[str, bytes]:
+    def _retained_scan(self, suffix: str, topics: list[tuple[str, int]], min_s: float = 2.0, strict: bool = False) -> dict[str, bytes]:
         """Blocking: a throwaway client that collects every retained message
         under `topics` until the burst goes quiet, or until it holds
         RETAINED_SCAN_MAX_BYTES; returns {topic: payload}.  The network
-        thread is always stopped, whatever happens."""
+        thread is always stopped, whatever happens.  ``strict``: RuntimeError
+        instead of what was read, when that maximum left messages unread."""
         found: dict[str, bytes] = {}
         budget = [0, 0]  # bytes held, messages left unread once the budget was spent (paho's thread only)
 
@@ -1306,6 +1359,9 @@ class MqttPublisher:
             _LOGGER.warning("MQTT: the %s scan stopped at %s retained topics (%s bytes, its maximum): at least %s further "
                             "retained messages under %s were left unread",
                             suffix, len(found), budget[0], budget[1], ", ".join(t for t, _q in topics))
+            if strict:
+                raise RuntimeError(f"the scan stopped at its maximum of {RETAINED_SCAN_MAX_BYTES // 1048576} MB, "
+                                   f"{budget[1]} retained messages unread")
         return found
 
     def _throwaway_client(self, suffix: str, what: str, deadline: float, on_message: Any = None) -> mqtt.Client:
@@ -1661,12 +1717,14 @@ class MqttPublisher:
                 self._probed_ok.add(probe_key)  # this process owns the namespace now: no re-probe on reconnects
         elif self.config.force_base_topic:
             self.stats["foreign_topics"], self.stats["foreign_count"] = [], 0
+        # before the record is written: it records the id format with the names
+        self._set_ids_undecided(base, self._decide_id_format(base))
         # a failed sweep (the broker unreachable right now) is retried by the full republish after paho connects
         self._identity_sweep_due = not self._sweep_old_identity(base)
         if self._stopping:
             return
         self._live_base = base
-        self._live_prefix = disc.identity_prefix(base)
+        self._live_prefix = self._prefix_for(base)
         self._tls_checked_at, self._tls_error, self._last_disconnect = 0.0, "", ""  # new settings: report afresh
         self._connected_at, self._broker_max_packet = 0.0, 0
         old = self._client
@@ -2608,6 +2666,8 @@ class MqttPublisher:
         c = self._client
         if c is None or not self._connected or self._moving:
             return False
+        if self._ids_undecided and topic.startswith(f"{self.config.discovery_prefix}/device/"):
+            return False  # which ids to announce under is unknown: nothing is announced, nothing removed
         if payload is not None and self._oversized(topic, payload):
             return False
         if payload is None:
@@ -2924,7 +2984,7 @@ class MqttPublisher:
             self._boot_removed |= {(discovery_id, _comp_key(eid)) for eid in entity_ids}
 
     def _publish_discovery_all(self, follow_up: bool = True) -> None:
-        if not self.config.discovery_enabled:
+        if not self.config.discovery_enabled or self._ids_undecided:
             return  # e.g. a delayed republish that lands after an undo
         groups, counts = self._announced_groups()
 
@@ -3503,7 +3563,7 @@ class MqttPublisher:
     def _publish_manager_discovery(self) -> None:
         """The manager device on its own while entity discovery is off (with
         discovery on, _publish_discovery_all carries it)."""
-        if self.config.discovery_enabled or not self._connected or self._moving:
+        if self.config.discovery_enabled or not self._connected or self._moving or self._ids_undecided:
             return
         mid, block, comps = self._manager_discovery()
         if self.config.manager_discovery:
@@ -3858,13 +3918,15 @@ class MqttPublisher:
             async with self._conn_lock:
                 if self._identity_sweep_due and self._connected and not self._moving:
                     self._identity_sweep_due = not await self.hass.async_add_executor_job(self._sweep_old_identity, self.base_topic)
-        if self.config.discovery_enabled and self._orphan_sweep_due and self._boot_components is None:
+        if self._ids_undecided:
+            await self._async_decide_id_format()
+        if self.config.discovery_enabled and self._orphan_sweep_due and self._boot_components is None and not self._ids_undecided:
             await self._async_read_boot_components()
         if self.config.discovery_enabled:
             self._publish_discovery_all()
         self._publish_manager_discovery()
         self.publish_manager()
-        if self._resync_excluded:
+        if self._resync_excluded and not self._ids_undecided:
             self._resync_excluded = False
             await self._async_resync_excluded()
         if self._undiscover_due and not self.config.discovery_enabled:
@@ -3878,7 +3940,8 @@ class MqttPublisher:
                 _LOGGER.info("MQTT: discovery turned off: removed %s announced devices from the consumer", removed)
             except RuntimeError as err:
                 _LOGGER.warning("MQTT: removing the announced entities after discovery was turned off failed, retried: %s", err)
-        if self._orphan_sweep_due and self.hass.is_running and time.time() - self._started_at > ORPHAN_SWEEP_DELAY_S:
+        if self._orphan_sweep_due and self.hass.is_running and time.time() - self._started_at > ORPHAN_SWEEP_DELAY_S \
+                and not self._ids_undecided:
             self._orphan_sweep_due = False  # a connect after HA started: the timer from _on_started may have found it disconnected
             await self._async_sweep_orphans()
         await self._publish_services()
@@ -3887,6 +3950,23 @@ class MqttPublisher:
             n, self.stats["services_published"], self.stats["discovery_devices"], self.stats["discovery_components"],
         )
         return n
+
+    async def _async_decide_id_format(self) -> None:
+        """The id format was undecided at the connect: read the retained discovery configs again, and once they decide,
+        record it and announce under it (the discovery below, in the same full republish)."""
+        async with self._conn_lock:  # a Move or a reconnect rewrites the record and the live names: never in between
+            base = self._live_base
+            if not (self._ids_undecided and self._connected and not self._moving and base):
+                return
+            why = await self.hass.async_add_executor_job(self._decide_id_format, base)
+            if self._live_base != base:
+                return
+            self._set_ids_undecided(base, why)
+            if why:
+                return
+            self._live_prefix = self._prefix_for(base)
+            await self.hass.async_add_executor_job(self._remember_identity, base, self.config.discovery_prefix)
+        _LOGGER.info("MQTT: discovery of %s announced under %s ids", base, self._live_prefix)
 
     def status(self) -> dict[str, Any]:
         named = bool(self._live_base or self.wanted_base_topic)  # no identity: no topic is used, "hass_none" is no name

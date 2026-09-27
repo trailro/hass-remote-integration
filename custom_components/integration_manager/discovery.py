@@ -47,12 +47,21 @@ ORIGIN = {
 INSTANCE_SEP = "-"
 
 
-def identity_prefix(key: str) -> str:
-    """What the unique ids and device identifiers of identity ``key`` start with: ``hass_<domain>_`` as always, and
-    ``hass_<domain>-<instance>-`` for an instance, whose name may hold a ``_``: with a ``_`` there, garage's
-    ``binary_sensor.x`` and garage_binary's ``sensor.x`` would get the same unique id, and one identity's prefix would
-    start the other's (parity takes what starts with its prefix for its own)."""
-    return key + (INSTANCE_SEP if INSTANCE_SEP in key else "_")
+# the id format of what a volume published under its plain identity (mqtt_identity.json's "id_format", decided by
+# installer.MqttIdentity.id_format): a volume that published with 0.26.0 or older keeps LEGACY_ID_FORMAT for good, so
+# its unique ids, device identifiers and discovery topics, and the entities on the main Home Assistant, stay
+LEGACY_ID_FORMAT = 1  # hass_<domain>_<rest>
+ID_FORMAT = 2  # hass_<domain>-<rest>
+ID_FORMAT_UNDECIDED = 0  # recorded while the retained discovery configs could not be read in full: nothing is announced
+
+
+def identity_prefix(key: str, id_format: int = ID_FORMAT) -> str:
+    """What the unique ids, device identifiers and device discovery ids of identity ``key`` start with:
+    ``hass_<domain>-``, and ``hass_<domain>-<instance>-`` for an instance, whatever ``id_format`` says.  A ``_``
+    there is also inside domains and instance names: hass_a_ + ``binary_sensor.x`` is hass_a_binary_ + ``sensor.x``,
+    and one identity's prefix starts the other's; no domain, entity id, device id or instance name holds a ``-``
+    (own_rest).  ``hass_<domain>_`` only for LEGACY_ID_FORMAT, the plain identity of a volume that published it."""
+    return key + ("_" if id_format == LEGACY_ID_FORMAT and INSTANCE_SEP not in key else INSTANCE_SEP)
 
 
 def own_rest(prefix: str, value: Any) -> str | None:
