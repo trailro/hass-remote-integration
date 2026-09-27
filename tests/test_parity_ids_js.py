@@ -1,4 +1,5 @@
-"""The Cutover page while the id format is undecided, (tests/js/parity_ids.mjs).
+"""The Cutover page while the id format is undecided, and why Remove orphans left some alone
+(tests/js/parity_ids.mjs).
 
 Needs node, which the container the unit tests run in does not have: it skips there and runs wherever node is
 installed (a developer machine, CI)."""
@@ -35,6 +36,15 @@ class CutoverIdsTest(unittest.TestCase):
         o = self.out["parity"]
         self.assertIsNone(o["result"])
         self.assertIn("id format undecided: nothing is compared until it is decided", o["shown"])
+
+    def test_each_reason_an_orphan_was_left(self):
+        (line,) = self.out["remove_orphans"]["logs"]
+        self.assertTrue(line.startswith("removed 1"), line)
+        self.assertIn("1 left alone: their device is another container's (sensor.x)", line)
+        self.assertIn("1 left alone: their device has no retained config on the broker", line)
+        self.assertIn("(sensor.gone)", line)
+        self.assertIn("1 left alone: the retained configs of their device could not be read (try again) (sensor.dark)", line)
+        self.assertNotIn("another container's (sensor.gone", line)
 
 
 if __name__ == "__main__":

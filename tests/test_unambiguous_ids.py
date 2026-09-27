@@ -218,7 +218,7 @@ class DestructiveDiscoveryGateTest(unittest.TestCase):
                 # and the publisher refuses the other's device whatever asks it to
                 for one, other in ((a, b), (b, a)):
                     retained = asyncio.run(one.pub.async_retained_ours([other.did]))
-                    self.assertEqual(retained, {other.did: False})
+                    self.assertEqual(retained, {other.did: "not_ours"})
                     self.assertFalse(one.pub.remove_discovered_component(other.did, other.entity_id, "sensor", retained_ours=set()))
                 self.assertEqual(self.store.retained, before)
 
@@ -249,8 +249,23 @@ class DestructiveDiscoveryGateTest(unittest.TestCase):
         a, b, _client = self.containers(*self.PAIRS["legacy + legacy"])
         a.pub._group_by_device = lambda: ({}, {})
         with mock.patch.object(mp.MqttPublisher, "_retained_scan", side_effect=RuntimeError("the broker went away")):
-            self.assertEqual(asyncio.run(a.pub.async_retained_ours([a.did, None])), {a.did: False})
+            self.assertEqual(asyncio.run(a.pub.async_retained_ours([a.did, None])), {a.did: "unreadable"})
         self.assertFalse(a.pub.remove_discovered_component(a.did, "sensor.y", "sensor"))  # nothing verified: refused
+        self.assertEqual(self.store.cleared, [])
+
+    def test_each_reason_an_orphan_is_left_is_named(self):
+        """Another origin, no config on the broker, or none readable: each is refused, and said as it is."""
+        a, b, client = self.containers(*self.PAIRS["legacy + legacy"])
+        del self.store.retained[a.pub._discovery_topic(b.did)]  # b's device config went from the broker
+        res = self.remove_orphans(a, client, ["sensor.x"])
+        self.assertEqual((res["removed"], res["skipped"], res["not_on_broker"]), ([], ["sensor.x"], ["sensor.x"]))
+        self.assertNotIn("not_ours", res)
+        self.assertIn("no retained config on the broker", res["note"])
+        self.assertNotIn("another container", res["note"])
+        with mock.patch.object(mp.MqttPublisher, "_collect_quiet", staticmethod(lambda *a, **k: True)):  # cut short
+            res = self.remove_orphans(a, client, ["sensor.x"])
+        self.assertEqual((res["removed"], res["unreadable"]), ([], ["sensor.x"]))
+        self.assertIn("could not be read", res["note"])
         self.assertEqual(self.store.cleared, [])
 
 
