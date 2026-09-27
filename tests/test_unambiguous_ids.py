@@ -379,6 +379,7 @@ class IdFormatTest(_Case):
         # a restart reads the record: still undecided, so it scans again
         self.assertIsNone(self.identity().id_format("hass_demo"))
         # the next full republish reads them in full: decided, recorded, announced from then on
+        pub._ids_tried_at -= mp.IDS_RETRY_MIN_S
         await pub._async_decide_id_format()
         self.assertEqual((pub._ids_undecided, pub.prefix, self.record()["id_format"]), ("", "hass_demo_", disc.LEGACY_ID_FORMAT))
         self.assertIsNone(pub._identity.describe()["identity_warning"])
@@ -429,6 +430,7 @@ class IdFormatTest(_Case):
                 self.assertEqual((pub.prefix, self.record()["id_format"]), ("hass_demo-", disc.ID_FORMAT_UNDECIDED))
                 # a full read decides as before
                 pub._client, pub._connected, pub._moving = self.store.live(), True, False
+                pub._ids_tried_at -= mp.IDS_RETRY_MIN_S
                 await pub._async_decide_id_format()
                 self.assertEqual((pub._ids_undecided, pub.prefix, self.record()["id_format"]), ("", "hass_demo_", disc.LEGACY_ID_FORMAT))
 
@@ -438,6 +440,27 @@ class IdFormatTest(_Case):
         with mock.patch.object(mp.MqttPublisher, "_collect_quiet", staticmethod(lambda *a, **k: True)):
             found = await pub.hass.async_add_executor_job(pub._retained_scan, "cleanup", [("homeassistant/device/+/config", 1)])
         self.assertEqual(list(found), list(self.store.retained))
+
+    async def undecided(self, **config):
+        """A volume without a record whose read stopped at its maximum, connected."""
+        self.store.retained.update([_config("hass_demo", "hass_demo_"), _config("hass_other", "hass_other_")])
+        pub = self.pub_with(self.identity(), **config)
+        with mock.patch.object(mp, "RETAINED_SCAN_MAX_BYTES", 10):
+            await self.connect_names(pub)
+        self.assertTrue(pub._ids_undecided)
+        pub._client, pub._connected, pub._moving = self.store.live(), True, False
+        pub._broker_max_packet, pub._oversized_warned = 0, set()
+        return pub
+
+    async def test_the_connection_read_is_not_repeated_at_once(self):
+        """The full republish that follows the connection does not read up to 64 MB again seconds later."""
+        pub = await self.undecided()
+        self.scans.clear()
+        await pub._async_decide_id_format()
+        self.assertEqual((self.scans, bool(pub._ids_undecided)), ([], True))
+        pub._ids_tried_at -= mp.IDS_RETRY_MIN_S
+        await pub._async_decide_id_format()
+        self.assertEqual((self.scans, pub._ids_undecided), (["ids"], ""))
 
     async def test_the_connect_decides_before_it_records(self):
         for complete in (True, False):

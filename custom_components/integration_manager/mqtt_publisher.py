@@ -170,6 +170,9 @@ STOP_JOIN_S = 5  # how long stopping a client waits for its network thread befor
 # further topics are left unread - the same outcome a scan cut short by _collect_quiet's maximum already has, and a
 # sweep that reads less removes less, never the wrong thing.  Our own documents are a few KB each.
 RETAINED_SCAN_MAX_BYTES = 64 * 1024 * 1024
+# an undecided id format is read again at a full republish, but not within this long of the last read: the full
+# republish that follows every connection would otherwise repeat the connection's own read (up to 64 MB) seconds later
+IDS_RETRY_MIN_S = 60
 PUBLISH_MAX_BYTES = 1024 * 1024
 # paho 2.1 ignores the receive maximum an MQTT 5 broker announces and keeps up to this many QoS 1 messages
 # unacknowledged; a broker announcing less (HiveMQ: 10) may close the connection over it
@@ -638,6 +641,7 @@ class MqttPublisher:
     # why the id format of the live identity is unknown (the retained discovery configs could not be read in full): no
     # discovery config goes out and none is swept until a full republish reads them (_async_decide_id_format)
     _ids_undecided = ""
+    _ids_tried_at = 0.0  # time.monotonic() of the last read that was to decide it
     # the last CONNACK was a refusal: paho follows it with a disconnection ("Unspecified error"), which must not replace the reason
     _refused = False
     # manager device discovery topics announced to the main HA (kept on disk), None before a record exists (a new install, or
@@ -805,12 +809,13 @@ class MqttPublisher:
         if self._identity is None or self._identity.id_format(base) is not None:
             return ""
         prefix = self.config.discovery_prefix
+        self._ids_tried_at = time.monotonic()
         try:
             found = self._retained_scan("ids", [(f"{prefix}/device/+/config", 1)], strict=True)
         except Exception as err:  # noqa: BLE001
             return (f"discovery waits: whether {base} keeps the ids it published with 0.26.0 or older is decided by the "
-                    f"retained discovery configs under {prefix}/, which could not be read in full ({err}); tried again at "
-                    "every full republish")
+                    f"retained discovery configs under {prefix}/, which could not be read in full ({err}); read again at "
+                    "the next connection and full republish")
         legacy = any(self._is_ours(t, p, base) and _has_ids_of(p, base + "_") for t, p in found.items())
         self._identity.decide(base, disc.LEGACY_ID_FORMAT if legacy else disc.ID_FORMAT)
         _LOGGER.info("MQTT: %s uses %s ids (%s)", base, f"{base}_" if legacy else f"{base}-",
@@ -3967,7 +3972,8 @@ class MqttPublisher:
         record it and announce under it (the discovery below, in the same full republish)."""
         async with self._conn_lock:  # a Move or a reconnect rewrites the record and the live names: never in between
             base = self._live_base
-            if not (self._ids_undecided and self._connected and not self._moving and base):
+            if not (self._ids_undecided and self._connected and not self._moving and base) \
+                    or time.monotonic() - self._ids_tried_at < IDS_RETRY_MIN_S:
                 return
             why = await self.hass.async_add_executor_job(self._decide_id_format, base)
             if self._live_base != base:
