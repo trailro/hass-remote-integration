@@ -123,24 +123,30 @@ async def compute_parity(hass: HomeAssistant, installer: Installer, publisher: M
     mqtt_loaded = "mqtt" in (p_config.get("components") or [])
     from homeassistant.const import Platform
 
-    from .discovery import manager_device
+    from .discovery import INSTANCE_SEP, manager_device, own_rest
 
     # the publisher announces every state, non-platform domains (zone, person, ...) mirrored as sensors
     platforms = {p.value for p in Platform} | {eid.split(".", 1)[0] for eid in hass.states.async_entity_ids()}
     manager_uids = {c["unique_id"][len("k_"):] for c in manager_device("k", "k_", dict.fromkeys(("status", "health", "manager", "cmd"), "t"), "x", "", True)[2].values()}
 
+    def _rest(value: Any) -> str | None:
+        if prefix.endswith(INSTANCE_SEP):  # an instance, or a plain identity with unambiguous ids: nothing else is its own
+            return own_rest(prefix, value)
+        # hass_<domain>_ (ids a volume published with 0.26.0 or older keep): hass_a_ also starts hass_a_binary_'s ids,
+        # which the rules below mostly tell apart; what they cannot, the publisher refuses to clear (not our origin)
+        return value[len(prefix):] if isinstance(value, str) and value.startswith(prefix) else None
+
     def _ours_uid(uid: Any) -> bool:
-        # exactly this identity: hass_a must not claim hass_a_b's entities, whose ids start with hass_a_ too
-        if not isinstance(uid, str) or not uid.startswith(prefix):
+        rest = _rest(uid)
+        if rest is None:
             return False
-        rest = uid[len(prefix):]
         m = re.fullmatch(r"([a-z_]+)\.[a-z0-9_]+", rest)
         return (bool(m) and m.group(1) in platforms) or rest in manager_uids
 
     def _ours_device(ident: str) -> bool:
-        rest = ident[len(prefix):] if ident.startswith(prefix) else None
+        rest = _rest(ident)
         return rest is not None and (bool(re.fullmatch(r"[0-9a-f]{32}", rest)) or rest == "manager"
-                                     or bool(re.fullmatch(r"[a-z0-9_]+_nodevice", rest)))  # <integration>_nodevice; the exact prefix scopes it
+                                     or bool(re.fullmatch(r"[a-z0-9_]+_nodevice", rest)))  # <integration>_nodevice
 
     parent_by_uid = {e["unique_id"]: e for e in p_entities if e.get("platform") == "mqtt" and _ours_uid(e.get("unique_id"))}
     p_state = {s["entity_id"]: s for s in p_states}
@@ -182,6 +188,10 @@ async def compute_parity(hass: HomeAssistant, installer: Installer, publisher: M
             continue
         pdev = p_dev.get(pe.get("device_id") or "") or {}
         disc_id = next((i[1] for i in (pdev.get("identifiers") or []) if isinstance(i, list) and len(i) == 2 and _ours_device(str(i[1]))), None)
+        if disc_id is not None and _rest(disc_id) == "manager":
+            # every other device is announced under its identifier; the manager device (<prefix>manager) under
+            # <base>_manager, the same string only for a prefix ending in "_"
+            disc_id = f"{publisher.base_topic}_manager"
         orphans.append({"unique_id": uid, "parent_entity_id": pe["entity_id"], "parent_name": pe.get("name") or pe.get("original_name"),
                         "parent_disabled_by": pe.get("disabled_by"), "parent_domain": pe["entity_id"].split(".", 1)[0],
                         "our_entity_id": uid[len(prefix):], "discovery_id": disc_id})
