@@ -258,7 +258,11 @@ A volume whose plain identity uses `-` ids (`"id_format": 2`: it first
 published with a release after 0.26.0) announces `hass_<domain>_` ids once
 rolled back to 0.26.0 or older: the main HA takes them for new entities, which
 get `_2` entity ids while the others hold theirs. Roll such a volume back with
-discovery off, or delete those entities on the main HA afterwards.
+discovery off. With 0.26.0 itself both sets stay until you delete one on the
+main HA. 0.26.0 rewrites `mqtt_identity.json` without `id_format`, so after an
+update again the volume keeps the `_` ids 0.26.0 announced, and the orphan
+sweep (five minutes after the start) clears the `-` configs it left: the main
+HA deletes the original entities and keeps the `_2` ones.
 
 ## Connection
 
@@ -817,6 +821,10 @@ without waiting. Otherwise it waits for the sweep: a config of a device no
 longer announced is cleared then, or, when entities still setting up are left
 in it, keeps them with a removal form for every other one. Either way the
 devices the entities moved to are announced again a few seconds later.
+The sweep also clears the configs with this identity's exact origin in the
+[id format](#id-format) it does not use now (left by a rollback to 0.26.0
+with discovery on, a restore or a hand edit), except the manager device's,
+which is announced again over it.
 
 ## What the main Home Assistant needs
 
