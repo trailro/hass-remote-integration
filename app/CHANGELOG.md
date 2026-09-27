@@ -3,6 +3,31 @@
 Every version's changes are in the
 [GitHub releases](https://github.com/trailro/hass-remote-integration/releases).
 
+## 0.27.0
+
+- **Fixed: Remove orphans could delete another container's entities.** Two
+  containers of integrations like `a` and `a_binary` on one broker: the
+  Cutover page of `a` could take some of `a_binary`'s entities for its own
+  orphans and empty their discovery config. A container now clears a device
+  it does not announce only when its retained config carries this
+  container's own origin; anything else is left and reported (`not_ours`,
+  `not_on_broker`, `unreadable`).
+- **Unambiguous ids for new volumes.** A volume that never published uses
+  `hass_<domain>-…` ids, as instances already did (`-` is in no domain, so
+  two containers' ids never collide). **A volume that published with 0.26.0
+  or older keeps its ids**: nothing is migrated, nothing changes on the main
+  Home Assistant. A volume without `mqtt_identity.json` reads its own
+  retained configs first and keeps the format it finds.
+- **When the format cannot be decided** (a broker that refuses or hides the
+  configs, an incomplete read), no discovery config is announced until it
+  can, and the MQTT page says why and lets you choose. **Change id format**
+  on the MQTT page switches a decided format behind a confirmation (entity
+  ids and history stay; areas, names and labels set on the main HA do not).
+- **Rolling back** a volume that started with `-` ids to 0.26.0 makes the
+  main HA create its entities again with `_2` ids; updating again removes
+  those and keeps the originals. See
+  [MQTT: Id format](https://github.com/trailro/hass-remote-integration/blob/main/docs/mqtt.md#id-format).
+
 ## 0.26.0
 
 - **Two instances of the same integration can share a broker.** A new
