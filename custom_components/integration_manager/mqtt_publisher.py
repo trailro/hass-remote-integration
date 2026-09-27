@@ -1727,7 +1727,8 @@ class MqttPublisher:
             return
         base = self.wanted_base_topic
         if not base:
-            # nothing running -> no identity -> nothing to publish under
+            # nothing running -> no identity -> nothing to publish under, and no id format that waits
+            self._set_ids_undecided("", "")
             self.stats["connect_error"] = "no integration is running: MQTT has no identity (hass_<domain>, or hass_<domain>-<instance>) until one starts"
             _LOGGER.info("MQTT: %s", self.stats["connect_error"])
             return

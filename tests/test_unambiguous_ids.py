@@ -531,6 +531,15 @@ class IdFormatTest(_Case):
                 self.assertEqual(self.store.cleared, [leftover])
                 self.assertEqual(self.store.retained, {t: p for t, p in before.items() if t != leftover})
 
+    async def test_an_uninstall_ends_the_undecided_state(self):
+        """No integration runs any more: there is no identity whose id format waits, and nothing says one does."""
+        pub = await self.undecided()
+        pub._identity._domain = pub._key_provider = lambda: None  # uninstalled
+        pub.stats, pub._stopping, pub._cleanup_pending = {}, False, {}
+        await pub.hass.async_add_executor_job(pub._connect)
+        self.assertIn("no integration is running", pub.stats["connect_error"])
+        self.assertEqual((pub._ids_undecided, pub._identity.undecided), ("", None))
+
     async def test_the_mqtt_page_sets_an_undecided_id_format(self):
         for fmt, prefix in ((disc.LEGACY_ID_FORMAT, "hass_demo_"), (disc.ID_FORMAT, "hass_demo-")):
             with self.subTest(fmt=fmt):
