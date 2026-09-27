@@ -540,6 +540,23 @@ class IdFormatTest(_Case):
         self.assertIn("no integration is running", pub.stats["connect_error"])
         self.assertEqual((pub._ids_undecided, pub._identity.undecided), ("", None))
 
+    @staticmethod
+    def status(pub):
+        pub.hass.states = mock.Mock(async_all=lambda: [], get=lambda _eid: None)
+        pub.stats, pub.history, pub._health_last = getattr(pub, "stats", {}), [], {"state": "ok"}
+        pub._cleanup_pending, pub._cleanup_pending_lock = getattr(pub, "_cleanup_pending", {}), threading.Lock()
+        with mock.patch.object(mp.er, "async_get", return_value=mock.Mock(entities={})), \
+                mock.patch.object(pub, "recent_commands", return_value=[]):
+            return pub.status()
+
+    async def test_the_status_names_no_prefix_while_undecided(self):
+        """hass_demo- is only what nothing is announced under yet: the status does not name it."""
+        pub = await self.undecided()
+        self.assertIsNone(self.status(pub)["prefix"])
+        pub._ids_tried_at -= mp.IDS_RETRY_MIN_S
+        await pub._async_decide_id_format()
+        self.assertEqual(self.status(pub)["prefix"], "hass_demo_")
+
     async def test_the_mqtt_page_sets_an_undecided_id_format(self):
         for fmt, prefix in ((disc.LEGACY_ID_FORMAT, "hass_demo_"), (disc.ID_FORMAT, "hass_demo-")):
             with self.subTest(fmt=fmt):
