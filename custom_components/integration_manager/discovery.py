@@ -55,6 +55,16 @@ def identity_prefix(key: str) -> str:
     return key + (INSTANCE_SEP if INSTANCE_SEP in key else "_")
 
 
+def own_rest(prefix: str, value: Any) -> str | None:
+    """What follows ``prefix`` (one that ends in ``-``) in a unique id, device identifier or discovery id of the identity
+    whose prefix it is, or None when ``value`` is not one of its ids.  The rest of an id never holds a ``-``: one that
+    does belongs to an instance of the same domain (``hass_a-`` + ``garage-sensor.x``)."""
+    if not isinstance(value, str) or not value.startswith(prefix):
+        return None
+    rest = value[len(prefix):]
+    return rest if rest and INSTANCE_SEP not in rest else None
+
+
 def origin(prefix: str) -> dict[str, Any]:
     """Origin block naming the instance (prefix = identity_prefix of the instance key)."""
     return {**ORIGIN, "name": f"{ORIGIN['name']} ({prefix[:-1] if prefix.endswith(('_', INSTANCE_SEP)) else prefix})"}
