@@ -593,9 +593,12 @@ class PublisherIdentityTest(_Case):
         pub = self.pub_with(self.identity("-bad"), force_base_topic=True)
         pub._client, pub._connected, pub.stats, pub._stopping = None, False, {}, False
         pub._cleanup_pending = {}
+        # the record has no id_format: the one read for hass_hri_probe- configs (none here) uses a client of its own
         with mock.patch.object(mp.MqttPublisher, "_new_client") as new_client, \
+                mock.patch.object(mp.MqttPublisher, "_retained_scan", return_value={}) as scan, \
                 mock.patch.object(mp.MqttPublisher, "_sweep_old_identity", return_value=True) as sweep:
             await pub.hass.async_add_executor_job(pub._connect)
+        self.assertEqual([c.args[0] for c in scan.call_args_list], ["ids"])
         new_client.assert_called_once_with("hass_hri_probe")
         sweep.assert_called_once_with("hass_hri_probe")
         self.assertEqual(pub.stats["connect_error"], "")

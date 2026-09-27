@@ -810,20 +810,39 @@ class MqttPublisher:
     def _decide_id_format(self, base: str) -> str:
         """Blocking: the id format of the plain identity ``base`` when mqtt_identity.json does not say it (a volume that
         never published it, a deleted record, a Move back to it): hass_<domain>_ ids in a retained discovery config of
-        this identity (its exact origin) mean it published them, and keeps them; none means hass_<domain>-.  Returns
-        why it is still undecided (the configs could not be read in full), empty once decided."""
-        if self._identity is None or self._identity.id_format(base) is not None:
+        this identity (its exact origin) mean it published them, and keeps them; none means hass_<domain>-.  A record
+        from 0.26.0 or older (no id_format) is hass_<domain>_ unless configs of this exact origin hold hass_<domain>-
+        ids, which such a volume never announced: it started with them and was rolled back to 0.26.0, whose record
+        lost the format; a read that fails leaves it hass_<domain>_, never undecided.  Returns why it is still
+        undecided (the configs could not be read in full), empty once decided."""
+        if self._identity is None:
+            return ""
+        unverified = self._identity.unverified_legacy(base)
+        if not unverified and self._identity.id_format(base) is not None:
             return ""
         prefix = self.config.discovery_prefix
         self._ids_tried_at = time.monotonic()
         try:
             found = self._retained_scan("ids", [(f"{prefix}/device/+/config", 1)], strict=True)
         except Exception as err:  # noqa: BLE001
+            if unverified:
+                self._identity.decide(base, disc.LEGACY_ID_FORMAT, "recorded")
+                _LOGGER.warning("MQTT: %s keeps the %s_ ids its record from 0.26.0 or older gives it: whether it announced "
+                                "%s- ids before a rollback to 0.26.0 could not be read (%s)", base, base, base, err)
+                return ""
             return (f"discovery waits: whether {base} keeps the ids it published with 0.26.0 or older is decided by the "
                     f"retained discovery configs under {prefix}/, which could not be read in full ({err}); read again by "
                     f"the next full republish (not within {IDS_RETRY_MIN_S} s of this read), or choose the id format on "
                     "the MQTT page")
         ours = [p for t, p in found.items() if self._is_ours(t, p, base)]
+        if unverified:
+            newer = any(_has_ids_of(p, base + disc.INSTANCE_SEP) for p in ours)
+            self._identity.decide(base, disc.ID_FORMAT if newer else disc.LEGACY_ID_FORMAT, "scan" if newer else "recorded")
+            if newer:
+                _LOGGER.warning("MQTT: %s uses %s- ids: its record from 0.26.0 or older says %s_, but its retained discovery "
+                                "configs hold %s- ones (a rollback to 0.26.0 and an update again); its %s_ configs are "
+                                "cleared by the orphan sweep", base, base, base, base, base)
+            return ""
         legacy = any(_has_ids_of(p, base + "_") for p in ours)
         # none of ours: also what a broker ACL that hides the configs shows, which the MQTT page can correct
         self._identity.decide(base, disc.LEGACY_ID_FORMAT if legacy else disc.ID_FORMAT, "scan" if ours else "scan_empty")
@@ -3290,7 +3309,7 @@ class MqttPublisher:
         # drop it, or the consumer keeps it there and ignores it in the config of the device it moved to
         owner = {eid: did for did, (_block, comps) in groups.items() for eid in comps}
         moved_to: set[str] = set()
-        removed_components, cleared_devices, docs = 0, 0, []
+        removed_components, cleared_devices, other_format, docs = 0, 0, 0, []
         other = self._other_id_prefix(base)
         for topic, payload in found.items():
             if not self._is_ours(topic, payload, base):
@@ -3306,7 +3325,7 @@ class MqttPublisher:
                         and self._in_other_id_format(topic, payload, base, other):
                     # the main HA keeps these entities next to those announced now: the whole config goes
                     if self._publish(topic, None, qos=1):
-                        cleared_devices += 1
+                        other_format += 1
                     continue
                 if topic == manager_topic or not self.config.discovery_enabled:
                     continue
@@ -3352,7 +3371,7 @@ class MqttPublisher:
                 self._last_hash.pop(self._discovery_topic(did), None)
             self.hass.loop.call_later(5, self._publish_discovery_all, False)
         if docs:
-            if removed_components or cleared_devices:
+            if removed_components or cleared_devices or other_format:
                 await asyncio.sleep(2)  # the removal forms reach the consumer before the documents empty (no "Erroneous JSON")
             try:
                 await self.hass.async_add_executor_job(self._clear_topics, "orphans", docs)
@@ -3361,6 +3380,9 @@ class MqttPublisher:
         if removed_components or cleared_devices or docs:
             _LOGGER.info("MQTT: removed %s orphan components, %s empty devices and %s documents of entities that no longer exist",
                          removed_components, cleared_devices, len(docs))
+        if other_format:
+            _LOGGER.info("MQTT: cleared %s discovery configs %s announced in %s ids, the id format it does not use",
+                         other_format, base, other)
 
     async def _async_resync_excluded(self) -> None:
         """Retained documents of excluded integrations, and discovery configs of

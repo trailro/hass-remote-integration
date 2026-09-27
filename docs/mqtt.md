@@ -124,7 +124,12 @@ instance always uses `-`. The plain identity `hass_<domain>` uses:
   (`hass_demo_sensor.power`), for good: its record has no `id_format`, and gets
   `"id_format": 1` at the next connection. Nothing it announced changes and
   nothing is migrated: unique ids, device identifiers, discovery topics and the
-  entity ids on the main HA stay what they were.
+  entity ids on the main HA stay what they were. Before that connection the
+  container reads the retained discovery configs once: configs of this
+  identity's exact origin with `-` ids mean it started with `-` and was rolled
+  back to 0.26.0 (see [Rolling back](#rolling-back-to-a-release-without-instances)),
+  and it keeps `-` (`"id_format": 2`, source `scan`). A read that is not
+  complete leaves it `_`, with a warning in the log.
 
 Why: a `_` is also inside domains, so with `_` the ids of two plain identities
 can meet. `hass_a_` + `binary_sensor.x` is `hass_a_binary_` + `sensor.x`, and
@@ -175,7 +180,8 @@ reason, and `POST /api/cutover/status` says it in `ids_undecided`.
 
 The MQTT page shows the format and where it came from (`id_format` and
 `id_format_source` in `GET /api/mqtt/status`: `recorded` by 0.26.0 or older,
-`scan` from this identity's retained configs, `scan_empty` from a read that
+`scan` from this identity's retained configs (also for a record of 0.26.0 or
+older that its `-` configs overrule), `scan_empty` from a read that
 found none of them, `chosen` on the page, `instance`); `mqtt_identity.json`
 keeps the source next to the format. Where the read cannot decide (a refused
 subscription or a store over the maximum fails every time), the page offers
@@ -277,12 +283,15 @@ published with a release after 0.26.0) announces `hass_<domain>_` ids once
 rolled back to 0.26.0 or older: the main HA takes them for new entities, which
 get `_2` entity ids while the others hold theirs. Roll such a volume back with
 discovery off. With 0.26.0 itself both sets stay until you delete one on the
-main HA. 0.26.0 rewrites `mqtt_identity.json` without `id_format`, so after an
-update again the volume keeps the `_` ids 0.26.0 announced, and the orphan
-sweep (five minutes after the start) clears the `-` configs it left: the main
-HA deletes the original entities and keeps the `_2` ones. To keep the
-original ones instead, use **Change id format** (to `2`) on the MQTT page
-before that: the `_` configs are cleared instead.
+main HA. 0.26.0 rewrites `mqtt_identity.json` without `id_format`; after an
+update again the container finds its own `-` configs still retained, keeps the
+`-` ids, and the orphan sweep (five minutes after the start) clears the `_`
+configs 0.26.0 announced: the main HA deletes the `_2` entities and keeps the
+original ones. That needs the read at the first connection to be complete and
+the `-` configs to be still retained; otherwise the volume keeps the `_` ids,
+the sweep clears the `-` configs, and the main HA keeps the `_2` entities. Use
+**Change id format** (to `2`) on the MQTT page before the sweep to keep the
+original ones then.
 
 ## Connection
 

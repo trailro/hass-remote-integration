@@ -307,7 +307,9 @@ class MqttIdentity:
     remembered identity connects under it, with the problem shown as a warning.
 
     The ids of the plain identity (``id_format``): hass_<domain>- for a volume that never published it, hass_<domain>_
-    for good where the record holds it from 0.26.0 or older (no id_format), so nothing it announced changes.  Where the
+    for good where the record holds it from 0.26.0 or older (no id_format), so nothing it announced changes, unless
+    its retained configs of this exact origin hold hass_<domain>- ids (``unverified_legacy``: a volume that started with
+    them, rolled back to 0.26.0, which rewrote the record without id_format, and updated again).  Where the
     record does not hold it (a fresh volume, a deleted record, a Move), the retained discovery configs of this
     identity decide (the publisher's scan, ``decide``): hass_<domain>_ ids among them keep that format.  An instance
     always uses hass_<domain>-<instance>-."""
@@ -447,11 +449,22 @@ class MqttIdentity:
         rec = self.record
         if self.record_problem or rec.get("base") != base:
             return None
+        if "id_format" not in rec and base in self._decided:  # the publisher's scan of a record from 0.26.0 or older
+            return None
         return rec.get("id_format", LEGACY_ID_FORMAT) or None
 
+    def unverified_legacy(self, base: str) -> bool:
+        """The record holds the plain identity ``base`` without id_format (0.26.0 or older wrote it) and no scan has
+        checked it yet: LEGACY_ID_FORMAT unless its retained configs hold hass_<domain>- ids, which only a volume that
+        published under id_format 2 before a rollback to 0.26.0 announced (the publisher's scan, ``decide``)."""
+        rec = self.record
+        return (not self.record_problem and rec.get("base") == base and INSTANCE_SEP not in base
+                and "id_format" not in rec and base not in self._decided)
+
     def decide(self, base: str, id_format: int, source: str = "scan") -> None:
-        """What the retained discovery configs of ``base`` say (``source`` scan or scan_empty), or the MQTT page's
-        choice: kept until a record of ``base`` is written with it."""
+        """What the retained discovery configs of ``base`` say (``source`` scan or scan_empty; recorded where they leave
+        a record from 0.26.0 or older at LEGACY_ID_FORMAT), or the MQTT page's choice: kept until a record of ``base`` is
+        written with it."""
         self._decided[base] = (id_format, source)
 
     def choose(self, base: str, id_format: int) -> None:
