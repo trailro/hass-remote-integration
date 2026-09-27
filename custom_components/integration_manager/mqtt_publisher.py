@@ -3517,7 +3517,8 @@ class MqttPublisher:
         self.hass.loop.call_later(ORPHAN_SWEEP_DELAY_S, lambda: self.hass.async_create_task(self._async_orphan_sweep_if_due()))
 
     async def _async_orphan_sweep_if_due(self) -> None:
-        if self._orphan_sweep_due and self._connected and not self._moving:
+        # undecided: it could clear nothing, and would use up the sweep that deciding the format needs
+        if self._orphan_sweep_due and self._connected and not self._moving and not self._ids_undecided:
             self._orphan_sweep_due = False
             await self._async_sweep_orphans()
 
