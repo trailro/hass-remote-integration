@@ -57,6 +57,24 @@ class ManagerOrphanTest(unittest.TestCase):
 
     CASES = ((A, "hass_a_"), ("hass_a-garage", "hass_a-garage-"))
 
+    def test_named_instance_normalization_is_not_a_user_rename(self):
+        key, prefix = "hass_demo-office", "hass_demo-office-"
+        pub = camp._publisher(discovery_enabled=True, manager_discovery=True)
+        pub._live_base, pub._live_prefix, pub._key_provider = key, prefix, (lambda: key)
+        pub._group_by_device = lambda: ({}, {})
+        pub._manager_discovery = lambda: disc.manager_device(key, prefix, TOPICS, "demo", "1", False)
+        for parent_id, renamed in (("binary_sensor.hass_demo_office_integration", False),
+                                   ("binary_sensor.custom_health", True)):
+            with self.subTest(parent_id=parent_id):
+                entities = [{"entity_id": parent_id, "unique_id": f"{prefix}health_online", "platform": "mqtt"}]
+                client = mock.Mock(url="http://parent")
+                client.commands = mock.AsyncMock(return_value=[entities, [], [], {"components": ["mqtt"], "version": "2026.9.3"}])
+                with mock.patch.object(parity, "_parent_client", return_value=client):
+                    result = asyncio.run(parity.compute_parity(_hass(), mock.Mock(), pub))
+                (matched,) = result["matched"]
+                self.assertEqual(matched["renamed"], renamed)
+                self.assertEqual(result["summary"]["renamed"], int(renamed))
+
     def test_a_manager_orphan_is_removed_from_the_manager_device(self):
         for key, prefix in self.CASES:
             with self.subTest(key=key):

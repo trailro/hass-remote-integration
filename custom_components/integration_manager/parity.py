@@ -30,6 +30,7 @@ from aiohttp import ClientError, ClientWSTimeout, WSMsgType, web
 from .ui import load_template, render
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.util import slugify
 
 from . import events
 from .installer import Installer
@@ -180,9 +181,13 @@ async def compute_parity(hass: HomeAssistant, installer: Installer, publisher: M
         ps = p_state.get(pe["entity_id"])
         parent_state = ps["state"] if ps else None
         comparable = (o.get("platform") or o["entity_id"].split(".", 1)[0]) not in STATE_NOT_COMPARABLE
+        # MQTT slugifies the announced object ID before generating the parent ID.
+        announced_domain, announced_object = o["announced_entity_id"].split(".", 1)
+        expected_parent_id = f"{announced_domain}.{slugify(announced_object)}"
         matched.append({
             "unique_id": uid, "entity_id": o["entity_id"], "parent_entity_id": pe["entity_id"],
-            "renamed": pe["entity_id"] != o["announced_entity_id"], "parent_name": pe.get("name"), "parent_original_name": pe.get("original_name"),
+            "renamed": pe["entity_id"] != expected_parent_id,
+            "parent_name": pe.get("name"), "parent_original_name": pe.get("original_name"),
             "parent_disabled_by": pe.get("disabled_by"), "parent_area": pe.get("area_id"),
             "parent_device": (p_dev.get(pe.get("device_id") or "") or {}).get("name_by_user") or (p_dev.get(pe.get("device_id") or "") or {}).get("name"),
             "state": ours_state, "parent_state": parent_state, "state_comparable": comparable,
