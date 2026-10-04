@@ -624,10 +624,15 @@ def _arm_stop_watchdog(timeout: float = STOP_WATCHDOG_S) -> threading.Thread:
         events = sys.modules.get("custom_components.integration_manager.events")
         if events is not None and not events.drain(max(0.0, deadline - time.monotonic())):
             _LOGGER.critical("timeline events still pending: exiting without them")
-        # Give the listener a bounded chance to write the queued warning. Never
-        # fall back to a synchronous handler: a stalled file write can hold its
-        # lock indefinitely and prevent the watchdog from reaching the hard exit.
-        logbuffer.flush_queue(LOG_FLUSH_S)
+        # Reserve part of the log budget for process.log when stderr holds the
+        # listener up. A daemon writes the fallback: its file lock or I/O may
+        # block too, but must never prevent this thread's hard exit.
+        log_deadline = time.monotonic() + LOG_FLUSH_S
+        if not logbuffer.flush_queue(max(0.0, LOG_FLUSH_S - 0.5)) and (handler := logbuffer.find()) is not None:
+            record = _LOGGER.makeRecord(_LOGGER.name, logging.CRITICAL, __file__, 0, msg, (), None)
+            fallback = threading.Thread(target=handler.handle, args=(record,), name="stop-log-fallback", daemon=True)
+            fallback.start()
+            fallback.join(max(0.0, log_deadline - time.monotonic()))
         os._exit(1)
 
     thread = threading.Thread(target=watch, name="stop-watchdog", daemon=True)

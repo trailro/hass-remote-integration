@@ -186,6 +186,7 @@ class StopWatchdogArmingTest(unittest.TestCase):
                    "custom_components.integration_manager.events": SimpleNamespace(drain=lambda _: True)}
         with mock.patch.object(run, "_LOGGER", logger), \
              mock.patch.object(run.time, "sleep", return_value=None), \
+             mock.patch.object(run, "LOG_FLUSH_S", 0.05), \
              mock.patch.dict(run.sys.modules, modules), \
              mock.patch.object(run.logbuffer, "flush_queue", return_value=False), \
              mock.patch.object(run.logbuffer, "find", return_value=handler), \
@@ -199,6 +200,27 @@ class StopWatchdogArmingTest(unittest.TestCase):
                 thread.join(1)
             self.assertFalse(thread.is_alive())
             self.assertTrue(stopped_while_locked, "logging prevented the watchdog's hard exit")
+
+    def test_fallback_writes_when_only_the_queue_is_blocked(self):
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        logger = logging.Logger("stop-watchdog-test")
+        logger.addHandler(logging.NullHandler())
+        exited = threading.Event()
+        modules = {"custom_components.integration_manager.writer": SimpleNamespace(drain=lambda _: True),
+                   "custom_components.integration_manager.events": SimpleNamespace(drain=lambda _: True)}
+        with mock.patch.object(run, "_LOGGER", logger), \
+             mock.patch.object(run.time, "sleep", return_value=None), \
+             mock.patch.object(run, "LOG_FLUSH_S", 0.05), \
+             mock.patch.dict(run.sys.modules, modules), \
+             mock.patch.object(run.logbuffer, "flush_queue", return_value=False), \
+             mock.patch.object(run.logbuffer, "find", return_value=handler), \
+             mock.patch.object(run.os, "_exit", side_effect=lambda _: exited.set()):
+            thread = run._arm_stop_watchdog(0)
+            thread.join(1)
+            self.assertFalse(thread.is_alive())
+            self.assertTrue(exited.is_set())
+            self.assertIn("exiting hard", stream.getvalue())
 
 
 def _device(installer=None):
