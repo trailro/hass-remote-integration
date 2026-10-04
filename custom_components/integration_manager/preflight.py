@@ -34,7 +34,6 @@ import sys
 import time
 from typing import Any
 
-from homeassistant import loader
 from homeassistant.const import __version__ as ha_version
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -42,7 +41,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from jsonio import ha_vkey, tag_key
 
 from . import patches
-from .installer import _req_name, bad_requirement, read_capped
+from .installer import _dependency_rows, _req_name, bad_requirement, read_capped
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -913,18 +912,15 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
         if min_ha and ha_vkey(str(min_ha)) > ha_vkey(target):
             blockers.append(f"needs Home Assistant >= {min_ha}, target is {target}")
 
-        # 3. dependencies: every domain the manifest names must be loadable here
-        deps = list(manifest.get("dependencies", [])) + list(manifest.get("after_dependencies", []))
+        # 3. the same recursive requirement closure start() will install
         dep_rows = []
         dep_reqs: list[str] = []
-        for dep in deps:
-            try:
-                integ = await loader.async_get_integration(hass, dep)
-                dep_rows.append({"domain": dep, "found": True, "requirements": list(integ.requirements or [])})
-                dep_reqs.extend(integ.requirements or [])
-            except loader.IntegrationNotFound:
-                dep_rows.append({"domain": dep, "found": False, "requirements": []})
-                if dep in manifest.get("dependencies", []):
+        for row in await _dependency_rows(hass, domain, manifest):
+            dep = row["domain"]
+            dep_rows.append({key: row[key] for key in ("domain", "found", "requirements")})
+            dep_reqs.extend(row["requirements"])
+            if not row["found"]:
+                if row["required"]:
                     blockers.append(f"dependency '{dep}' is not available in this Home Assistant")
                 else:
                     warnings.append(f"after_dependency '{dep}' is not available here")

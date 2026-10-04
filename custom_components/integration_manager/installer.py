@@ -637,6 +637,38 @@ def track_delayed_stores() -> None:
     Store.async_delay_save = async_delay_save
 
 
+async def _dependency_rows(hass: HomeAssistant, domain: str | None, manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    """The dependency closure used by both preflight and requirements installation.
+
+    Load each domain once, including cycles and shared children. A missing
+    domain reached through a hard dependency stays required even if an
+    after_dependency reached it first. Loader cancellation propagates.
+    """
+    todo = [(dep, True) for dep in manifest.get("dependencies", [])]
+    todo += [(dep, False) for dep in manifest.get("after_dependencies", [])]
+    rows: dict[str, dict[str, Any]] = {}
+    hard_children: dict[str, list[str]] = {}
+    while todo:
+        dep, required = todo.pop()
+        if dep == domain:
+            continue
+        if dep in rows:
+            if required and not rows[dep]["required"]:
+                rows[dep]["required"] = True
+                todo.extend((child, True) for child in hard_children.get(dep, []))
+            continue
+        row = rows[dep] = {"domain": dep, "found": False, "requirements": [], "required": required}
+        try:
+            integ = await loader.async_get_integration(hass, dep)
+        except loader.IntegrationNotFound:
+            continue
+        row.update(found=True, requirements=list(integ.requirements or []))
+        hard_children[dep] = list(integ.dependencies or [])
+        todo.extend((child, required) for child in hard_children[dep])
+        todo.extend((child, False) for child in integ.after_dependencies or [])
+    return list(rows.values())
+
+
 class Installer:
     # set by ManagerDevice.__init__ (manager_device.py); None while there is none, which the watchdog allows for
     manager: Any = None
@@ -2756,21 +2788,8 @@ class Installer:
         manifest = manifest or self.installed_manifest(domain)
         if not manifest:
             return []
-        seen: set[str] = set()
-        todo = list(manifest.get("dependencies", [])) + list(manifest.get("after_dependencies", []))
-        reqs: list[str] = []
-        while todo:
-            dom = todo.pop()
-            if dom in seen or dom == domain:
-                continue
-            seen.add(dom)
-            try:
-                integ = await loader.async_get_integration(self.hass, dom)
-            except loader.IntegrationNotFound:
-                continue
-            reqs.extend(integ.requirements or [])
-            todo.extend(list(integ.dependencies or []) + list(integ.after_dependencies or []))
-        return sorted(set(reqs))
+        rows = await _dependency_rows(self.hass, domain, manifest)
+        return sorted({req for row in rows for req in row["requirements"]})
 
     async def async_reconcile(self) -> None:
         """Boot self-heal for the RUNNING integration: deployed files match
