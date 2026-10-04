@@ -109,6 +109,7 @@ class _Case(unittest.IsolatedAsyncioTestCase):
                                    async_add_executor_job=lambda f, *a: loop.run_in_executor(None, f, *a))
         pub._key_provider = lambda: running
         pub._live_base = pub._live_prefix = None
+        pub._identity = None
         pub._conn_lock = asyncio.Lock()
         pub._topics, pub._last_hash, pub._discovery_map, pub._blocks = {}, {}, {}, {}
         pub.rules = MqttRules("/nonexistent/mqtt_rules.json")  # no file: no rules, and nothing holds the connection
