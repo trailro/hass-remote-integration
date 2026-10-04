@@ -19,6 +19,7 @@ class RecursivePreflightTest(unittest.TestCase):
         manifest = {"domain": "demo", "version": "2.0", "config_flow": True,
                     "requirements": ["rootpkg==1"], "dependencies": list(dependencies), "after_dependencies": list(after)}
         inst = _installer(self, {"__init__.py": ""}, manifest)
+        inst.hass = _hass()
         inst.installed_manifest = lambda domain=None: manifest
         return inst, manifest
 
