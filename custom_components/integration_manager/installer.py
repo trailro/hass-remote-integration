@@ -674,6 +674,7 @@ class Installer:
         self._abandoned_switch: dict[str, dict[str, Any]] = {}  # domain -> restart_required before its uninstall asked for one
         self.busy = False
         self._backup_lock = asyncio.Lock()  # backups on their own queue up instead of refusing each other
+        self._active_backups: set[str] = set()  # recovery copies owned by an in-progress start
         self.state_load_error: str | None = None  # a damaged state.json, reported by the boot reconcile
         os.makedirs(self.versions_dir, exist_ok=True)
         self.state = self._load_state()
@@ -1038,8 +1039,9 @@ class Installer:
         return out
 
     def protected_backups(self) -> set[str]:
-        """Backups a full rollback still needs: never pruned automatically."""
+        """Recovery copies needed by recorded or in-progress changes."""
         out = {rec["pre_update_backup"] for rec in self.state.installed.values() if rec.get("pre_update_backup")}
+        out.update(getattr(self, "_active_backups", ()))
         if self.state.rollback_backup:
             out.add(self.state.rollback_backup)
         # a scheduled Home Assistant version change: its pre-change backup is the
@@ -1505,6 +1507,8 @@ class Installer:
         prev_domain = self.state.domain if self.state.domain != domain else None
         was_running = self.state.domain == domain
         deploy_started = False
+        active_backup = None
+        self._active_backups = getattr(self, "_active_backups", set())
         try:
             if not boot and self.state.pending_start:
                 self.cancel_pending_start()  # a manual start supersedes an older intention
@@ -1525,6 +1529,8 @@ class Installer:
                 # exactly what a rollback wants.
                 label = f"pre-update-{domain}-{rec['running_tag']}" if switching and rec.get("running_tag") else f"pre-start-{domain}-{tag}"
                 pre = await self.async_backup(label)
+                active_backup = pre["name"]
+                self._active_backups.add(active_backup)  # before prune/deploy/pip can yield
                 keep = self.settings.backup_keep
                 await self.hass.async_add_executor_job(lambda: backupkit.prune(self.config_dir, keep, self.protected_backups() | {pre["name"]}))
                 backup = pre["name"]
@@ -1682,6 +1688,8 @@ class Installer:
                 _LOGGER.error("state.json not written after the failed start of %s %s", domain, tag)
             return {"ok": False, "error": self.state.last_error}
         finally:
+            if active_backup is not None:
+                self._active_backups.discard(active_backup)  # release only this start's ownership
             self.busy = False
 
     # ----- YAML config per integration ------------------------------------
