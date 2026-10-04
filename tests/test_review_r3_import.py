@@ -253,7 +253,7 @@ class ApplyRunningAlignTest(unittest.TestCase):
         self.assertEqual(merged["domain"], "hub")
         self.assertEqual(merged["entities"], {"sensor:u1": {"entity_id": "sensor.hub_rssi", "name": "Hub signal",
                                                             "icon": None, "disabled_by": None, "hidden_by": None}})
-        self.assertEqual(merged["devices"], {'["hub", "d1"]': {"name_by_user": "Hub", "disabled_by": None}})
+        self.assertEqual(merged["devices"], {'["e1", ["hub", "d1"]]': {"name_by_user": "Hub", "disabled_by": None}})
         self.assertEqual(res["alignment"], self.aligner.align_existing.return_value)
 
     def test_an_entry_that_never_loads_is_removed_again_and_everything_it_touched_undone(self):
@@ -267,7 +267,7 @@ class ApplyRunningAlignTest(unittest.TestCase):
         with open(os.path.join(self.storage, "hub.e1"), encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "this volume's own")
         # and the map keys the import had merged do not stay pending for an entry that is not there
-        self.aligner.drop_keys.assert_called_once_with("hub", ["sensor:u1"], ['["hub", "d1"]'])
+        self.aligner.drop_keys.assert_called_once_with("hub", ["sensor:u1"], ['["e1", ["hub", "d1"]]'])
 
     def test_a_store_named_after_a_taken_entry_id_follows_the_new_one(self):
         taken = SimpleNamespace(entry_id="e1", domain="hub", unique_id="other")
