@@ -86,6 +86,7 @@ backup_exclude:
   - "*_hass_remote_integration/integration_manager/staging-*"
   - "*_hass_remote_integration/integration_manager/import.tar"
   - "*_hass_remote_integration/integration_manager/import.tar.tmp"
+  - "*_hass_remote_integration/integration_manager/import-pending.json"
   - "*_hass_remote_integration/integration_manager/import-extracted"
   - "*_hass_remote_integration/integration_manager/hacs_catalog.json"
   - "*_hass_remote_integration/integration_manager/ha-backup-running"

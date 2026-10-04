@@ -48,6 +48,8 @@ class ImportDuringStopTest(unittest.TestCase):
         os.makedirs(os.path.join(self.cfg, "integration_manager"))
 
     def _run(self):
+        # This setup-only fixture exercises the busy/stop race. Durable Store
+        # behavior is covered by the real HA Store and transaction regressions.
         at_add, resume = asyncio.Event(), asyncio.Event()
 
         async def on_add():
@@ -77,6 +79,7 @@ class ImportDuringStopTest(unittest.TestCase):
                 mock.patch.object(Installer, "dismiss_patch_notification", lambda self, domain: None), \
                 mock.patch.object(ha_import, "load_summary", lambda cfg: SUMMARY), \
                 mock.patch.object(ha_import, "clear", lambda cfg: None), \
+                mock.patch.object(ha_import, "_save_config_entries", mock.AsyncMock()), \
                 mock.patch.object(ha_import, "loader", mock.Mock(async_get_integration=mock.AsyncMock(
                     return_value=SimpleNamespace(is_built_in=False)))):
             stopped, result = asyncio.run(scenario())
