@@ -618,14 +618,16 @@ fit, that entity is announced without it, with a warning in the log (once for
 the category), and the rest of the rule applies.
 
 When `integration_manager/mqtt_rules.json` cannot be read (not valid JSON, not
-a rules object, a read error), which entities it excludes is unknown, so the
+a rules object, a read error, or an invalid rule), which entities it excludes is unknown, so the
 container fails closed: it does not open its connection to the broker,
 publishes nothing and takes no command (an uninstall cleanup still pending
 clears its retained topics on short connections of its own). The main HA
 keeps its entities, unavailable after the retained `offline`. `GET
 /api/mqtt/status` names the problem in `rules_error` and `connect_error`, the
 MQTT page shows it next to the rules, and the log says it. The damaged file
-stays where it is. When it is not valid JSON or holds no rules object, a copy
+stays where it is. Invalid optional metadata never silently drops an exclusion: an invalid rule
+blocks connecting too. Legacy invalid `device_class` values are still ignored while the rest
+of their valid rule applies. When the file is not valid JSON, holds no rules object or has an invalid rule, a copy
 is kept as `mqtt_rules.json.corrupt-<time>` (the newest 3, mode 600); a file
 that cannot be read at all gets none. Rule
 changes from the Entities page or `POST /api/mqtt/rules` are refused with the
