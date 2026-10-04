@@ -3,6 +3,7 @@ with entrypoint.py which applies a scheduled restore before HA starts)."""
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import tempfile
@@ -190,13 +191,37 @@ class BackupActionView(ManagerView):
             return self.json({"ok": False, "error": "no such backup"})
         try:
             if action == "delete":
-                if await self.hass.async_add_executor_job(lambda: name in self.installer.protected_backups() | backupkit.restore_needs(cfg)):
-                    return self.json({"ok": False, "error": "this backup is still needed: it is the way back of a full rollback, of a scheduled or failed Home Assistant version change or clean start, "
-                                                        "of a scheduled restore or a restore that could not be put back, or the copy taken before a restore in the last 7 days"})
-                if await self.hass.async_add_executor_job(backupkit.app_backup_running, cfg):
-                    return self.json({"ok": False, "error": "a Home Assistant backup of the app is running and reads this folder: try again in a few minutes"})
-                await self.hass.async_add_executor_job(os.remove, path)
-                return self.json({"ok": True})
+                # A new archive can be listed before the executor creating it
+                # returns its name to start(). Reserve busy before any protection
+                # check yields, so a change cannot begin between check and unlink.
+                if self.installer.busy:
+                    return self.json({"ok": False, "error": "another action is running: wait for it to finish before deleting a backup"})
+                self.installer.busy = True
+                try:
+                    if await self.hass.async_add_executor_job(lambda: name in self.installer.protected_backups() | backupkit.restore_needs(cfg)):
+                        return self.json({"ok": False, "error": "this backup is still needed: it is the way back of a full rollback, of a scheduled or failed Home Assistant version change or clean start, "
+                                                            "of a scheduled restore or a restore that could not be put back, or the copy taken before a restore in the last 7 days"})
+                    if await self.hass.async_add_executor_job(backupkit.app_backup_running, cfg):
+                        return self.json({"ok": False, "error": "a Home Assistant backup of the app is running and reads this folder: try again in a few minutes"})
+                    unlink = asyncio.ensure_future(self.hass.async_add_executor_job(os.remove, path))
+                    cancelled = False
+                    while True:
+                        try:
+                            await asyncio.shield(unlink)
+                            break
+                        except asyncio.CancelledError:
+                            if unlink.cancelled():
+                                raise
+                            cancelled = True  # executor work continues; keep busy until it finishes
+                        except Exception:
+                            if not cancelled:
+                                raise
+                            break  # retrieve the worker failure, then preserve caller cancellation
+                    if cancelled:
+                        raise asyncio.CancelledError()
+                    return self.json({"ok": True})
+                finally:
+                    self.installer.busy = False
             if action == "restore":
                 if self.installer.busy:
                     return self.json({"ok": False, "error": "another action is running (an install, start, stop, import, restore or full rollback): try again in a moment"})
