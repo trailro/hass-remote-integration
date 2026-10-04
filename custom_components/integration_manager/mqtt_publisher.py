@@ -1551,7 +1551,7 @@ class MqttPublisher:
         key = self._pending_key(base_topic, self._broker_identity())  # the broker the scan reaches
         try:
             topics = [(f"{discovery_prefix}/device/+/config", 1)] + ([(f"{base_topic}/#", 1)] if docs else [])
-            found = self._retained_scan("cleanup", topics)
+            found = self._retained_scan("cleanup", topics, strict=True)
             ours = [t for t, p in found.items() if self._is_ours(t, p, base_topic)]
             self._clear_topics("cleanup", ours)
         except Exception as err:  # noqa: BLE001
