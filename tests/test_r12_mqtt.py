@@ -520,7 +520,8 @@ class LivePrefixMoveTest(unittest.TestCase):
         }
         scanned, cleared = [], []
 
-        def scan(_self, _suffix, topics, min_s=2.0):
+        def scan(_self, _suffix, topics, min_s=2.0, strict=False):
+            self.assertTrue(strict)  # this fake returns a complete retained burst for identity cleanup
             scanned.extend(t for t, _q in topics)
             return {t: p for t, p in retained.items()
                     if any(mqtt.topic_matches_sub(sub, t) for sub, _q in topics)}
