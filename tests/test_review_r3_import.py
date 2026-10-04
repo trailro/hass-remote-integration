@@ -243,6 +243,7 @@ class ApplyRunningAlignTest(unittest.TestCase):
         kwargs.update(over)
         with mock.patch.object(ha_import, "load_summary", return_value=summary), \
                 mock.patch.object(ha_import, "_forget_cached_stores"), \
+                mock.patch.object(ha_import, "_save_config_entries", mock.AsyncMock()), \
                 mock.patch.object(ha_import.loader, "async_get_integration",
                                   mock.AsyncMock(return_value=SimpleNamespace(is_built_in=False))):
             return asyncio.run(ha_import.apply(hass, self.aligner, "hub", "e1", None, None, **kwargs))

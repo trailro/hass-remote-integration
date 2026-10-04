@@ -77,6 +77,7 @@ class RebuildVersusLifecycleTest(unittest.TestCase):
                       mock.patch.object(ha_import, "loader", mock.Mock(async_get_integration=mock.AsyncMock(return_value=SimpleNamespace(is_built_in=False)))),
                       mock.patch.object(ha_import, "pn"), mock.patch.object(ha_import.events, "emit"),
                       mock.patch.object(ha_import, "REBUILD_RETRY_S", 0.01, create=True),
+                      mock.patch.object(ha_import, "_save_config_entries", mock.AsyncMock()),
                       mock.patch.object(Installer, "dismiss_patch_notification", lambda self, domain: None)):
             patch.start()
             self.addCleanup(patch.stop)

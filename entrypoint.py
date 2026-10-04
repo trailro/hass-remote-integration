@@ -755,6 +755,63 @@ def prune(keep: set[str]) -> None:
         shutil.rmtree(venv_dir(v), ignore_errors=True)
 
 
+def _recover_import_transaction() -> bool:
+    """Resolve one durable intent before legacy cleanup. False keeps all
+    recovery/source files when the marker or disk outcome is uncertain."""
+    journal = os.path.join(STATE_DIR, "import-pending.json")
+    if not os.path.lexists(journal):
+        return True  # older versions have no intent marker
+    try:
+        with open(journal, encoding="utf-8") as fh:
+            intent = json.load(fh)
+        if (not isinstance(intent, dict) or intent.get("version") != 1
+                or not isinstance(intent.get("entry_id"), str) or not intent["entry_id"]
+                or not isinstance(intent.get("domain"), str) or not intent["domain"]
+                or intent.get("phase") not in ("pending", "commit", "rollback", "uncertain")
+                or not isinstance(intent.get("stores"), list)):
+            raise ValueError("invalid import intent")
+        for item in intent["stores"]:
+            name = item.get("name") if isinstance(item, dict) else None
+            if (not isinstance(name, str) or not name or name in (".", "..")
+                    or "/" in name or "\\" in name or not isinstance(item.get("had_original"), bool)):
+                raise ValueError("invalid import store name")
+        path = os.path.join(CONFIG_DIR, ".storage", "core.config_entries")
+        try:
+            with open(path, encoding="utf-8") as fh:
+                entries = json.load(fh)["data"]["entries"]
+        except FileNotFoundError:
+            entries = []  # the initial empty HA store was never written
+        if not isinstance(entries, list) or any(not isinstance(e, dict) for e in entries):
+            raise ValueError("invalid config entry store")
+        found = [e for e in entries if e.get("entry_id") == intent["entry_id"]]
+        if len(found) > 1 or (found and found[0].get("domain") != intent["domain"]):
+            raise ValueError("ambiguous saved import entry")
+        committed = bool(found)
+        if committed and intent["phase"] != "commit":
+            raise ValueError("saved entry without a verified commit phase")
+        for item in intent["stores"]:
+            dest = os.path.join(CONFIG_DIR, ".storage", item["name"])
+            aside = dest + ".pre-import"
+            if committed:
+                for old in (aside, aside + ".done"):
+                    if os.path.lexists(old):
+                        os.remove(old)
+            elif os.path.lexists(aside):
+                if os.path.islink(aside) or not os.path.isfile(aside):
+                    raise ValueError("unusable original import store")
+                os.replace(aside, dest)
+            elif not item["had_original"] and os.path.lexists(dest):
+                os.remove(dest)
+        fsync_dir(os.path.join(CONFIG_DIR, ".storage"))
+        os.remove(journal)
+        fsync_dir(STATE_DIR)
+        log("recovered interrupted import: " + ("saved entry kept" if committed else "stores rolled back"))
+        return True
+    except (OSError, ValueError, KeyError, TypeError):
+        log("import recovery is uncertain: retained intent, original stores and source for recovery")
+        return False
+
+
 def clean_import_leftovers() -> None:
     """An uploaded HA backup / its extracted .storage (another instance's
     secrets) must not survive a restart that interrupted an import.  Nor an
@@ -762,6 +819,8 @@ def clean_import_leftovers() -> None:
     runs inside Home Assistant, so none is in progress at boot): put back, as
     the import undoes a failure.  One an import completed is renamed to
     .pre-import.done before its delete: removed, never put back."""
+    if not _recover_import_transaction():
+        return
     storage = os.path.join(CONFIG_DIR, ".storage")
     for done in glob.glob(os.path.join(glob.escape(storage), "*.pre-import.done")):
         if os.path.isfile(done) and not os.path.islink(done):

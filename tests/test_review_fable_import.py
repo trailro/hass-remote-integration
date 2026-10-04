@@ -47,7 +47,7 @@ class _Store:
 
     def write(self, path=None):
         with open(path or self.path, "w", encoding="utf-8") as fh:
-            json.dump({"entries": sorted(self.entries)}, fh)
+            json.dump({"data": {"entries": [e.as_dict() for e in self.entries.values()]}}, fh)
 
     async def _async_handle_write_data(self):
         if self.pending:
@@ -80,7 +80,7 @@ class CrashPointsTest(unittest.TestCase):
             entries[entry.entry_id] = entry
             store.pending = True  # HA: _async_schedule_save after the setup
 
-        config_entries = SimpleNamespace(async_entries=lambda _d=None: [], async_get_entry=lambda i: entries.get(i),
+        config_entries = SimpleNamespace(async_entries=lambda _d=None: list(entries.values()), _async_schedule_save=lambda: setattr(store, "pending", True), async_get_entry=lambda i: entries.get(i),
                                          async_add=async_add, async_remove=mock.AsyncMock(),
                                          flow=SimpleNamespace(async_progress_by_handler=lambda *a, **k: []))
         if with_store:
@@ -124,7 +124,7 @@ class CrashPointsTest(unittest.TestCase):
         with mock.patch.object(ep, "log"):
             ep.clean_import_leftovers()
         with open(os.path.join(cfg, ".storage", "core.config_entries"), encoding="utf-8") as fh:
-            entries = json.load(fh)["entries"]
+            entries = [e["entry_id"] for e in json.load(fh)["data"]["entries"]]
         with open(os.path.join(cfg, ".storage", "hub.e1"), encoding="utf-8") as fh:
             store = fh.read()
         return entries, store
@@ -138,10 +138,9 @@ class CrashPointsTest(unittest.TestCase):
             # the imported entry with the imported store, or no entry and this volume's store as it was
             if store != (IMPORTED if entries == ["e1"] else ORIGINAL):
                 bad.append(where)
-        # The one point left: core.config_entries was just written (atomically) and _commit has not renamed the
-        # first .pre-import yet - one executor hop, where it was the whole of clear() or the 1 s SAVE_DELAY.
-        # Closing it needs the boot to look at core.config_entries before it puts an original back.
-        self.assertEqual(bad, ["before _commit, delayed save pending"])
+        # Boot resolves the durable intent before legacy cleanup: a verified commit keeps new stores,
+        # absence rolls back, and a saved entry without a verified phase keeps both stores/source.
+        self.assertEqual(bad, [])  # intent makes boot keep imported stores or conservatively retain recovery
         self.assertEqual(sorted(os.listdir(self.storage)), ["core.config_entries", "hub.e1"])
 
     def test_a_single_import_is_consistent_after_a_restart_at_any_point(self):
@@ -154,7 +153,7 @@ class CrashPointsTest(unittest.TestCase):
         self.apply(self.hass(), cleanup=True)
         self.assertFalse(self.store.pending)
         with open(self.store.path, encoding="utf-8") as fh:
-            self.assertEqual(json.load(fh)["entries"], ["e1"])
+            self.assertEqual([e["entry_id"] for e in json.load(fh)["data"]["entries"]], ["e1"])
 
     def test_the_extraction_is_removed_after_the_commit(self):
         self.apply(self.hass(), cleanup=True)
