@@ -539,4 +539,6 @@ class DiagnosticsView(ManagerView):
             return scrub_text(f"# {name}, last {min(LOG_FILE_TAIL, len(lines))} lines\n"
                               + "\n".join(lines[-LOG_FILE_TAIL:]))
         except OSError as err:
-            return f"(log file unreadable: {err})"
+            # OSError text includes the path, which may itself contain a secret.
+            # Keep the failure useful without putting filenames into the bundle.
+            return f"(log file unreadable: errno {err.errno})" if err.errno is not None else "(log file unreadable)"

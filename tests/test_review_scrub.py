@@ -212,6 +212,14 @@ class LogFileOpenerTest(unittest.TestCase):
         self.assertNotIn(SECRET, text)
         self.assertIn("unreadable", text)
 
+    def test_an_unreadable_log_does_not_expose_its_filename(self):
+        path = os.path.join(self.dir, f"password={SECRET}.log")
+        text = self._zip_tail(path)  # listed file disappeared before it was opened
+        self.assertIn("unreadable", text)
+        self.assertNotIn(SECRET, text)
+        self.assertNotIn(path, text)
+        self.assertNotIn("password=", text)
+
     def test_the_download_refuses_a_symlink(self):
         """Pins behaviour that already held: the opener the other two now share."""
         with self.assertRaises(OSError):
