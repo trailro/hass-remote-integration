@@ -386,7 +386,10 @@ MQTT 3.1.1 cannot announce the 320 KB maximum, so any payload is read before it
 is refused: limit it on the broker (`max_packet_size` in mosquitto). The scans
 (base-topic check, cleanup of stale and excluded documents) use short-lived
 connections that announce no maximum, to see retained documents of any size. A
-sweep that read less removes less, never something else.
+sweep that read less removes less, never something else. Each retained scan
+and its deletion use the same captured broker settings and topic namespace.
+A reconnect cannot redirect an in-progress cleanup to its destination broker;
+stale discovery decisions are retried with the current connection.
 
 ## Entity document
 
@@ -526,14 +529,18 @@ string, a finite number, `true`, `false` or `null`.
 
 - An `_id` over 128 bytes is refused ([Limits](#limits)).
 - A repeated `_id` within five minutes is answered from memory, never executed
-  twice. The latest 1000 are kept. The type counts: `1` and `"1"` differ.
+  twice within the same broker, user and base topic. Reconnects to that same
+  namespace keep this history; another namespace can reuse the id independently.
+  The latest 1000 are kept in all. The type counts: `1` and `"1"` differ.
 - A call refused before it reached the service (an unknown service, which an
   integration still loading at boot answers for a moment; a target that does
   not exist here; too many calls in progress) does not remember its `_id`, so
   resending it runs. An internal error is remembered.
 - While the service still runs, also after a timeout answer, a repeat gets
   `ok: null`, `state: running` and `duplicate: true`; once it ends, the final
-  result, flagged `late` when it ended after the timeout.
+  result, flagged `late` when it ended after the timeout. If the connection
+  moved to another broker or base topic meanwhile, its old response is dropped;
+  it is never sent to the new namespace. The service still finishes normally.
 
 ### Concurrency
 

@@ -294,7 +294,7 @@ class CallIdSizeTest(unittest.TestCase):
             pub.hass.services.has_service.return_value = has_service
             pub.hass.services.supports_response.return_value = mock.Mock()
             answers = []
-            pub._publish_result = lambda d, s, res: answers.append(res)
+            pub._publish_result = lambda d, s, res, **kw: answers.append(res)
             pub._on_call("light/turn_on", payload)
             for _ in range(8):
                 await asyncio.sleep(0)
@@ -324,14 +324,14 @@ class CallIdSizeTest(unittest.TestCase):
             pub = _publisher(asyncio.get_running_loop())
             DedupOfRefusalsTest._known(pub)
             answers = []
-            pub._publish_result = lambda d, s, res: answers.append(res)
+            pub._publish_result = lambda d, s, res, **kw: answers.append(res)
             pub._on_call("light/turn_on", json.dumps({"_id": "automation-42", "entity_id": "light.a"}))
             for _ in range(8):
                 await asyncio.sleep(0)
             return answers, pub
         answers, pub = asyncio.run(run())
         self.assertEqual([a["id"] for a in answers], ["automation-42"])
-        self.assertEqual(list(pub._calls), [mp._call_key("light", "turn_on", "automation-42")])
+        self.assertEqual(list(pub._calls), [pub._scoped_call_key("light", "turn_on", "automation-42")])
 
     def test_the_limit_counts_bytes_not_characters(self):
         self.assertIsNone(mp._call_id_problem("é" * 60))          # 122 bytes as JSON
@@ -347,7 +347,7 @@ class CallIdSizeTest(unittest.TestCase):
 
     def test_a_crash_answer_cuts_it_as_well(self):
         pub = _publisher()
-        pub._publish_result = lambda d, s, res: pub.results.append(res)
+        pub._publish_result = lambda d, s, res, **kw: pub.results.append(res)
         pub._call_crashed("light/turn_on", json.dumps({"_id": "z" * 250_000}), ValueError("boom"))
         self.assertLessEqual(len(str(pub.results[-1]["id"])), mp.CALL_ID_MAX_BYTES)
         self.assertLessEqual(len(str(pub.history[-1]["id"])), mp.CALL_ID_MAX_BYTES)
@@ -363,7 +363,7 @@ class DedupOfRefusalsTest(unittest.TestCase):
         async def run():
             pub = _publisher(asyncio.get_running_loop())
             answers = []
-            pub._publish_result = lambda d, s, res: answers.append(res)
+            pub._publish_result = lambda d, s, res, **kw: answers.append(res)
             for setup in (first, second):
                 setup(pub)
                 pub._on_call("light/turn_on", payload)

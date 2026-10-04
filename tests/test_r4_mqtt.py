@@ -309,8 +309,8 @@ class CallMemoryTest(unittest.TestCase):
         for i in range(mp.CALLS_REMEMBERED + 500):
             pub._on_call("light/turn_on", json.dumps({"_id": i, "entity_id": "light.a", "brightness": 3}))
         self.assertEqual(len(pub._calls), mp.CALLS_REMEMBERED)
-        self.assertNotIn(mp._call_key("light", "turn_on", 0), pub._calls)  # the oldest went first
-        self.assertIn(mp._call_key("light", "turn_on", mp.CALLS_REMEMBERED + 499), pub._calls)
+        self.assertNotIn(pub._scoped_call_key("light", "turn_on", 0), pub._calls)  # the oldest went first
+        self.assertIn(pub._scoped_call_key("light", "turn_on", mp.CALLS_REMEMBERED + 499), pub._calls)
         self.assertEqual(set(next(iter(pub._calls.values()))), {"received", "state", "result"})
 
     def test_expired_on_a_call_without_id(self):
@@ -332,7 +332,7 @@ class InFlightCapTest(unittest.IsolatedAsyncioTestCase):
             refused = [r for _d, _s, r in pub.results if r.get("ok") is False]
             self.assertEqual([r["id"] for r in refused], [3])
             self.assertIn("too many calls in progress", refused[0]["error"])
-            self.assertNotIn(mp._call_key("light", "turn_on", 3), pub._calls)
+            self.assertNotIn(pub._scoped_call_key("light", "turn_on", 3), pub._calls)
             self.assertEqual(pub._in_flight, 2)
             pub.release.set()
             await _settle()

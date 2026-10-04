@@ -37,7 +37,7 @@ def _publisher(exclude=()):
     pub._live_base = BASE
     pub._topics = {}
     pub.results = []
-    pub._publish_result = lambda domain, service, result: pub.results.append((domain, service, result))
+    pub._publish_result = lambda domain, service, result, **kw: pub.results.append((domain, service, result))
     return pub
 
 
