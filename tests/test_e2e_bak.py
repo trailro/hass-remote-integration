@@ -149,6 +149,7 @@ class LastRestoreProtectionTest(unittest.TestCase):
 
     def installer(self, last_restore):
         inst = object.__new__(Installer)
+        inst.busy = False
         inst.state_dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, inst.state_dir, True)
         inst.state = SimpleNamespace(installed={}, rollback_backup=None)
