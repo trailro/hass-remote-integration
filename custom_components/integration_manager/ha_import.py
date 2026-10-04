@@ -1006,6 +1006,7 @@ async def apply_all(hass: HomeAssistant, aligner: RegistryAligner, domains: list
     # entries of its own (none of them this backup's): importing next to them could duplicate a device
     preexisting = {d for d, _ in todo if hass.config_entries.async_entries(d)
                    and not any(_from_backup(e) for e in hass.config_entries.async_entries(d))}
+    completed = False
     try:
         for domain, entry in todo:
             if domain in preexisting:
@@ -1023,9 +1024,10 @@ async def apply_all(hass: HomeAssistant, aligner: RegistryAligner, domains: list
                 results.append({"domain": domain, "entry_id": entry["entry_id"], **r})
             except ValueError as err:
                 results.append({"domain": domain, "entry_id": entry["entry_id"], "error": str(err)})
+        completed = True
     finally:
         failed = [r for r in results if "error" in r]
-        if not failed or not keep_failed:
+        if completed and (not failed or not keep_failed):
             await hass.async_add_executor_job(clear, cfg)
     for w in warnings:
         _LOGGER.warning("import: %s", w)
@@ -1256,6 +1258,12 @@ async def async_finish_rebuild(hass: HomeAssistant, aligner: RegistryAligner, in
                            + (f", {len(failed)} failed ({'; '.join(f['error'] for f in failed)})" if failed else "") + f".{tail}")
                 if res.get("warnings"):
                     msg += f" {'; '.join(res['warnings'])}."
+    except asyncio.CancelledError:
+        # HA cancels background tasks during shutdown. The plan, extraction
+        # and pre-rebuild storage are the next boot's recovery, even if some
+        # entries have already been imported (apply_all skips those on retry).
+        keep = True
+        raise
     except Exception as err:  # noqa: BLE001 - reported, the plan must not run again
         msg = f"{head}; rebuilding {domain} failed: {type(err).__name__}: {err}.{tail}"
     finally:
