@@ -455,7 +455,7 @@ class CallMemoryThreadsTest(unittest.TestCase):
         pub.hass.async_create_task = lambda coro: coro
         pub.hass.services.has_service = lambda d, s: True
         pub._call_target_problem = lambda *a: None
-        pub._publish_result = lambda *a: None
+        pub._publish_result = lambda *a, **kw: None
         pub._on_call("light/turn_on", json.dumps({"_id": "refused"}))
         loop_thread = threading.Thread(target=lambda: asyncio.run(scheduled[0]()))
 
@@ -474,7 +474,7 @@ class CallMemoryThreadsTest(unittest.TestCase):
                       **{f"k{i}": {"received": now, "state": "ok", "result": None} for i in range(5)}}
         pub._seen_call(None)  # raised "dictionary changed size during iteration" without the lock
         loop_thread.join(5)
-        self.assertNotIn(mp._call_key("light", "turn_on", "refused"), pub._calls)
+        self.assertNotIn(pub._scoped_call_key("light", "turn_on", "refused"), pub._calls)
 
 
 class ReloadExclusionTest(unittest.IsolatedAsyncioTestCase):

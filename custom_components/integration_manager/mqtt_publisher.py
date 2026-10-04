@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import copy
 import hashlib
 import json
 import secrets
@@ -1311,7 +1312,7 @@ class MqttPublisher:
             # a new discovery prefix alone moves only the discovery configs: the documents stay where they are
             base_moved = self.wanted_base_topic is not None and self.wanted_base_topic != self._live_base
             if clear_old:
-                cleared = await self.hass.async_add_executor_job(self._clear_retained_under, self.base_topic, self.config.discovery_prefix, base_moved)
+                cleared = await self.hass.async_add_executor_job(self._retained_connection()._clear_retained_under, self.base_topic, self.config.discovery_prefix, base_moved)
                 swept = cleared is not None
                 _LOGGER.info("MQTT: cleared %s retained topics left under the old names by earlier runs", cleared)
             else:
@@ -1378,6 +1379,53 @@ class MqttPublisher:
             return {"error": f"{type(err).__name__}: {err}", "foreign": [], "ours": 0}
         foreign = [t for t, p in found.items() if not self._is_ours(t, p, base_topic)]
         return {"foreign": sorted(foreign)[:20], "foreign_count": len(foreign), "ours": len(found) - len(foreign)}
+
+    def _retained_connection(self) -> MqttPublisher:
+        """A blocking worker bound to the settings/names at submission, even if its await is cancelled.
+
+        The worker only scans/clears retained topics; it never adopts a later reconnect's settings.
+        Bookkeeping and its locks remain shared with the publisher, while broker negotiation belongs
+        to this connection. A shallow publisher copy avoids a second protocol/TLS implementation.
+        """
+        if hasattr(self, "_retained_owner"):
+            return self  # already a fixed connection; nested blocking helpers keep the same source record
+        worker = copy.copy(self)
+        worker._retained_owner = self
+        worker.config = copy.deepcopy(self.config)
+        worker._source_config = self.config
+        # Pending-record updates replace their dict: bind writes to the owner, not this shallow copy.
+        worker._set_cleanup_pending = self._set_cleanup_pending
+        worker._cancel_pending_cleanup = self._cancel_pending_cleanup
+        worker._identity = getattr(self, "_identity", None)
+        worker._live_base = self.base_topic
+        worker._live_prefix = getattr(self, "_live_prefix", None) or worker._prefix_for(worker._live_base)
+        wanted = self.wanted_base_topic  # an uninstall can want None while the old connection is still live
+        worker._key_provider = lambda: wanted
+        worker._topics = dict(getattr(self, "_topics", {}))  # a later reconnect cannot change a stale-document ownership decision
+        return worker
+
+    def _retained_current(self, worker: MqttPublisher) -> bool:
+        """Only apply scan decisions to the main connection that supplied their names/settings."""
+        return (self.config is worker._source_config and self.base_topic == worker.base_topic
+                and self.prefix == worker.prefix and self._reply_origin() == worker._configured_origin())
+
+    def _configured_origin(self) -> tuple:
+        return (self.config.host, self.config.port, self.config.tls, self.config.username, self.base_topic)
+
+    def _reply_origin(self, client: mqtt.Client | None = None) -> tuple:
+        """Broker/base namespace of a live client, including across automatic reconnects.
+
+        A config reload can change settings before the client reconnects: replies must use the
+        client's captured namespace. Passwords never enter dedup keys or command history.
+        """
+        c = getattr(self, "_client", None) if client is None else client
+        origin = getattr(c, "_hri_origin", None)
+        if isinstance(origin, tuple):
+            return origin
+        return self._configured_origin()
+
+    def _scoped_call_key(self, domain: str, service: str, call_id: Any, origin: tuple | None = None) -> str:
+        return _dumps([self._reply_origin() if origin is None else origin, _call_key(domain, service, call_id)])
 
     def _retained_scan(self, suffix: str, topics: list[tuple[str, int]], min_s: float = 2.0, strict: bool = False) -> dict[str, bytes]:
         """Blocking: a throwaway client that collects every retained message
@@ -1548,12 +1596,13 @@ class MqttPublisher:
 
     def _clear_retained_checked(self, base_topic: str, discovery_prefix: str, docs: bool = True, warn: bool = True) -> tuple[int | None, str]:
         """Blocking: _clear_retained_under, with the reason when it was not done."""
-        key = self._pending_key(base_topic, self._broker_identity())  # the broker the scan reaches
+        worker = self._retained_connection()
+        key = self._pending_key(base_topic, worker._broker_identity())  # the broker the scan reaches
         try:
             topics = [(f"{discovery_prefix}/device/+/config", 1)] + ([(f"{base_topic}/#", 1)] if docs else [])
-            found = self._retained_scan("cleanup", topics, strict=True)
+            found = worker._retained_scan("cleanup", topics, strict=True)
             ours = [t for t, p in found.items() if self._is_ours(t, p, base_topic)]
-            self._clear_topics("cleanup", ours)
+            worker._clear_topics("cleanup", ours)
         except Exception as err:  # noqa: BLE001
             (_LOGGER.warning if warn else _LOGGER.debug)("retained cleanup under %s failed: %s", base_topic, err)
             return None, f"{type(err).__name__}: {err}"  # not done: the identity must not be recorded as moved
@@ -1654,7 +1703,22 @@ class MqttPublisher:
         self._cleanup_retrying = True
         try:
             async with self._conn_lock:  # no start or reconnect in between: nothing may be published under a name being cleared
-                await self.hass.async_add_executor_job(self._retry_pending_cleanups)
+                job = asyncio.ensure_future(self.hass.async_add_executor_job(self._retained_connection()._retry_pending_cleanups))
+                cancelled = False
+                try:
+                    while True:
+                        try:
+                            await asyncio.shield(job)
+                            break
+                        except asyncio.CancelledError:
+                            # Cancellation does not stop an executor. Keep the connection gate until its
+                            # deletion is done, so a same-origin reinstall cannot publish into that sweep.
+                            cancelled = True
+                            if job.cancelled():
+                                break
+                finally:
+                    if cancelled:
+                        raise asyncio.CancelledError
         finally:
             self._cleanup_retrying = False
 
@@ -1800,6 +1864,7 @@ class MqttPublisher:
             self._stop_client(old)
         try:
             c = self._new_client(self.client_id)  # tls_set raises on an unreadable CA file
+            c._hri_origin = self._reply_origin(c)  # bound before any callback can accept a call
             c.will_set(self._status_topic(), "offline", qos=1, retain=True)
             c.on_connect = self._on_connect
             c.on_connect_fail = self._on_connect_fail
@@ -2115,8 +2180,10 @@ class MqttPublisher:
     def _on_message(self, client, userdata, msg) -> None:
         """Command or service call from the consuming HA (paho thread).
         Anything raised here would end paho's network loop, so nothing may."""
+        if client is not None and client is not self._client:
+            return
         try:
-            self._handle_message(msg)
+            self._handle_message(msg, origin=self._reply_origin(client))
         except Exception as err:  # noqa: BLE001
             _LOGGER.error("MQTT message %s could not be handled: %s", msg.topic, err)
 
@@ -2138,7 +2205,10 @@ class MqttPublisher:
         at = self._cleared_cmds.pop(topic, None)
         return at is not None and time.monotonic() - at < CLEARED_ECHO_WINDOW_S
 
-    def _handle_message(self, msg) -> None:
+    def _handle_message(self, msg, origin: tuple | None = None) -> None:
+        origin = self._reply_origin() if origin is None else origin
+        if origin != self._reply_origin():
+            return
         if getattr(msg, "retain", False):
             if not msg.payload:
                 return  # a retained command being cleared (MQTT 5 keeps the flag on it): nothing to run, nothing to clear
@@ -2163,13 +2233,13 @@ class MqttPublisher:
         call_prefix = self._call_base() + "/"
         if msg.topic.startswith(call_prefix):
             if not msg.payload.strip():  # whitespace alone is no JSON object either
-                self._reject_empty_call(msg.topic[len(call_prefix):])
+                self._reject_empty_call(msg.topic[len(call_prefix):], origin=origin)
                 return
             rest, payload = msg.topic[len(call_prefix):], msg.payload.decode(errors="replace")
             try:
-                self._on_call(rest, payload)
+                self._on_call(rest, payload, origin=origin)
             except Exception as err:  # noqa: BLE001 - the caller waits on result/: an answer, never silence
-                self._call_crashed(rest, payload, err)
+                self._call_crashed(rest, payload, err, origin=origin)
             return
         prefix = self._cmd_base() + "/"
         if not msg.topic.startswith(prefix):
@@ -2464,7 +2534,7 @@ class MqttPublisher:
         """Its entities are not published: excluded in the settings, or created by Home Assistant itself."""
         return integration in self.config.exclude_integrations or integration in NEVER_PUBLISHED_INTEGRATIONS
 
-    def _reject_empty_call(self, rest: str) -> None:
+    def _reject_empty_call(self, rest: str, origin: tuple | None = None) -> None:
         """A call needs a JSON object ({} without data); an empty payload is what clearing a retained call looks like."""
         parts = [p.lower() for p in rest.split("/")]
         valid = len(parts) == 2 and all(_SERVICE_NAME.fullmatch(p) for p in parts)
@@ -2473,7 +2543,7 @@ class MqttPublisher:
         if valid and not self._moving:
             domain, service = parts
             # the shape every other result has: a consumer routes on "service" and correlates on "id"
-            self._publish_result(domain, service, {"id": None, "service": f"{domain}.{service}", "ok": False, "error": error})
+            self._publish_result(domain, service, {"id": None, "service": f"{domain}.{service}", "ok": False, "error": error}, origin=origin)
 
     @staticmethod
     def _internal_error(what: str, err: Exception) -> str:
@@ -2483,7 +2553,7 @@ class MqttPublisher:
         _LOGGER.error("MQTT call %s could not be handled: %s%s", what, type(err).__name__, where)
         return f"internal error ({type(err).__name__}): see the log of the container"
 
-    def _call_crashed(self, rest: str, payload: str, err: Exception) -> None:
+    def _call_crashed(self, rest: str, payload: str, err: Exception, origin: tuple | None = None) -> None:
         """Paho thread: _on_call raised."""
         error = self._internal_error(repr(rest[:80]), err)
         try:
@@ -2497,13 +2567,14 @@ class MqttPublisher:
         valid = len(parts) == 2 and all(_SERVICE_NAME.fullmatch(p) for p in parts)
         self._finish(self._remember("call", ".".join(parts) if valid else rest[:80], "", call_id), "error", error)
         if valid and not self._moving:
-            self._publish_result(parts[0], parts[1], {"id": call_id, "service": ".".join(parts), "ok": False, "error": error})
+            self._publish_result(parts[0], parts[1], {"id": call_id, "service": ".".join(parts), "ok": False, "error": error}, origin=origin)
 
-    def _on_call(self, rest: str, payload: str) -> None:
+    def _on_call(self, rest: str, payload: str, origin: tuple | None = None) -> None:
         """Generic service call: <base>/call/<domain>/<service> with a JSON
         object as payload (service data incl. entity_id/device_id/area_id;
         an optional "_id" is echoed back).  Outcome goes to
         <base>/result/<domain>/<service>, not retained."""
+        origin = self._reply_origin() if origin is None else origin
         parts = rest.split("/")
         # parsed once, on paho's thread, and passed along: the refusals below all answer with the id it carries (the
         # command history is only useful to the consumer when a refused call carries the id it sent), and the history
@@ -2523,6 +2594,9 @@ class MqttPublisher:
         # kept masked whole
         set_value = len(parts) == 2 and (parts[0].lower(), parts[1].lower()) == ("text", "set_value")
         secret = self._password_value("text", "set_value", parsed) if set_value and isinstance(parsed, dict) else None
+
+        def reply(domain: str, service: str, result: dict[str, Any]) -> None:
+            self._publish_result(domain, service, result, origin=origin)
 
         def remember(what: str) -> dict[str, Any]:
             if secret:
@@ -2544,33 +2618,33 @@ class MqttPublisher:
         denied = (f"domain {domain} is not callable over MQTT" if domain in MQTT_CALL_DENY_DOMAINS or domain in self.config.exclude_integrations
                   else f"{domain}.{service} is not callable over MQTT" if (domain, service) in MQTT_CALL_DENY_SERVICES else None)
         if denied:
-            self._publish_result(domain, service, {"id": sent_id, "service": f"{domain}.{service}", "ok": False, "error": denied})
+            reply(domain, service, {"id": sent_id, "service": f"{domain}.{service}", "ok": False, "error": denied})
             self._finish(remember(f"{domain}.{service}"), "rejected", denied)
             return
         if id_problem is not None:
-            self._publish_result(domain, service, {"id": sent_id, "service": f"{domain}.{service}", "ok": False, "error": id_problem})
+            reply(domain, service, {"id": sent_id, "service": f"{domain}.{service}", "ok": False, "error": id_problem})
             self._finish(remember(f"{domain}.{service}"), "rejected", id_problem)
             _LOGGER.warning("MQTT call %s.%s refused: %s", domain, service, id_problem)
             return
         if bad is not None:
-            self._publish_result(domain, service, {"id": sent_id, "service": f"{domain}.{service}", "ok": False, "error": f"bad payload: {bad}"})
+            reply(domain, service, {"id": sent_id, "service": f"{domain}.{service}", "ok": False, "error": f"bad payload: {bad}"})
             self._finish(remember(f"{domain}.{service}"), "rejected", f"bad payload: {bad}")
             return
         data: dict[str, Any] = parsed
         call_id = data.pop("_id", None)
         shown = {**data, "value": "***"} if secret else data
         # an _id is unique per service for the consumer (a counter that restarts, one per automation)
-        call_key = _call_key(domain, service, call_id) if call_id not in (None, "") else None
+        call_key = self._scoped_call_key(domain, service, call_id, origin) if call_id not in (None, "") else None
         prior = self._seen_call(call_key)
         if prior is not None:
             # A retry of the same _id (the consumer did not see the result in
             # time): answer from history, never run the service twice.
             dup = self._remember("call", f"{domain}.{service}", shown, call_id)
             if prior["state"] == "running":
-                self._publish_result(domain, service, {"id": call_id, "service": f"{domain}.{service}", "ok": None, "state": "running", "duplicate": True})
+                reply(domain, service, {"id": call_id, "service": f"{domain}.{service}", "ok": None, "state": "running", "duplicate": True})
                 self._finish(dup, "duplicate", "still running")
             else:
-                self._publish_result(domain, service, {**(prior.get("result") or {"id": call_id, "service": f"{domain}.{service}", "ok": None}), "duplicate": True})
+                reply(domain, service, {**(prior.get("result") or {"id": call_id, "service": f"{domain}.{service}", "ok": None}), "duplicate": True})
                 self._finish(dup, "duplicate", f"answered from history ({prior['state']})")
             _LOGGER.info("MQTT call %s.%s id=%s repeated: answered from history (%s)", domain, service, call_id, prior["state"])
             return
@@ -2613,27 +2687,27 @@ class MqttPublisher:
                 # answered from that record rather than sent down the same broken path again
                 res = {"id": call_id, "service": f"{domain}.{service}", "ok": False, "error": self._internal_error(f"{domain}.{service}", err)}
                 done("error", res["error"], res)
-                self._publish_result(domain, service, res)
+                reply(domain, service, res)
 
         async def _run() -> None:
             base: dict[str, Any] = {"id": call_id, "service": f"{domain}.{service}"}
             if not self.hass.services.has_service(domain, service):
                 res = {**base, "ok": False, "error": f"unknown service {domain}.{service}"}
-                self._publish_result(domain, service, res)
+                reply(domain, service, res)
                 done("error", res["error"], res)
                 forget()  # an integration that is still loading: the retry must run, not be answered from history
                 _LOGGER.warning("MQTT call %s.%s failed: unknown service", domain, service)
                 return
             if problem := self._call_target_problem(data, domain, service):
                 res = {**base, "ok": False, "error": problem}
-                self._publish_result(domain, service, res)
+                reply(domain, service, res)
                 done("rejected", problem, res)
                 forget()  # an entity that has not been added yet: the same _id may be sent again
                 _LOGGER.warning("MQTT call %s.%s refused: %s", domain, service, problem)
                 return
             if self._in_flight >= CALLS_IN_FLIGHT_MAX:
                 res = {**base, "ok": False, "error": f"too many calls in progress ({CALLS_IN_FLIGHT_MAX}): try again later"}
-                self._publish_result(domain, service, res)
+                reply(domain, service, res)
                 done("rejected", res["error"], res)
                 forget()  # never ran: a retry with the same _id runs once there is room
                 _LOGGER.warning("MQTT call %s.%s refused: %s calls in progress", domain, service, self._in_flight)
@@ -2653,7 +2727,7 @@ class MqttPublisher:
             _LOGGER.debug("MQTT call %s.%s wait returned, done=%s", domain, service, bool(finished))
             if late:
                 res = {**base, "ok": False, "error": f"timeout after {CALL_TIMEOUT_S}s (service still running)"}
-                self._publish_result(domain, service, res)
+                reply(domain, service, res)
                 done("timeout", res["error"], res)
                 _LOGGER.warning("MQTT call %s.%s timed out after %ss", domain, service, CALL_TIMEOUT_S)
             try:
@@ -2675,17 +2749,21 @@ class MqttPublisher:
                                 _scrubbed(str(err).replace(secret, "***") if secret else str(err)))
             if late:
                 result["late"] = True
-            self._publish_result(domain, service, result)
+            reply(domain, service, result)
             done(("late-ok" if result.get("ok") else "late-error") if late else ("ok" if result.get("ok") else "error"),
                  result.get("error"), result)
 
         self.hass.loop.call_soon_threadsafe(lambda: self.hass.async_create_task(_call()))
 
-    def _publish_result(self, domain: str, service: str, result: dict[str, Any]) -> None:
+    def _publish_result(self, domain: str, service: str, result: dict[str, Any], origin: tuple | None = None) -> None:
         c = self._client
         if c is None or not self._connected:
             return
-        topic, payload = f"{self.base_topic}/result/{domain}/{service}", _dumps(result)
+        current = self._reply_origin(c)
+        if origin is not None and origin != current:
+            return  # the service still completes and is remembered, but its response never crosses namespaces
+        base = current[-1]
+        topic, payload = f"{base}/result/{domain}/{service}", _dumps(result)
         if self._oversized(topic, payload):
             # the caller is waiting for an answer on this topic: send it without the response data rather than nothing
             payload = _dumps({"id": result.get("id"), "service": result.get("service"), "ok": False,
@@ -3109,16 +3187,17 @@ class MqttPublisher:
     def _clear_stale_docs(self, keep: frozenset[str] = frozenset()) -> int:
         """Blocking: retained entity documents of ours under <base>/ that this
         process no longer publishes (entities a new version dropped); `keep`: those of registry entries without a state."""
-        base = self.base_topic
+        worker = self._retained_connection()
+        base = worker.base_topic
         try:
-            found = self._retained_scan("stale", [(f"{base}/#", 1)])
+            found = worker._retained_scan("stale", [(f"{base}/#", 1)])
             live = set(self._topics.values()) | keep
             keep_prefixes = (f"{base}/services/", f"{base}/cmd/", f"{base}/call/")
             stale = [t for t, p in found.items()
                      if t not in live and t not in (self._status_topic(), self._health_topic(), self._manager_topic())
                      and not t.startswith(keep_prefixes)
                      and self._is_ours(t, p, base) and b"published_at" in p]
-            self._clear_topics("stale", stale)
+            worker._clear_topics("stale", stale)
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning("stale document cleanup failed: %s", err)
             return 0
@@ -3136,11 +3215,14 @@ class MqttPublisher:
         topics = {self._discovery_topic(d): d for d in set(discovery_ids) if d and d not in groups}
         if not topics:
             return {}
+        worker = self._retained_connection()
         try:
             # strict: a scan cut short would take a config it did not read for one that is not there
-            found = await self.hass.async_add_executor_job(lambda: self._retained_scan("gate", [(t, 1) for t in topics], strict=True))
+            found = await self.hass.async_add_executor_job(lambda: worker._retained_scan("gate", [(t, 1) for t in topics], strict=True))
         except Exception as err:  # noqa: BLE001 - unknown is not ours
             _LOGGER.warning("MQTT: could not read the retained discovery configs to be cleared (%s): none is cleared", err)
+            return dict.fromkeys(topics.values(), "unreadable")
+        if not self._retained_current(worker):
             return dict.fromkeys(topics.values(), "unreadable")
         base = self.base_topic
         return {d: "not_on_broker" if t not in found else "ours" if self._is_ours(t, found[t], base) else "not_ours"
@@ -3188,16 +3270,19 @@ class MqttPublisher:
         """Blocking: every retained discovery config of THIS identity under
         <prefix>/device/+/config (the consumer removes the entities).  A scan
         that may be partial raises: the undiscover stays due and is retried."""
-        base, prefix = self.base_topic, self.config.discovery_prefix
+        worker = self._retained_connection()
+        base, prefix = worker.base_topic, worker.config.discovery_prefix
         try:
-            found = self._retained_scan("undisc", [(f"{prefix}/device/+/config", 1)], strict=True)
+            found = worker._retained_scan("undisc", [(f"{prefix}/device/+/config", 1)], strict=True)
             # the manager device stays while manager_discovery wants it: removing it would drop the
             # consumer's customisations of those entities only to announce them again a minute later
             keep = {self._discovery_topic(f"{base}_manager")} if self.config.manager_discovery else set()
             ours = [t for t, p in found.items() if self._is_ours(t, p, base) and t not in keep]
-            self._clear_topics("undisc", ours)
-            self.stats["discovery_devices"] = len(keep)
-            self.stats["discovery_components"] = 0
+            worker._clear_topics("undisc", ours)
+            owner = getattr(self, "_retained_owner", self)
+            if owner._retained_current(worker):
+                self.stats["discovery_devices"] = len(keep)
+                self.stats["discovery_components"] = 0
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning("discovery cleanup failed: %s", err)
             raise RuntimeError(f"discovery cleanup failed: {err}") from err  # never report "cleared 0" for a cleanup that did not run
@@ -3212,7 +3297,8 @@ class MqttPublisher:
             await self.hass.async_add_executor_job(self._defer_cleanup, base_topic)
             return 0
         prefix, broker = self.config.discovery_prefix, self._broker_identity()
-        n, why = await self.hass.async_add_executor_job(self._clear_retained_checked, base_topic, prefix, True, False)  # logged below
+        worker = self._retained_connection()
+        n, why = await self.hass.async_add_executor_job(worker._clear_retained_checked, base_topic, prefix, True, False)  # logged below
         if n is None and base_topic:
             # the broker is unreachable: the uninstall stands, the removal waits for it (a timer, even with nothing installed)
             key = self._pending_key(base_topic, broker)
@@ -3224,7 +3310,7 @@ class MqttPublisher:
                 _LOGGER.warning("MQTT: the retained data of the uninstalled %s stays on the broker for now (%s): retried every %s s",
                                 base_topic, why, CLEANUP_RETRY_S)
                 events.emit("mqtt", f"retained data of the uninstalled {base_topic} not cleared ({why}): retried until the broker takes it")
-        if base_topic == self.base_topic:
+        if self._retained_current(worker) and base_topic == self.base_topic:
             self._topics.clear()
             self._last_hash.clear()
             self._discovery_map.clear()
@@ -3252,7 +3338,10 @@ class MqttPublisher:
         events.emit("mqtt", f"retained data of the uninstalled {base} not cleared (MQTT is disabled): removed once MQTT is enabled")
 
     async def async_clear_discovery(self) -> int:
-        n = await self.hass.async_add_executor_job(self._clear_discovery_retained)
+        worker = self._retained_connection()
+        n = await self.hass.async_add_executor_job(worker._clear_discovery_retained)
+        if not self._retained_current(worker):
+            return n  # cleared on its original broker; do not discard the new connection's bookkeeping
         self._discovery_map.clear()
         self._blocks.clear()
         # the configs are gone from the broker: an identical config published
@@ -3267,11 +3356,14 @@ class MqttPublisher:
     async def _async_read_boot_components(self) -> None:
         """What earlier processes announced, before this process's first discovery publish."""
         base, prefix = self.base_topic, self.config.discovery_prefix
+        worker = self._retained_connection()
         try:
-            found = await self.hass.async_add_executor_job(self._retained_scan, "boot", [(f"{prefix}/device/+/config", 1)])
+            found = await self.hass.async_add_executor_job(worker._retained_scan, "boot", [(f"{prefix}/device/+/config", 1)])
         except Exception as err:  # noqa: BLE001 - without it the sweep still clears documents; nothing is carried
             _LOGGER.warning("MQTT: could not read the discovery configs announced before this start: %s", err)
             self._boot_components = {}
+            return
+        if not self._retained_current(worker):
             return
         manager_topic = self._discovery_topic(f"{base}_manager")
         out: dict[str, dict[str, dict[str, Any]]] = {}
@@ -3302,10 +3394,14 @@ class MqttPublisher:
         empty retained payloads for the documents and for devices left with
         nothing."""
         base, prefix = self.base_topic, self.config.discovery_prefix
+        worker = self._retained_connection()
         try:
-            found = await self.hass.async_add_executor_job(self._retained_scan, "orphans", [(f"{base}/#", 1), (f"{prefix}/device/+/config", 1)])
+            found = await self.hass.async_add_executor_job(worker._retained_scan, "orphans", [(f"{base}/#", 1), (f"{prefix}/device/+/config", 1)])
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning("MQTT: orphan sweep failed, retried at the next connect: %s", err)
+            self._orphan_sweep_due = True
+            return
+        if not self._retained_current(worker):
             self._orphan_sweep_due = True
             return
         manager_topic = self._discovery_topic(f"{base}_manager")
@@ -3380,7 +3476,7 @@ class MqttPublisher:
             if removed_components or cleared_devices or other_format:
                 await asyncio.sleep(2)  # the removal forms reach the consumer before the documents empty (no "Erroneous JSON")
             try:
-                await self.hass.async_add_executor_job(self._clear_topics, "orphans", docs)
+                await self.hass.async_add_executor_job(worker._clear_topics, "orphans", docs)
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("MQTT: clearing %s orphan documents failed: %s", len(docs), err)
         if removed_components or cleared_devices or docs:
@@ -3396,10 +3492,14 @@ class MqttPublisher:
         while disconnected could not clear)."""
         base, prefix = self.base_topic, self.config.discovery_prefix
         excluded = set(self.config.exclude_integrations) | NEVER_PUBLISHED_INTEGRATIONS
+        worker = self._retained_connection()
         try:
-            found = await self.hass.async_add_executor_job(self._retained_scan, "resync", [(f"{base}/#", 1), (f"{prefix}/device/+/config", 1)])
+            found = await self.hass.async_add_executor_job(worker._retained_scan, "resync", [(f"{base}/#", 1), (f"{prefix}/device/+/config", 1)])
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning("MQTT: sweep of excluded integrations failed: %s", err)
+            self._resync_excluded = True
+            return
+        if not self._retained_current(worker):
             self._resync_excluded = True
             return
         docs, configs = [], []
@@ -3416,7 +3516,10 @@ class MqttPublisher:
             if isinstance(doc, dict) and doc.get("integration") in excluded:
                 docs.append(topic)
         if docs:
-            await self.hass.async_add_executor_job(self._clear_topics, "resync", docs)
+            await self.hass.async_add_executor_job(worker._clear_topics, "resync", docs)
+        if not self._retained_current(worker):
+            self._resync_excluded = True
+            return
         if self.config.discovery_enabled:
             groups, _ = self._group_by_device()
             for topic in configs:
@@ -3458,7 +3561,7 @@ class MqttPublisher:
         keep = frozenset(self._topic_for(e.entity_id, e.platform) for e in list(reg.entities.values())
                          if self.hass.states.get(e.entity_id) is None and not self._integration_excluded(e.platform)
                          and not self.rules.for_entity(e.entity_id).get("exclude"))
-        return await self.hass.async_add_executor_job(self._clear_stale_docs, keep)
+        return await self.hass.async_add_executor_job(self._retained_connection()._clear_stale_docs, keep)
 
     # ----- rules ---------------------------------------------------------------
 
@@ -3678,11 +3781,14 @@ class MqttPublisher:
     async def _async_clear_manager_if_retained(self, mid: str, topic: str) -> None:
         """No record of what was announced (a new install, or one upgraded from a version that kept none): a manager
         device config retained on the broker is what the main HA has; one that is not there needs no removal."""
+        worker = self._retained_connection()
         try:
-            found = await self.hass.async_add_executor_job(self._retained_scan, "mgr", [(topic, 1)])
+            found = await self.hass.async_add_executor_job(worker._retained_scan, "mgr", [(topic, 1)])
         except Exception as err:  # noqa: BLE001 - unknown, so removed as before: at worst the main HA warns once
             _LOGGER.debug("MQTT: could not read the retained manager device config (%s): removing it", err)
             found = {topic: b"?"}
+        if not self._retained_current(worker):
+            return
         if not self._connected or self._moving or self.config.manager_discovery or self.config.discovery_enabled:
             return  # the settings or the connection changed meanwhile: the next pass decides
         if not found.get(topic):
@@ -4015,7 +4121,10 @@ class MqttPublisher:
             await self._async_resync_excluded()
         if self._undiscover_due and not self.config.discovery_enabled:
             try:
-                removed = await self.hass.async_add_executor_job(self._clear_discovery_retained)
+                worker = self._retained_connection()
+                removed = await self.hass.async_add_executor_job(worker._clear_discovery_retained)
+                if not self._retained_current(worker):
+                    return n  # the new connection decides whether its discovery still needs removal
                 self._set_undiscover_due(False)
                 keep = f"{self.base_topic}_manager"
                 for did in [d for d in self._discovery_map if d != keep]:

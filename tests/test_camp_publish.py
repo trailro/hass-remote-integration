@@ -223,7 +223,7 @@ class RefusedCallShapeTest(unittest.TestCase):
 
     def setUp(self):
         self.pub = _publisher()
-        self.pub._publish_result = lambda domain, service, result: self.pub.results.append((domain, service, result))
+        self.pub._publish_result = lambda domain, service, result, **kw: self.pub.results.append((domain, service, result))
 
     def test_a_denied_domain_keeps_the_call_id(self):
         self.pub._on_call("homeassistant/restart", json.dumps({"_id": "c7"}))
