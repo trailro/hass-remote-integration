@@ -338,7 +338,7 @@ def clear(config_dir: str) -> None:
 # ----- registry alignment ---------------------------------------------------
 
 
-def _build_map(out_dir: str, domain: str, entry_id: str) -> dict[str, Any]:
+def _build_map(out_dir: str, domain: str, entry_id: str, target_entry_id: str | None = None) -> dict[str, Any]:
     ents = _load_store(out_dir, "core.entity_registry").get("entities") or []
     _dstore = _load_store(out_dir, "core.device_registry")
     devs = list(_dstore.get("devices") or []) + list(_dstore.get("child_devices") or [])
@@ -354,8 +354,21 @@ def _build_map(out_dir: str, domain: str, entry_id: str) -> dict[str, Any]:
         if entry_id not in _device_entries(dv):
             continue
         for ident in dv.get("identifiers") or []:
-            dmap[json.dumps(list(ident))] = {"name_by_user": dv.get("name_by_user"), "disabled_by": dv.get("disabled_by")}
+            dmap[_dkey(target_entry_id or entry_id, ident)] = {"name_by_user": dv.get("name_by_user"), "disabled_by": dv.get("disabled_by")}
     return {"domain": domain, "entities": emap, "devices": dmap}
+
+
+def _dkey(entry_id: str, identifier: Any) -> str:
+    """Identifiers are unique per config entry, including child devices."""
+    return json.dumps([entry_id, list(identifier)])
+
+
+def _device_owners(dev: Any) -> set[str]:
+    owners = set(getattr(dev, "config_entries", None) or ())
+    for attr in ("config_entry_id", "primary_config_entry"):
+        if owner := getattr(dev, attr, None):
+            owners.add(owner)
+    return owners
 
 
 def _ekey(entity_domain: str, unique_id: Any) -> str:
@@ -387,7 +400,9 @@ class RegistryAligner:
     """Applies the stored import maps (one per domain): now for existing
     registry entries, and live for entities/devices the integration creates
     afterwards.  File: {"domains": {<domain>: {"entities": {"<entity domain>:<unique_id>": ...},
-    "devices": {identifier_json: ...}}}}."""
+    "devices": {entry_identifier_json: ...}}}}. Legacy identifier-only keys
+    remain readable and apply only when their domain has one config entry
+    and one matching device."""
 
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
@@ -537,16 +552,7 @@ class RegistryAligner:
                     m["entities"].pop(key, None)
                     dropped += 1
             for key, want in list(m["devices"].items()):
-                ident = tuple(json.loads(key))
-                # async_get_device(identifiers=) is deprecated (identifiers are
-                # per config entry now); our map has no entry id, so scan
-                found = dreg.async_get_devices(identifiers={ident})
-                dev = found[0] if found else None
-                if dev is None and hasattr(dreg, "async_get_child_device_by_identifier"):
-                    for entry in self.hass.config_entries.async_entries(domain):
-                        dev = dreg.async_get_child_device_by_identifier(ident, entry.entry_id)
-                        if dev:
-                            break
+                dev = next((d for d in registry_devices(dreg) if self._matches_device(domain, key, d)), None)
                 if dev is not None and (not want.get("name_by_user") or dev.name_by_user == want["name_by_user"]) \
                         and (want.get("disabled_by") != "user" or dev.disabled_by == dr.DeviceEntryDisabler.USER):
                     m["devices"].pop(key, None)
@@ -639,13 +645,35 @@ class RegistryAligner:
         m["entities"].pop(key, None)  # only once applied
         return True
 
+    def _matches_device(self, domain: str, key: str, dev: Any) -> bool:
+        """New keys have an entry owner. An old key has no recoverable owner:
+        use it only for a unique match in a single-entry domain, retaining ambiguous ones
+        rather than assigning one imported hub's preferences to another."""
+        try:
+            parts = json.loads(key)
+            owned = isinstance(parts, list) and len(parts) == 2 and isinstance(parts[1], list)
+            owner, ident = (parts[0], tuple(parts[1])) if owned else (None, tuple(parts))
+        except (ValueError, TypeError):
+            return False
+        owners = _device_owners(dev)
+        domain_owners = {e.entry_id for e in self.hass.config_entries.async_entries(domain)}
+        if not owners.intersection(domain_owners) or ident not in dev.identifiers:
+            return False
+        if owned:
+            return owner in owners and owner in domain_owners
+        if len(domain_owners) != 1:
+            return False  # another configured hub may not have created its matching device yet
+        matches = [d for d in registry_devices(dr.async_get(self.hass))
+                   if _device_owners(d).intersection(domain_owners) and ident in d.identifiers]
+        return len(matches) == 1 and matches[0].id == dev.id
+
     def align_device(self, device_id: str) -> bool:
         reg = dr.async_get(self.hass)
         dev = reg.async_get(device_id)
         if dev is None:
             return False
-        idents = [json.dumps(list(ident)) for ident in dev.identifiers]
-        hit = [(m, k) for m in self.maps.values() for k in idents if k in m["devices"]]
+        hit = [(m, k) for domain, m in self.maps.items() for k in m["devices"]
+               if self._matches_device(domain, k, dev)]
         if not hit:
             return False
         want = next((m["devices"][k] for m, k in hit if m["devices"][k].get("name_by_user") or m["devices"][k].get("disabled_by") == "user"), None)
@@ -910,7 +938,7 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
             await hass.async_add_executor_job(_copy)
             _forget_cached_stores(hass, copied)
         if align:
-            merged = await hass.async_add_executor_job(_build_map, out_dir, domain, entry_id)
+            merged = await hass.async_add_executor_job(_build_map, out_dir, domain, entry_id, entry.entry_id)
             aligner.merge_map(merged)
         await hass.config_entries.async_add(entry)
         not_loaded = running and not entry.disabled_by and entry.state not in _KEEP_STATES and not _reauth_pending(hass, entry)

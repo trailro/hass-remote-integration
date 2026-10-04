@@ -73,7 +73,7 @@ class RebuildVersusLifecycleTest(unittest.TestCase):
         self.installer.state.installed = {"hub": {"versions": {"v1": {}}, "running_tag": "v1"}}
         for patch in (mock.patch.object(ha_import, "load_summary", lambda cfg: SUMMARY),
                       mock.patch.object(ha_import, "clear", lambda cfg: None),
-                      mock.patch.object(ha_import, "_build_map", lambda out_dir, domain, entry_id: {"entities": {}, "devices": {}}),
+                      mock.patch.object(ha_import, "_build_map", lambda out_dir, domain, entry_id, target_entry_id=None: {"entities": {}, "devices": {}}),
                       mock.patch.object(ha_import, "loader", mock.Mock(async_get_integration=mock.AsyncMock(return_value=SimpleNamespace(is_built_in=False)))),
                       mock.patch.object(ha_import, "pn"), mock.patch.object(ha_import.events, "emit"),
                       mock.patch.object(ha_import, "REBUILD_RETRY_S", 0.01, create=True),
