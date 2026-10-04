@@ -49,11 +49,11 @@ async def _locked(make_coro, installer=None):
             installer.busy = False
 
 
-_REBUILD_MSG = "a Home Assistant downgrade with a clean start is scheduled and uses the import area: restart first"
+_REBUILD_MSG = "a scheduled clean start or incomplete import uses the import area: finish its recovery before retrying"
 
 
 def _rebuild_staged(config_dir: str) -> bool:
-    return os.path.isfile(os.path.join(config_dir, ha_import.REBUILD_FILE))
+    return os.path.isfile(os.path.join(config_dir, ha_import.REBUILD_FILE)) or os.path.lexists(os.path.join(config_dir, ha_import.IMPORT_PENDING_FILE))
 
 
 class ImportUploadView(ManagerView):

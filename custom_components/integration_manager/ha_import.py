@@ -36,7 +36,7 @@ from typing import Any
 
 import backupkit
 import securetar
-from jsonio import write_json
+from jsonio import fsync_dir, write_json
 
 from homeassistant import loader
 from homeassistant.config_entries import ConfigEntry, ConfigEntryDisabler, ConfigEntryState
@@ -45,6 +45,7 @@ from homeassistant.components import persistent_notification as pn
 from homeassistant.core import CoreState, Event, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.json import json_bytes
 
 from . import events
 
@@ -57,6 +58,7 @@ SUMMARY_FILE = os.path.join(EXTRACT_DIR, "summary.json")
 MAP_FILE = os.path.join(STATE_DIR, "import-map.json")
 REBUILD_FILE = os.path.join(STATE_DIR, "rebuild-pending.json")  # read by entrypoint.py too
 REBUILD_TYPE = "ha-downgrade-rebuild"
+IMPORT_PENDING_FILE = os.path.join(STATE_DIR, "import-pending.json")  # entrypoint boot recovery; no credentials
 CORE_STORES = (".storage/core.config_entries", ".storage/core.entity_registry", ".storage/core.device_registry")
 
 
@@ -92,6 +94,8 @@ def inspect_backup(config_dir: str, password: str | None, domains: set[str]) -> 
     return a summary.  `domains` = integrations installable here (the
     registry); only their config data/options are kept.  Blocking."""
     tar_path = os.path.join(config_dir, IMPORT_TAR)
+    if os.path.lexists(os.path.join(config_dir, IMPORT_PENDING_FILE)):
+        raise ValueError("an incomplete import owns its recovery source; resolve recovery before inspecting another backup")
     out_dir = os.path.join(config_dir, EXTRACT_DIR)
     shutil.rmtree(out_dir, ignore_errors=True)
     os.makedirs(out_dir)
@@ -324,10 +328,14 @@ def load_summary(config_dir: str) -> dict[str, Any] | None:
 
 
 def clear_extracted(config_dir: str) -> None:
+    if os.path.lexists(os.path.join(config_dir, IMPORT_PENDING_FILE)):
+        return  # every caller, including an exhausted/abandoned rebuild, must retain unresolved recovery
     shutil.rmtree(os.path.join(config_dir, EXTRACT_DIR), ignore_errors=True)
 
 
 def clear(config_dir: str) -> None:
+    if os.path.lexists(os.path.join(config_dir, IMPORT_PENDING_FILE)):
+        return  # an unresolved transaction owns its source, including during coroutine cancellation
     shutil.rmtree(os.path.join(config_dir, EXTRACT_DIR), ignore_errors=True)
     try:
         os.remove(os.path.join(config_dir, IMPORT_TAR))
@@ -730,16 +738,36 @@ def _forget_cached_stores(hass: HomeAssistant, names: list[str]) -> None:
         manager.async_invalidate(name)
 
 
-async def _save_config_entries(hass: HomeAssistant, domain: str) -> None:
-    """Write core.config_entries now instead of SAVE_DELAY later (what HA's
-    final write does).  Also waits for a save already under way."""
-    store = getattr(hass.config_entries, "_store", None)
+def _saved_config_entries(config_dir: str) -> list[dict[str, Any]]:
+    # Read the file, never Store.async_load: its cache/pending data is not
+    # evidence that HA's swallowed WriteError reached disk.
+    with open(os.path.join(config_dir, ".storage", "core.config_entries"), encoding="utf-8") as fh:
+        return json.load(fh)["data"]["entries"]
+
+
+async def _save_config_entries(hass: HomeAssistant, domain: str, entry_id: str | None = None, *, removed: bool = False) -> None:
+    """Force a fresh HA save and confirm the imported entry (or its removal).
+    Store consumes its pending write even when it logs and swallows a WriteError,
+    so a normal return alone cannot authorize deleting recovery files."""
+    entries = hass.config_entries
+    store = getattr(entries, "_store", None)
     if store is None:
-        return
+        raise ValueError("config entry persistence is unavailable; import recovery was retained")
     try:
-        await store._async_handle_write_data()  # noqa: SLF001 - internal HA API, as in Installer.async_flush_stores
-    except Exception as err:  # noqa: BLE001 - HA still saves it itself a second later
-        _LOGGER.warning("import of %s: the config entries could not be saved at once (%s)", domain, err)
+        entries._async_schedule_save()  # noqa: SLF001 - refresh even if a failed Store write consumed the callback
+        await store._async_handle_write_data()  # noqa: SLF001 - waits for a write already under way
+        # Snapshot after flushing, on the loop. Unrelated config-entry changes
+        # do not invalidate this import: check only its stable id when given.
+        expected = json.loads(json_bytes([e.as_dict() for e in entries.async_entries()
+                                          if entry_id is None or e.entry_id == entry_id]))
+        if entry_id is not None and ((removed and expected) or (not removed and not expected)):
+            raise ValueError("the imported entry changed presence during persistence")
+        saved = await hass.async_add_executor_job(_saved_config_entries, hass.config.config_dir)
+        actual = [e for e in saved if entry_id is None or e.get("entry_id") == entry_id]
+        if actual != expected:
+            raise ValueError("the saved config entry does not match the import")
+    except Exception as err:  # noqa: BLE001 - no credential-bearing snapshots in the error
+        raise ValueError(f"import of {domain}: config entry persistence could not be confirmed ({type(err).__name__})") from None
 
 
 def _unmask(given: Any, stored: Any, misses: list[str] | None = None, path: str = "") -> Any:
@@ -885,12 +913,38 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
         # integration is started (HA skips setup of disabled entries)
         disabled_by=ConfigEntryDisabler.USER if (not running or src.get("disabled_by")) else None,
     )
+    journal = os.path.join(cfg, IMPORT_PENDING_FILE)
+    intent: dict[str, Any] = {"version": 1, "entry_id": entry.entry_id, "domain": domain, "phase": "pending", "stores": []}
+
     copied: list[str] = []   # new files in place (copy succeeded)
+    attempted: list[str] = []  # includes a new destination a failed copy created
     moved: list[str] = []    # originals set aside as .pre-import (recorded BEFORE the move: a failed copy must still restore them)
     merged: dict[str, Any] = {"entities": {}, "devices": {}}
 
     to_copy = storage_for_entry(dom.get("storage_files", []), original_id, other_entry_ids(dom, original_id),
                                 first_of_domain=not hass.config_entries.async_entries(domain))
+
+    def _begin() -> None:
+        if os.path.lexists(journal):
+            raise ValueError("an earlier import has unresolved recovery; resolve it before retrying")
+        # An id must be absent on disk as well as in memory before this intent
+        # can interpret its presence at boot as a completed add.
+        try:
+            saved = _saved_config_entries(cfg)
+        except FileNotFoundError:
+            saved = []
+        if any(e.get("entry_id") == entry.entry_id for e in saved):
+            raise ValueError("the import entry id is still present on disk; restart before retrying")
+        if copy_storage:
+            for f in to_copy:
+                name = f.replace(original_id, entry.entry_id) if original_id and not keep_id else f
+                if os.path.isfile(os.path.join(out_dir, ".storage", f)):
+                    intent["stores"].append({"name": name, "had_original": os.path.isfile(os.path.join(cfg, ".storage", name))})
+        write_json(journal, intent)  # durable before a store moves or an entry is added
+
+    def _finish() -> None:
+        os.remove(journal)
+        fsync_dir(os.path.dirname(journal))
 
     def _copy() -> None:
         for f in to_copy:
@@ -899,15 +953,19 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
             name = f.replace(original_id, entry.entry_id) if original_id and not keep_id else f
             d = os.path.join(cfg, ".storage", name)
             if os.path.isfile(s):
+                if os.path.exists(d + ".pre-import"):
+                    raise ValueError("an earlier import has unconfirmed recovery stores; resolve it before retrying")
                 if os.path.isfile(d):  # keep what was here: a failed import must put it back
                     moved.append(name)
                     os.replace(d, d + ".pre-import")
+                attempted.append(name)  # before opening d: a short/failed first copy still needs undo
                 shutil.copyfile(s, d)
                 copied.append(name)
 
-    def _undo() -> None:
+    def _undo() -> bool:
+        restored = True
         aligner.drop_keys(domain, list(merged["entities"]), list(merged["devices"]))
-        for f in dict.fromkeys(moved + copied):
+        for f in dict.fromkeys(moved + attempted):
             d = os.path.join(cfg, ".storage", f)
             try:
                 if f in moved:
@@ -915,9 +973,10 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
                 else:
                     os.remove(d)
             except OSError:
-                pass
+                restored = False
+        return restored
 
-    def _commit() -> None:
+    def _commit() -> bool:
         for f in moved:
             aside = os.path.join(cfg, ".storage", f) + ".pre-import"
             # marked done first: a .pre-import left on the volume is put back over the imported store at the next boot
@@ -932,8 +991,12 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
                 os.remove(done)
             except OSError as err:
                 _LOGGER.error("import of %s: .storage/%s could not be removed (%s)", domain, os.path.basename(done), err)
+        return not any(os.path.lexists(os.path.join(cfg, ".storage", f) + ".pre-import") for f in moved)
 
+    begun = False
     try:
+        await hass.async_add_executor_job(_begin)
+        begun = True
         if copy_storage:
             await hass.async_add_executor_job(_copy)
             _forget_cached_stores(hass, copied)
@@ -946,16 +1009,46 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
             reason = entry.reason or entry.state.value
             await hass.config_entries.async_remove(entry.entry_id)
     except Exception as err:  # noqa: BLE001 - a ValueError too: the copy and the alignment map are undone for any failure
-        _undo()
+        if begun and hass.config_entries.async_get_entry(entry.entry_id) is None and _undo():
+            await hass.async_add_executor_job(_finish)
         raise ValueError(f"{type(err).__name__}: {err}") from None
     if not_loaded:
-        _undo()
+        # Removal was scheduled by HA; confirm it before letting boot restore stores.
+        await _save_config_entries(hass, domain, entry.entry_id, removed=True)
+        if _undo():
+            await hass.async_add_executor_job(_finish)
         raise ValueError(f"the entry did not load ({reason}); it was removed again, fix the options and retry")
     # The originals set aside go only once the entry is on disk, and before anything slow: a restart in between
-    # puts every .pre-import back (clean_import_leftovers), which is right while the entry is not saved and wrong
-    # once it is.  Home Assistant saves config entries SAVE_DELAY after async_add, so that save is made now.
-    await _save_config_entries(hass, domain)
-    await hass.async_add_executor_job(_commit)
+    # resolves the intent before handling legacy .pre-import files. A verified commit keeps the imported
+    # stores; an uncertain write keeps both the originals and source.  Home Assistant saves config entries SAVE_DELAY after async_add, so that save is made now.
+    try:
+        await _save_config_entries(hass, domain, entry.entry_id)
+    except ValueError as err:
+        # Remove the runtime entry before restoring stores that its setup may
+        # still use. Confirm the removal too: a failed flush can have written
+        # the entry before a read/verification error prevented confirmation.
+        try:
+            await hass.async_add_executor_job(write_json, journal, {**intent, "phase": "uncertain"})
+            removed = await hass.config_entries.async_remove(entry.entry_id)
+            if removed and removed.get("require_restart"):
+                raise ValueError("the imported entry could not be unloaded; restart required for recovery")
+            await _save_config_entries(hass, domain, entry.entry_id, removed=True)
+        except Exception as rollback_err:  # noqa: BLE001
+            raise ValueError(f"{err}; rollback persistence is unconfirmed ({type(rollback_err).__name__}); "
+                             "original stores and import source were retained for recovery") from None
+        await hass.async_add_executor_job(write_json, journal, {**intent, "phase": "rollback"})
+        if not _undo():
+            raise ValueError(f"{err}; the entry was removed but store rollback is incomplete; "
+                             "import source and remaining originals retained for recovery") from None
+        await hass.async_add_executor_job(_finish)
+        raise ValueError(f"{err}; the entry was removed and stores restored; import source retained for retry") from None
+    try:
+        await hass.async_add_executor_job(write_json, journal, {**intent, "phase": "commit"})
+        if not await hass.async_add_executor_job(_commit):
+            raise ValueError("an original store could not be marked committed")
+        await hass.async_add_executor_job(_finish)
+    except Exception as err:  # noqa: BLE001 - the durable entry stays; boot can finish a verified commit
+        raise ValueError(f"entry saved but import cleanup is incomplete ({type(err).__name__}); recovery retained") from None
     # Done with the other instance's .storage (it holds every integration's
     # credentials): removed right away once imported (apply_all keeps it until
     # its last entry).  A failed import keeps it for the retry; Clear removes it.
@@ -983,6 +1076,8 @@ async def apply_all(hass: HomeAssistant, aligner: RegistryAligner, domains: list
     imported, so a retry after a partial import completes it.  A domain that
     had entries of its own before any of this backup's is skipped whole."""
     cfg = hass.config.config_dir
+    if os.path.lexists(os.path.join(cfg, IMPORT_PENDING_FILE)):
+        raise ValueError("an incomplete import owns its recovery source; resolve it before importing other entries")
     summary = await hass.async_add_executor_job(load_summary, cfg)
     if not summary:
         raise ValueError("no inspected backup: upload and inspect one first")
@@ -1126,6 +1221,8 @@ def stage_rebuild(config_dir: str, backup_name: str, domain: str | None, ha_vers
     into EXTRACT_DIR only once it is complete, so a failure here (no space,
     an archive that became unreadable) leaves an older change's clean start
     exactly as it was.  Blocking."""
+    if os.path.lexists(os.path.join(config_dir, IMPORT_PENDING_FILE)):
+        raise ValueError("an incomplete import owns its recovery source; resolve it before staging a clean start")
     _sweep_stage_leftovers(config_dir)
     tmp_dir = _stage_path(config_dir, _STAGE_NEW)
     os.makedirs(tmp_dir)
@@ -1164,6 +1261,8 @@ def stage_rebuild(config_dir: str, backup_name: str, domain: str | None, ha_vers
 
 def drop_rebuild(config_dir: str) -> bool:
     """Forget a scheduled clean start (a newer choice replaces it)."""
+    if os.path.lexists(os.path.join(config_dir, IMPORT_PENDING_FILE)):
+        return False  # plan/source/pre-rebuild storage still belong to unresolved import recovery
     path = os.path.join(config_dir, REBUILD_FILE)
     had = os.path.isfile(path)
     try:

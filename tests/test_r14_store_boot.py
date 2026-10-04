@@ -91,6 +91,7 @@ class ImportCommitLeftoverTest(unittest.TestCase):
             return real_remove(path, *args, **kwargs)
 
         with mock.patch.object(ha_import, "load_summary", return_value=summary), mock.patch.object(ha_import, "_forget_cached_stores"), \
+                mock.patch.object(ha_import, "_save_config_entries", mock.AsyncMock()), \
                 mock.patch.object(ha_import.os, "remove", remove), self.assertLogs(ha_import.__name__, logging.ERROR) as logs:
             asyncio.run(ha_import.apply(hass, mock.Mock(), "hub", "e1", None, None, align=False, copy_storage=True, running=False, cleanup=False))
         return "\n".join(logs.output)

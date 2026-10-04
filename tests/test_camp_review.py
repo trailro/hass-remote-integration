@@ -161,7 +161,8 @@ class ImportBadEntryIdTest(unittest.TestCase):
         config_entries.async_add = async_add
         hass = SimpleNamespace(config=SimpleNamespace(config_dir=cfg), config_entries=config_entries,
                                async_add_executor_job=executor)
-        with mock.patch.object(ha_import, "load_summary", return_value=summary):
+        with mock.patch.object(ha_import, "load_summary", return_value=summary), \
+                mock.patch.object(ha_import, "_save_config_entries", mock.AsyncMock()):
             return asyncio.run(ha_import.apply(hass, None, "hub", "e1", None, None, align=False, copy_storage=True,
                                                running=False, cleanup=False))
 
