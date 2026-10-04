@@ -3407,9 +3407,12 @@ class Installer:
         except OSError:
             have_tag = None
         # the tag alone is not enough: "local" or a branch name gets new code under
-        # the same tag, so the marker also carries when that copy entered the store
+        # the same tag. Keep the legacy tag/timestamp lines for disk adoption,
+        # then identify stamped copies by their unique store generation.
         rec = ((self.state.installed.get(domain) or {}).get("versions") or {}).get(tag) or {}
         stamp = f"{tag}\n{rec.get('installed_at') or ''}".strip()
+        if rec.get("stored"):
+            stamp = f"{tag}\n{rec.get('installed_at') or ''}\n{rec['stored']}"
         if not force and have and have.get("version") == want.get("version") and have_tag == stamp:
             return False
         self._deploy(domain, tag)
