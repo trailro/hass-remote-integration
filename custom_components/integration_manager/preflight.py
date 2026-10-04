@@ -831,7 +831,7 @@ async def gate(hass: HomeAssistant, installer, domain: str, tag: str | None) -> 
     example) does not block either: the smoke test still guards the start.  A dev build is gated like any
     other version: it is checked against the stored copy, never against GitHub, so there is nothing about
     an uploaded tree the check cannot read - and a syntax error or a requirement with no wheel in one costs
-    two restarts and a rollback to find out otherwise.  Its report is keyed on the copy's installed_at, so
+    two restarts and a rollback to find out otherwise.  Its report is keyed on the copy's store generation, so
     the next upload is checked again and starting the same copy twice runs one check.
     A stored copy that is no integration at all is the exception, and blocks; a version that is not in the
     store (or whose directory is gone) is not gated at all: start() refuses it plainly, forced or not.
@@ -852,10 +852,11 @@ async def gate(hass: HomeAssistant, installer, domain: str, tag: str | None) -> 
         return {"blocked": False, "report": None, "skipped": "no GitHub repository known"}
     def stamp() -> str:
         versions_now = (installer.state.installed.get(domain) or {}).get("versions") or {}
-        return str((versions_now.get(target) or {}).get("installed_at") or "")
+        copy = versions_now.get(target) or {}
+        return str(copy.get("stored") or copy.get("installed_at") or "")
 
     before = stamp()
-    key = f"stored:{target}\n{before}"  # a reinstalled copy (same tag, new installed_at) is checked again
+    key = f"stored:{target}\n{before}"  # legacy copies use installed_at; stamped reinstalls cannot collide
     report = recent(domain, key)
     if report is None:
         try:
