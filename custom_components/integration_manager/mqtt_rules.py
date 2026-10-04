@@ -126,14 +126,15 @@ class MqttRules:
         except (ValueError, RecursionError) as err:  # also a text that is not UTF-8
             self._failed(f"mqtt_rules.json is not valid JSON ({type(err).__name__}: {err}) {self._keep_corrupt()}")
             return
-        rules = raw.get("rules", {}) if isinstance(raw, dict) else None
+        rules = raw.get("rules") if isinstance(raw, dict) else None
         if not isinstance(rules, dict):
             self._failed(f"mqtt_rules.json does not hold a rules object {self._keep_corrupt()}")
             return
         out = {}
         for k, v in rules.items():
             if not isinstance(v, dict):
-                continue
+                self._failed(f"mqtt_rules.json rule {k!r} is not an object {self._keep_corrupt()}")
+                return
             try:
                 out[str(k)] = self.clean(v)
             except ValueError as err:
@@ -144,7 +145,8 @@ class MqttRules:
                         continue
                     except ValueError:
                         pass
-                _LOGGER.error("mqtt rule %r ignored: %s", k, err)
+                self._failed(f"mqtt_rules.json rule {k!r} is invalid ({err}) {self._keep_corrupt()}")
+                return
         self.rules = out
 
     def _failed(self, problem: str) -> None:
