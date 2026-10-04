@@ -5,10 +5,13 @@ not before it, a bound on the manager action lock, a bound on the HTTP service c
 burst that no longer flushes the timeline's page."""
 
 import asyncio
+import io
 import json
+import logging
 import os
 import shutil
 import tempfile
+import threading
 import time
 import unittest
 from types import SimpleNamespace
@@ -173,6 +176,29 @@ class StopWatchdogArmingTest(unittest.TestCase):
         for name in ("run.py", os.path.join("custom_components", "integration_manager", "installer.py")):
             with open(os.path.join(ROOT, name), encoding="utf-8") as fh:
                 self.assertIn(f'"{WATCHDOG_KEY}"', fh.read(), name)
+
+    def test_a_blocked_log_handler_cannot_hold_up_the_hard_exit(self):
+        handler = logging.StreamHandler(io.StringIO())
+        logger = logging.Logger("stop-watchdog-test")
+        logger.addHandler(logging.NullHandler())
+        exited = threading.Event()
+        modules = {"custom_components.integration_manager.writer": SimpleNamespace(drain=lambda _: True),
+                   "custom_components.integration_manager.events": SimpleNamespace(drain=lambda _: True)}
+        with mock.patch.object(run, "_LOGGER", logger), \
+             mock.patch.object(run.time, "sleep", return_value=None), \
+             mock.patch.dict(run.sys.modules, modules), \
+             mock.patch.object(run.logbuffer, "flush_queue", return_value=False), \
+             mock.patch.object(run.logbuffer, "find", return_value=handler), \
+             mock.patch.object(run.os, "_exit", side_effect=lambda _: exited.set()):
+            handler.acquire()  # listener is stuck writing process.log with its lock held
+            try:
+                thread = run._arm_stop_watchdog(0)
+                stopped_while_locked = exited.wait(1)
+            finally:
+                handler.release()
+                thread.join(1)
+            self.assertFalse(thread.is_alive())
+            self.assertTrue(stopped_while_locked, "logging prevented the watchdog's hard exit")
 
 
 def _device(installer=None):
