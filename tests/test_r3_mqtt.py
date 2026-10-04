@@ -32,9 +32,12 @@ def _publisher(exclude=()):
     pub.history = collections.deque(maxlen=mp.HISTORY_MAX)
     pub._calls = {}
     pub.stats = {"calls": 0, "last_call": None}
-    pub.config = mock.Mock(exclude_integrations=list(exclude))
+    pub.config = mock.Mock(enabled=True, host="synthetic-broker", port=1883, tls=False, username="",
+                           exclude_integrations=list(exclude))
     pub._moving = False
-    pub._live_base = BASE
+    pub._live_base, pub._live_prefix = BASE, BASE + "_"
+    pub._key_provider = lambda: BASE
+    pub._identity = None
     pub._topics = {}
     pub.results = []
     pub._publish_result = lambda domain, service, result, **kw: pub.results.append((domain, service, result))
