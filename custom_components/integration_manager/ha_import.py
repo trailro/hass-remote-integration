@@ -941,17 +941,21 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
     to_copy = storage_for_entry(dom.get("storage_files", []), original_id, other_entry_ids(dom, original_id),
                                 first_of_domain=not hass.config_entries.async_entries(domain))
 
+    def _on_disk() -> bool:
+        try:
+            return any(e.get("entry_id") == entry.entry_id for e in _saved_config_entries(cfg))
+        except FileNotFoundError:
+            return False
+
     def _begin() -> None:
         if os.path.lexists(journal):
             raise ValueError("an earlier import has unresolved recovery: Resolve it on the import page, or restart")
         # An id must be absent on disk as well as in memory before this intent
         # can interpret its presence at boot as a completed add.
-        try:
-            saved = _saved_config_entries(cfg)
-        except FileNotFoundError:
-            saved = []
-        if any(e.get("entry_id") == entry.entry_id for e in saved):
-            raise ValueError("the import entry id is still present on disk; restart before retrying")
+        if _on_disk():
+            raise ValueError(f"config entry {entry.entry_id} is not loaded here but still in .storage/core.config_entries "
+                             "after Home Assistant saved it: that save failed (see its log for \"Error writing config\"); "
+                             "retry once Home Assistant can write its storage")
         if copy_storage:
             for f in to_copy:
                 name = f.replace(original_id, entry.entry_id) if original_id and not keep_id else f
@@ -1012,6 +1016,8 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
 
     begun = False
     try:
+        if await hass.async_add_executor_job(_on_disk):
+            await _flush_config_entries(hass)  # deleted here moments ago: HA writes that SAVE_DELAY later
         await hass.async_add_executor_job(_begin)
         begun = True
         if copy_storage:

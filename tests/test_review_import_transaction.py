@@ -274,6 +274,18 @@ class ImportTransactionTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(installer.busy)
         self.assertIsNone(ha_import.pending_import(self.cfg))
 
+    async def test_an_entry_deleted_moments_ago_is_flushed_not_refused(self):
+        self.write([{"entry_id": "e1", "domain": "hub"}])  # deleted here, HA writes that SAVE_DELAY later
+        result = await self.apply()
+        self.assertEqual(result["entry_id"], "e1")
+
+    async def test_an_entry_whose_removal_cannot_be_written_is_refused_with_the_reason(self):
+        self.write([{"entry_id": "e1", "domain": "hub"}])
+        self.writes = ["swallow"]
+        with self.assertRaisesRegex(ValueError, "that save failed"):
+            await self.apply()
+        self.assertFalse(os.path.exists(os.path.join(self.cfg, ha_import.IMPORT_PENDING_FILE)))
+
     async def test_ha_stop_inside_async_add_during_a_rebuild_is_settled_at_the_next_boot(self):
         """#122 keeps the clean start's plan when HA cancels the rebuild; the import's record must not pin it."""
         from homeassistant.core import CoreState
