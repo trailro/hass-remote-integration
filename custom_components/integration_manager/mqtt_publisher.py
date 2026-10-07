@@ -3858,6 +3858,7 @@ class MqttPublisher:
             _LOGGER.debug("MQTT: could not read the retained manager device config (%s): removing it", err)
             found = {topic: b"?"}
         if not self._retained_current(origin):
+            self._manager_absent_sent = False  # read against another broker or names: the next pass asks again
             return
         if not self._connected or self._moving or self.config.manager_discovery or self.config.discovery_enabled:
             return  # the settings or the connection changed meanwhile: the next pass decides

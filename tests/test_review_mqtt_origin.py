@@ -255,6 +255,20 @@ class RetainedOriginTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pub._clear_stale_docs.call_args.args[0], frozenset({"kept"}))
         self.assertFalse(pub._stale_docs_due)
 
+    async def test_manager_check_read_before_a_switch_is_asked_again(self):
+        """The broker changed during the read of the retained manager config: the next pass of this connection asks
+        again, instead of taking the device as handled."""
+        pub = self.publisher()
+        pub._manager_absent_sent = True  # set by _publish_manager_discovery when it started the check
+
+        async def executor(func, *args):
+            self.switch(pub)
+            return {}
+        pub.hass.async_add_executor_job = executor
+        await pub._async_clear_manager_if_retained("hass_fix_manager", "homeassistant/device/hass_fix_manager/config")
+        self.assertFalse(pub._manager_absent_sent)
+        self.assertEqual(pub._client.published, [])
+
     async def test_broker_traits_learned_by_a_cleanup_stay_with_the_publisher(self):
         pub = self.publisher()
         built = []
