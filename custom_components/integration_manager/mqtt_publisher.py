@@ -664,6 +664,7 @@ class MqttPublisher:
     _stopping = False  # Home Assistant is stopping: no client may be created any more
     _identity: Any = None  # installer.MqttIdentity, set in __init__
     _identity_sweep_due = False  # the sweep of an identity that changed while disconnected failed: retried after a connect
+    _stale_docs_due = False  # a stale-document scan read against a broker or names no longer live: the next full republish clears them
     # why the id format of the live identity is unknown (the retained discovery configs could not be read in full): no
     # discovery config goes out and none is swept until a full republish reads them (_async_decide_id_format)
     _ids_undecided = ""
@@ -3248,6 +3249,7 @@ class MqttPublisher:
         try:
             found = self._retained_scan("stale", [(f"{base}/#", 1)], origin=origin)
             if not self._retained_current(origin):
+                self._stale_docs_due = True  # cleared by the next full republish, under the broker and names it has
                 return 0  # what this process publishes now is not what that scan read against
             live = set(self._topics.values()) | keep
             keep_prefixes = (f"{base}/services/", f"{base}/cmd/", f"{base}/call/")
@@ -3621,13 +3623,15 @@ class MqttPublisher:
             _LOGGER.warning("MQTT: stale documents not cleared (no connection within %.0f s)", self.CONNECT_GRACE_S)
             return 0
         await self.async_republish_all()  # so _topics reflects the new version first
-        # entries without a state (disabled): no document is published for them, but their discovery components stay and
-        # read the retained one, which an empty payload would break there.  Read on the loop, where the registry lives
+        return await self.hass.async_add_executor_job(self._clear_stale_docs, self._stale_keep(), self._retained_origin())
+
+    def _stale_keep(self) -> frozenset[str]:
+        """Entries without a state (disabled): no document is published for them, but their discovery components stay and
+        read the retained one, which an empty payload would break there.  Read on the loop, where the registry lives."""
         reg = er.async_get(self.hass)
-        keep = frozenset(self._topic_for(e.entity_id, e.platform) for e in list(reg.entities.values())
+        return frozenset(self._topic_for(e.entity_id, e.platform) for e in list(reg.entities.values())
                          if self.hass.states.get(e.entity_id) is None and not self._integration_excluded(e.platform)
                          and not self.rules.for_entity(e.entity_id).get("exclude"))
-        return await self.hass.async_add_executor_job(self._clear_stale_docs, keep, self._retained_origin())
 
     # ----- rules ---------------------------------------------------------------
 
@@ -4204,6 +4208,9 @@ class MqttPublisher:
                 and not self._ids_undecided:
             self._orphan_sweep_due = False  # a connect after HA started: the timer from _on_started may have found it disconnected
             await self._async_sweep_orphans()
+        if self._stale_docs_due:
+            self._stale_docs_due = False
+            await self.hass.async_add_executor_job(self._clear_stale_docs, self._stale_keep(), self._retained_origin())
         await self._publish_services()
         _LOGGER.info(
             "MQTT full republish: %s entities, %s services, discovery: %s devices / %s components",
