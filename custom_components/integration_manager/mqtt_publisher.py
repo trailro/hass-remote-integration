@@ -3186,10 +3186,11 @@ class MqttPublisher:
 
     def _clear_discovery_retained(self) -> int:
         """Blocking: every retained discovery config of THIS identity under
-        <prefix>/device/+/config (the consumer removes the entities)."""
+        <prefix>/device/+/config (the consumer removes the entities).  A scan
+        that may be partial raises: the undiscover stays due and is retried."""
         base, prefix = self.base_topic, self.config.discovery_prefix
         try:
-            found = self._retained_scan("undisc", [(f"{prefix}/device/+/config", 1)])
+            found = self._retained_scan("undisc", [(f"{prefix}/device/+/config", 1)], strict=True)
             # the manager device stays while manager_discovery wants it: removing it would drop the
             # consumer's customisations of those entities only to announce them again a minute later
             keep = {self._discovery_topic(f"{base}_manager")} if self.config.manager_discovery else set()

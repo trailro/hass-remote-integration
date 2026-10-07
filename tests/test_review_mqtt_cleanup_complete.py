@@ -9,7 +9,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 from custom_components.integration_manager import mqtt_publisher as mp
-from tests.test_r13_mqtt import _Broker
+from tests import test_camp_publish as camp
+from tests.test_r13_mqtt import _Broker, _config
 
 
 class CompleteCleanupTest(unittest.TestCase):
@@ -76,3 +77,42 @@ class CompleteCleanupTest(unittest.TestCase):
         self.assertIsNone(n)
         self.assertIn("time limit", why)
         self.assertIn(self.key, self.pub._cleanup_pending)
+
+
+class UndiscoverCompleteTest(unittest.IsolatedAsyncioTestCase):
+    """Discovery turned off (or Undo): a partial scan must not mark the undiscover as done."""
+
+    def setUp(self):
+        pub = self.pub = camp._publisher(enabled=True, discovery_enabled=False, manager_discovery=False)
+        pub.stats.update(discovery_devices=0, discovery_components=0)
+        pub._pending_clears, pub._orphan_sweep_due, pub._resync_excluded = set(), False, False
+        pub._identity_sweep_due, pub._ids_undecided, pub._ids_switch_due = False, False, False
+        pub._undiscover_due = True
+        pub._discovery_map, pub._blocks = {}, {}
+        pub.hass.states.async_all.return_value = []
+        pub.publish_health = pub._publish_manager_discovery = pub.publish_manager = lambda: None
+        pub._publish_services = mock.AsyncMock()
+        self.due = []
+        pub._set_undiscover_due = lambda due: (self.due.append(due), setattr(pub, "_undiscover_due", due))
+
+        async def executor(fn, *args):
+            return fn(*args)
+
+        pub.hass.async_add_executor_job = executor
+        self.topic = f"homeassistant/device/{camp.BASE}_dev/config"
+        self.broker = _Broker({self.topic: _config(camp.BASE)})
+
+    async def republish(self, cut):
+        with mock.patch.object(self.pub, "_throwaway_client", side_effect=self.broker.client), \
+                mock.patch.object(mp.MqttPublisher, "_collect_quiet", return_value=cut), mock.patch.object(mp.events, "emit"):
+            await self.pub.async_republish_all()
+
+    async def test_cut_scan_keeps_undiscover_due_until_a_complete_scan(self):
+        with self.assertLogs(mp._LOGGER, "WARNING"):
+            await self.republish(cut=True)
+        self.assertEqual(self.due, [])
+        self.assertTrue(self.pub._undiscover_due)
+        self.assertEqual(self.broker.cleared, [])
+        await self.republish(cut=False)
+        self.assertEqual(self.due, [False])
+        self.assertEqual(self.broker.cleared, [self.topic])
