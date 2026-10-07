@@ -20,7 +20,7 @@ class DisabledBeforeUninstallTest(_Case):
         pub = self.publisher(running="hass_demo")
         await pub.hass.async_add_executor_job(pub._remember_identity, "hass_demo", "homeassistant")  # what its connect records
         pub = self.publisher(enabled=False)  # MQTT turned off afterwards
-        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a: broker.client(*a)), \
+        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a, **k: broker.client(*a)), \
                 mock.patch.object(mp.mqtt, "Client", side_effect=AssertionError("no client while MQTT is off")):
             return await self.uninstall(pub)
 
@@ -34,7 +34,7 @@ class DisabledBeforeUninstallTest(_Case):
         self.assertEqual(broker.scans, [])  # nothing sent while MQTT is off
         self.assertEqual(set(self.on_disk()), {"hass_demo"})
         self.assertTrue(any("hass_demo" in c.args[1] for c in self.emit.call_args_list))
-        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a: broker.client(*a)):
+        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a, **k: broker.client(*a)):
             pub = self.publisher(enabled=False)  # a restart, still off
             await pub._on_cleanup_timer(None)
             self.assertEqual(broker.scans, [])
@@ -54,7 +54,7 @@ class DisabledBeforeUninstallTest(_Case):
                     self.ledger(ledger)
                 pub = self.publisher(enabled=False)
                 broker = _Broker({**OURS, **KEPT})
-                with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a: broker.client(*a)):
+                with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a, **k: broker.client(*a)):
                     res = await self.uninstall(pub)
                     await self.publisher()._on_cleanup_timer(None)
                 self.assertNotIn("retained_cleanup_deferred", res)

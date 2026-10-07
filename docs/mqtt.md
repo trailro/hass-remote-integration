@@ -387,9 +387,14 @@ is refused: limit it on the broker (`max_packet_size` in mosquitto). The scans
 (base-topic check, cleanup of stale and excluded documents) use short-lived
 connections that announce no maximum, to see retained documents of any size. A
 sweep that read less removes less, never something else. Each retained scan
-and its deletion use the same captured broker settings and topic namespace.
-A reconnect cannot redirect an in-progress cleanup to its destination broker;
-stale discovery decisions are retried with the current connection.
+and its deletion use the broker settings and names taken when it started, so a
+reconnect or a settings change meanwhile cannot send its deletions to another
+broker. When the broker (host, port, TLS, user), the base topic, the id prefix
+or the discovery prefix differ once it returns, its result is dropped and the
+work stays due (the next full republish, or the next minute for an
+uninstall's kept cleanup); nothing it read is published on the new connection.
+A settings change that touches none of them (turning discovery off, an
+exclusion) drops nothing.
 
 ## Entity document
 

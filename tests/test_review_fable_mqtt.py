@@ -143,7 +143,7 @@ class PendingKeyIsHostAndPortTest(_Case):
         self.assertEqual(pub.retained_cleanup_pending()[0]["other_broker"], False)
         self.assertNotIn("waiting for the MQTT settings", pub.retained_cleanup_pending()[0]["error"])
         broker = _Broker({**OURS, **KEPT})
-        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a: broker.client(*a)):
+        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a, **k: broker.client(*a)):
             await pub._on_cleanup_timer(None)
         self.assertEqual(sorted(broker.cleared), sorted(OURS))
         self.assertEqual(self.on_disk(), {})

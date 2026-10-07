@@ -1,10 +1,14 @@
 """A retained scan and an accepted call keep the broker/namespace that supplied them."""
 
 import asyncio
+import dataclasses
 import json
 import unittest
 from types import SimpleNamespace
 from unittest import mock
+
+from paho.mqtt.packettypes import PacketTypes
+from paho.mqtt.reasoncodes import ReasonCode
 
 from custom_components.integration_manager import mqtt_publisher as mp
 from homeassistant.core import SupportsResponse
@@ -53,22 +57,6 @@ class RetainedOriginTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(pub._conn_lock.locked())
         self.assertFalse(pub._cleanup_retrying)
 
-    async def test_pending_uninstall_is_not_cancelled_just_because_its_old_connection_is_live(self):
-        for wanted in (None, "hass_next"):
-            with self.subTest(wanted=wanted):
-                pub = self.publisher()
-                old = pub.base_topic
-                pub._key_provider = lambda: wanted
-                key = pub._pending_key(old, pub._broker_identity())
-                pub._cleanup_pending = {key: {"base": old, "prefix": pub.config.discovery_prefix}}
-                pub._cancel_pending_cleanup = mock.Mock()
-                worker = pub._retained_connection()
-                worker._retry_pending_cleanups()
-                pub._cancel_pending_cleanup.assert_not_called()
-                self.assertIn(key, pub._cleanup_pending)
-                self.assertEqual(worker.wanted_base_topic, wanted)
-                self.assertEqual(worker.base_topic, old)
-
     async def test_scan_resumed_after_switch_never_deletes_destination_even_when_disabled_or_refused(self):
         for sweep, flag in [("_async_resync_excluded", "_resync_excluded"),
                             ("_async_sweep_orphans", "_orphan_sweep_due")]:
@@ -82,14 +70,14 @@ class RetainedOriginTest(unittest.IsolatedAsyncioTestCase):
 
                     async def executor(func, *args):
                         found = func(*args)
-                        if func.__name__ == "_retained_scan":
+                        if isinstance(found, dict):  # the scan; a clear returns nothing
                             entered.set()
                             await resume.wait()
                         return found
 
                     pub.hass.async_add_executor_job = executor
-                    def client(worker, *args):
-                        return brokers[worker.config.host].client(*args)
+                    def client(_pub, *args, origin=None):
+                        return brokers[origin.config.host].client(*args)
                     with mock.patch.object(mp.MqttPublisher, "_throwaway_client", client), \
                             mock.patch.object(mp.MqttPublisher, "_collect_quiet", return_value=False):
                         task = asyncio.create_task(getattr(pub, sweep)())
@@ -107,8 +95,8 @@ class RetainedOriginTest(unittest.IsolatedAsyncioTestCase):
         pub = self.publisher()
         topic = pub.base_topic + "/status"
         brokers = {"broker-a": _Broker({topic: b"offline"}), "broker-b": _Broker({topic: b"foreign"})}
-        def client(worker, suffix, *args):
-            cl = brokers[worker.config.host].client(suffix, *args)
+        def client(_pub, suffix, *args, origin=None):
+            cl = brokers[(origin.config if origin else pub.config).host].client(suffix, *args)
             if suffix == "cleanup":
                 subscribe = cl.subscribe
                 def switched(topics):
@@ -131,8 +119,7 @@ class RetainedOriginTest(unittest.IsolatedAsyncioTestCase):
         topic = pub.config.discovery_prefix + "/device/old/config"
         broker = _Broker({topic: b'{}'})
         pub._is_ours = lambda *args: True
-        worker = pub._retained_connection()
-        def client(_worker, suffix, *args):
+        def client(_pub, suffix, *args, **_kw):
             cl = broker.client(suffix, *args)
             if suffix == "undisc":
                 subscribe = cl.subscribe
@@ -142,8 +129,9 @@ class RetainedOriginTest(unittest.IsolatedAsyncioTestCase):
                     return result
                 cl.subscribe = switched
             return cl
-        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", client),                 mock.patch.object(mp.MqttPublisher, "_collect_quiet", return_value=False):
-            self.assertEqual(worker._clear_discovery_retained(), 1)
+        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", client), \
+                mock.patch.object(mp.MqttPublisher, "_collect_quiet", return_value=False):
+            self.assertEqual(pub._clear_discovery_retained(), 1)
         self.assertEqual(pub.stats["discovery_devices"], 7)
         self.assertEqual(pub.stats["discovery_components"], 31)
 
@@ -153,15 +141,60 @@ class RetainedOriginTest(unittest.IsolatedAsyncioTestCase):
         config_topic = pub.config.discovery_prefix + "/device/old/config"
         found = {topic: b'{"integration":"demo","published_at":"t"}', config_topic: b'{}'}
         pub._is_ours = lambda *args: True
+        jobs = []
         async def executor(func, *args):
-            if func.__name__ == "_retained_scan":
-                return found
-            self.switch(pub)
+            jobs.append(func)
+            if len(jobs) == 1:
+                return found  # the scan
+            self.switch(pub)  # during the clear of the documents
             return None
         pub.hass.async_add_executor_job = executor
         await pub._async_resync_excluded()
         self.assertEqual(pub._client.published, [])
         self.assertTrue(pub._resync_excluded)
+
+    async def test_settings_adopted_without_reconnect_do_not_discard_sweeps(self):
+        """A reload adopts mqtt.json while the connection keeps its broker: a sweep submitted after it is not discarded."""
+        for change in ({"qos": 1}, {"host": "broker-b"}):
+            with self.subTest(change=change):
+                pub = self.publisher()
+                pub._client._hri_origin = pub._configured_origin()  # bound at the connect, before the reload
+                pub.config = dataclasses.replace(pub.config, **change)  # async_reload_config: a new object, no reconnect
+                topic = pub.base_topic + "/demo/sensor/excluded"
+                broker = _Broker({topic: json.dumps({"integration": "demo", "published_at": "t"}).encode()})
+
+                async def executor(func, *args):
+                    return func(*args)
+                pub.hass.async_add_executor_job = executor
+                with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda _pub, *a, **k: broker.client(*a)), \
+                        mock.patch.object(mp.MqttPublisher, "_collect_quiet", return_value=False):
+                    await pub._async_resync_excluded()
+                self.assertEqual(broker.cleared, [topic])
+                self.assertFalse(pub._resync_excluded)
+
+    async def test_broker_traits_learned_by_a_cleanup_stay_with_the_publisher(self):
+        pub = self.publisher()
+        built = []
+
+        def client_factory(*_a, **kwargs):
+            c = mock.Mock()
+            c.protocol = kwargs.get("protocol")
+            c.max_inflight_messages = 20
+            refused = not built
+            c.connect.side_effect = lambda *a, **k: c.on_connect(
+                c, None, None, ReasonCode(PacketTypes.CONNACK, "Unsupported protocol version") if refused else 0, None)
+            c.subscribe.side_effect = lambda topics: c.on_subscribe(c, None, 1, [ReasonCode(PacketTypes.SUBACK, identifier=1)])
+            c.publish.return_value.is_published.return_value = True
+            built.append(c)
+            return c
+
+        with mock.patch.object(mp.mqtt, "Client", side_effect=client_factory), \
+                mock.patch.object(mp.MqttPublisher, "_collect_quiet", return_value=False), \
+                self.assertLogs(mp._LOGGER, "WARNING"), mock.patch.object(mp.events, "emit"):
+            n, why = pub._clear_retained_checked("hass_removed", pub.config.discovery_prefix)
+        self.assertEqual((n, why), (0, ""))
+        self.assertTrue(pub._mqtt311)
+        self.assertEqual(pub._broker_traits(), (True, 0))  # the next client of this broker speaks 3.1.1 at once
 
 
 class CallOriginTest(unittest.IsolatedAsyncioTestCase):

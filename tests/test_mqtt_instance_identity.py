@@ -487,7 +487,7 @@ class PublisherIdentityTest(_Case):
         self.assertEqual(disc.manager_device(pub.base_topic, pub.prefix, dict.fromkeys(("status", "health", "manager", "cmd"), "t"), "hri_probe", "", True),
                          before)
         broker = _Broker({})
-        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a: broker.client(*a)):
+        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a, **k: broker.client(*a)):
             self.assertTrue(await pub.hass.async_add_executor_job(pub._sweep_old_identity, pub.wanted_base_topic))
         self.assertEqual((broker.scans, broker.cleared), ([], []))
         self.assertEqual({k: v for k, v in self.record().items() if k != "broker"},
@@ -611,7 +611,7 @@ class PublisherIdentityTest(_Case):
         pub._drop_newly_excluded = lambda new: None
         cleared = []
 
-        def clear(base, prefix, docs=True):
+        def clear(base, prefix, docs=True, origin=None):
             cleared.append((base, prefix, docs))
             return 4
 

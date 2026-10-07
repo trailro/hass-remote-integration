@@ -66,7 +66,7 @@ class InboundPacketLimitTest(unittest.TestCase):
 
     def test_mqtt_311_has_no_way_to_say_it(self):
         pub = self._pub()
-        pub._broker_traits = lambda: (True, 0)
+        pub._broker_traits = lambda config=None: (True, 0)
         self.assertNotIn("properties", self._connect_kwargs(pub))
 
     def test_the_scan_clients_announce_nothing(self):

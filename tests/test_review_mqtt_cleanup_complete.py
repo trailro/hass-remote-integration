@@ -21,7 +21,7 @@ class CompleteCleanupTest(unittest.TestCase):
         self.pub.config = mp.MqttConfig(enabled=True, host="synthetic-broker")
         self.pub.hass = SimpleNamespace(config=SimpleNamespace(path=lambda *p: os.path.join(self.tmp.name, *p)))
         self.pub._key_provider = lambda: None
-        self.pub._live_base = None
+        self.pub._live_base = self.pub._live_prefix = self.pub._identity = None
         self.pub._stopping = False
         self.pub._cleanup_pending_lock = threading.Lock()
         self.pub._cleanup_pending = {}
@@ -35,7 +35,7 @@ class CompleteCleanupTest(unittest.TestCase):
         self.broker = _Broker(self.retained)
 
     def incomplete(self, mode):
-        def client(suffix, *args):
+        def client(suffix, *args, **k):
             cl = self.broker.client(suffix, *args)
             if mode == "drop" and suffix == "cleanup":
                 subscribe = cl.subscribe

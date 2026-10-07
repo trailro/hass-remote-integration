@@ -205,7 +205,7 @@ class StartWindow(StartWindowCase):
     async def test_the_sweep_forgets_the_removals(self):
         await self.test_delete_in_the_window_stays_deleted()
         self.pub.config.discovery_enabled = False  # the sweep itself is covered elsewhere; here only its bookkeeping
-        self.pub._retained_scan = lambda *a: {}
+        self.pub._retained_scan = lambda *a, **k: {}
         self.pub.hass.async_add_executor_job = mock.AsyncMock(return_value={})
         await self.pub._async_sweep_orphans()
         self.assertEqual(self.pub._boot_removed, set())
