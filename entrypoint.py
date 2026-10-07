@@ -793,10 +793,10 @@ def _recover_import_transaction() -> bool:
     entry in core.config_entries on disk is what it loads.  Saved: the stores
     it was created from stay and the originals set aside go.  Not saved: the
     originals are put back.  An unreadable intent cannot say which: every
-    original set aside is kept as .pre-import.orphan, never put back.  False
-    only while core.config_entries cannot be read or a store cannot be moved:
-    everything is retained, and the manager's Resolve or a later boot settles
-    it."""
+    original set aside is kept as .pre-import.orphan, never put back.  Without
+    the import source the intent is stale and only dropped.  False only while
+    core.config_entries cannot be read or a store cannot be moved: everything
+    is retained, and the manager's Resolve or a later boot settles it."""
     journal = os.path.join(STATE_DIR, "import-pending.json")
     if not os.path.lexists(journal):
         return True  # older versions have no intent marker
@@ -843,15 +843,18 @@ def _recover_import_transaction() -> bool:
         return False
     present = any(e.get("entry_id") == intent["entry_id"] and e.get("domain") == domain for e in entries)
     paths = [(item, os.path.join(storage, item["name"])) for item in stores]
-    source = os.path.isdir(os.path.join(STATE_DIR, "import-extracted"))
-    if not source and not any(os.path.lexists(p) or os.path.lexists(p + ".pre-import") for _i, p in paths):
-        # 0.27.0 (no intent) ran in between: it put back any original and removed the source
-        msg = f"interrupted import of {domain}: nothing left to recover"
+    if not os.path.isdir(os.path.join(STATE_DIR, "import-extracted")):
+        # an import keeps its source while its record exists: 0.27.0 (no record) ran in between, put back any original
+        # and removed the source; a store the record created may belong to an entry imported under it since
+        msg = f"interrupted import of {domain}: nothing left to recover (its record was stale)"
     else:
-        missing, skipped = [], []
+        missing, skipped, back = [], [], []
         try:
             for item, dest in paths:
                 aside = dest + ".pre-import"
+                if (present and item["had_original"] and intent["phase"] != "commit"
+                        and not os.path.lexists(aside) and not os.path.lexists(aside + ".done")):
+                    back.append(item["name"])  # no original set aside: the store there is not the imported one
                 if present:
                     for old in (aside, aside + ".done"):
                         if os.path.lexists(old):
@@ -869,12 +872,14 @@ def _recover_import_transaction() -> bool:
         except OSError as err:
             log(f"interrupted import of {domain}: a store could not be settled ({err}); intent and source retained")
             return False
-        if present and intent["phase"] in ("added", "commit") and not missing:
+        if present and intent["phase"] in ("added", "commit") and not missing and not back:
             msg = f"interrupted import of {domain}: its config entry was saved, the imported stores are kept"
         elif present:
             msg = (f"interrupted import of {domain}: its config entry was saved (the import had reached '{intent['phase']}'), "
                    "so the stores it was created from are kept and the originals set aside removed"
-                   + (f"; not on the volume: {', '.join(missing)}" if missing else ""))
+                   + (f"; not on the volume: {', '.join(missing)}" if missing else "")
+                   + (f"; no original was set aside for {', '.join(back)}, so what is there now (possibly an original "
+                      "already put back) is kept" if back else ""))
         else:
             msg = (f"interrupted import of {domain}: its config entry was not saved, the original stores were put back"
                    + (f"; not a file, left as it is: {', '.join(n + '.pre-import' for n in skipped)}" if skipped else ""))
