@@ -317,7 +317,6 @@ class RetainedOriginTest(unittest.IsolatedAsyncioTestCase):
                 self.assertLogs(mp._LOGGER, "WARNING"), mock.patch.object(mp.events, "emit"):
             n, why = pub._clear_retained_checked("hass_removed", pub.config.discovery_prefix)
         self.assertEqual((n, why), (0, ""))
-        self.assertTrue(pub._mqtt311)
         self.assertEqual(pub._broker_traits(), (True, 0))  # the next client of this broker speaks 3.1.1 at once
 
     async def test_orphan_sweep_and_services_still_run_in_the_pass_that_turns_discovery_off(self):
@@ -346,6 +345,30 @@ class RetainedOriginTest(unittest.IsolatedAsyncioTestCase):
         pub._set_undiscover_due.assert_not_called()  # due again for the names announced now
         pub._async_sweep_orphans.assert_awaited_once()
         pub._publish_services.assert_awaited_once()
+
+
+class BrokerTraitsTest(unittest.TestCase):
+    """What a broker taught (it refused MQTT 5, it keeps fewer unacknowledged messages) stays with that broker."""
+
+    def test_a_client_for_another_broker_keeps_what_the_live_broker_taught(self):
+        pub = _publisher(enabled=True, host="broker-a")
+        live, other = pub.config, mp.MqttConfig(enabled=True, host="broker-x")
+        with self.assertLogs(mp._LOGGER, "WARNING"), mock.patch.object(mp.events, "emit"):
+            self.assertTrue(pub._learned_mqtt311(mock.Mock(protocol=mp.mqtt.MQTTv5), "Unsupported protocol version", live))
+        pub._new_client("hass_fix-cleanup-1", other)  # a pending cleanup's throwaway client for another broker
+        self.assertEqual(pub._broker_traits(other), (False, 0))
+        self.assertEqual(pub._broker_traits(live), (True, 0))  # the next live client speaks 3.1.1 at once
+
+    def test_the_live_client_learns_for_the_broker_it_connected_to(self):
+        """A reload adopted another host without a reconnect: a refusal of the live client is that broker's."""
+        pub = _publisher(enabled=True, host="broker-a")
+        live = pub.config
+        client = mock.Mock(protocol=mp.mqtt.MQTTv5, _hri_config=live)
+        pub.config = dataclasses.replace(live, host="broker-b")
+        with self.assertLogs(mp._LOGGER, "WARNING"), mock.patch.object(mp.events, "emit"):
+            self.assertTrue(pub._learned_mqtt311(client, "Unsupported protocol version"))
+        self.assertEqual(pub._broker_traits(live), (True, 0))
+        self.assertEqual(pub._broker_traits(), (False, 0))
 
 
 class StopDuringRetryTest(unittest.IsolatedAsyncioTestCase):

@@ -687,11 +687,11 @@ class MqttPublisher:
     _cleared_cmds: dict[str, float] = {}
     _connected_at = 0.0  # monotonic time of the last CONNACK: a drop right after one is not a TLS problem
     _broker_max_packet = 0  # maximum packet size the broker announced (MQTT 5 only), 0 = none announced
-    # what the broker at _learned_for taught this process: it refused MQTT 5, it announced a receive maximum below
-    # paho's window.  Forgotten when the host, port or TLS setting changes: that may be another broker.
-    _learned_for = ""
-    _mqtt311 = False
-    _receive_max = 0
+    # what each broker taught this process, by host:port/TLS (another of them may be another broker): it refused MQTT 5,
+    # it announced a receive maximum below paho's window.  Per broker: a throwaway client for another one (a cleanup
+    # under the settings a reload adopted, a scan bound to the broker it was submitted on) must not make the live one
+    # forget it.  Replaced, never mutated in place (this class-level one is shared)
+    _learned: dict[str, tuple[bool, int]] = {}
     # the session the last CONNACK opened speaks MQTT 5: its subscription carries noLocal, so nothing this
     # process publishes comes back to it.  False until one says otherwise (the safe side: 3.1.1 echoes)
     _session_v5 = False
@@ -1095,21 +1095,26 @@ class MqttPublisher:
 
     def _broker_traits(self, config: MqttConfig | None = None) -> tuple[bool, int]:
         """(refused MQTT 5, receive maximum to keep to) for the configured broker (or that of ``config``)."""
+        return self._learned.get(self._traits_key(config), (False, 0))
+
+    def _traits_key(self, config: MqttConfig | None) -> str:
         config = config or self.config
-        key = f"{config.host}:{config.port}/{config.tls}"
-        if key != self._learned_for:
-            self._learned_for, self._mqtt311, self._receive_max = key, False, 0
-        return self._mqtt311, self._receive_max
+        return f"{config.host}:{config.port}/{config.tls}"
+
+    def _client_settings(self, client: mqtt.Client, config: MqttConfig | None) -> MqttConfig:
+        """``config``, else the settings ``client`` connected with (the live one: _connect binds them), else the configured ones."""
+        settings = config or getattr(client, "_hri_config", None)
+        return settings if isinstance(settings, MqttConfig) else self.config
 
     def _learned_mqtt311(self, client: mqtt.Client, reason_code: Any, config: MqttConfig | None = None) -> bool:
         """A refused MQTT 5 connection: what a 3.1.1 broker answers (CONNACK code 1) to a protocol it does not speak.
         Recorded, so the next client of this broker speaks 3.1.1."""
         if getattr(client, "protocol", None) != mqtt.MQTTv5 or str(reason_code) != "Unsupported protocol version":
             return False
-        config = config or self.config
-        self._broker_traits(config)
-        if not self._mqtt311:
-            self._mqtt311 = True
+        config = self._client_settings(client, config)
+        mqtt311, receive_max = self._broker_traits(config)
+        if not mqtt311:
+            self._learned = {**self._learned, self._traits_key(config): (True, receive_max)}
             where = f"{config.host}:{config.port}"
             _LOGGER.warning("MQTT: %s refused MQTT 5: using MQTT 3.1.1, which cannot announce a maximum packet size", where)
             events.emit("mqtt", f"{where} refused MQTT 5: using MQTT 3.1.1")
@@ -1123,8 +1128,8 @@ class MqttPublisher:
             return False
         if announced >= client.max_inflight_messages:
             return False
-        self._broker_traits(config)
-        self._receive_max = announced
+        config = self._client_settings(client, config)
+        self._learned = {**self._learned, self._traits_key(config): (self._broker_traits(config)[0], announced)}
         _LOGGER.info("MQTT: the broker accepts %s unacknowledged messages at a time: reconnecting with that window", announced)
         return True
 
