@@ -210,6 +210,51 @@ class RetainedOriginTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pub._discovery_map, {})
         pub._set_undiscover_due.assert_called_once_with(True)
 
+    async def test_stale_docs_read_before_a_switch_stay_due(self):
+        """The broker changed during the scan: nothing is cleared on either, and the documents of the dropped entities
+        are cleared by the next full republish instead of staying retained until some later update."""
+        pub = self.publisher()
+        pub._topics = {}
+        topic = pub.base_topic + "/demo/sensor/dropped"
+        retained = {topic: json.dumps({"integration": "demo", "published_at": "t"}).encode()}
+        brokers = {"broker-a": _Broker(retained), "broker-b": _Broker(retained)}
+        def client(_pub, suffix, *args, origin=None):
+            cl = brokers[origin.config.host].client(suffix, *args)
+            if suffix == "stale":
+                subscribe = cl.subscribe
+                def switched(topics):
+                    result = subscribe(topics)
+                    self.switch(pub)
+                    return result
+                cl.subscribe = switched
+            return cl
+        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", client), \
+                mock.patch.object(mp.MqttPublisher, "_collect_quiet", return_value=False):
+            self.assertEqual(pub._clear_stale_docs(), 0)
+        self.assertEqual(brokers["broker-a"].cleared + brokers["broker-b"].cleared, [])
+        self.assertTrue(pub._stale_docs_due)
+
+    async def test_full_republish_retries_due_stale_docs(self):
+        pub = self.publisher()
+        pub.config = mp.MqttConfig(enabled=True, host="broker-a", discovery_enabled=False)
+        pub._pending_clears = set()
+        pub._identity_sweep_due, pub._ids_undecided, pub._ids_switch_due, pub._undiscover_due = False, False, False, False
+        pub._stale_docs_due = True
+        pub.stats.update(discovery_devices=0, discovery_components=0)
+        pub.hass.states.async_all.return_value = []
+        pub.publish_health = pub._publish_manager_discovery = pub.publish_manager = lambda: None
+        pub._publish_services = mock.AsyncMock()
+        pub._stale_keep = lambda: frozenset({"kept"})
+        pub._clear_stale_docs = mock.Mock(return_value=1)
+
+        async def executor(func, *args):
+            return func(*args)
+        pub.hass.async_add_executor_job = executor
+        await pub.async_republish_all()
+        pub._clear_stale_docs.assert_called_once()
+        self.assertEqual(pub._clear_stale_docs.call_args.args[0], frozenset({"kept"}))
+        self.assertFalse(pub._stale_docs_due)
+
     async def test_broker_traits_learned_by_a_cleanup_stay_with_the_publisher(self):
         pub = self.publisher()
         built = []
