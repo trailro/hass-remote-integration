@@ -184,6 +184,18 @@ class CutoverBlockerScopeTest(unittest.TestCase):
             [_entry("sensor.kitchen_spare", PREFIX + "sensor.zone_1")],
         ), [])
 
+    def test_a_hyphenated_named_instance_id_is_checked_as_the_main_ha_slugifies_it(self):
+        """A named instance announces binary_sensor.hass_<d>-<inst>_...; the main HA registers the slugified id, so
+        that is the id a foreign holder sits on and the id our own mirror already has."""
+        announced = {"binary_sensor.hass_demo-office_integration": "hass_demo-office-health_online"}
+        parent_id = "binary_sensor.hass_demo_office_integration"
+        with self.subTest("foreign holder"):
+            (problem,) = self._blockers(announced, [_entry(parent_id, "0x00158d0001234567_contact")])
+            self.assertIn(parent_id, problem)
+            self.assertIn("_2", problem)
+        with self.subTest("our own mirror"):
+            self.assertEqual(self._blockers(announced, [_entry(parent_id, "hass_demo-office-health_online")]), [])
+
     def test_the_integration_still_holding_the_id_is_still_a_blocker(self):
         (problem,) = self._blockers(
             {"sensor.zone_1": PREFIX + "sensor.zone_1"},

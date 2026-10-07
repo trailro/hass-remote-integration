@@ -99,6 +99,12 @@ class ParentHA:
 STATE_NOT_COMPARABLE = frozenset({"button", "scene", "notify", "event"})
 
 
+def _parent_entity_id(announced: str) -> str:
+    """The entity id the main HA's MQTT integration derives from an announced one: it slugifies the object id."""
+    domain, obj = announced.split(".", 1)
+    return f"{domain}.{slugify(obj)}"
+
+
 def _parent_client(hass: HomeAssistant, installer: Installer) -> ParentHA:
     st = installer.settings
     return ParentHA(hass, str(st.data.get("parent_ha_url") or ""), str(st.data.get("parent_ha_token") or ""))
@@ -181,12 +187,9 @@ async def compute_parity(hass: HomeAssistant, installer: Installer, publisher: M
         ps = p_state.get(pe["entity_id"])
         parent_state = ps["state"] if ps else None
         comparable = (o.get("platform") or o["entity_id"].split(".", 1)[0]) not in STATE_NOT_COMPARABLE
-        # MQTT slugifies the announced object ID before generating the parent ID.
-        announced_domain, announced_object = o["announced_entity_id"].split(".", 1)
-        expected_parent_id = f"{announced_domain}.{slugify(announced_object)}"
         matched.append({
             "unique_id": uid, "entity_id": o["entity_id"], "parent_entity_id": pe["entity_id"],
-            "renamed": pe["entity_id"] != expected_parent_id,
+            "renamed": pe["entity_id"] != _parent_entity_id(o["announced_entity_id"]),
             "parent_name": pe.get("name"), "parent_original_name": pe.get("original_name"),
             "parent_disabled_by": pe.get("disabled_by"), "parent_area": pe.get("area_id"),
             "parent_device": (p_dev.get(pe.get("device_id") or "") or {}).get("name_by_user") or (p_dev.get(pe.get("device_id") or "") or {}).get("name"),
@@ -388,7 +391,7 @@ class CutoverView(ManagerView):
         ours = {c.get("unique_id") for dev in preview for c in dev["components"].values() if c.get("unique_id")}
         # the exception is our mirror of *that* entity, not any mirror of ours: a mirror renamed on the main HA
         # onto the id another entity is announced under collides with it exactly like a stranger would
-        announced_uid = {c["default_entity_id"]: c.get("unique_id") for dev in preview for c in dev["components"].values()
+        announced_uid = {_parent_entity_id(c["default_entity_id"]): c.get("unique_id") for dev in preview for c in dev["components"].values()
                          if c.get("default_entity_id")}
         held: dict[str, str] = {}
         for e in registry:
