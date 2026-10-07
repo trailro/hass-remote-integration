@@ -186,6 +186,27 @@ class ImportBootIntentTest(unittest.TestCase):
         self.assertEqual(self.read("hub.e1.pre-import"), "original")
         self.assertTrue(os.path.isfile(os.path.join(self.source, "source")))
 
+    def test_without_the_source_a_record_is_stale_and_no_store_is_removed(self):
+        # 0.27.0 ran in between, removed the source, and imported the domain again: the domain-wide store the old
+        # record created (had_original False) now belongs to that entry
+        self.intent["stores"] = [{"name": "hub", "had_original": False}]
+        self.put(self.storage, "hub", "imported again under 0.27.0")
+        shutil.rmtree(self.source)
+        os.remove(os.path.join(self.storage, "hub.e1.pre-import"))
+        self.prepare("added", present=False)
+        self.boot()
+        self.assertFalse(os.path.exists(self.journal))
+        self.assertEqual(self.read("hub"), "imported again under 0.27.0")
+        self.assertIn("nothing left to recover", self.timeline()[0]["message"])
+
+    def test_a_saved_entry_whose_original_was_already_put_back_is_not_said_to_keep_the_imported_store(self):
+        os.remove(os.path.join(self.storage, "hub.e1.pre-import"))  # put back by a version without the record
+        self.prepare("added", present=True)
+        self.boot()
+        message = self.timeline()[0]["message"]
+        self.assertNotIn("imported stores are kept", message)
+        self.assertIn("hub.e1", message)
+
     def test_an_unknown_phase_is_an_unreadable_record(self):
         self.prepare("sideways", present=True)
         self.boot()
