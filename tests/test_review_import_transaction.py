@@ -83,7 +83,7 @@ class ImportTransactionTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_swallowed_write_failure_restores_original_and_keeps_retry_source(self):
         self.put(self.storage, "hub.e1", "original")
-        self.writes = ["swallow", "write"]
+        self.writes = ["swallow"] * ha_import._PERSIST_ATTEMPTS + ["write"]
         with self.assertRaisesRegex(ValueError, "stores restored"):
             await self.apply()
         self.assertEqual(self.entries, {})
@@ -95,7 +95,7 @@ class ImportTransactionTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_unconfirmed_rollback_retains_original_recovery_and_source(self):
         self.put(self.storage, "hub.e1", "original")
-        self.writes = ["stale", "swallow"]
+        self.writes = ["stale"] * ha_import._PERSIST_ATTEMPTS + ["swallow"] * ha_import._PERSIST_ATTEMPTS
         with self.assertRaisesRegex(ValueError, "rollback persistence is unconfirmed"):
             await self.apply()
         self.assertEqual(self.entries, {})
@@ -136,7 +136,7 @@ class ImportTransactionTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_unload_does_not_restore_stores_used_by_live_integration(self):
         self.put(self.storage, "hub.e1", "original")
-        self.writes = ["swallow"]
+        self.writes = ["swallow"] * ha_import._PERSIST_ATTEMPTS
         self.hass.config_entries.async_remove = mock.AsyncMock(return_value={"require_restart": True})
         with self.assertRaisesRegex(ValueError, "rollback persistence is unconfirmed"):
             await self.apply()
@@ -146,7 +146,7 @@ class ImportTransactionTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_store_restore_reports_incomplete_recovery(self):
         self.put(self.storage, "hub.e1", "original")
-        self.writes = ["swallow", "write"]
+        self.writes = ["swallow"] * ha_import._PERSIST_ATTEMPTS + ["write"]
         replace = os.replace
 
         def fail_restore(source, destination):
@@ -184,7 +184,7 @@ class ImportTransactionTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_unresolved_import_also_protects_rebuild_leaf_cleanup(self):
         self.put(self.storage, "hub.e1", "original")
-        self.writes = ["stale", "swallow"]
+        self.writes = ["stale"] * ha_import._PERSIST_ATTEMPTS + ["swallow"] * ha_import._PERSIST_ATTEMPTS
         with self.assertRaises(ValueError):
             await self.apply()
         plan = os.path.join(self.cfg, ha_import.REBUILD_FILE)

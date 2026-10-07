@@ -182,7 +182,7 @@ class RealConfigEntriesSaveTest(unittest.IsolatedAsyncioTestCase):
         path = hass.config.path(".storage", "core.config_entries")
         self.assertFalse(os.path.exists(path))  # SAVE_DELAY: not yet
         with self.assertNoLogs(ha_import._LOGGER, "WARNING"):
-            await ha_import._save_config_entries(hass, "demo")
+            await ha_import._save_config_entries(hass, "demo", entry.entry_id)
         with open(path, encoding="utf-8") as fh:
             saved = json.load(fh)
         self.assertEqual([e["entry_id"] for e in saved["data"]["entries"]], [entry.entry_id])
