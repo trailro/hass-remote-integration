@@ -389,12 +389,22 @@ connections that announce no maximum, to see retained documents of any size. A
 sweep that read less removes less, never something else. Each retained scan
 and its deletion use the broker settings and names taken when it started, so a
 reconnect or a settings change meanwhile cannot send its deletions to another
-broker. When the broker (host, port, TLS, user), the base topic, the id prefix
-or the discovery prefix differ once it returns, its result is dropped and the
-work stays due (the next full republish, or the next minute for an
-uninstall's kept cleanup); nothing it read is published on the new connection.
-A settings change that touches none of them (turning discovery off, an
-exclusion) drops nothing.
+broker. The work on the names this container publishes under (the sweeps of
+orphaned and excluded entities, the stale documents, the read of the discovery
+configs announced before this start, the check of the manager device, the
+removal of the discovery configs when discovery is turned off or on Undo, an
+uninstall) uses the broker of the live connection (the one the settings name
+when there is none): a settings change adopted
+without a reconnect (turning discovery off, Undo, a hand edit of `mqtt.json`)
+leaves the connection, and these scans, on the broker it has until the next
+reconnect. The checks at a connect and the kept cleanups of an uninstall use
+the broker the settings name. When that broker (host, port, TLS, user), the
+base topic, the id prefix or the discovery prefix differ once the scan returns,
+its result is dropped and the work stays due: the next full republish (the
+orphan sweep reads the announced configs again first), the next pass for the
+manager device, or the next minute for an uninstall's kept cleanup. Nothing it read is published on the new
+connection. A settings change that touches none of them (turning discovery off,
+an exclusion) drops nothing.
 
 ## Entity document
 
