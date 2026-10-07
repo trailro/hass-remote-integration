@@ -371,6 +371,18 @@ class BrokerTraitsTest(unittest.TestCase):
         self.assertEqual(pub._broker_traits(), (False, 0))
 
 
+class OriginReprTest(unittest.TestCase):
+    def test_the_origin_repr_never_carries_the_password(self):
+        """An origin holds a copy of the settings, the password included: a log line or a traceback that shows it must not."""
+        pub = _publisher(enabled=True, host="broker-a", username="hri", password="configured-secret")
+        pub._client._hri_config = dataclasses.replace(pub.config, password="live-secret")
+        for live in (True, False):
+            origin = pub._retained_origin(live)
+            for text in (repr(origin), str(origin), f"{origin}", repr([origin])):
+                self.assertNotIn("secret", text)
+            self.assertIn("broker-a", repr(origin))
+        self.assertEqual(pub._retained_origin().config.password, "live-secret")  # what the throwaway clients log in with
+
 class StopDuringRetryTest(unittest.IsolatedAsyncioTestCase):
     """Home Assistant stopping during a pending-cleanup retry: the retry ends at once and clears nothing more."""
 
