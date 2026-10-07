@@ -192,7 +192,7 @@ class VersionSwitchKeepsDisabledEntitiesTest(unittest.IsolatedAsyncioTestCase):
         retained = {f"{camp.BASE}/demo/sensor/{name}": doc for name in ("live", "off", "hidden", "gone")}
         pub._retained_scan = lambda *a, **k: retained
         cleared = []
-        pub._clear_topics = lambda suffix, topics: cleared.extend(topics)
+        pub._clear_topics = lambda suffix, topics, origin=None: cleared.extend(topics)
         pub.async_republish_all = mock.AsyncMock(return_value=1)
         pub.hass.async_add_executor_job = mock.AsyncMock(side_effect=lambda f, *a: f(*a))
         with mock.patch.object(er, "async_get", return_value=registry):

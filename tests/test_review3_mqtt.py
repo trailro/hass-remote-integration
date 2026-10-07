@@ -167,7 +167,7 @@ class StaleSweepKeepsTheManagerTest(unittest.TestCase):
         gone = json.dumps({"published_at": "now", "integration": "demo"}).encode()
         pub._retained_scan = lambda *a, **k: {f"{camp.BASE}/manager": manager, f"{camp.BASE}/demo/sensor/gone": gone}
         cleared = []
-        pub._clear_topics = lambda suffix, topics: cleared.extend(topics)
+        pub._clear_topics = lambda suffix, topics, origin=None: cleared.extend(topics)
         self.assertEqual(pub._clear_stale_docs(), 1)
         self.assertEqual(cleared, [f"{camp.BASE}/demo/sensor/gone"])
 

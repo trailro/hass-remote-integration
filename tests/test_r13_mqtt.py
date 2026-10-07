@@ -47,7 +47,7 @@ class _Broker:
         self.scans: list[list[str]] = []
         self.cleared: list[str] = []
 
-    def client(self, _suffix, _what, _deadline, on_message=None):
+    def client(self, _suffix, _what, _deadline, on_message=None, origin=None):
         broker = self
 
         class Client:
@@ -168,7 +168,7 @@ class UninstallDuringAnOutageTest(_Case):
     async def test_a_reachable_broker_answers_as_before(self):
         pub = self.publisher()
         broker = _Broker({**OURS, **KEPT})
-        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a: broker.client(*a)):
+        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a, **k: broker.client(*a)):
             res = await self.uninstall(pub)
         self.assertEqual(res["retained_cleared"], len(OURS))
         self.assertNotIn("retained_cleanup_failed", res)
@@ -184,7 +184,7 @@ class RetriedWhenTheBrokerIsBackTest(_Case):
         await pub._on_cleanup_timer(None)  # still unreachable
         self.assertEqual(set(self.on_disk()), {"hass_demo"})
         broker = _Broker({**OURS, **KEPT})
-        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a: broker.client(*a)):
+        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a, **k: broker.client(*a)):
             await pub._on_cleanup_timer(None)
             await pub._on_cleanup_timer(None)
         self.assertEqual(broker.scans, [["homeassistant/device/+/config", "hass_demo/#"]])  # once, that identity only
@@ -198,7 +198,7 @@ class RetriedWhenTheBrokerIsBackTest(_Case):
         pub, _res, _scan = await self.fail_uninstall()
         pub._live_base = "hass_demo"  # the uninstall's reconnect has not dropped the connection yet
         broker = _Broker({**OURS, **KEPT})
-        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a: broker.client(*a)):
+        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a, **k: broker.client(*a)):
             await pub._on_cleanup_timer(None)
         self.assertEqual(broker.scans, [])
         self.assertEqual(set(self.on_disk()), {"hass_demo"})
@@ -208,7 +208,7 @@ class RetriedWhenTheBrokerIsBackTest(_Case):
         pub = self.publisher(running="hass_other")  # another integration started before the broker came back
         mp.write_json(os.path.join(self.dir, "integration_manager", "mqtt_identity.json"), {"base": "hass_demo", "prefix": "homeassistant"})
         broker = _Broker({**OURS, **KEPT})
-        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a: broker.client(*a)):
+        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a, **k: broker.client(*a)):
             self.assertTrue(await pub.hass.async_add_executor_job(pub._sweep_old_identity, "hass_other"))
             await pub._on_cleanup_timer(None)
         self.assertEqual(len(broker.scans), 1)  # the timer found nothing left to do: no second clear
@@ -229,7 +229,7 @@ class InstalledAgainBeforeTheBrokerIsBackTest(_Case):
         # stopped again later, the broker back: its documents are a stop's, and stay
         pub._key_provider, pub._live_base = (lambda: None), None
         broker = _Broker({**OURS, **KEPT})
-        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a: broker.client(*a)):
+        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a, **k: broker.client(*a)):
             await pub._on_cleanup_timer(None)
         self.assertEqual(broker.scans, [])
         self.assertEqual(broker.retained, {**OURS, **KEPT})
@@ -238,7 +238,7 @@ class InstalledAgainBeforeTheBrokerIsBackTest(_Case):
         await self.fail_uninstall()
         pub = self.publisher(running="hass_demo", enabled=False)
         broker = _Broker({**OURS, **KEPT})
-        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a: broker.client(*a)):
+        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a, **k: broker.client(*a)):
             await pub._on_cleanup_timer(None)
         self.assertEqual(broker.scans, [])
         self.assertEqual(self.on_disk(), {})

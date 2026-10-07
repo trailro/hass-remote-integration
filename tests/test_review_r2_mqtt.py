@@ -293,7 +293,7 @@ class _Broker:
         self.scans = []
         self.cleared = []
 
-    def client(self, _suffix, _what, _deadline, on_message=None):
+    def client(self, _suffix, _what, _deadline, on_message=None, origin=None):
         broker = self
 
         class Client:

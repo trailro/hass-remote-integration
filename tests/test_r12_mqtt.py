@@ -520,7 +520,7 @@ class LivePrefixMoveTest(unittest.TestCase):
         }
         scanned, cleared = [], []
 
-        def scan(_self, _suffix, topics, min_s=2.0, strict=False):
+        def scan(_self, _suffix, topics, min_s=2.0, strict=False, origin=None):
             self.assertTrue(strict)  # this fake returns a complete retained burst for identity cleanup
             scanned.extend(t for t, _q in topics)
             return {t: p for t, p in retained.items()
@@ -531,7 +531,7 @@ class LivePrefixMoveTest(unittest.TestCase):
 
         pub.hass.async_add_executor_job = executor
         with mock.patch.object(mp.MqttPublisher, "_retained_scan", scan), \
-                mock.patch.object(mp.MqttPublisher, "_clear_topics", lambda _self, _suffix, topics: cleared.extend(topics)), \
+                mock.patch.object(mp.MqttPublisher, "_clear_topics", lambda _self, _suffix, topics, origin=None: cleared.extend(topics)), \
                 mock.patch.object(mp.MqttPublisher, "_remember_identity"):
             asyncio.run(pub._async_reconnect_locked())
         return scanned, cleared

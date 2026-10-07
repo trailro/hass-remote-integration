@@ -181,7 +181,7 @@ class RepublishCountTest(unittest.IsolatedAsyncioTestCase):
             return fn(*args)
 
         pub.hass.async_add_executor_job = executor
-        pub._clear_discovery_retained = lambda: 99
+        pub._clear_discovery_retained = lambda origin=None: 99
         self.assertEqual(await pub.async_republish_all(), 3)
         self.assertEqual(pub.stats["entities_last_run"], 3)
 

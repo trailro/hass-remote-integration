@@ -140,7 +140,7 @@ class _Store:
 
         return Live()
 
-    def throwaway(self, _suffix, _what, _deadline, on_message=None):
+    def throwaway(self, _suffix, _what, _deadline, on_message=None, origin=None):
         store = self
 
         class Client:
@@ -206,7 +206,7 @@ class DestructiveDiscoveryGateTest(unittest.TestCase):
              "unambiguous + legacy": ("hass_a-", "hass_a_binary_")}
 
     def setUp(self):
-        patcher = mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda _self, *a: self.store.throwaway(*a))
+        patcher = mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda _self, *a, **k: self.store.throwaway(*a))
         patcher.start()
         self.addCleanup(patcher.stop)
         mock.patch.object(mp.MqttPublisher, "_collect_quiet", staticmethod(lambda *a, **k: None)).start()
@@ -304,7 +304,7 @@ class IdFormatTest(_Case):
     def setUp(self):
         super().setUp()
         self.store = _Store()
-        mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda _self, *a: self.store.throwaway(*a)).start()
+        mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda _self, *a, **k: self.store.throwaway(*a)).start()
         self.scans = []
         real = mp.MqttPublisher._retained_scan
         mock.patch.object(mp.MqttPublisher, "_retained_scan",
@@ -425,7 +425,7 @@ class IdFormatTest(_Case):
 
     def throwaway(self, change):
         """The store's throwaway client, changed by ``change`` before the scan uses it."""
-        def make(_self, *a):
+        def make(_self, *a, **k):
             c = self.store.throwaway(*a)
             change(c)
             return c

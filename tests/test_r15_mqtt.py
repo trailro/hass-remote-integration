@@ -17,7 +17,7 @@ class BoundToItsBrokerTest(_Case):
         pub, _res, _scan = await self.fail_uninstall()  # broker A unreachable
         a, b = _Broker({**OURS, **KEPT}), _Broker(dict(KEPT))
         by_port = {port_a: a, port_b: b}  # a throwaway client reaches the broker the settings name at that moment
-        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *args: by_port[self.config.port].client(*args)):
+        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *args, **k: by_port[self.config.port].client(*args)):
             pub.config = mp.MqttConfig(enabled=True, host="127.0.0.1", port=port_b)  # the settings moved to B
             await pub._on_cleanup_timer(None)
             await pub._on_cleanup_timer(None)
@@ -42,7 +42,7 @@ class BoundToItsBrokerTest(_Case):
         pub = self.publisher(running="hass_other", port=port_b)
         mp.write_json(os.path.join(self.dir, "integration_manager", "mqtt_identity.json"), {"base": "hass_demo", "prefix": "homeassistant"})
         b = _Broker({**OURS, **KEPT})
-        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a: b.client(*a)):
+        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a, **k: b.client(*a)):
             self.assertTrue(await pub.hass.async_add_executor_job(pub._sweep_old_identity, "hass_other"))
         self.assertEqual(set(self.on_disk()), {"hass_demo"})
 
@@ -53,7 +53,7 @@ class BoundToItsBrokerTest(_Case):
             pub = self.publisher(running=running, enabled=enabled, port=port_b, force_base_topic=True)
             pub._client, pub._connected, pub._probed_ok, pub.stats = None, False, set(), {}
             b = _Broker({})
-            with mock.patch.object(mp.mqtt, "Client"), mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a: b.client(*a)), \
+            with mock.patch.object(mp.mqtt, "Client"), mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a, **k: b.client(*a)), \
                     mock.patch.object(mp.MqttPublisher, "_sweep_old_identity", return_value=True):
                 if enabled:
                     await pub.hass.async_add_executor_job(pub._connect)
@@ -72,7 +72,7 @@ class BoundToItsBrokerTest(_Case):
         port_a, port_b = self.port, _closed_port(self.port)
         await self.fail_uninstall()
         b = _Broker({**OURS, **KEPT})
-        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a: b.client(*a)):
+        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a, **k: b.client(*a)):
             res = await self.uninstall(self.publisher(port=port_b))  # installed again on B, uninstalled with B reachable
         self.assertEqual(b.retained, KEPT)
         self.assertIs(res["retained_cleanup_failed"], True)
@@ -89,7 +89,7 @@ class RecordsWithoutABrokerTest(_Case):
         pub = self.publisher()  # read with broker A configured
         self.assertEqual(self.on_disk()["hass_demo"]["broker"], {"host": "127.0.0.1", "port": self.port, "tls": False, "username": ""})
         b = _Broker({**OURS, **KEPT})
-        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a: b.client(*a)):
+        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda self, *a, **k: b.client(*a)):
             pub.config = mp.MqttConfig(enabled=True, host="127.0.0.1", port=port_b)
             await pub._on_cleanup_timer(None)
             self.assertEqual(b.scans, [])

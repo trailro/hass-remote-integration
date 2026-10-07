@@ -281,7 +281,7 @@ class ManagerDeviceClearTest(unittest.IsolatedAsyncioTestCase):
                 pub._retained_scan = mock.Mock(return_value=retained)
                 pub._publish_manager_discovery()
                 await asyncio.gather(*self.tasks)
-                pub._retained_scan.assert_called_once_with("mgr", [(TOPIC, 1)])
+                pub._retained_scan.assert_called_once_with("mgr", [(TOPIC, 1)], origin=mock.ANY)
                 self.assertEqual(len(self.clears(pub)), cleared)
                 self.assertEqual(pub._manager_announced, frozenset())
 
