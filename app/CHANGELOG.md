@@ -3,6 +3,44 @@
 Every version's changes are in the
 [GitHub releases](https://github.com/trailro/hass-remote-integration/releases).
 
+## 0.28.0
+
+Fixes from a review of the codebase.
+
+- **Interrupted imports are settled, never stuck.** An import interrupted by a
+  restart (or by Home Assistant stopping) is settled at the next boot from the
+  config entry Home Assistant actually saved: the imported stores are kept when
+  the entry is on disk, the originals are put back when it is not. A stuck
+  import can be resolved from the import page (**Resolve**,
+  `POST /api/import/resolve`). An import is only committed once Home Assistant
+  has really written the entry (its storage swallows write errors); a later
+  update of the entry by the integration no longer looks like a failure.
+  Originals that cannot be matched safely are kept as `*.pre-import.orphan`,
+  never put back over a store in use.
+- **A rebuild survives a restart:** stopping Home Assistant during a rebuild
+  keeps its plan and the pre-rebuild copy, and the next boot resumes it.
+- **Imported device names and disabled flags** apply only to the devices of
+  the config entry they came from.
+- **Preflight checks the full dependency closure** of the integration, as the
+  start installs it, so a requirement of an indirect dependency that cannot
+  install is found before anything changes.
+- **A reinstall of the same tag within a second** now deploys the new copy
+  (the copy's stored generation is its identity, not its install time).
+- **MQTT:** malformed MQTT rules keep MQTT off with the reason instead of
+  silently dropping rules (an `exclude` included); retained cleanup that could
+  not read everything stays pending and is retried, and so does turning
+  discovery off; background cleanup and sweeps run on the broker of the live
+  connection and are dropped and retried if the connection changes meanwhile;
+  service-call replies go to the connection the call came from.
+- **Cutover:** entity ids of a named instance (`hass_<domain>-<name>`) are
+  compared the way Home Assistant writes them, so they are no longer reported
+  as renamed and a holder of the id is found before discovery is enabled.
+- **Backups:** deleting a backup is refused while another manager action
+  (install, start, restore, Home Assistant version change) runs, so an update
+  never loses its rollback backup.
+- **Diagnostics** no longer include a file path in an unreadable-log error;
+  the stop watchdog cannot be held up by a blocked log write.
+
 ## 0.27.0
 
 - **Fixed: Remove orphans could delete another container's entities.** Two
