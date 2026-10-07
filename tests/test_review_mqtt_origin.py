@@ -200,6 +200,33 @@ class RetainedOriginTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(pub._mqtt311)
         self.assertEqual(pub._broker_traits(), (True, 0))  # the next client of this broker speaks 3.1.1 at once
 
+    async def test_orphan_sweep_and_services_still_run_in_the_pass_that_turns_discovery_off(self):
+        pub = self.publisher()
+        pub.config = mp.MqttConfig(enabled=True, host="broker-a", discovery_enabled=False)
+        pub.stats.update(discovery_devices=0, discovery_components=0)
+        pub._pending_clears, pub._resync_excluded = set(), False
+        pub._identity_sweep_due, pub._ids_undecided, pub._ids_switch_due = False, False, False
+        pub._undiscover_due, pub._orphan_sweep_due = True, True
+        pub._started_at = 0.0
+        pub.hass.is_running = True
+        pub._discovery_map, pub._blocks = {}, {}
+        pub.hass.states.async_all.return_value = []
+        pub.publish_health = pub._publish_manager_discovery = pub.publish_manager = lambda: None
+        pub._publish_services = mock.AsyncMock()
+        pub._async_sweep_orphans = mock.AsyncMock()
+        pub._set_undiscover_due = mock.Mock()
+
+        async def executor(func, *args):
+            if func == pub._clear_discovery_retained:
+                pub._live_base, pub._live_prefix = "hass_new", "hass_new_"  # a Move while the configs were cleared
+                return 3
+            return func(*args)
+        pub.hass.async_add_executor_job = executor
+        await pub.async_republish_all()
+        pub._set_undiscover_due.assert_not_called()  # due again for the names announced now
+        pub._async_sweep_orphans.assert_awaited_once()
+        pub._publish_services.assert_awaited_once()
+
 
 class StopDuringRetryTest(unittest.IsolatedAsyncioTestCase):
     """Home Assistant stopping during a pending-cleanup retry: the retry ends at once and clears nothing more."""

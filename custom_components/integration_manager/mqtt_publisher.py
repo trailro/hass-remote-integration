@@ -4171,14 +4171,15 @@ class MqttPublisher:
             try:
                 origin = self._retained_origin()
                 removed = await self.hass.async_add_executor_job(self._clear_discovery_retained, origin)
-                if not self._retained_current(origin):
-                    return n  # the new connection decides whether its discovery still needs removal
-                self._set_undiscover_due(False)
-                keep = f"{self.base_topic}_manager"
-                for did in [d for d in self._discovery_map if d != keep]:
-                    self._discovery_map.pop(did, None)
-                    self._blocks.pop(did, None)
-                _LOGGER.info("MQTT: discovery turned off: removed %s announced devices from the consumer", removed)
+                # the broker or the names changed meanwhile: what was cleared there is not what is announced here now,
+                # so the undiscover stays due for the next full republish; the rest of this pass runs as usual
+                if self._retained_current(origin):
+                    self._set_undiscover_due(False)
+                    keep = f"{self.base_topic}_manager"
+                    for did in [d for d in self._discovery_map if d != keep]:
+                        self._discovery_map.pop(did, None)
+                        self._blocks.pop(did, None)
+                    _LOGGER.info("MQTT: discovery turned off: removed %s announced devices from the consumer", removed)
             except RuntimeError as err:
                 _LOGGER.warning("MQTT: removing the announced entities after discovery was turned off failed, retried: %s", err)
         if self._orphan_sweep_due and self.hass.is_running and time.time() - self._started_at > ORPHAN_SWEEP_DELAY_S \
