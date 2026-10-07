@@ -269,6 +269,33 @@ class RetainedOriginTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(pub._manager_absent_sent)
         self.assertEqual(pub._client.published, [])
 
+    async def test_orphan_sweep_postponed_after_its_pause_reads_the_boot_configs_again(self):
+        """The broker changed during the pause between the removal forms and the documents: no document is cleared, and
+        the next full republish reads the announced configs again (under the broker it then has) and redoes the sweep."""
+        pub = self.publisher()
+        pub._is_ours = lambda *args: True
+        pub._entity_gone = lambda _eid: True
+        pub._topics, pub._last_hash = {}, {}
+        pub._boot_components, pub._boot_removed = {"dev": {"sensor_gone": {"unique_id": pub.prefix + "sensor.gone"}}}, set()
+        config_topic = pub.config.discovery_prefix + "/device/dev/config"
+        doc_topic = pub.base_topic + "/demo/sensor/gone"
+        broker = _Broker({config_topic: json.dumps({"components": {"sensor_gone": {"platform": "sensor", "unique_id": pub.prefix + "sensor.gone"}}}).encode(),
+                          doc_topic: json.dumps({"integration": "demo", "published_at": "t", "entity_id": "sensor.gone"}).encode()})
+
+        async def executor(func, *args):
+            return func(*args)
+        pub.hass.async_add_executor_job = executor
+
+        async def pause(_s):
+            self.switch(pub)
+        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda _pub, *a, **k: broker.client(*a)), \
+                mock.patch.object(mp.MqttPublisher, "_collect_quiet", return_value=False), \
+                mock.patch.object(mp.asyncio, "sleep", pause):
+            await pub._async_sweep_orphans()
+        self.assertEqual(broker.cleared, [])
+        self.assertTrue(pub._orphan_sweep_due)
+        self.assertIsNone(pub._boot_components)
+
     async def test_broker_traits_learned_by_a_cleanup_stay_with_the_publisher(self):
         pub = self.publisher()
         built = []
