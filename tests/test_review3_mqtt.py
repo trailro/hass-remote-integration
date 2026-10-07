@@ -133,7 +133,7 @@ class ThrowawayBudgetTest(unittest.TestCase):
         broker = Mqtt311Broker()
         self.addCleanup(broker.close)
         pub = camp._publisher(host="127.0.0.1", port=broker.port, force_base_topic=True)
-        pub._learned_for = None
+        pub._learned = {}
         real_stop = mp.MqttPublisher._stop_client
         stopped = []
 
