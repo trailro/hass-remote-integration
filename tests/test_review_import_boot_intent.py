@@ -213,6 +213,19 @@ class ImportBootIntentTest(unittest.TestCase):
         self.assertEqual(self.read("hub.e1.pre-import.orphan"), "original")
         self.assertIn("unreadable", self.timeline()[0]["message"])
 
+    def test_the_timeline_is_rotated_at_the_events_size_limit(self):
+        from custom_components.integration_manager import events
+        self.assertEqual(self.ep.EVENTS_MAX_BYTES, events.MAX_BYTES)
+        path = os.path.join(self.ep.STATE_DIR, "events.jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"ts": "x", "kind": "boot", "message": "old"}) + "\n")
+        with mock.patch.object(self.ep, "EVENTS_MAX_BYTES", 80):
+            self.prepare("commit", present=True)
+            self.boot()
+        with open(path + ".1", encoding="utf-8") as fh:
+            self.assertEqual(json.loads(fh.read())["message"], "old")
+        self.assertEqual(self.timeline()[0]["kind"], "restore")
+
     def test_the_timeline_line_does_not_join_a_torn_last_line(self):
         with open(os.path.join(self.ep.STATE_DIR, "events.jsonl"), "w", encoding="utf-8") as fh:
             fh.write('{"ts": "x", "kind": "boot", "mess')

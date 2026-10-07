@@ -755,17 +755,29 @@ def prune(keep: set[str]) -> None:
         shutil.rmtree(venv_dir(v), ignore_errors=True)
 
 
+EVENTS_MAX_BYTES = 512_000  # events.MAX_BYTES (that module is the integration's, loaded only with Home Assistant)
+
+
 def _timeline(kind: str, message: str) -> None:
-    """One event on the manager's timeline (integration_manager/events.jsonl, the format events.py writes): the
-    boot runs before Home Assistant, so nothing else writes the file now."""
-    line = json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "kind": kind, "message": message}, ensure_ascii=False) + "\n"
+    """One event on the manager's timeline (integration_manager/events.jsonl, the format and rotation events.py
+    writes): the boot runs before Home Assistant, so nothing else writes the file now."""
+    path = os.path.join(STATE_DIR, "events.jsonl")
+    data = (json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "kind": kind, "message": message}, ensure_ascii=False)
+            + "\n").encode("utf-8", errors="replace")
     try:
-        with open(os.path.join(STATE_DIR, "events.jsonl"), "a+b") as fh:
-            if fh.seek(0, os.SEEK_END):
+        try:
+            size = os.path.getsize(path)
+        except FileNotFoundError:
+            size = 0
+        if size + len(data) > EVENTS_MAX_BYTES:
+            os.replace(path, path + ".1")
+            size = 0
+        with open(path, "a+b") as fh:
+            if size:
                 fh.seek(-1, os.SEEK_END)
                 if fh.read(1) != b"\n":
-                    line = "\n" + line  # a torn last line stays apart from this event
-            fh.write(line.encode("utf-8", errors="replace"))
+                    data = b"\n" + data  # a torn last line stays apart from this event
+            fh.write(data)
     except OSError:
         pass  # the container log has it too
 
