@@ -792,26 +792,41 @@ def _recover_import_transaction() -> bool:
     before the legacy cleanup.  Home Assistant is not running: the config
     entry in core.config_entries on disk is what it loads.  Saved: the stores
     it was created from stay and the originals set aside go.  Not saved: the
-    originals are put back.  False only while core.config_entries cannot be
-    read or a store cannot be moved: everything is retained, and the
-    manager's Resolve or a later boot settles it."""
+    originals are put back.  An unreadable intent cannot say which: every
+    original set aside is kept as .pre-import.orphan, never put back.  False
+    only while core.config_entries cannot be read or a store cannot be moved:
+    everything is retained, and the manager's Resolve or a later boot settles
+    it."""
     journal = os.path.join(STATE_DIR, "import-pending.json")
     if not os.path.lexists(journal):
         return True  # older versions have no intent marker
     try:
         intent = _read_import_intent(journal)
     except (OSError, ValueError, KeyError, TypeError) as err:
+        # nothing says whether a loaded entry uses an imported store: an original put back over it would pull the
+        # store from under that entry, so every original set aside is kept as .pre-import.orphan for a manual restore
+        storage = os.path.join(CONFIG_DIR, ".storage")
+        orphans = []
         try:
+            for aside in sorted(glob.glob(os.path.join(glob.escape(storage), "*.pre-import"))):
+                orphan, n = aside + ".orphan", 0
+                while os.path.lexists(orphan):
+                    n += 1
+                    orphan = f"{aside}.orphan.{n}"
+                os.replace(aside, orphan)
+                orphans.append(os.path.basename(orphan))
+            fsync_dir(storage)
             os.remove(journal)
             fsync_dir(STATE_DIR)
-        except OSError:
-            log("import recovery: an unreadable intent could not be removed; original stores and source retained")
+        except OSError as err2:
+            log(f"import recovery: an unreadable intent could not be settled ({err2}); original stores and source retained")
             return False
         msg = (f"interrupted import: its record was unreadable ({type(err).__name__}) and was dropped; "
-               "any original store it had set aside is put back")
+               + (f"the originals it had set aside are kept, never put back automatically: {', '.join(orphans)} "
+                  "(see docs/files.md to restore one by hand)" if orphans else "it had no original set aside"))
         log(msg)
         _timeline("restore", msg)
-        return True  # the legacy cleanup: every .pre-import back, the source removed
+        return True  # the legacy cleanup removes the source; it finds no .pre-import left to put back
     domain, stores = intent["domain"], intent["stores"]
     storage = os.path.join(CONFIG_DIR, ".storage")
     try:

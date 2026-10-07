@@ -260,6 +260,33 @@ class ImportTransactionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.read("hub.e1.pre-import"), "original")
         self.assertTrue(os.path.isfile(os.path.join(self.cfg, ha_import.IMPORT_PENDING_FILE)))
 
+    async def test_resolve_refuses_to_drop_an_unreadable_record_while_an_original_is_set_aside(self):
+        # the next boot, finding no record, would otherwise put the original back under a loaded imported entry
+        self.put(self.storage, "hub.e1", "imported")
+        self.put(self.storage, "hub.e1.pre-import", "original")
+        journal = os.path.join(self.cfg, ha_import.IMPORT_PENDING_FILE)
+        os.makedirs(os.path.dirname(journal), exist_ok=True)
+        for record in ("not JSON", json.dumps({"version": 1, "entry_id": "e1", "domain": "hub", "phase": "sideways",
+                                               "stores": [{"name": "hub.e1", "had_original": True}]})):
+            with self.subTest(record=record):
+                with open(journal, "w", encoding="utf-8") as fh:
+                    fh.write(record)
+                with self.assertRaisesRegex(ValueError, r"unreadable.*hub\.e1\.pre-import.*restart"):
+                    await self.resolve()
+                self.assertTrue(os.path.isfile(journal))
+                self.assertEqual(self.read("hub.e1"), "imported")
+                self.assertEqual(self.read("hub.e1.pre-import"), "original")
+
+    async def test_resolve_drops_an_unreadable_record_with_nothing_set_aside(self):
+        journal = os.path.join(self.cfg, ha_import.IMPORT_PENDING_FILE)
+        os.makedirs(os.path.dirname(journal), exist_ok=True)
+        with open(journal, "w", encoding="utf-8") as fh:
+            fh.write("not JSON")
+        message, _forget = await self.resolve()
+        self.assertIn("unreadable", message)
+        self.assertNotIn("puts back", message)
+        self.assertFalse(os.path.exists(journal))
+
     async def test_resolve_view_runs_under_the_import_lock_and_answers_the_outcome(self):
         from custom_components.integration_manager import import_views
 

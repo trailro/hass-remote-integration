@@ -152,14 +152,44 @@ class ImportBootIntentTest(unittest.TestCase):
         self.boot()
         self.assert_retained()
 
-    def test_a_corrupt_intent_is_dropped_and_the_legacy_cleanup_runs(self):
+    def test_a_corrupt_intent_keeps_every_original_as_an_orphan_and_overwrites_nothing(self):
+        # without the record nothing says whether a loaded entry uses the imported store: putting the original back
+        # over it would pull the store from under that entry
         self.prepare("pending", present=False)
+        self.put(self.storage, "other.x.pre-import", "another original")
+        self.put(self.storage, "other.x.pre-import.orphan", "an older orphan")
         with open(self.journal, "w", encoding="utf-8") as fh:
             fh.write("not JSON")
         self.boot()
         self.assertFalse(os.path.exists(self.journal))
-        self.assertEqual(self.read("hub.e1"), "original")
+        self.assertEqual(self.read("hub.e1"), "imported")
+        self.assertEqual(self.read("hub.e1.pre-import.orphan"), "original")
+        self.assertFalse(os.path.exists(os.path.join(self.storage, "hub.e1.pre-import")))
+        self.assertFalse(os.path.exists(os.path.join(self.storage, "other.x")))
+        self.assertEqual(self.read("other.x.pre-import.orphan"), "an older orphan")
+        self.assertEqual(self.read("other.x.pre-import.orphan.1"), "another original")
         self.assertFalse(os.path.exists(self.source))
+        [event] = self.timeline()
+        self.assertIn("unreadable", event["message"])
+        self.assertIn("hub.e1.pre-import.orphan", event["message"])
+        self.boot()  # no record now: the legacy cleanup must not take an orphan for something to put back
+        self.assertEqual(self.read("hub.e1"), "imported")
+        self.assertEqual(self.read("hub.e1.pre-import.orphan"), "original")
+
+    def test_a_corrupt_intent_stays_while_an_original_cannot_be_kept_aside(self):
+        with open(self.journal, "w", encoding="utf-8") as fh:
+            fh.write("not JSON")
+        with mock.patch.object(self.ep.os, "replace", side_effect=PermissionError("test")):
+            self.boot()
+        self.assertTrue(os.path.isfile(self.journal))
+        self.assertEqual(self.read("hub.e1"), "imported")
+        self.assertEqual(self.read("hub.e1.pre-import"), "original")
+        self.assertTrue(os.path.isfile(os.path.join(self.source, "source")))
+
+    def test_an_unknown_phase_is_an_unreadable_record(self):
+        self.prepare("sideways", present=True)
+        self.boot()
+        self.assertEqual(self.read("hub.e1.pre-import.orphan"), "original")
         self.assertIn("unreadable", self.timeline()[0]["message"])
 
     def test_the_timeline_line_does_not_join_a_torn_last_line(self):
