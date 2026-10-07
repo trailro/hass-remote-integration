@@ -745,27 +745,44 @@ def _saved_config_entries(config_dir: str) -> list[dict[str, Any]]:
         return json.load(fh)["data"]["entries"]
 
 
-async def _save_config_entries(hass: HomeAssistant, domain: str, entry_id: str | None = None, *, removed: bool = False) -> None:
-    """Force a fresh HA save and confirm the imported entry (or its removal).
-    Store consumes its pending write even when it logs and swallows a WriteError,
-    so a normal return alone cannot authorize deleting recovery files."""
+# What an import decides about its entry, and what boot recovery reads back. Not modified_at, title, state
+# flags or anything else HA or the integration's setup may change while the save runs.
+_PERSISTED_FIELDS = ("entry_id", "domain", "data", "options", "version", "minor_version")
+_PERSIST_ATTEMPTS = 3  # a concurrent async_update_entry (setup, token refresh) needs one more flush, not a rollback
+
+
+def _persisted(record: dict[str, Any]) -> dict[str, Any]:
+    return {k: record.get(k) for k in _PERSISTED_FIELDS}
+
+
+async def _flush_config_entries(hass: HomeAssistant) -> None:
+    """Write core.config_entries now (HA saves SAVE_DELAY later). Rescheduled
+    first: a failed Store write consumed the callback it had."""
     entries = hass.config_entries
-    store = getattr(entries, "_store", None)
-    if store is None:
+    entries._async_schedule_save()  # noqa: SLF001 - private HA API, same on 2026.5.0 and 2026.9
+    await entries._store._async_handle_write_data()  # noqa: SLF001 - waits for a write already under way
+
+
+async def _save_config_entries(hass: HomeAssistant, domain: str, entry_id: str, *, removed: bool = False) -> None:
+    """Force a fresh HA save and confirm the imported entry (or its removal)
+    on disk. Store consumes its pending write even when it logs and swallows
+    a WriteError, so a normal return alone cannot authorize deleting recovery
+    files. Only _PERSISTED_FIELDS are compared, against the live entry after
+    each flush: an update during the write is written by the next attempt."""
+    entries = hass.config_entries
+    if getattr(entries, "_store", None) is None:
         raise ValueError("config entry persistence is unavailable; import recovery was retained")
     try:
-        entries._async_schedule_save()  # noqa: SLF001 - refresh even if a failed Store write consumed the callback
-        await store._async_handle_write_data()  # noqa: SLF001 - waits for a write already under way
-        # Snapshot after flushing, on the loop. Unrelated config-entry changes
-        # do not invalidate this import: check only its stable id when given.
-        expected = json.loads(json_bytes([e.as_dict() for e in entries.async_entries()
-                                          if entry_id is None or e.entry_id == entry_id]))
-        if entry_id is not None and ((removed and expected) or (not removed and not expected)):
-            raise ValueError("the imported entry changed presence during persistence")
-        saved = await hass.async_add_executor_job(_saved_config_entries, hass.config.config_dir)
-        actual = [e for e in saved if entry_id is None or e.get("entry_id") == entry_id]
-        if actual != expected:
-            raise ValueError("the saved config entry does not match the import")
+        for _attempt in range(_PERSIST_ATTEMPTS):
+            await _flush_config_entries(hass)
+            live = entries.async_get_entry(entry_id)
+            if (live is None) != removed:
+                raise ValueError("the imported entry changed presence during persistence")
+            expected = [] if removed else [_persisted(json.loads(json_bytes(live.as_dict())))]
+            saved = await hass.async_add_executor_job(_saved_config_entries, hass.config.config_dir)
+            if [_persisted(e) for e in saved if e.get("entry_id") == entry_id] == expected:
+                return
+        raise ValueError("the saved config entry does not match the import")
     except Exception as err:  # noqa: BLE001 - no credential-bearing snapshots in the error
         raise ValueError(f"import of {domain}: config entry persistence could not be confirmed ({type(err).__name__})") from None
 
