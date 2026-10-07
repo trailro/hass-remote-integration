@@ -57,7 +57,7 @@ Not in a backup, so a restore never rolls them back:
   the app's Home Assistant backup does hold them, see
   [app backups](app.md#backups)), `integration_manager/*.tmp`,
   staging folders, a scheduled restore and its record, `pre-restore-*`, an
-  import's `import.tar` and `import-extracted`, and the cached HACS list
+  import's `import.tar`, `import-extracted` and `import-pending.json`, and the cached HACS list
   (`hacs_catalog.json`).
 
 A backup of the Docker volume made with other tools can leave out `venv-*`
@@ -158,10 +158,14 @@ A store file goes with the longest domain it is named after: `foo_bar_tokens`
 comes with `foo_bar`, never with `foo`.
 
 When an import replaces a store file the volume already had, the original is
-kept as `.storage/<store>.pre-import` until the import is done; a restart in
-the middle puts it back. The import is done once its config entry is in
-`.storage/core.config_entries`: the manager writes that file at once, then
-removes the set-aside original, then deletes the extracted backup.
+kept as `.storage/<store>.pre-import` until the import is done. The import is
+done once its config entry is in `.storage/core.config_entries`: the manager
+writes that file at once, reads it back (Home Assistant only logs a failed
+write), then removes the set-aside original, then deletes the extracted
+backup. A restart in the middle is settled at the next boot from
+`.storage/core.config_entries`: with the entry there the imported stores stay,
+without it the originals are put back (see `import-pending.json` in
+[Files](files.md)).
 
 `POST /api/import/apply` (*Import*) and `/apply_all` (*Import all*) answer
 `alignment`: `entities` and `devices` aligned when the entry had just set up,
