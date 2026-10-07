@@ -127,4 +127,19 @@ created from stay and the originals go; without it, the originals are put
 back. Either way the record goes and the timeline says which it was. *Resolve*
 on the import page (`POST /api/import/resolve`) does the same without a
 restart, from the entry Home Assistant has loaded. Only an unreadable
-`core.config_entries` keeps the record over a boot. Never delete it by hand.
+`core.config_entries` or a store that could not be moved keeps the record over
+a boot; a record without the extraction (a version without the record ran in
+between and removed it) is stale and only dropped. Never delete it by hand.
+
+An unreadable record (not JSON, a field missing or unknown) cannot say whether
+an entry Home Assistant loads uses an imported store, so no original is ever
+put back over one. *Resolve* refuses to drop it while any
+`.storage/<store>.pre-import` exists, and says so; the next boot renames each
+`.storage/<store>.pre-import` to `.storage/<store>.pre-import.orphan`
+(`.orphan.1`, `.orphan.2`… when one is already there), drops the record and the
+extraction, and lists the orphans on the timeline. An orphan is never put back
+automatically. To restore one by hand: stop the container, check in
+`.storage/core.config_entries` that no entry you keep uses the store (or remove
+that entry first), rename `.storage/<store>.pre-import.orphan` to
+`.storage/<store>` over the imported one, and start the container. An orphan
+you do not need can simply be deleted.
