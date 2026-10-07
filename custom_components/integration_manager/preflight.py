@@ -101,7 +101,7 @@ PIP_TIMEOUT_S = 300
 STDERR_TAIL_LINES = 12  # of a failed pip run, what the report carries for the UI to show verbatim
 CACHE_S = 1800  # a preflight report stays good enough to gate a start for 30 min (same stored copy, same Home Assistant)
 MAX_CHECK_BYTES = 5 * 1024 * 1024  # a .py file above this is a blocker, not parsed
-MAX_REPORTS = 32  # a report is several kB and every gate key carries the copy's installed_at: within CACHE_S,
+MAX_REPORTS = 32  # a report is several kB and every gate key carries the copy's store generation: within CACHE_S,
 # reinstalls add keys faster than staleness retires them, so the sweep alone does not bound the dict
 _REPORTS: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
 GITHUB_API = "https://api.github.com/repos/{repo}"
