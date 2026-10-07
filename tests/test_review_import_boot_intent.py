@@ -1,4 +1,5 @@
-"""Boot recovery follows durable phase evidence and preserves uncertain imports."""
+"""Boot recovery settles an interrupted import from what Home Assistant will load, and never leaves a record that
+blocks every import action: core.config_entries on disk decides, the phase only says how sure the import was."""
 import json
 import os
 import shutil
@@ -45,6 +46,19 @@ class ImportBootIntentTest(unittest.TestCase):
         with open(os.path.join(self.storage, name), encoding="utf-8") as fh:
             return fh.read()
 
+    def timeline(self):
+        try:
+            with open(os.path.join(self.ep.STATE_DIR, "events.jsonl"), encoding="utf-8") as fh:
+                return [json.loads(line) for line in fh]
+        except FileNotFoundError:
+            return []
+
+    def assert_kept_imported(self):
+        self.assertEqual(self.read("hub.e1"), "imported")
+        self.assertFalse(os.path.exists(os.path.join(self.storage, "hub.e1.pre-import")))
+        self.assertFalse(os.path.exists(self.journal))
+        self.assertFalse(os.path.exists(self.source))
+
     def assert_retained(self):
         self.assertTrue(os.path.isfile(self.journal))
         self.assertEqual(self.read("hub.e1"), "imported")
@@ -59,15 +73,58 @@ class ImportBootIntentTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.journal))
         self.assertFalse(os.path.exists(self.source))
 
-    def test_cancelled_save_verification_keeps_all_recovery_with_saved_entry(self):
-        self.prepare("pending", present=True)  # cancellation after flush, before its verification/phase record
+    def test_restart_during_async_add_with_the_entry_flushed_keeps_the_import(self):
+        # HA's final write (or SAVE_DELAY) saved the entry; the stop cancelled the import before its check
+        self.prepare("added", present=True)
         self.boot()
-        self.assert_retained()
+        self.assert_kept_imported()
+        [event] = self.timeline()
+        self.assertEqual(event["kind"], "restore")
+        self.assertIn("imported stores are kept", event["message"])
 
-    def test_failed_rollback_with_entry_still_on_disk_is_not_assumed_committed(self):
-        self.prepare("uncertain", present=True)
+    def test_restart_during_async_add_before_any_save_puts_the_original_back(self):
+        self.prepare("added", present=False)
         self.boot()
-        self.assert_retained()
+        self.assertEqual(self.read("hub.e1"), "original")
+        self.assertFalse(os.path.exists(self.journal))
+        self.assertFalse(os.path.exists(self.source))
+        self.assertIn("original stores were put back", self.timeline()[0]["message"])
+
+    def test_a_saved_entry_keeps_its_stores_whatever_phase_was_recorded(self):
+        for phase in ("pending", "uncertain", "rollback"):
+            with self.subTest(phase=phase):
+                self.setUp()
+                self.prepare(phase, present=True)  # Home Assistant loads this entry: its stores must stay with it
+                self.boot()
+                self.assert_kept_imported()
+                self.assertIn(f"had reached '{phase}'", self.timeline()[-1]["message"])
+
+    def test_a_saved_entry_with_a_missing_store_still_finishes_and_says_so(self):
+        os.remove(os.path.join(self.storage, "hub.e1"))
+        self.prepare("commit", present=True)
+        self.boot()
+        self.assertFalse(os.path.exists(os.path.join(self.storage, "hub.e1.pre-import")))
+        self.assertFalse(os.path.exists(self.journal))
+        self.assertIn("not on the volume: hub.e1", self.timeline()[0]["message"])
+
+    def test_an_unusable_original_does_not_hold_the_rollback(self):
+        os.remove(os.path.join(self.storage, "hub.e1.pre-import"))
+        os.makedirs(os.path.join(self.storage, "hub.e1.pre-import"))
+        self.prepare("added", present=False)
+        self.boot()
+        self.assertFalse(os.path.exists(self.journal))
+        self.assertIn("hub.e1.pre-import", self.timeline()[0]["message"])
+
+    def test_a_round_trip_through_a_version_without_the_intent_has_nothing_left_to_recover(self):
+        # 0.27.0 ignored the record: it put the original back elsewhere and removed the source
+        self.intent["stores"] = [{"name": "hub.gone", "had_original": False}]
+        shutil.rmtree(self.source)
+        os.remove(os.path.join(self.storage, "hub.e1.pre-import"))
+        self.prepare("added", present=False)
+        self.boot()
+        self.assertFalse(os.path.exists(self.journal))
+        self.assertEqual(self.read("hub.e1"), "imported")  # not the import's: untouched
+        self.assertIn("nothing left to recover", self.timeline()[0]["message"])
 
     def test_confirmed_entry_absence_restores_original_and_removes_new_store(self):
         self.intent["stores"].append({"name": "hub.new", "had_original": False})
@@ -95,12 +152,24 @@ class ImportBootIntentTest(unittest.TestCase):
         self.boot()
         self.assert_retained()
 
-    def test_corrupt_intent_keeps_legacy_originals_and_source(self):
+    def test_a_corrupt_intent_is_dropped_and_the_legacy_cleanup_runs(self):
         self.prepare("pending", present=False)
         with open(self.journal, "w", encoding="utf-8") as fh:
             fh.write("not JSON")
         self.boot()
-        self.assert_retained()
+        self.assertFalse(os.path.exists(self.journal))
+        self.assertEqual(self.read("hub.e1"), "original")
+        self.assertFalse(os.path.exists(self.source))
+        self.assertIn("unreadable", self.timeline()[0]["message"])
+
+    def test_the_timeline_line_does_not_join_a_torn_last_line(self):
+        with open(os.path.join(self.ep.STATE_DIR, "events.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write('{"ts": "x", "kind": "boot", "mess')
+        self.prepare("commit", present=True)
+        self.boot()
+        with open(os.path.join(self.ep.STATE_DIR, "events.jsonl"), encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        self.assertEqual(json.loads(lines[1])["kind"], "restore")
 
     def test_marker_does_not_enter_manager_or_app_backup(self):
         self.assertTrue(backupkit._excluded("integration_manager/import-pending.json"))

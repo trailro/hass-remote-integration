@@ -755,61 +755,123 @@ def prune(keep: set[str]) -> None:
         shutil.rmtree(venv_dir(v), ignore_errors=True)
 
 
+def _timeline(kind: str, message: str) -> None:
+    """One event on the manager's timeline (integration_manager/events.jsonl, the format events.py writes): the
+    boot runs before Home Assistant, so nothing else writes the file now."""
+    line = json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "kind": kind, "message": message}, ensure_ascii=False) + "\n"
+    try:
+        with open(os.path.join(STATE_DIR, "events.jsonl"), "a+b") as fh:
+            if fh.seek(0, os.SEEK_END):
+                fh.seek(-1, os.SEEK_END)
+                if fh.read(1) != b"\n":
+                    line = "\n" + line  # a torn last line stays apart from this event
+            fh.write(line.encode("utf-8", errors="replace"))
+    except OSError:
+        pass  # the container log has it too
+
+
+def _read_import_intent(journal: str) -> dict:
+    with open(journal, encoding="utf-8") as fh:
+        intent = json.load(fh)
+    if (not isinstance(intent, dict) or intent.get("version") != 1
+            or not isinstance(intent.get("entry_id"), str) or not intent["entry_id"]
+            or not isinstance(intent.get("domain"), str) or not intent["domain"]
+            or intent.get("phase") not in ("pending", "added", "commit", "rollback", "uncertain")
+            or not isinstance(intent.get("stores"), list)):
+        raise ValueError("invalid import intent")
+    for item in intent["stores"]:
+        name = item.get("name") if isinstance(item, dict) else None
+        if (not isinstance(name, str) or not name or name in (".", "..")
+                or "/" in name or "\\" in name or not isinstance(item.get("had_original"), bool)):
+            raise ValueError("invalid import store name")
+    return intent
+
+
 def _recover_import_transaction() -> bool:
-    """Resolve one durable intent before legacy cleanup. False keeps all
-    recovery/source files when the marker or disk outcome is uncertain."""
+    """Resolve the durable intent an interrupted import left (ha_import.apply)
+    before the legacy cleanup.  Home Assistant is not running: the config
+    entry in core.config_entries on disk is what it loads.  Saved: the stores
+    it was created from stay and the originals set aside go.  Not saved: the
+    originals are put back.  False only while core.config_entries cannot be
+    read or a store cannot be moved: everything is retained, and the
+    manager's Resolve or a later boot settles it."""
     journal = os.path.join(STATE_DIR, "import-pending.json")
     if not os.path.lexists(journal):
         return True  # older versions have no intent marker
     try:
-        with open(journal, encoding="utf-8") as fh:
-            intent = json.load(fh)
-        if (not isinstance(intent, dict) or intent.get("version") != 1
-                or not isinstance(intent.get("entry_id"), str) or not intent["entry_id"]
-                or not isinstance(intent.get("domain"), str) or not intent["domain"]
-                or intent.get("phase") not in ("pending", "commit", "rollback", "uncertain")
-                or not isinstance(intent.get("stores"), list)):
-            raise ValueError("invalid import intent")
-        for item in intent["stores"]:
-            name = item.get("name") if isinstance(item, dict) else None
-            if (not isinstance(name, str) or not name or name in (".", "..")
-                    or "/" in name or "\\" in name or not isinstance(item.get("had_original"), bool)):
-                raise ValueError("invalid import store name")
-        path = os.path.join(CONFIG_DIR, ".storage", "core.config_entries")
+        intent = _read_import_intent(journal)
+    except (OSError, ValueError, KeyError, TypeError) as err:
         try:
-            with open(path, encoding="utf-8") as fh:
+            os.remove(journal)
+            fsync_dir(STATE_DIR)
+        except OSError:
+            log("import recovery: an unreadable intent could not be removed; original stores and source retained")
+            return False
+        msg = (f"interrupted import: its record was unreadable ({type(err).__name__}) and was dropped; "
+               "any original store it had set aside is put back")
+        log(msg)
+        _timeline("restore", msg)
+        return True  # the legacy cleanup: every .pre-import back, the source removed
+    domain, stores = intent["domain"], intent["stores"]
+    storage = os.path.join(CONFIG_DIR, ".storage")
+    try:
+        try:
+            with open(os.path.join(storage, "core.config_entries"), encoding="utf-8") as fh:
                 entries = json.load(fh)["data"]["entries"]
         except FileNotFoundError:
             entries = []  # the initial empty HA store was never written
         if not isinstance(entries, list) or any(not isinstance(e, dict) for e in entries):
             raise ValueError("invalid config entry store")
-        found = [e for e in entries if e.get("entry_id") == intent["entry_id"]]
-        if len(found) > 1 or (found and found[0].get("domain") != intent["domain"]):
-            raise ValueError("ambiguous saved import entry")
-        committed = bool(found)
-        if committed and intent["phase"] != "commit":
-            raise ValueError("saved entry without a verified commit phase")
-        for item in intent["stores"]:
-            dest = os.path.join(CONFIG_DIR, ".storage", item["name"])
-            aside = dest + ".pre-import"
-            if committed:
-                for old in (aside, aside + ".done"):
-                    if os.path.lexists(old):
-                        os.remove(old)
-            elif os.path.lexists(aside):
-                if os.path.islink(aside) or not os.path.isfile(aside):
-                    raise ValueError("unusable original import store")
-                os.replace(aside, dest)
-            elif not item["had_original"] and os.path.lexists(dest):
-                os.remove(dest)
-        fsync_dir(os.path.join(CONFIG_DIR, ".storage"))
+    except (OSError, ValueError, KeyError, TypeError) as err:
+        log(f"interrupted import of {domain}: core.config_entries could not be read ({type(err).__name__}); its intent, "
+            "original stores and source are retained until Resolve on the import page or a later boot settles it")
+        return False
+    present = any(e.get("entry_id") == intent["entry_id"] and e.get("domain") == domain for e in entries)
+    paths = [(item, os.path.join(storage, item["name"])) for item in stores]
+    source = os.path.isdir(os.path.join(STATE_DIR, "import-extracted"))
+    if not source and not any(os.path.lexists(p) or os.path.lexists(p + ".pre-import") for _i, p in paths):
+        # 0.27.0 (no intent) ran in between: it put back any original and removed the source
+        msg = f"interrupted import of {domain}: nothing left to recover"
+    else:
+        missing, skipped = [], []
+        try:
+            for item, dest in paths:
+                aside = dest + ".pre-import"
+                if present:
+                    for old in (aside, aside + ".done"):
+                        if os.path.lexists(old):
+                            os.remove(old)
+                    if not os.path.lexists(dest):
+                        missing.append(item["name"])
+                elif os.path.lexists(aside):
+                    if os.path.islink(aside) or not os.path.isfile(aside):
+                        skipped.append(item["name"])
+                        continue
+                    os.replace(aside, dest)
+                elif not item["had_original"] and os.path.lexists(dest) and not os.path.isdir(dest):
+                    os.remove(dest)
+            fsync_dir(storage)
+        except OSError as err:
+            log(f"interrupted import of {domain}: a store could not be settled ({err}); intent and source retained")
+            return False
+        if present and intent["phase"] in ("added", "commit") and not missing:
+            msg = f"interrupted import of {domain}: its config entry was saved, the imported stores are kept"
+        elif present:
+            msg = (f"interrupted import of {domain}: its config entry was saved (the import had reached '{intent['phase']}'), "
+                   "so the stores it was created from are kept and the originals set aside removed"
+                   + (f"; not on the volume: {', '.join(missing)}" if missing else ""))
+        else:
+            msg = (f"interrupted import of {domain}: its config entry was not saved, the original stores were put back"
+                   + (f"; not a file, left as it is: {', '.join(n + '.pre-import' for n in skipped)}" if skipped else ""))
+    try:
         os.remove(journal)
         fsync_dir(STATE_DIR)
-        log("recovered interrupted import: " + ("saved entry kept" if committed else "stores rolled back"))
-        return True
-    except (OSError, ValueError, KeyError, TypeError):
-        log("import recovery is uncertain: retained intent, original stores and source for recovery")
+    except OSError as err:
+        log(f"interrupted import of {domain}: settled, but its intent could not be removed ({err})")
         return False
+    log(msg)
+    _timeline("restore", msg)
+    return True
 
 
 def clean_import_leftovers() -> None:
