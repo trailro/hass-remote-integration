@@ -1,8 +1,12 @@
-"""A retained scan and an accepted call keep the broker/namespace that supplied them."""
+"""A retained scan and an accepted call keep the broker/namespace that supplied them; a stop ends a cleanup retry."""
 
 import asyncio
 import dataclasses
 import json
+import os
+import tempfile
+import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -195,6 +199,76 @@ class RetainedOriginTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((n, why), (0, ""))
         self.assertTrue(pub._mqtt311)
         self.assertEqual(pub._broker_traits(), (True, 0))  # the next client of this broker speaks 3.1.1 at once
+
+
+class StopDuringRetryTest(unittest.IsolatedAsyncioTestCase):
+    """Home Assistant stopping during a pending-cleanup retry: the retry ends at once and clears nothing more."""
+
+    async def test_stop_during_the_scan_returns_promptly_and_clears_nothing(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        os.makedirs(os.path.join(tmp.name, "integration_manager"))
+        pub = _publisher(asyncio.get_running_loop(), enabled=True, host="broker-a")
+        pub.hass.config.path = lambda *p: os.path.join(tmp.name, *p)
+        pub.hass.async_add_executor_job = lambda f, *a: asyncio.get_running_loop().run_in_executor(None, f, *a)
+        pub._conn_lock = asyncio.Lock()
+        pub._cleanup_retrying = False
+        pub._cleanup_pending_lock = threading.Lock()
+        pub._cleanup_pending = {}
+        retained, records = {}, []
+        for base in ("hass_gone_a", "hass_gone_b"):
+            retained[f"{base}/demo/sensor/x"] = json.dumps({"integration": "demo", "published_at": "t"}).encode()
+            key = pub._pending_key(base, pub._broker_identity())
+            records.append({"base": base, "prefix": "homeassistant", "broker": pub._broker_identity(), "since": "before"})
+            pub._set_cleanup_pending(key, records[-1])
+        broker = _Broker(retained)
+
+        def client(_pub, suffix, *args, **_kw):
+            cl = broker.client(suffix, *args)
+            subscribe = cl.subscribe
+            def stopping(topics):
+                result = subscribe(topics)
+                pub._stopping = True  # _on_stop, while the first record's scan collects
+                return result
+            cl.subscribe = stopping
+            return cl
+
+        started = time.monotonic()
+        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", client), mock.patch.object(mp.events, "emit"):
+            await asyncio.wait_for(pub._on_cleanup_timer(None), 5)
+        elapsed = time.monotonic() - started
+        self.assertEqual(broker.cleared, [])
+        self.assertEqual(broker.retained, retained)
+        self.assertEqual(len(broker.scans), 1)  # the second record was never scanned
+        self.assertEqual(sorted(r["base"] for r in pub._cleanup_pending.values()), ["hass_gone_a", "hass_gone_b"])
+        with open(pub._cleanup_pending_file(), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["pending"], records)
+        self.assertFalse(pub._conn_lock.locked())
+        self.assertLess(elapsed, 1.5)  # the scan's own minimum is 2 s
+
+    async def test_cancelled_while_stopping_releases_the_connection_gate(self):
+        pub = _publisher(asyncio.get_running_loop(), enabled=True, host="broker-a")
+        pub._cleanup_pending = {("hass_removed", "broker-a", 1883): {"base": "hass_removed"}}
+        pub._cleanup_retrying = False
+        pub._conn_lock = asyncio.Lock()
+        job = asyncio.get_running_loop().create_future()
+        entered = asyncio.Event()
+        def executor(*args):
+            entered.set()
+            return job
+        pub.hass.async_add_executor_job = executor
+        task = asyncio.create_task(pub._on_cleanup_timer(None))
+        await entered.wait()
+        pub._stopping = True
+        task.cancel()
+        done, _ = await asyncio.wait({task}, timeout=1)
+        if not done:  # still holding the gate: let it end so the test does not hang
+            job.set_result(None)
+            await asyncio.wait({task}, timeout=1)
+        self.assertIn(task, done)
+        self.assertTrue(task.cancelled())
+        self.assertFalse(pub._conn_lock.locked())
+        job.cancel()
 
 
 class CallOriginTest(unittest.IsolatedAsyncioTestCase):

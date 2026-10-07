@@ -839,7 +839,9 @@ and retried every minute while MQTT is enabled, also with no integration
 installed. A retained scan that loses its connection, reaches its byte budget,
 or ends at its time limit while messages still arrive also keeps the cleanup
 pending. No partial scan is acknowledged as a complete cleanup; a later full
-scan must finish before its retry record is removed.
+scan must finish before its retry record is removed. A Home Assistant stop
+ends a retry at once: nothing more is cleared, and what is left stays pending
+for the next start.
 If MQTT is disabled at the uninstall, nothing is sent: the identity
 last recorded gets the same kept cleanup, the answer says
 `retained_cleanup_deferred`, and it runs once MQTT is enabled again.
