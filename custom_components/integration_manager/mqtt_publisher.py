@@ -44,7 +44,7 @@ import threading
 import time
 import traceback
 from collections.abc import Callable, Collection, Iterable
-from dataclasses import MISSING, asdict, dataclass, field
+from dataclasses import MISSING, asdict, dataclass, field, replace
 from datetime import timedelta
 from typing import Any
 
@@ -653,6 +653,11 @@ class _RetainedOrigin:
     prefix: str
     discovery_prefix: str
     config: MqttConfig = field(compare=False, repr=False)  # a copy, the password included: never logged
+    live: bool = field(default=True, compare=False)  # the live connection's broker (True) or the configured one
+
+
+# what reaches a broker: a reload adopts these from mqtt.json while the live client keeps those it connected with
+_CONNECTION_FIELDS = ("host", "port", "username", "password", "tls", "ca_certs", "tls_insecure")
 
 
 class MqttPublisher:
@@ -1400,18 +1405,30 @@ class MqttPublisher:
         foreign = [t for t, p in found.items() if not self._is_ours(t, p, base_topic)]
         return {"foreign": sorted(foreign)[:20], "foreign_count": len(foreign), "ours": len(found) - len(foreign)}
 
-    def _retained_origin(self) -> _RetainedOrigin:
-        """The settings and names a retained scan or cleanup submitted now works with, whatever changes meanwhile."""
+    def _live_settings(self) -> MqttConfig:
+        """The settings the live client connected with: async_reload_config adopts mqtt.json without a reconnect, and
+        until that reconnect the connection, and every _publish, stays on its broker.  The configured ones without a client."""
+        settings = getattr(getattr(self, "_client", None), "_hri_config", None)
+        return settings if isinstance(settings, MqttConfig) else self.config
+
+    def _retained_origin(self, live: bool = True) -> _RetainedOrigin:
+        """The settings and names a retained scan or cleanup submitted now works with, whatever changes meanwhile.
+        ``live``: the broker of the live connection, for work on the namespace this process publishes in (what is read
+        there decides what _publish sends on that connection); False: the configured broker (a connect, the pending
+        cleanups of the broker the settings name)."""
         c = self.config
+        if live and (s := self._live_settings()) is not c:
+            c = replace(c, **{f: getattr(s, f) for f in _CONNECTION_FIELDS})
         return _RetainedOrigin(c.host, c.port, c.tls, c.username, self.base_topic, self.prefix, c.discovery_prefix,
-                               copy.deepcopy(c))
+                               copy.deepcopy(c), live)
 
     def _retained_current(self, origin: _RetainedOrigin) -> bool:
         """The broker and the names are still those ``origin`` was submitted with: its result may be applied.  A reload
-        that adopts other settings without a reconnect changes nothing here unless the broker or a name changed."""
-        c = self.config
+        that adopts other settings without a reconnect changes nothing for a live origin (the connection keeps its
+        broker); a reconnect to another broker, or a changed name, does."""
+        b = self._live_settings() if origin.live else self.config
         return (origin.host, origin.port, origin.tls, origin.username, origin.base, origin.prefix, origin.discovery_prefix) \
-            == (c.host, c.port, c.tls, c.username, self.base_topic, self.prefix, c.discovery_prefix)
+            == (b.host, b.port, b.tls, b.username, self.base_topic, self.prefix, self.config.discovery_prefix)
 
     def _configured_origin(self) -> tuple:
         return (self.config.host, self.config.port, self.config.tls, self.config.username, self.base_topic)
@@ -1493,7 +1510,7 @@ class MqttPublisher:
         second client that suits it; the first one never subscribed or published anything.  ``origin``: the broker
         settings and the base topic (its client id) to use, the configured ones when None.  RuntimeError once Home Assistant
         stops."""
-        origin = origin or self._retained_origin()
+        origin = origin or self._retained_origin(live=False)
         config = origin.config
         for _attempt in range(2):
             self._raise_if_stopping()
@@ -1628,7 +1645,7 @@ class MqttPublisher:
                                 origin: _RetainedOrigin | None = None) -> tuple[int | None, str]:
         """Blocking: _clear_retained_under, with the reason when it was not done.  Scanned and cleared on the broker of
         ``origin`` (the configured one when None), whatever the settings name meanwhile."""
-        origin = origin or self._retained_origin()
+        origin = origin or self._retained_origin(live=False)
         key = self._pending_key(base_topic, self._broker_identity(origin.config))  # the broker the scan reaches
         try:
             topics = [(f"{discovery_prefix}/device/+/config", 1)] + ([(f"{base_topic}/#", 1)] if docs else [])
@@ -1736,7 +1753,7 @@ class MqttPublisher:
         self._cleanup_retrying = True
         try:
             async with self._conn_lock:  # no start or reconnect in between: nothing may be published under a name being cleared
-                job = asyncio.ensure_future(self.hass.async_add_executor_job(self._retry_pending_cleanups, self._retained_origin()))
+                job = asyncio.ensure_future(self.hass.async_add_executor_job(self._retry_pending_cleanups, self._retained_origin(live=False)))
                 cancelled = False
                 try:
                     while True:
@@ -1760,7 +1777,7 @@ class MqttPublisher:
         identity needed), each under its own base topic and discovery prefix only, and only on the broker it is for: the
         settings may name another one by now, where an empty scan says nothing about the broker that keeps the data.
         ``origin``: the settings the run was submitted with; once they change, or Home Assistant stops, it ends."""
-        origin = origin or self._retained_origin()
+        origin = origin or self._retained_origin(live=False)
         here = self._pending_key("", self._broker_identity(origin.config))[1:]
         for key, rec in list(self._cleanup_pending.items()):
             base = key[0]
@@ -1902,6 +1919,7 @@ class MqttPublisher:
         try:
             c = self._new_client(self.client_id)  # tls_set raises on an unreadable CA file
             c._hri_origin = self._reply_origin(c)  # bound before any callback can accept a call
+            c._hri_config = copy.deepcopy(self.config)  # what it connects with: _live_settings
             c.will_set(self._status_topic(), "offline", qos=1, retain=True)
             c.on_connect = self._on_connect
             c.on_connect_fail = self._on_connect_fail

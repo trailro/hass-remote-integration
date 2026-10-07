@@ -158,23 +158,57 @@ class RetainedOriginTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(pub._resync_excluded)
 
     async def test_settings_adopted_without_reconnect_do_not_discard_sweeps(self):
-        """A reload adopts mqtt.json while the connection keeps its broker: a sweep submitted after it is not discarded."""
+        """A reload adopts mqtt.json while the connection keeps its broker: a sweep submitted after it is not discarded,
+        and reads and clears on the broker the connection (and every _publish) is on, not on the one the file names."""
         for change in ({"qos": 1}, {"host": "broker-b"}):
             with self.subTest(change=change):
                 pub = self.publisher()
                 pub._client._hri_origin = pub._configured_origin()  # bound at the connect, before the reload
+                pub._client._hri_config = pub.config
                 pub.config = dataclasses.replace(pub.config, **change)  # async_reload_config: a new object, no reconnect
                 topic = pub.base_topic + "/demo/sensor/excluded"
-                broker = _Broker({topic: json.dumps({"integration": "demo", "published_at": "t"}).encode()})
+                retained = {topic: json.dumps({"integration": "demo", "published_at": "t"}).encode()}
+                brokers = {"broker-a": _Broker(retained), "broker-b": _Broker(retained)}
 
                 async def executor(func, *args):
                     return func(*args)
                 pub.hass.async_add_executor_job = executor
-                with mock.patch.object(mp.MqttPublisher, "_throwaway_client", lambda _pub, *a, **k: broker.client(*a)), \
+                def client(_pub, *args, origin=None):
+                    return brokers[origin.config.host].client(*args)
+                with mock.patch.object(mp.MqttPublisher, "_throwaway_client", client), \
                         mock.patch.object(mp.MqttPublisher, "_collect_quiet", return_value=False):
                     await pub._async_resync_excluded()
-                self.assertEqual(broker.cleared, [topic])
+                self.assertEqual(brokers["broker-a"].cleared, [topic])
+                self.assertEqual(brokers["broker-b"].cleared, [])
                 self.assertFalse(pub._resync_excluded)
+
+    async def test_undo_after_a_host_change_without_reconnect_clears_the_live_broker(self):
+        """Parity Undo: async_reload_config adopts a file naming another broker, then async_clear_discovery.  The main
+        Home Assistant reads the configs on the broker the connection is on: those go, the other broker's stay."""
+        pub = self.publisher()
+        pub._client._hri_config = pub.config  # bound at the connect
+        pub._conn_lock = asyncio.Lock()
+        pub._set_undiscover_due = mock.Mock()
+        pub._discovery_map, pub._blocks = {"dev": {}}, {"dev": {}}
+        pub._is_ours = lambda *args: True
+        topic = pub.config.discovery_prefix + "/device/dev/config"
+        brokers = {"broker-a": _Broker({topic: b"{}"}), "broker-b": _Broker({topic: b"{}"})}
+        new = dataclasses.replace(pub.config, host="broker-b", discovery_enabled=False)
+        pub._load = lambda: new
+
+        async def executor(func, *args):
+            return func(*args)
+        pub.hass.async_add_executor_job = executor
+        def client(_pub, *args, origin=None):
+            return brokers[origin.config.host].client(*args)
+        with mock.patch.object(mp.MqttPublisher, "_throwaway_client", client), \
+                mock.patch.object(mp.MqttPublisher, "_collect_quiet", return_value=False):
+            await pub.async_reload_config()
+            self.assertEqual(await pub.async_clear_discovery(), 1)
+        self.assertEqual(brokers["broker-a"].cleared, [topic])
+        self.assertEqual(brokers["broker-b"].cleared, [])
+        self.assertEqual(pub._discovery_map, {})
+        pub._set_undiscover_due.assert_called_once_with(True)
 
     async def test_broker_traits_learned_by_a_cleanup_stay_with_the_publisher(self):
         pub = self.publisher()
