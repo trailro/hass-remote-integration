@@ -193,9 +193,145 @@ class ImportTransactionTest(unittest.IsolatedAsyncioTestCase):
         aside = os.path.join(self.cfg, ".storage.pre-rebuild-test")
         os.makedirs(aside)
         ha_import.clear_extracted(self.cfg)
-        self.assertFalse(ha_import.drop_rebuild(self.cfg))
-        self.assertTrue(os.path.isfile(plan))
-        self.assertTrue(os.path.isdir(aside))
+        # the import's record holds its source, never the clean start's plan or set-aside .storage
+        self.assertTrue(ha_import.drop_rebuild(self.cfg))
+        self.assertFalse(os.path.exists(plan))
+        self.assertFalse(os.path.exists(aside))
         self.assertTrue(os.path.isfile(os.path.join(self.source, "hub.e1")))
         with self.assertRaisesRegex(ValueError, "incomplete import"):
             await ha_import.apply_all(self.hass, self.aligner, None, False, False, None, {"hub"})
+
+    def phase(self):
+        with open(os.path.join(self.cfg, ha_import.IMPORT_PENDING_FILE), encoding="utf-8") as fh:
+            return json.load(fh)["phase"]
+
+    async def interrupt_add(self, *, inserted):
+        """HA stops (and cancels the import) inside async_add, with the entry in memory or not yet."""
+        reached = asyncio.Event()
+
+        async def add(entry):
+            self.phases.append(self.phase())
+            if inserted:
+                self.entries[entry.entry_id] = entry
+                self.pending = True
+            reached.set()
+            await asyncio.Event().wait()
+
+        self.phases = []
+        self.hass.config_entries.async_add = add
+        task = asyncio.create_task(self.apply())
+        await asyncio.wait_for(reached.wait(), 2)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(self.phases, ["added"])  # durable before HA could write the entry
+
+    async def resolve(self):
+        with mock.patch.object(ha_import, "_forget_cached_stores") as forget, mock.patch.object(ha_import.events, "emit"):
+            return await ha_import.async_resolve_pending(self.hass), forget
+
+    async def test_resolve_keeps_the_imported_stores_of_an_entry_home_assistant_has(self):
+        self.put(self.storage, "hub.e1", "original")
+        await self.interrupt_add(inserted=True)
+        message, _forget = await self.resolve()
+        self.assertIn("imported stores are kept", message)
+        self.assertEqual(self.read("hub.e1"), "imported")
+        self.assertFalse(os.path.exists(os.path.join(self.storage, "hub.e1.pre-import")))
+        self.assertFalse(os.path.exists(os.path.join(self.cfg, ha_import.IMPORT_PENDING_FILE)))
+        self.assertEqual([e["entry_id"] for e in ha_import._saved_config_entries(self.cfg)], ["e1"])  # confirmed first
+        ha_import.clear(self.cfg)  # no longer held
+        self.assertFalse(os.path.exists(self.source))
+
+    async def test_resolve_puts_the_originals_back_without_the_entry(self):
+        self.put(self.storage, "hub.e1", "original")
+        await self.interrupt_add(inserted=False)
+        message, forget = await self.resolve()
+        self.assertIn("original stores were put back", message)
+        self.assertEqual(self.read("hub.e1"), "original")
+        forget.assert_called_once_with(self.hass, ["hub.e1"])
+        self.assertFalse(os.path.exists(os.path.join(self.cfg, ha_import.IMPORT_PENDING_FILE)))
+
+    async def test_resolve_changes_nothing_while_the_entry_cannot_be_confirmed_on_disk(self):
+        self.put(self.storage, "hub.e1", "original")
+        await self.interrupt_add(inserted=True)
+        self.writes = ["swallow"] * ha_import._PERSIST_ATTEMPTS
+        with self.assertRaisesRegex(ValueError, "nothing was changed; restart"):
+            await self.resolve()
+        self.assertEqual(self.read("hub.e1.pre-import"), "original")
+        self.assertTrue(os.path.isfile(os.path.join(self.cfg, ha_import.IMPORT_PENDING_FILE)))
+
+    async def test_resolve_view_runs_under_the_import_lock_and_answers_the_outcome(self):
+        from custom_components.integration_manager import import_views
+
+        await self.interrupt_add(inserted=False)
+        installer = SimpleNamespace(busy=False)
+        request = SimpleNamespace(headers={}, query={}, content_type="application/json", json=mock.AsyncMock(return_value={}))
+        with mock.patch.object(ha_import, "_forget_cached_stores"), mock.patch.object(ha_import.events, "emit"):
+            response = await import_views.ImportResolveView(self.hass, installer).post(request)
+        body = json.loads(response.body)
+        self.assertTrue(body["ok"], body)
+        self.assertIn("put back", body["message"])
+        self.assertFalse(installer.busy)
+        self.assertIsNone(ha_import.pending_import(self.cfg))
+
+    async def test_ha_stop_inside_async_add_during_a_rebuild_is_settled_at_the_next_boot(self):
+        """#122 keeps the clean start's plan when HA cancels the rebuild; the import's record must not pin it."""
+        from homeassistant.core import CoreState
+        from tests.fakes import entrypoint_for
+
+        plan_path = os.path.join(self.cfg, ha_import.REBUILD_FILE)
+        with open(plan_path, "w", encoding="utf-8") as fh:
+            json.dump({"stage": "import", "domain": "hub", "backup": "pre.zip", "to": "2026.1.0"}, fh)
+        with open(os.path.join(self.cfg, ha_import.SUMMARY_FILE), encoding="utf-8") as fh:
+            summary = json.load(fh)
+        with open(os.path.join(self.cfg, ha_import.SUMMARY_FILE), "w", encoding="utf-8") as fh:
+            json.dump({**summary, "type": ha_import.REBUILD_TYPE}, fh)
+        aside = os.path.join(self.cfg, ".storage.pre-rebuild-test")
+        os.makedirs(aside)
+        self.hass.state = CoreState.running
+        installer = SimpleNamespace(busy=False, running="hub", state=SimpleNamespace(installed={"hub"}))
+        reached = asyncio.Event()
+
+        async def add(entry):
+            self.entries[entry.entry_id] = entry
+            self.pending = True
+            reached.set()
+            await asyncio.Event().wait()
+
+        self.hass.config_entries.async_add = add
+        loader = mock.Mock(async_get_integration=mock.AsyncMock(return_value=SimpleNamespace(is_built_in=False)))
+        with mock.patch.object(ha_import, "loader", loader), mock.patch.object(ha_import, "_forget_cached_stores"), \
+                mock.patch.object(ha_import, "pn") as pn, mock.patch.object(ha_import.events, "emit"):
+            task = asyncio.create_task(ha_import.async_finish_rebuild(self.hass, self.aligner, installer))
+            await asyncio.wait_for(reached.wait(), 2)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertEqual(self.phase(), "added")
+            self.assertTrue(os.path.isfile(plan_path) and os.path.isdir(aside))
+            await self.hass.config_entries._store._async_handle_write_data()  # HA's final write on the way out
+
+            ep = entrypoint_for(self, self.cfg)
+            with mock.patch.object(ep, "log"):
+                ep.clean_import_leftovers()  # the next boot
+            self.assertIsNone(ha_import.pending_import(self.cfg))
+            self.assertEqual(self.read("hub.e1"), "imported")
+            self.assertTrue(os.path.isfile(plan_path))  # still the clean start's, with its source
+            self.assertTrue(os.path.isfile(os.path.join(self.source, "hub.e1")))
+
+            await ha_import.async_finish_rebuild(self.hass, self.aligner, installer)  # after the next start
+        self.assertFalse(os.path.exists(plan_path))
+        self.assertFalse(os.path.exists(aside))
+        self.assertFalse(os.path.exists(os.path.join(self.cfg, ha_import.EXTRACT_DIR)))
+        self.assertNotIn("failed", pn.async_create.call_args.args[1])
+
+
+class ResolveButtonTest(unittest.TestCase):
+    def test_the_import_page_shows_the_blocked_state_with_a_resolve_button(self):
+        root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "custom_components", "integration_manager")
+        with open(os.path.join(root, "templates", "system.html"), encoding="utf-8") as fh:
+            self.assertIn('id="imresolve"', fh.read())
+        with open(os.path.join(root, "static", "system.js"), encoding="utf-8") as fh:
+            js = fh.read()
+        self.assertIn("r.pending_import", js)
+        self.assertIn("post('api/import/resolve')", js)

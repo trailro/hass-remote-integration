@@ -49,7 +49,8 @@ async def _locked(make_coro, installer=None):
             installer.busy = False
 
 
-_REBUILD_MSG = "a scheduled clean start or incomplete import uses the import area: finish its recovery before retrying"
+_REBUILD_MSG = ("a scheduled clean start or an interrupted import holds the import area: a clean start finishes at the next "
+                "restart; an interrupted import is settled by Resolve on this page (POST api/import/resolve) or at the next restart")
 
 
 def _rebuild_staged(config_dir: str) -> bool:
@@ -134,7 +135,8 @@ class ImportInspectView(ManagerView):
         # passwords and tokens stay masked (the POST inspect answers the user who gave the key in
         # full; an import puts the stored value back wherever it receives "***")
         uploaded = await self.hass.async_add_executor_job(os.path.isfile, os.path.join(cfg, ha_import.IMPORT_TAR))
-        return self.json({"uploaded": uploaded, "summary": scrub(summary) if summary else None})
+        pending = await self.hass.async_add_executor_job(ha_import.pending_import, cfg)
+        return self.json({"uploaded": uploaded, "summary": scrub(summary) if summary else None, "pending_import": pending})
 
     @with_body
     async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
@@ -146,7 +148,7 @@ class ImportInspectView(ManagerView):
     async def _post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
         cfg = self.hass.config.config_dir
         if await self.hass.async_add_executor_job(_rebuild_staged, cfg):
-            return self.json({"ok": False, "error": "a Home Assistant downgrade with a clean start is scheduled: restart first"})
+            return self.json({"ok": False, "error": _REBUILD_MSG})
         if not await self.hass.async_add_executor_job(os.path.isfile, os.path.join(cfg, ha_import.IMPORT_TAR)):
             return self.json({"ok": False, "error": "upload a backup first"})
         password = body.get("password")
@@ -252,3 +254,23 @@ class ImportApplyAllView(ManagerView):
         except Exception as err:  # noqa: BLE001
             return self.json({"ok": False, "error": scrub_text(f"{type(err).__name__}: {err}")})
         return self.json({"ok": True, **result})
+
+
+class ImportResolveView(ManagerView):
+    """POST /api/import/resolve: settle an interrupted import (ha_import.async_resolve_pending)."""
+
+    url = "/api/import/resolve"
+
+    def __init__(self, hass: HomeAssistant, installer) -> None:
+        self.hass = hass
+        self.installer = installer
+
+    @with_body
+    async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
+        try:
+            message = await _locked(lambda: ha_import.async_resolve_pending(self.hass), self.installer)
+        except ValueError as err:
+            return self.json({"ok": False, "error": str(err)})
+        except Exception as err:  # noqa: BLE001
+            return self.json({"ok": False, "error": scrub_text(f"{type(err).__name__}: {err}")})
+        return self.json({"ok": True, "message": message})
