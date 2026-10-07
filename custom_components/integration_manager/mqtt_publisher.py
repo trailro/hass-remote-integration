@@ -3540,7 +3540,10 @@ class MqttPublisher:
             if removed_components or cleared_devices or other_format:
                 await asyncio.sleep(2)  # the removal forms reach the consumer before the documents empty (no "Erroneous JSON")
                 if not self._retained_current(origin):
-                    self._orphan_sweep_due = True
+                    # the removal forms went out on the connection the scan read, but the documents stay: the whole sweep
+                    # is redone by the next full republish, which first reads again what is announced under the broker and
+                    # names it then has (until then nothing is carried: what the read above found may not be there)
+                    self._orphan_sweep_due, self._boot_components = True, None
                     return
             try:
                 await self.hass.async_add_executor_job(self._clear_topics, "orphans", docs, origin)
