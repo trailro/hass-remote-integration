@@ -23,7 +23,7 @@ from .manage_views import EventsView, InstalledActionView, PatchActionView, Patc
 from .mqtt_publisher import MqttPublisher
 from .backup_views import BackupActionView, BackupCreateView, BackupsView, BackupUploadView, RestoreCancelView
 from .ha_import import RegistryAligner, async_finish_rebuild
-from .import_views import ImportApplyAllView, ImportApplyView, ImportClearView, ImportInspectView, ImportUploadView
+from .import_views import ImportApplyAllView, ImportApplyView, ImportClearView, ImportInspectView, ImportResolveView, ImportUploadView
 from .devices_page import DeviceActionView, DevicesApiView, DevicesPageView
 from .entities_page import EntitiesApiView, EntitiesPageView, EntityActionView
 from .logs_page import LogLevelView, LoggersApiView, LogsApiView, LogsPageView
@@ -311,6 +311,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ImportApplyView(hass, aligner, installer),
         ImportApplyAllView(hass, aligner, installer),
         ImportClearView(hass),
+        ImportResolveView(hass, installer),
         BackupsView(hass, installer, ha_updater),
         BackupCreateView(hass, installer),
         SettingsView(installer),

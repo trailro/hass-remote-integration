@@ -159,7 +159,8 @@ function imRender(){
   box.querySelectorAll('button').forEach(b=>b.onclick=()=>{IMSEL={dom:b.dataset.dom,eid:b.dataset.eid}; const e=IMS.domains[IMSEL.dom].entries.find(x=>x.entry_id===IMSEL.eid);
     $('#imtitle').textContent=`${IMSEL.dom} · ${e.title||''}`; $('#imdata').value=JSON.stringify(e.data||{},null,1); $('#imoptions').value=JSON.stringify(e.options||{},null,1); $('#imstorage').checked=IMS.domains[IMSEL.dom].storage_files.length>0; $('#imresult').textContent=''; $('#imform').hidden=false;});
 }
-async function imLoad(){const r=await (await fetch('api/import/inspect')).json(); IMS=r.summary; imRender(); if(r.summary) $('#immsg').textContent='inspected backup ready (archive already deleted)';}
+async function imLoad(){const r=await (await fetch('api/import/inspect')).json(); IMS=r.summary; imRender(); if(r.summary) $('#immsg').textContent='inspected backup ready (archive already deleted)';
+  const p=r.pending_import; $('#impending').hidden=!p; if(p) $('#impendingmsg').textContent=`an interrupted import${p.domain?' of '+p.domain:''}${p.phase?' (at '+p.phase+')':''} holds the import area: Resolve keeps its stores if Home Assistant has its config entry, otherwise puts the originals back (a restart does the same)`;}
 $('#imupload').onclick=async()=>{const f=$('#imfile').files[0];
   if(f){ const fd=new FormData(); fd.append('file',f); $('#immsg').textContent=`uploading ${(f.size/1048576).toFixed(0)} MB…`;
     const u=await (await fetch('api/import/upload',{method:'POST',headers:{'X-Requested-With':'fetch'},body:fd})).json(); if(!u.ok){$('#immsg').textContent='ERROR: '+u.error;return;} }
@@ -174,6 +175,7 @@ $('#imapply').onclick=async()=>{ if(!IMSEL) return; let data,options; try{data=J
   if(!confirm(`Import ${IMSEL.dom} into this instance and set it up now?`)) return; $('#imresult').textContent='importing…';
   const r=await post('api/import/apply',{domain:IMSEL.dom,entry_id:IMSEL.eid,data,options,align:$('#imalign').checked,copy_storage:$('#imstorage').checked});
   $('#imresult').textContent=r.ok?`ok: entry ${r.entry_id.slice(0,8)} state ${r.state}; storage copied: ${r.copied_storage.join(', ')||'none'}${r.alignment?`; aligned ${r.alignment.entities} entities / ${r.alignment.devices} devices (${r.alignment.pending_entities} pending)`:''}; extracted backup removed`:'ERROR: '+r.error; if(r.ok){IMS=null;IMSEL=null;imRender();} sysStatus(); };
+$('#imresolve').onclick=async()=>{const r=await post('api/import/resolve'); $('#impendingmsg').textContent=r.ok?r.message:'ERROR: '+r.error; if(r.ok) imLoad().then(()=>{$('#immsg').textContent=r.message;});};
 imLoad().catch(e=>log('import: '+e));
 const fmtB=b=>b>1048576?(b/1048576).toFixed(1)+' MB':(b/1024).toFixed(0)+' KB';
 let BK={};

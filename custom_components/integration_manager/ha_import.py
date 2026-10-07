@@ -943,7 +943,7 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
 
     def _begin() -> None:
         if os.path.lexists(journal):
-            raise ValueError("an earlier import has unresolved recovery; resolve it before retrying")
+            raise ValueError("an earlier import has unresolved recovery: Resolve it on the import page, or restart")
         # An id must be absent on disk as well as in memory before this intent
         # can interpret its presence at boot as a completed add.
         try:
@@ -1085,6 +1085,91 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
         except Exception as err:  # noqa: BLE001 - the entry is in; alignment continues live
             result["alignment_error"] = f"{type(err).__name__}: {err}"
     return result
+
+
+def pending_import(config_dir: str) -> dict[str, Any] | None:
+    """What the import page shows of an interrupted import's intent (no
+    credentials in it); {} when it cannot be read.  Blocking."""
+    try:
+        with open(os.path.join(config_dir, IMPORT_PENDING_FILE), encoding="utf-8") as fh:
+            intent = json.load(fh)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(intent, dict):
+        return {}
+    return {k: intent.get(k) for k in ("domain", "entry_id", "phase") if isinstance(intent.get(k), str)}
+
+
+def _read_intent(path: str) -> dict[str, Any]:
+    """The intent apply wrote, checked as entrypoint._read_import_intent does
+    at boot.  FileNotFoundError when there is none, ValueError when unusable."""
+    with open(path, encoding="utf-8") as fh:
+        intent = json.load(fh)
+    stores = intent.get("stores") if isinstance(intent, dict) else None
+    if (not isinstance(intent, dict) or intent.get("version") != 1 or not isinstance(stores, list)
+            or not all(isinstance(intent.get(k), str) and intent[k] for k in ("entry_id", "domain"))
+            or not all(isinstance(i, dict) and isinstance(i.get("name"), str) and i["name"] not in ("", ".", "..")
+                       and "/" not in i["name"] and "\\" not in i["name"] and isinstance(i.get("had_original"), bool)
+                       for i in stores)):
+        raise ValueError("invalid import intent")
+    return intent
+
+
+async def async_resolve_pending(hass: HomeAssistant) -> str:
+    """Settle an interrupted import now, the way the next boot would, but from
+    what Home Assistant has loaded: its entry there keeps the imported stores
+    (the originals set aside go); without it the originals are put back.  The
+    entry's presence is confirmed on disk first, so a restart in between
+    cannot decide the other way.  Callers hold the import lock."""
+    cfg = hass.config.config_dir
+    journal = os.path.join(cfg, IMPORT_PENDING_FILE)
+
+    def _drop() -> None:
+        os.remove(journal)
+        fsync_dir(os.path.dirname(journal))
+
+    try:
+        intent = await hass.async_add_executor_job(_read_intent, journal)
+    except FileNotFoundError:
+        return "no interrupted import to resolve"
+    except (OSError, ValueError):
+        await hass.async_add_executor_job(_drop)
+        return "the interrupted import's record was unreadable and was removed; the next restart puts back any original store it set aside"
+    domain, entry_id = intent["domain"], intent["entry_id"]
+    live = hass.config_entries.async_get_entry(entry_id)
+    present = live is not None and live.domain == domain
+    try:
+        await _save_config_entries(hass, domain, entry_id, removed=not present)
+    except ValueError as err:
+        raise ValueError(f"{err}: nothing was changed; restart, and the boot settles the import from what is on disk") from None
+    names = [i["name"] for i in intent["stores"]]
+
+    def _settle() -> None:
+        storage = os.path.join(cfg, ".storage")
+        for item in intent["stores"]:
+            dest = os.path.join(storage, item["name"])
+            aside = dest + ".pre-import"
+            if present:
+                for old in (aside, aside + ".done"):
+                    if os.path.isfile(old) or os.path.islink(old):
+                        os.remove(old)
+            elif os.path.isfile(aside) and not os.path.islink(aside):
+                os.replace(aside, dest)
+            elif not item["had_original"] and (os.path.isfile(dest) or os.path.islink(dest)):
+                os.remove(dest)
+        fsync_dir(storage)
+        _drop()
+
+    await hass.async_add_executor_job(_settle)
+    if not present:
+        _forget_cached_stores(hass, names)
+    msg = (f"interrupted import of {domain}: " + ("its config entry is in use, the imported stores are kept"
+           if present else "its config entry is not here, the original stores were put back"))
+    _LOGGER.info(msg)
+    events.emit("restore", msg)
+    return msg
 
 
 async def apply_all(hass: HomeAssistant, aligner: RegistryAligner, domains: list[str] | None, align: bool, copy_storage: bool,
@@ -1280,9 +1365,9 @@ def stage_rebuild(config_dir: str, backup_name: str, domain: str | None, ha_vers
 
 
 def drop_rebuild(config_dir: str) -> bool:
-    """Forget a scheduled clean start (a newer choice replaces it)."""
-    if os.path.lexists(os.path.join(config_dir, IMPORT_PENDING_FILE)):
-        return False  # plan/source/pre-rebuild storage still belong to unresolved import recovery
+    """Forget a scheduled clean start (a newer choice replaces it).  An
+    interrupted import's intent does not hold it: the extraction stays for
+    that import (clear_extracted), its plan and .storage.pre-rebuild-* go."""
     path = os.path.join(config_dir, REBUILD_FILE)
     had = os.path.isfile(path)
     try:
