@@ -1441,7 +1441,8 @@ class MqttPublisher:
         messages unread, the time cap ended it while messages still arrived,
         or the connection dropped (nothing arrives then either, which looks
         like a quiet end).  ``origin``: the broker settings it connects with
-        (the configured ones when None)."""
+        (the configured ones when None).  Home Assistant stopping ends it with
+        a RuntimeError, strict or not."""
         found: dict[str, bytes] = {}
         budget = [0, 0]  # bytes held, messages left unread once the budget was spent (paho's thread only)
         dropped: list[Any] = []  # disconnections during the scan (paho's thread)
@@ -1462,14 +1463,16 @@ class MqttPublisher:
             granted: list[Any] = []
             c.on_subscribe = lambda cl, u, mid, codes, props=None: granted.append(codes)
             c.subscribe(topics)
-            while not granted and time.monotonic() < deadline:
+            while not granted and time.monotonic() < deadline and not self._stopping:
                 time.sleep(0.05)
+            self._raise_if_stopping()
             if not granted or any(getattr(g, "is_failure", False) for g in granted[0]):
                 raise RuntimeError("the broker refused the subscription (ACL?)")
-            cut = self._collect_quiet(c, found, min_s=min_s)
+            cut = self._collect_quiet(c, found, min_s=min_s, stop=lambda: self._stopping)
             lost = bool(dropped) or not c.is_connected()
         finally:
             self._stop_client(c)
+        self._raise_if_stopping()
         if strict and lost:
             raise RuntimeError("the connection of the scan dropped before the retained messages were read")
         if strict and cut:
@@ -1488,10 +1491,12 @@ class MqttPublisher:
         """Blocking: a client of its own, connected (CONNACK received) with its network loop running, else RuntimeError.
         A broker that refuses MQTT 5, or keeps fewer unacknowledged messages than the client would send, gets a
         second client that suits it; the first one never subscribed or published anything.  ``origin``: the broker
-        settings and the base topic (its client id) to use, the configured ones when None."""
+        settings and the base topic (its client id) to use, the configured ones when None.  RuntimeError once Home Assistant
+        stops."""
         origin = origin or self._retained_origin()
         config = origin.config
         for _attempt in range(2):
+            self._raise_if_stopping()
             c = self._new_client(f"{origin.base}-{suffix}-{secrets.token_hex(3)}", config)
             ack: dict[str, Any] = {"rc": None, "props": None}
             c.on_connect = lambda cl, u, flags, rc, props=None: ack.update(rc=rc, props=props)
@@ -1499,8 +1504,11 @@ class MqttPublisher:
             c.connect(config.host, config.port, keepalive=30, **self._connect_options(c))
             c.loop_start()
             # is_connected() is false until the broker's CONNACK: a slow (remote, TLS) broker is not a lost one
-            while ack["rc"] is None and time.monotonic() < deadline:
+            while ack["rc"] is None and time.monotonic() < deadline and not self._stopping:
                 time.sleep(0.05)
+            if self._stopping:
+                self._stop_client(c)
+                self._raise_if_stopping()
             if ack["rc"] is not None and (self._learned_mqtt311(c, ack["rc"], config) if ack["rc"] != 0
                                           else self._learned_receive_max(c, ack["props"], config)):
                 # stopped beside the second attempt, not before it: the stop takes a second on a broker that answers
@@ -1513,6 +1521,11 @@ class MqttPublisher:
                 raise RuntimeError(f"the broker did not accept the {what} connection ({ack['rc']})")
             return c
         raise RuntimeError(f"the broker did not accept the {what} connection (refused twice)")
+
+    def _raise_if_stopping(self) -> None:
+        """Blocking helpers: Home Assistant is stopping, so no scan or cleanup goes on (nothing is cleared after it)."""
+        if self._stopping:
+            raise RuntimeError("Home Assistant is stopping")
 
     @staticmethod
     def _stop_client(c: mqtt.Client) -> None:
@@ -1556,7 +1569,8 @@ class MqttPublisher:
         c = self._throwaway_client(f"{suffix}-clear", "cleanup", deadline, origin=origin)
         try:
             infos = [c.publish(t, "", qos=1, retain=True) for t in topics]
-            while time.monotonic() < deadline and c.is_connected() and not all(i.is_published() for i in infos):
+            while time.monotonic() < deadline and c.is_connected() and not all(i.is_published() for i in infos) \
+                    and not self._stopping:
                 time.sleep(0.1)
             unconfirmed = sum(1 for i in infos if not i.is_published())
             if unconfirmed:
@@ -1565,15 +1579,19 @@ class MqttPublisher:
             self._stop_client(c)
 
     @staticmethod
-    def _collect_quiet(c: mqtt.Client, found: dict[str, bytes], min_s: float = 2.0, quiet_s: float = 1.0, max_s: float = 15.0) -> bool:
+    def _collect_quiet(c: mqtt.Client, found: dict[str, bytes], min_s: float = 2.0, quiet_s: float = 1.0, max_s: float = 15.0,
+                       stop: Callable[[], bool] | None = None) -> bool:
         """Wait for the retained burst: at least min_s, then until nothing new
         arrived for quiet_s, capped at max_s (busy brokers with thousands of
         retained configs need more than a fixed 3 s).  True when max_s ended
-        it while topics were still arriving: what was read may be partial."""
+        it while topics were still arriving: what was read may be partial.
+        ``stop`` true ends the wait at once (the caller checks why)."""
         t0 = time.time()
         last_n, last_change = -1, t0
         while True:
             time.sleep(0.25)
+            if stop is not None and stop():
+                return True
             now = time.time()
             if len(found) != last_n:
                 last_n, last_change = len(found), now
@@ -1729,8 +1747,8 @@ class MqttPublisher:
                             # Cancellation does not stop an executor. Keep the connection gate until its
                             # deletion is done, so a same-origin reinstall cannot publish into that sweep.
                             cancelled = True
-                            if job.cancelled():
-                                break
+                            if job.cancelled() or self._stopping:
+                                break  # stopping: the job ends at its next check and clears nothing more
                 finally:
                     if cancelled:
                         raise asyncio.CancelledError
@@ -1741,7 +1759,7 @@ class MqttPublisher:
         """Blocking, under the connection lock: the removals an uninstall could not finish, from throwaway clients (no
         identity needed), each under its own base topic and discovery prefix only, and only on the broker it is for: the
         settings may name another one by now, where an empty scan says nothing about the broker that keeps the data.
-        ``origin``: the settings the run was submitted with; once they change, it ends."""
+        ``origin``: the settings the run was submitted with; once they change, or Home Assistant stops, it ends."""
         origin = origin or self._retained_origin()
         here = self._pending_key("", self._broker_identity(origin.config))[1:]
         for key, rec in list(self._cleanup_pending.items()):
@@ -1756,6 +1774,8 @@ class MqttPublisher:
             if base == self._live_base or not self.config.enabled:
                 continue  # still connected under it (the uninstall's reconnect comes next), or MQTT is off
             n, why = self._clear_retained_checked(base, rec.get("prefix") or self.config.discovery_prefix, warn=False, origin=origin)
+            if self._stopping:
+                return  # whatever it got to: the record stays as it was, retried at the next start
             if n is None:
                 if rec.get("deferred"):  # the first try since MQTT is on: the reason is the broker now
                     self._set_cleanup_pending(key, {**rec, "deferred": False, "error": why})
