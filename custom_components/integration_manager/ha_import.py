@@ -1020,6 +1020,9 @@ async def apply(hass: HomeAssistant, aligner: RegistryAligner, domain: str, entr
         if align:
             merged = await hass.async_add_executor_job(_build_map, out_dir, domain, entry_id, entry.entry_id)
             aligner.merge_map(merged)
+        # From here HA may write the entry at any moment (SAVE_DELAY, or its final write when it stops and cancels
+        # this): the boot reads "added" with the entry on disk as an import to keep, without it as one to undo.
+        await hass.async_add_executor_job(write_json, journal, {**intent, "phase": "added"})
         await hass.config_entries.async_add(entry)
         not_loaded = running and not entry.disabled_by and entry.state not in _KEEP_STATES and not _reauth_pending(hass, entry)
         if not_loaded:
