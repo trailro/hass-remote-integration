@@ -45,7 +45,7 @@ Exceptions:
 | Entities | `GET /api/entities`, `POST /api/entities/<entity_id>/{rename,name,disable,enable,delete,mqtt_exclude,mqtt_include,mqtt_name}`, `GET /api/devices`, `POST /api/devices/<device_id>/{name,delete}`, `GET /api/services`, `POST /api/services/call` |
 | System | `GET /api/ha`, `POST /api/ha/{update,rollback,check}`, `POST /api/restart`, `GET/POST /api/settings` |
 | Backups | `GET /api/backups`, `POST /api/backups/create`, `POST /api/backups/upload`, `GET /api/backups/<name>/download`, `POST /api/backups/<name>/{restore,delete}`, `POST /api/backups/restore/cancel` |
-| Import | `POST /api/import/upload`, `GET/POST /api/import/inspect`, `POST /api/import/{apply,apply_all,clear}` |
+| Import | `POST /api/import/upload`, `GET/POST /api/import/inspect`, `POST /api/import/{apply,apply_all,clear,resolve}` |
 | Cutover | `GET /api/parity`, `POST /api/parity/{test,remove_orphans}`, `POST /api/cutover/{status,enable,undo}` |
 | Logs | `GET /api/logs?level=&prefix=&q=&since_id=&limit=`, `GET /api/logs/loggers`, `POST /api/logs/level`, `GET /api/log_files`, `GET /api/log_files/tail?id=&file=&lines=&q=`, `GET /api/log_files/download?id=&file=`, `GET/POST /api/settings` (`log_format`) |
 | Diagnostics | `GET /api/diagnostics` (zip, secrets removed), `GET /api/diag/memory[?refs=<type>]` |
@@ -244,6 +244,14 @@ Assistant* refuses the same and has no force.
 
 `POST /api/import/apply` and `/apply_all` answer `alignment`; what its counts
 mean is in [Backups](backups.md#import-from-a-home-assistant-backup).
+
+`GET /api/import/inspect` also answers `pending_import`: the record of an
+interrupted import (`domain`, `entry_id`, `phase`; no credentials), `{}` when
+it cannot be read, `null` when there is none. While one exists, inspect,
+apply, Clear and a rebuild are refused. `POST /api/import/resolve` settles it
+without a restart, from the config entry Home Assistant has saved, as the next
+boot would ([Files](files.md)); it answers `{ok, message}` or
+`{ok: false, error}`, and again "nothing to resolve" when there is none.
 
 ### Cutover
 
