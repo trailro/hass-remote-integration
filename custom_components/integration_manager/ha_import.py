@@ -1116,6 +1116,7 @@ def _read_intent(path: str) -> dict[str, Any]:
     stores = intent.get("stores") if isinstance(intent, dict) else None
     if (not isinstance(intent, dict) or intent.get("version") != 1 or not isinstance(stores, list)
             or not all(isinstance(intent.get(k), str) and intent[k] for k in ("entry_id", "domain"))
+            or intent.get("phase") not in ("pending", "added", "commit", "rollback", "uncertain")
             or not all(isinstance(i, dict) and isinstance(i.get("name"), str) and i["name"] not in ("", ".", "..")
                        and "/" not in i["name"] and "\\" not in i["name"] and isinstance(i.get("had_original"), bool)
                        for i in stores)):
@@ -1141,8 +1142,20 @@ async def async_resolve_pending(hass: HomeAssistant) -> str:
     except FileNotFoundError:
         return "no interrupted import to resolve"
     except (OSError, ValueError):
-        await hass.async_add_executor_job(_drop)
-        return "the interrupted import's record was unreadable and was removed; the next restart puts back any original store it set aside"
+        def _drop_unless_set_aside() -> list[str]:
+            # with no record the next boot would put these back, perhaps under an entry that runs on the imported store
+            aside = sorted(os.path.basename(p) for p in glob.glob(os.path.join(glob.escape(os.path.join(cfg, ".storage")), "*.pre-import")))
+            if not aside:
+                _drop()
+            return aside
+
+        aside = await hass.async_add_executor_job(_drop_unless_set_aside)
+        if aside:
+            raise ValueError(f"the interrupted import's record is unreadable and original stores it set aside are still there "
+                             f"({', '.join(aside)}): which of them Home Assistant's entries no longer use cannot be told, so "
+                             "nothing was changed; restart, and the boot keeps them as .pre-import.orphan, never put back "
+                             "automatically (docs/files.md: restoring one by hand)")
+        return "the interrupted import's record was unreadable and was removed; it had no original store set aside"
     domain, entry_id = intent["domain"], intent["entry_id"]
     live = hass.config_entries.async_get_entry(entry_id)
     present = live is not None and live.domain == domain
