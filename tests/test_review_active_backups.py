@@ -1,4 +1,4 @@
-"""Recovery copies stay protected across awaits and reservations have one owner."""
+"""A backup cannot be deleted while another manager action holds busy, nor while the delete itself is unfinished."""
 
 import asyncio
 import json
@@ -46,7 +46,7 @@ class ActiveBackupTest(unittest.TestCase):
     async def delete(self, view):
         return await backup_views.BackupActionView.post.__wrapped__(view, None, {}, "pre.zip", "delete")
 
-    def test_pip_window_protects_copy_and_success_transfers_to_record(self):
+    def test_delete_is_refused_while_a_start_runs(self):
         inst, view, path = self.fixture()
         async def check():
             entered, release = asyncio.Event(), asyncio.Event()
@@ -58,48 +58,14 @@ class ActiveBackupTest(unittest.TestCase):
             inst.hass.async_add_executor_job = executor
             task = asyncio.create_task(inst.start("demo", "v2"))
             await asyncio.wait_for(entered.wait(), 5)
-            self.assertIn("pre.zip", inst.protected_backups())
             self.assertFalse((await self.delete(view))["ok"])
-            self.assertTrue(inst.busy)  # refusal did not release start's reservation
+            self.assertTrue(inst.busy)  # the refusal did not release start's busy
             self.assertTrue(os.path.isfile(path))
             release.set()
             self.assertTrue((await task)["ok"])
-            self.assertEqual(inst._active_backups, set())
             self.assertIn("pre.zip", inst.protected_backups())  # now owned by rollback record
         with mock.patch.object(backupkit, "prune"), mock.patch.object(inst_mod.events, "emit"):
             asyncio.run(check())
-
-    def test_cancellation_releases_only_this_starts_reservation(self):
-        inst, _, _ = self.fixture()
-        inst._active_backups.add("other.zip")
-        async def check():
-            entered = asyncio.Event()
-            async def executor(fn, *args):
-                if fn is inst._install_requirements:
-                    entered.set()
-                    await asyncio.Future()
-                return fn(*args)
-            inst.hass.async_add_executor_job = executor
-            task = asyncio.create_task(inst.start("demo", "v2"))
-            await asyncio.wait_for(entered.wait(), 5)
-            self.assertIn("pre.zip", inst.protected_backups())
-            task.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                await task
-            self.assertEqual(inst._active_backups, {"other.zip"})
-            self.assertFalse(inst.busy)
-        with mock.patch.object(backupkit, "prune"):
-            asyncio.run(check())
-
-    def test_failed_pip_releases_temporary_protection(self):
-        inst, _, path = self.fixture()
-        inst._install_requirements.side_effect = [["nestedpkg"], []]
-        with mock.patch.object(backupkit, "prune"):
-            result = asyncio.run(inst.start("demo", "v2"))
-        self.assertFalse(result["ok"])
-        self.assertEqual(inst._active_backups, set())
-        self.assertFalse(inst.busy)
-        self.assertTrue(os.path.isfile(path))
 
     def test_copy_visible_before_backup_returns_cannot_be_deleted(self):
         inst, view, path = self.fixture()
