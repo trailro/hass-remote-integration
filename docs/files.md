@@ -31,7 +31,7 @@ All under `/config`. *Backup* says whether a backup holds the file
 | `restore-applied.json`, `restore-failed.json` | outcome of an applied or failed restore a full volume kept from being recorded; recorded at the next boot, never applied again | no |
 | `rebuild-pending.json` | a clean-start rebuild still to run after a Home Assistant downgrade | yes |
 | `import-map.json` | entity and device ids an import aligns at boot | yes |
-| `import-pending.json` | durable import intent/phase with entry ID and store filenames; unresolved recovery blocks replacing its source | no |
+| `import-pending.json` | an import in progress, or interrupted and settled at the next boot or by *Resolve* (below); no credentials | no |
 | `import.tar`, `import-extracted/` | an uploaded Home Assistant backup until inspected, and what the inspection unpacked until the import or *Clear* | no |
 | `versions/<domain>/<tag>/` | version store | yes |
 | `patches/<domain>/` | your patches | yes |
@@ -116,11 +116,15 @@ invalid entry for a bundled domain leaves the bundled entry in use. An entry
 for `integration_manager`, the manager itself, is ignored with a warning; it
 is never installed, started or uninstalled.
 
-An incomplete import retains its extraction and set-aside `.storage/*.pre-import`
-files while `import-pending.json` remains unresolved. At boot, a verified commit
-keeps the new stores; an absent entry rolls them back. A saved entry without a
-verified commit phase, or unreadable metadata/storage, keeps both versions and
-blocks a new upload/import. Restart does not resolve an ambiguous outcome by
-itself: check the boot/import errors and compare the config entry and stores with
-the retained source or original backup before choosing which state to recover.
-Do not delete the intent or originals just to unblock an import.
+`import-pending.json` is an import's record of itself (config entry id,
+domain, phase, the store files it replaces), written before it touches
+`.storage` and removed when it is done. While it exists, upload, inspect,
+*Import*, *Import all*, *Clear* and a new clean start are refused, and the
+extraction and any `.storage/<store>.pre-import` original stay. An interrupted
+import is settled at the next boot from `.storage/core.config_entries`, which
+is what Home Assistant then loads: with the entry there, the stores it was
+created from stay and the originals go; without it, the originals are put
+back. Either way the record goes and the timeline says which it was. *Resolve*
+on the import page (`POST /api/import/resolve`) does the same without a
+restart, from the entry Home Assistant has loaded. Only an unreadable
+`core.config_entries` keeps the record over a boot. Never delete it by hand.
