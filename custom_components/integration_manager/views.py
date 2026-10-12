@@ -19,6 +19,7 @@ import re
 from aiohttp import web
 
 import backupkit
+import jsonio
 from homeassistant import data_entry_flow
 from homeassistant.config_entries import UnknownEntry
 from homeassistant.const import __version__ as HA_VERSION
@@ -206,6 +207,18 @@ def _ha_change_lock_taken() -> bool:
     return _HA_CHANGE_LOCK.locked() or any(not w.cancelled() for w in (_HA_CHANGE_LOCK._waiters or ()))  # noqa: SLF001
 
 
+def _fallback_waiting(config_dir: str) -> str | None:
+    """Blocking: the version the smoke test's switch back goes to, while that switch is written to ha.json but its
+    restart did not happen (ha_updater._smoke_fall_back: the restart was refused).  A switch then would take its
+    place while the restore it scheduled for that version stays."""
+    state = jsonio.read_json(os.path.join(config_dir, backupkit.STATE_DIR, "ha.json"), {})
+    state = state if isinstance(state, dict) else {}
+    fb = state.get("smoke_fallback") if isinstance(state.get("smoke_fallback"), dict) else {}
+    if fb.get("from") == HA_VERSION and state.get("fallback_from") == HA_VERSION and fb.get("to") and state.get("desired") == fb.get("to"):
+        return str(fb["to"])
+    return None
+
+
 def _manual_restore_pending(config_dir: str) -> bool:
     return backupkit.pending(config_dir) and not backupkit.pending_for_version(config_dir)
 
@@ -280,6 +293,9 @@ async def async_change_ha_version(installer: Installer, updater: HaUpdater, targ
             raise ValueError("another action is running (an install, start, stop, import, restore or full rollback): try again in a moment")
         installer.busy = True  # right away: nothing may start an install while this change is prepared
         try:
+            if (waiting := await hass.async_add_executor_job(_fallback_waiting, cfg)):
+                raise ValueError(f"the automatic switch back to Home Assistant {waiting} is waiting for the restart: "
+                                 "restart first, then switch from there")
             if mode != "keep" and await hass.async_add_executor_job(_manual_restore_pending, cfg):
                 # a full rollback's restore cannot be cancelled (RestoreCancelView): only the restart finishes it
                 if (rollback := await hass.async_add_executor_job(_rollback_restore_pending, installer, cfg)):

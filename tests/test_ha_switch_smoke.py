@@ -215,6 +215,22 @@ class VerdictTest(_Base):
         self.assertEqual(data("auth"), "new tokens")
         self.assertEqual(data("input_boolean"), "helper made on NEW")
 
+    def test_no_switch_is_scheduled_over_a_fallback_waiting_for_its_restart(self):
+        # the restart after the fallback was refused (an install started meanwhile): the next restart applies it,
+        # and a switch scheduled in between would replace the fallback's target while its restore stays scheduled
+        self.installer.restart = mock.AsyncMock(return_value={"ok": False, "error": "another action is running"})
+        self.entries["e1"] = _entry("e1", state="setup_error")
+        self.first_boot()
+        self.check()
+        self.assertEqual(self.state()["desired"], OLD)
+        inst = SimpleNamespace(hass=self.hass, busy=False, running="demo", running_tag="v2", _entries_of=lambda d: [_entry("e1")],
+                               settings=SimpleNamespace(backup_keep=50), async_backup=self.installer.async_backup,
+                               protected_backups=lambda: set(), min_ha_of=lambda *_a: None, state=SimpleNamespace(rollback_backup=None))
+        with self.assertRaisesRegex(ValueError, f"switch back to Home Assistant {OLD} is waiting for the restart"):
+            asyncio.run(self.views.async_change_ha_version(inst, self.updater, "2026.10.1", "keep", "test"))
+        self.assertEqual(self.state()["desired"], OLD)
+        self.assertEqual(backupkit.pending_for_version(self.cfg), OLD)
+
     def test_an_entry_that_loads_keeps_the_version(self):
         self.entries["e1"] = _entry("e1")
         self.first_boot()
