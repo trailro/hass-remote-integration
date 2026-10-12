@@ -204,6 +204,9 @@ What the floor and the check mean is in
 | `baseline` | the floor, `HA_VERSION_MIN`; anything older is refused |
 | `default_version` | `HA_VERSION_DEFAULT`, what a fresh volume installs; not a floor |
 | `verdicts` | version → its `check`, where known without resolving (a cached report, or the Python a release needs) |
+| `change` | the scheduled or booting version change until its version booted (`to`, `mode`, `backup`, `at`, `applied`, `parts`; `smoke`: the config entries a keep switch smoke-tests) |
+| `smoke` | the smoke test the booting version change still owes the integration (`version`, `from`, `domain`, `entries`, `loaded`, `backup`, `parts`, `at`); `null` when none |
+| `smoke_fallback` | the last automatic switch back after that smoke test failed (`from`, `to`, `domain`, `reason`, `at`); cleared when the version left passes it later |
 
 `?all=1` reads the release list in memory: no PyPI call, no
 `X-Requested-With`. While PyPI has never answered in this process,

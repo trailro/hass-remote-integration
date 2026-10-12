@@ -10,6 +10,7 @@ restart, keeps the previous venv, and reports a failed install through
 from __future__ import annotations
 
 import json
+import logging
 
 from jsonio import ha_vkey, update_json
 import os
@@ -19,8 +20,13 @@ import time
 from typing import Any
 
 import homeassistant
+from homeassistant.const import __version__ as HA_VERSION
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+from . import events
+
+_LOGGER = logging.getLogger(__name__)
 
 PYPI_URL = "https://pypi.org/pypi/homeassistant/json"
 CACHE_S = 600
@@ -33,6 +39,7 @@ _VERSION = re.compile(r"\d{4}\.\d{1,2}\.\d+(?:b\d+)?")  # a release or a beta, f
 # covers the last two or three months, which is the range a version change is really chosen from.  Not a
 # setting: "show all versions" is one click away and loses nothing, so there is nothing here to get wrong.
 RECENT_N = 10
+SMOKE_RECHECK_S = 60  # the smoke test after a version change looks again this often while it cannot judge
 
 
 def _floor() -> str:
@@ -51,6 +58,11 @@ class HaUpdater:
         self._cache: tuple[float, dict[str, Any]] | None = None
         self._releases: dict[str, str | None] = {}
         self._stable: list[str] = []  # every stable release PyPI still offers, oldest first (what "show all" lists)
+        self._smoke: dict[str, Any] | None = None  # the smoke test of this boot's version change (ha.json "smoke")
+        self._smoke_installer: Any = None
+        self._smoke_handle: Any = None
+        self._smoke_waiting: float | None = None  # when the recorded entries were first seen still setting up
+        self._smoke_rechecked = False  # an entry in setup_retry had its one more interval
 
     def _read(self) -> dict[str, Any]:
         try:
@@ -210,7 +222,9 @@ class HaUpdater:
             "in_venv": sys.prefix != sys.base_prefix,
             "desired": state.get("desired") or current,
             "previous": state.get("previous"),
-            "change": state.get("change"),  # {to, mode, backup, applied?} until that version booted
+            "change": state.get("change"),  # {to, mode, backup, applied?, smoke?} until that version booted
+            "smoke": state.get("smoke"),  # the smoke test this version change still owes the integration
+            "smoke_fallback": state.get("smoke_fallback"),  # the last automatic switch back after one failed
             "installed_venvs": venvs,
             "apt": state.get("apt"),  # what the entrypoint did with HRI_APT_PACKAGES at this boot (None: unset)
             "last_error": state.get("last_error", ""),
@@ -328,6 +342,206 @@ class HaUpdater:
 
         # under the per-file lock: run.py (loop) and a restart (executor) update ha.json too; fsynced
         return update_json(self.file, apply, read=lambda _path: self._read_for_update())
+
+    # ----- smoke test after a Home Assistant version change ---------------
+    #
+    # A new version that fails to boot three times is left by the entrypoint.  One that boots while the integration
+    # that ran before no longer sets up on it (an import error, setup_error, not loaded) used to stay, with the
+    # integration down.  A switch with "keep" records which of the integration's config entries were loaded
+    # (views.async_change_ha_version, change["smoke"]); the first boot of the new version turns that into
+    # ha.json "smoke", kept until the verdict so a restart in between does not lose it, and checks those entries
+    # `smoke_test_s` later, the way the integration's own smoke test does after a switch.  Loaded (also degraded):
+    # kept, a degraded one reported.  Not loaded: with `auto_rollback` on, back to the version before the switch,
+    # with the configuration from the switch's backup, the way the entrypoint's crash fallback goes back - once:
+    # the version it goes back to is not smoke-tested, and ha.json "smoke_fallback" records what happened, which
+    # a later switch to the same version warns about and is still allowed.
+
+    async def async_start_smoke(self, installer: Any, ha_state: Any) -> None:
+        """Boot: the smoke test this boot owes a version change, if any, is scheduled."""
+        state = ha_state if isinstance(ha_state, dict) else {}
+        rec = state.get("smoke") if isinstance(state.get("smoke"), dict) else None
+        change = state.get("change") if isinstance(state.get("change"), dict) else {}
+        planned = change.get("smoke") if isinstance(change.get("smoke"), dict) else None
+        if rec is not None and rec.get("version") != HA_VERSION:
+            rec = None  # another version boots: that switch's smoke test is moot
+            await self.hass.async_add_executor_job(self._drop_smoke, None)
+        if rec is None and planned is not None and change.get("to") == HA_VERSION and change.get("mode") == "keep":
+            rec = {"version": HA_VERSION, "from": planned.get("from"), "domain": planned.get("domain"),
+                   "entries": [str(e) for e in planned.get("entries") or []], "loaded": bool(planned.get("loaded")),
+                   "backup": change.get("backup"), "parts": change.get("parts") or ["storage"],
+                   "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+
+            def record(st: dict[str, Any]) -> dict[str, Any] | None:
+                ch = st.get("change") if isinstance(st.get("change"), dict) else {}
+                if ch.get("to") != HA_VERSION:
+                    return None  # run.py settled the change meanwhile: nothing to keep it from
+                st["smoke"] = rec
+                return st
+
+            await self.hass.async_add_executor_job(lambda: update_json(self.file, record, read=lambda _p: self._read_for_update()))
+        if rec is None:
+            return
+        delay = installer.settings.int_("smoke_test_s", 0, 86400)
+        if rec.get("domain") != installer.running or delay <= 0:
+            # another integration runs now, or the smoke test is off (as for an integration switch)
+            await self.hass.async_add_executor_job(self._drop_smoke, None)
+            return
+        self._smoke, self._smoke_installer = rec, installer
+        self._smoke_waiting, self._smoke_rechecked = None, False
+        events.emit("ha", f"Home Assistant {HA_VERSION}: smoke test of {rec['domain']} in {delay} s "
+                    f"(loaded before the switch from {rec.get('from')})", version=HA_VERSION)
+        self._schedule_smoke(delay)
+
+    def _schedule_smoke(self, delay: float) -> None:
+        if self._smoke_handle is not None:
+            self._smoke_handle.cancel()
+        self._smoke_handle = self.hass.loop.call_later(delay, lambda: self.hass.async_create_task(self.async_smoke_check()))
+
+    def _drop_smoke(self, extra: Any) -> None:
+        """Blocking: ha.json without "smoke" (and with ``extra(state)`` applied, when given)."""
+        def apply(st: dict[str, Any]) -> dict[str, Any]:
+            st.pop("smoke", None)
+            if extra is not None:
+                extra(st)
+            return st
+
+        update_json(self.file, apply, read=lambda _p: self._read_for_update())
+
+    async def async_smoke_check(self) -> None:
+        """The verdict on the integration's config entries that were loaded before the version change."""
+        from homeassistant.components import persistent_notification as pn
+
+        from .diagnostics import scrub_text
+        from .views import _ha_change_lock_taken
+
+        self._smoke_handle = None
+        rec, installer = self._smoke, self._smoke_installer
+        if rec is None or installer is None:
+            return
+        domain = str(rec.get("domain"))
+        state = await self.hass.async_add_executor_job(self._read)
+        current = state.get("smoke") if isinstance(state.get("smoke"), dict) else {}
+        if current.get("version") != HA_VERSION or (state.get("desired") or HA_VERSION) != HA_VERSION or installer.running != domain:
+            # another switch is scheduled, or another integration (or none) runs: this verdict would judge something else
+            self._smoke = None
+            await self.hass.async_add_executor_job(self._drop_smoke, None)
+            return
+        smoke_s = installer.settings.int_("smoke_test_s", 0, 86400)
+        entries = [e for e in (self.hass.config_entries.async_get_entry(i) for i in rec.get("entries") or [])
+                   if e is not None and not e.disabled_by]  # an entry removed or disabled since is not the version's doing
+        setting_up = [e for e in entries if e.state.value == "setup_in_progress"]
+        if setting_up:
+            if self._smoke_waiting is None:
+                self._smoke_waiting = time.monotonic()
+        else:
+            self._smoke_waiting = None
+        waited = time.monotonic() - self._smoke_waiting if self._smoke_waiting is not None else 0.0
+        busy = installer.busy or _ha_change_lock_taken()
+        hung = bool(setting_up) and not busy and self.hass.is_running and waited > max(installer.SETUP_WAIT_S, smoke_s)
+        if (busy or not self.hass.is_running or setting_up) and not hung:
+            self._schedule_smoke(SMOKE_RECHECK_S)  # judging now would be a false failure
+            return
+        failed = [e for e in entries if e.state.value != "loaded"]
+        yaml_down = not rec.get("entries") and rec.get("loaded") and domain not in self.hass.config.components
+        retrying = [e for e in failed if e.state.value == "setup_retry"]
+        if not hung and retrying and not self._smoke_rechecked:
+            # ConfigEntryNotReady (a device or a broker not reachable yet): Home Assistant retries on its own
+            self._smoke_rechecked = True
+            delay = max(SMOKE_RECHECK_S, smoke_s)
+            events.emit("ha", f"Home Assistant {HA_VERSION}: config entry '{retrying[0].title}' of {domain} is retrying its setup; "
+                        f"checked again in {delay} s", version=HA_VERSION)
+            self._schedule_smoke(delay)
+            return
+        self._smoke = None
+        if hung:
+            reason = f"config entry '{setting_up[0].title}' still setting up after {int(waited)} s"
+        elif failed:
+            bad = failed[0]
+            reason = f"config entry '{bad.title}' is {bad.state.value}" + (f": {scrub_text(str(bad.reason))}" if bad.reason else "")
+        elif yaml_down:
+            reason = f"{domain} is not loaded (no config entry; its YAML setup did not load it)"
+        else:
+            try:
+                h = installer.health_source(grace=False) if installer.health_source else installer.health()
+            except Exception as err:  # noqa: BLE001 - the entries are loaded: the version is kept whatever this says
+                h = {"state": "unknown", "reason": f"{type(err).__name__}: {err}"}
+            verdict = h.get("state") or "unknown"
+            note = f"Home Assistant {HA_VERSION}: smoke test of {domain}: {verdict}" + (f" ({h.get('reason')})" if h.get("reason") else "")
+            if verdict == "degraded":
+                note += "; Home Assistant version kept: a degraded integration is not switched back automatically"
+                pn.async_create(self.hass, note + ".", title="Home Assistant version", notification_id="hri_ha_smoke")
+            events.emit("ha", note, version=HA_VERSION, state=verdict)
+
+            def proven(st: dict[str, Any]) -> None:
+                fb = st.get("smoke_fallback")
+                if isinstance(fb, dict) and fb.get("from") == HA_VERSION:
+                    st.pop("smoke_fallback", None)  # the version that was left sets the integration up now
+
+            await self.hass.async_add_executor_job(self._drop_smoke, proven)
+            return
+        await self._smoke_fall_back(rec, installer, reason)
+
+    async def _smoke_fall_back(self, rec: dict[str, Any], installer: Any, reason: str) -> None:
+        """The integration did not set up on this version: back to the one before the switch (once), or say why not."""
+        import backupkit
+        from homeassistant.components import persistent_notification as pn
+
+        from .views import _HA_CHANGE_LOCK, _ha_change_lock_taken
+
+        domain, back, backup = str(rec.get("domain")), rec.get("from"), rec.get("backup")
+        parts = rec.get("parts") or ["storage"]
+        failed = f"Home Assistant {HA_VERSION} started, but {domain} did not set up on it ({reason})"
+        why_not = ""
+        if not installer.settings.bool_("auto_rollback"):
+            why_not = "automatic rollback is off"
+        elif not back or not _VERSION.fullmatch(str(back)) or back == HA_VERSION:
+            why_not = "the version before the switch is not recorded"
+        elif not await self.hass.async_add_executor_job(self._venv_for_this_python, back):
+            why_not = f"Home Assistant {back} is no longer installed here"
+        elif not backup:
+            why_not = "the switch's backup is not recorded"
+        elif installer.busy or _ha_change_lock_taken():
+            self._smoke = rec  # an action or a version change is being prepared: judged again once it is done
+            self._schedule_smoke(SMOKE_RECHECK_S)
+            return
+        if why_not:
+            msg = f"{failed}; not switched back: {why_not}"
+            _LOGGER.error("%s", msg)
+            events.emit("ha", msg, version=HA_VERSION, state="error")
+            pn.async_create(self.hass, msg + ".", title="Home Assistant version", notification_id="hri_ha_smoke")
+            await self.hass.async_add_executor_job(self._drop_smoke, None)
+            return
+        msg = (f"{failed}; switched back to Home Assistant {back} automatically, with the configuration from before "
+               f"the switch (backup {backup}). Switching to {HA_VERSION} again is allowed and is smoke-tested again")
+        async with _HA_CHANGE_LOCK:  # no version change is scheduled while this one is written
+            try:
+                # the configuration from before the switch: this version may have migrated .storage forward, which
+                # the older one cannot read (the entrypoint refuses to start it on that), as after a crash fallback
+                await self.hass.async_add_executor_job(
+                    lambda: backupkit.schedule_restore(self.hass.config.config_dir, str(backup), parts, for_version=back, force=True))
+            except Exception as err:  # noqa: BLE001
+                msg = f"{failed}; not switched back to Home Assistant {back}: its configuration from {backup} could not be scheduled ({err})"
+                _LOGGER.error("%s", msg)
+                events.emit("ha", msg, version=HA_VERSION, state="error")
+                pn.async_create(self.hass, msg + ".", title="Home Assistant version", notification_id="hri_ha_smoke")
+                await self.hass.async_add_executor_job(self._drop_smoke, None)
+                return
+            at = time.strftime("%Y-%m-%dT%H:%M:%S")
+
+            def fall_back(st: dict[str, Any]) -> None:
+                st["desired"] = back
+                st["fallback_from"] = HA_VERSION  # its venv stays until the version it goes back to booted
+                st["recovery"] = {"backup": backup, "from": HA_VERSION, "for": back, "parts": parts, "at": at}
+                st["last_error"] = msg  # announced after the restart (async_announce_ha_error), as a crash fallback's
+                st["smoke_fallback"] = {"from": HA_VERSION, "to": back, "domain": domain, "reason": reason, "at": at}
+                st.pop("change", None)
+
+            await self.hass.async_add_executor_job(self._drop_smoke, fall_back)
+        _LOGGER.error("%s", msg)
+        events.emit("ha", msg, version=HA_VERSION, state="error", fallback=back)
+        result = await installer.restart()
+        if not result.get("ok"):
+            _LOGGER.error("switching back to Home Assistant %s waits for the next restart: %s", back, result.get("error"))
 
     def cancel_config_change(self) -> list[str]:
         """Blocking: what a scheduled version change prepared for its boot (a
