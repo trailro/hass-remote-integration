@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import shutil
+import time
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -84,7 +85,9 @@ class _Base(unittest.TestCase):
     def first_boot(self, entries=("e1",), loaded=True, mode="keep"):
         """ha.json as the first boot of NEW finds it after a keep switch from OLD."""
         state = {"current": NEW, "desired": NEW, "previous": OLD, "proven": "", "boot_failures": 1,
-                 "change": {"to": NEW, "mode": mode, "backup": "pre-ha.zip", "at": "2026-10-12T10:00:00", "applied": True,
+                 "change": {"to": NEW, "mode": mode, "backup": "pre-ha.zip", "applied": True,
+                            # a minute ago: the switch's time is compared with the log's, so never a fixed date
+                            "at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 60)),
                             "smoke": {"domain": "demo", "from": OLD, "entries": list(entries), "loaded": loaded}}}
         self.write(state)
         asyncio.run(self.updater.async_start_smoke(self.installer, state))
