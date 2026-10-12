@@ -64,6 +64,7 @@ class HaUpdater:
         self._smoke_handle: Any = None
         self._smoke_waiting: float | None = None  # when the recorded entries were first seen still setting up
         self._smoke_rechecked = False  # an entry in setup_retry had its one more interval
+        self._smoke_restore_waiting: float | None = None  # when the fallback first found a restore scheduled by hand
         self.left_version: str | None = None  # ha.json smoke_fallback.from: never offered as an update (async_start_smoke)
 
     def _read(self) -> dict[str, Any]:
@@ -420,7 +421,7 @@ class HaUpdater:
             await self.hass.async_add_executor_job(self._drop_smoke, None)
             return
         self._smoke, self._smoke_installer = rec, installer
-        self._smoke_waiting, self._smoke_rechecked = None, False
+        self._smoke_waiting, self._smoke_rechecked, self._smoke_restore_waiting = None, False, None
         events.emit("ha", f"Home Assistant {HA_VERSION}: smoke test of {rec['domain']} in {delay} s "
                     f"(loaded before the switch from {rec.get('from')})", version=HA_VERSION)
         self._schedule_smoke(delay)
@@ -554,6 +555,17 @@ class HaUpdater:
             self._smoke = rec  # an action or a version change is being prepared: judged again once it is done
             self._schedule_smoke(SMOKE_RECHECK_S)
             return
+        elif await self.hass.async_add_executor_job(backupkit.pending, self.hass.config.config_dir):
+            # a restore the user scheduled and has not restarted for: the fallback's own schedule would replace it
+            if self._smoke_restore_waiting is None:
+                self._smoke_restore_waiting = time.monotonic()
+                events.emit("ha", f"{failed}; switching back to Home Assistant {back} waits: a configuration restore is scheduled "
+                            f"and has not been applied (restart, or cancel it on Backup)", version=HA_VERSION)
+            if time.monotonic() - self._smoke_restore_waiting <= installer.SETUP_WAIT_S:
+                self._smoke = rec
+                self._schedule_smoke(SMOKE_RECHECK_S)
+                return
+            why_not = f"a configuration restore is scheduled (still not applied after {installer.SETUP_WAIT_S // 60} min), and switching back would replace it"
         if why_not:
             msg = f"{failed}; not switched back: {why_not}"
             _LOGGER.error("%s", msg)

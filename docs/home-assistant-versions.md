@@ -374,10 +374,14 @@ reason is in the notification, on the timeline, in `last_error` and in
 
 An entry removed or disabled since the switch is not judged. Nothing is judged
 while another switch is scheduled, another integration runs or an action is in
-progress (it is checked again later). A downgrade with **restore** or **clean
-start** is not smoke-tested: either brings back another set of config entries
-than the one that ran. A version that fails to boot at all still takes the
-three-crash path above.
+progress (it is checked again later). A switch back waits while a
+configuration restore you scheduled on Backup has not been applied, because its
+own restore would replace yours (the timeline says so). If yours is still
+scheduled after 15 minutes, the version is kept, and the notification says the
+switch back was skipped because a restore is scheduled. A downgrade with
+**restore** or **clean start** is not smoke-tested: either brings back another
+set of config entries than the one that ran. A version that fails to boot at
+all still takes the three-crash path above.
 
 Switching to a version that was left this way is allowed: the switch warns that
 it was left, and it is smoke-tested again. `smoke_fallback` in `ha.json` (and
