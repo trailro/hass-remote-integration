@@ -7,7 +7,9 @@ versions the update would bring, a requirement known to be a wrapper over a
 program or a shared library the image does not carry is reported as a warning,
 so is one pip backtracked years behind what the requirement allows,
 an import of a name Home Assistant has removed by the version this
-container will run is reported as a warning too,
+container will run is reported as a warning too, an attribute of a Home
+Assistant module the code reads (``cv.vol``) that the target's own source
+does not have is a blocker,
 the manifest's dependencies are checked
 against HA's loader, and the minimum Home Assistant version (hacs.json) is
 compared with the target.  The report says what would change and whether
@@ -786,6 +788,333 @@ def _ha_symbol_checks(component_dir: str, target: str) -> list[str]:
     return hits
 
 
+# ----- attributes of Home Assistant modules -------------------------------
+#
+# The table above only sees `from homeassistant.x import Y`.  An integration that imports the module under a
+# name and reads an attribute of it (`cv.vol`, with `from homeassistant.helpers import config_validation as
+# cv`) fails only when that line runs, with an AttributeError: ramses_cc 0.60.4 did exactly that on Home
+# Assistant 2026.10.0, whose config_validation no longer has `import voluptuous as vol`.  Here every such
+# attribute is looked up in the source of the target Home Assistant itself: what the module binds at its top
+# level (assignments, definitions, the names it imports, its submodules, the deprecated constants Home
+# Assistant's own __getattr__ serves).  Nothing is imported.  A module whose names cannot be read off its
+# source (a __getattr__ of its own, globals() written to, a star import from outside Home Assistant) is not
+# judged; neither is a read through getattr(), behind hasattr() or in a `try` that catches AttributeError.
+
+MAX_HA_MODULE_VERSIONS = 4  # the module contents of a release never change: kept per version, for a few targets
+_HA_MODULE_NAMES: dict[str, dict[str, frozenset[str] | None]] = {}  # version -> module -> names (None: not judged)
+
+
+def _running_ha_root() -> str:
+    """The directory the running Home Assistant package is in (its site-packages)."""
+    return os.path.dirname(os.path.dirname(os.path.abspath(sys.modules["homeassistant"].__file__)))
+
+
+def _module_file(root: str, module: str) -> str | None:
+    base = os.path.join(root, *module.split("."))
+    for path in (base + ".py", os.path.join(base, "__init__.py")):
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _catches_attribute_error(handler: Any) -> bool:
+    import ast
+
+    if handler.type is None:
+        return True
+    nodes = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+    return any(isinstance(n, ast.Name) and n.id in ("AttributeError", "Exception", "BaseException") for n in nodes)
+
+
+def _dotted(node: Any) -> list[str] | None:
+    """["a", "b", "c"] for the expression a.b.c, None for anything that is not a dotted name."""
+    import ast
+
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    parts.append(node.id)
+    return parts[::-1]
+
+
+def _ha_attribute_uses(component_dir: str, ha_root: str) -> list[tuple[str, int, str, str]]:
+    """Blocking: (file, line, module, attribute) for every read of an attribute of a Home Assistant module the
+    integration imported under a name, the first level of a chain only (`cv.vol` of `cv.vol.Schema`), once per
+    file and attribute.  Whether `from homeassistant.x import y` names a module is decided by the running Home
+    Assistant (``ha_root``).  Nothing is imported or run."""
+    import ast
+
+    uses: list[tuple[str, int, str, str]] = []
+    for path, rel in _source_files(component_dir):
+        try:
+            if os.path.getsize(path) > MAX_CHECK_BYTES:
+                continue
+            with open(path, encoding="utf-8") as fh:
+                tree = ast.parse(fh.read(), filename=rel)
+        except (OSError, SyntaxError, UnicodeDecodeError, ValueError, MemoryError, RecursionError):
+            continue
+        bound: dict[str, str] = {}  # a name in this file -> the Home Assistant module it is
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "homeassistant" or alias.name.startswith("homeassistant."):
+                        # `import homeassistant.x.y` binds `homeassistant`; with `as`, the name is the module itself
+                        bound[alias.asname or "homeassistant"] = alias.name if alias.asname else "homeassistant"
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module \
+                    and (node.module == "homeassistant" or node.module.startswith("homeassistant.")):
+                for alias in node.names:
+                    if alias.name != "*" and _module_file(ha_root, f"{node.module}.{alias.name}"):
+                        bound[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+        if not bound:
+            continue
+        guarded: set[int] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Try) and any(_catches_attribute_error(h) for h in node.handlers):
+                for stmt in node.body:
+                    guarded.update(id(n) for n in ast.walk(stmt))
+            elif isinstance(node, ast.If):
+                checked = {(c.args[0].id, c.args[1].value) for c in ast.walk(node.test)
+                           if isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id == "hasattr"
+                           and len(c.args) == 2 and isinstance(c.args[0], ast.Name) and isinstance(c.args[1], ast.Constant)}
+                for stmt in node.body:
+                    guarded.update(id(n) for n in ast.walk(stmt) if isinstance(n, ast.Attribute)
+                                   and isinstance(n.value, ast.Name) and (n.value.id, n.attr) in checked)
+        # a name the code binds again is not the module there: `for entity in ...` beside `from homeassistant.helpers
+        # import entity`, a parameter or a comprehension variable of the same name.  At module level the name is
+        # dropped for the whole file; in a function, lambda or comprehension, for that scope.
+        for stmt in tree.body:
+            for node in _walk_module_level(stmt):
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                    bound.pop(node.id, None)
+        if not bound:
+            continue
+        found: list[tuple[int, str, str]] = []
+
+        def visit(node: Any, shadowed: frozenset[str]) -> None:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                a = node.args
+                local = {x.arg for x in [*a.posonlyargs, *a.args, *a.kwonlyargs, *([a.vararg] if a.vararg else []),
+                                         *([a.kwarg] if a.kwarg else [])]}
+                local |= {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+                shadowed = shadowed | (local & bound.keys())
+            elif isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                local = {n.id for g in node.generators for n in ast.walk(g.target) if isinstance(n, ast.Name)}
+                shadowed = shadowed | (local & bound.keys())
+            elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load) and id(node) not in guarded \
+                    and not (node.attr.startswith("__") and node.attr.endswith("__")):  # __name__ & co.: every module has them
+                parts = _dotted(node.value)
+                if parts and parts[0] in bound and parts[0] not in shadowed:
+                    module = ".".join([bound[parts[0]], *parts[1:]])
+                    if _module_file(ha_root, module):  # `cv.vol.Schema`: cv.vol is not a module, so only `cv.vol` is a read
+                        found.append((node.lineno, module, node.attr))
+            for child in ast.iter_child_nodes(node):
+                visit(child, shadowed)
+
+        try:
+            visit(tree, frozenset())
+        except RecursionError:
+            continue
+        seen: set[tuple[str, str]] = set()
+        for line, module, attr in sorted(found):
+            if (module, attr) not in seen:
+                seen.add((module, attr))
+                uses.append((rel, line, module, attr))
+    return uses
+
+
+def _walk_module_level(node: Any):
+    """ast.walk without entering a function, class or lambda body (their own node is yielded)."""
+    import ast
+
+    yield node
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+        return
+    for child in ast.iter_child_nodes(node):
+        yield from _walk_module_level(child)
+
+
+def _module_names(source: Any, module: str, _depth: int = 0) -> frozenset[str] | None:
+    """What ``module`` binds at its top level, read from its source (``source.read(module)``: (text, is a
+    package) or None when it does not exist); None when that cannot be told from the source."""
+    import ast
+
+    got = source.read(module) if _depth <= 8 else None
+    if got is None:
+        return None
+    text, package = got
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError, MemoryError, RecursionError):
+        return None
+    names: set[str] = set()
+    deprecated_getattr = False
+    for stmt in tree.body:
+        for node in _walk_module_level(stmt):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if node.name == "__getattr__":
+                    return None  # the module answers for names it does not bind
+                names.add(node.name)
+            elif isinstance(node, ast.Import):
+                names.update(a.asname or a.name.split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                for a in node.names:
+                    if a.name != "*":
+                        names.add(a.asname or a.name)
+                        continue
+                    origin = node.module or ""
+                    if node.level:
+                        base = module.split(".") if package else module.split(".")[:-1]
+                        origin = ".".join([*base[:len(base) - node.level + 1], *([origin] if origin else [])])
+                    star = _module_names(source, origin, _depth + 1) if origin.startswith("homeassistant") else None
+                    if star is None:
+                        return None
+                    names.update(star)
+            elif isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "__getattr__" for t in node.targets):
+                # Home Assistant's own: partial(check_if_deprecated_constant, ...) serves _DEPRECATED_<name> as <name>
+                call = node.value
+                if not (isinstance(call, ast.Call) and call.args and isinstance(call.args[0], ast.Name)
+                        and call.args[0].id == "check_if_deprecated_constant"):
+                    return None
+                deprecated_getattr = True
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                names.add(node.id)
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                names.add(node.name)
+            elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+                names.add(node.name)
+            elif isinstance(node, ast.MatchMapping) and node.rest:
+                names.add(node.rest)
+            elif isinstance(node, (ast.Subscript, ast.Attribute)) and isinstance(node.value, ast.Call) \
+                    and isinstance(node.value.func, ast.Name) and node.value.func.id == "globals" \
+                    and (isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store)
+                         or isinstance(node, ast.Attribute) and node.attr in ("update", "setdefault")):
+                return None  # globals() written to: names the source does not spell out
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Global):  # a function's `global x` binds x at module level too
+            names.update(node.names)
+    if deprecated_getattr:
+        names.update(n[len("_DEPRECATED_"):] for n in list(names) if n.startswith("_DEPRECATED_"))
+    if package:
+        names.update(source.submodules(module))
+    return frozenset(names)
+
+
+class _HaSource:
+    """The `homeassistant` package of one release: a directory (an install) or its wheel, read in place."""
+
+    def __init__(self, root: str | None = None, wheel: Any = None) -> None:
+        self.root, self.wheel = root, wheel
+        self.members = {n for n in wheel.namelist() if n.startswith("homeassistant/")} if wheel is not None else set()
+
+    def read(self, module: str) -> tuple[str, bool] | None:
+        base = module.replace(".", "/")
+        for rel, package in ((base + ".py", False), (base + "/__init__.py", True)):
+            if self.wheel is not None:
+                if rel not in self.members or self.wheel.getinfo(rel).file_size > MAX_CHECK_BYTES:
+                    continue
+                return self.wheel.read(rel).decode("utf-8", "replace"), package
+            path = os.path.join(self.root, *rel.split("/"))
+            if os.path.isfile(path) and os.path.getsize(path) <= MAX_CHECK_BYTES:
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    return fh.read(), package
+        return None
+
+    def submodules(self, module: str) -> set[str]:
+        base = module.replace(".", "/") + "/"
+        if self.wheel is not None:
+            out = set()
+            for name in self.members:
+                if name.startswith(base) and name.endswith(".py"):
+                    rest = name[len(base):].split("/")
+                    if len(rest) == 1 and rest[0] != "__init__.py":
+                        out.add(rest[0][:-3])
+                    elif len(rest) == 2 and rest[1] == "__init__.py":
+                        out.add(rest[0])
+            return out
+        path = os.path.join(self.root, *module.split("."))
+        return {n[:-3] if n.endswith(".py") else n for n in os.listdir(path)
+                if (n.endswith(".py") and n != "__init__.py") or os.path.isfile(os.path.join(path, n, "__init__.py"))}
+
+
+def _target_ha_root(target: str, python: str, config_dir: str) -> tuple[str | None, str | None, str]:
+    """Blocking: (where the target's `homeassistant` package is: a directory, or the path of its wheel; a
+    directory to remove afterwards; why there is none).  The running install for the running version, a venv
+    of the target on the volume, otherwise the target's wheel from the index pip uses, downloaded without its
+    dependencies into a temporary directory."""
+    import tempfile
+
+    if not _HA_VERSION_RE.fullmatch(target):
+        return None, None, f"{target[:40]!r} is not a Home Assistant version"
+    if target == ha_version:
+        return _running_ha_root(), None, ""
+    site = os.path.join(config_dir, f"venv-{target}", "lib", f"python{sys.version_info[0]}.{sys.version_info[1]}", "site-packages")
+    if os.path.isfile(os.path.join(site, "homeassistant", "__init__.py")):
+        return site, None, ""
+    scratch = tempfile.mkdtemp(prefix="hri-ha-source-")
+    dest = os.path.join(scratch, "download")
+    try:
+        proc = _run_pip([python, "-m", "pip", "download", "--no-deps", "--only-binary=:all:", "--ignore-requires-python",
+                         "--quiet", "--dest", dest, f"homeassistant=={target}"])
+    except subprocess.TimeoutExpired:
+        shutil.rmtree(scratch, ignore_errors=True)
+        return None, None, f"Home Assistant {target} could not be downloaded within {PIP_TIMEOUT_S}s"
+    except OSError as err:
+        shutil.rmtree(scratch, ignore_errors=True)
+        return None, None, f"Home Assistant {target} could not be downloaded: {err}"
+    wheels = [n for n in (os.listdir(dest) if os.path.isdir(dest) else []) if n.endswith(".whl")]
+    if proc.returncode != 0 or len(wheels) != 1:
+        shutil.rmtree(scratch, ignore_errors=True)
+        err = (proc.stderr or "").strip()
+        why = f"PyPI could not be reached: {_pip_reason(err)}" if _pip_unreachable(err) else (_pip_reason(err) if err else "no wheel")
+        return None, None, f"Home Assistant {target} could not be downloaded ({why})"
+    return os.path.join(dest, wheels[0]), scratch, ""
+
+
+def _ha_attribute_checks(component_dir: str, target: str, python: str, config_dir: str) -> tuple[list[str], str]:
+    """Blocking: (one line per attribute of a Home Assistant module the integration reads and Home Assistant
+    ``target`` does not have - "ha_compat.py:293 uses homeassistant.helpers.config_validation.vol, which Home
+    Assistant 2026.10.0 does not have" -, why the check could not run)."""
+    import zipfile
+
+    uses = _ha_attribute_uses(component_dir, _running_ha_root())
+    if not uses:
+        return [], ""
+    known = dict(_HA_MODULE_NAMES.get(target, {}))
+    missing = sorted({module for _rel, _line, module, _attr in uses if module not in known})
+    if missing:
+        where, cleanup, why = _target_ha_root(target, python, config_dir)
+        if where is None:
+            return [], why
+        def names(source: _HaSource, module: str) -> frozenset[str] | None:
+            try:
+                return _module_names(source, module)
+            except RecursionError:  # nested deeper than the walk can follow: not judged
+                return None
+
+        try:
+            if os.path.isdir(where):
+                source = _HaSource(root=where)
+                known.update((m, names(source, m)) for m in missing)
+            else:
+                with zipfile.ZipFile(where) as wheel:
+                    source = _HaSource(wheel=wheel)
+                    known.update((m, names(source, m)) for m in missing)
+        except (OSError, zipfile.BadZipFile) as err:
+            return [], f"Home Assistant {target} could not be read: {err}"
+        finally:
+            if cleanup:
+                shutil.rmtree(cleanup, ignore_errors=True)
+        _HA_MODULE_NAMES.pop(target, None)  # the newest at the end: the oldest version goes first
+        _HA_MODULE_NAMES[target] = known
+        while len(_HA_MODULE_NAMES) > MAX_HA_MODULE_VERSIONS:
+            del _HA_MODULE_NAMES[next(iter(_HA_MODULE_NAMES))]
+    return [f"{rel}:{line} uses {module}.{attr}, which Home Assistant {target} does not have"
+            for rel, line, module, attr in uses if known.get(module) is not None and attr not in known[module]], ""
+
+
 def _config_flow_version(component_dir: str) -> int | None:
     """Blocking: VERSION of the ConfigFlow class in <component>/config_flow.py, read with ast (never imported)."""
     import ast
@@ -1010,6 +1339,17 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
                             "it fails when loaded, unless it catches the ImportError somewhere the check cannot see"
                             + (f" (+{len(ha_symbols) - 3} more)" if len(ha_symbols) > 3 else ""))
 
+        # 5d. attributes of Home Assistant modules the code reads (`cv.vol`), looked up in the target's own source:
+        # an AttributeError when that code runs, so a blocker; a target that cannot be read is said, never a blocker
+        ha_attributes, ha_attributes_note = await hass.async_add_executor_job(
+            _ha_attribute_checks, scratch, target, sys.executable, installer.config_dir)
+        if ha_attributes:
+            blockers.append(f"the integration uses names Home Assistant {target} no longer has ({'; '.join(ha_attributes[:3])}): "
+                            "it fails with an AttributeError when that code runs"
+                            + (f" (+{len(ha_attributes) - 3} more)" if len(ha_attributes) > 3 else ""))
+        if ha_attributes_note:
+            warnings.append(f"the attributes the integration reads from Home Assistant's modules were not checked: {ha_attributes_note}")
+
         # 6. configuration surface
         yaml_present = os.path.isfile(installer.yaml_path(domain))
         old = installer.installed_manifest(domain) or {}
@@ -1046,7 +1386,7 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
                          "new": manifest.get("version"), "min_ha": min_ha},
             "requirements": req_rows, "also_installed": extra, "pip_ok": pip["ok"], "pip_error": pip["stderr"],
             "source_builds": source_builds, "python": py, "code_errors": code_errors, "removed_imports": removed_imports,
-            "removed_ha_symbols": ha_symbols,
+            "removed_ha_symbols": ha_symbols, "removed_ha_attributes": ha_attributes,
             "dependencies": dep_rows, "patches": patch_rows, "config": cfg,
             "duration_s": round(time.monotonic() - t0, 1),
         }

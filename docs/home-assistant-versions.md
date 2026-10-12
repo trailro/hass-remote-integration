@@ -195,6 +195,30 @@ catches: a version that does not set up is rolled back automatically.
   its removing version is at or below the target. Only `from <module> import
   <name>` is matched, and an import in a `try` whose `except` catches
   `ImportError` is ignored. The table only knows the names in it.
+- **Attributes of Home Assistant modules.** An integration that imports a
+  module under a name and reads an attribute of it (`cv.vol`, with
+  `config_validation` imported as `cv`) fails with an `AttributeError` when
+  that line runs if the target no longer has it: ramses_cc 0.60.4 on Home
+  Assistant 2026.10.0, whose `config_validation` dropped `import voluptuous as
+  vol`. Every such read (`import homeassistant.x.y as cv`, `from
+  homeassistant.x import y` when `y` is a module, and dotted uses of `import
+  homeassistant.x.y`; the first attribute of a chain) is looked up in the
+  target's own source, never imported: what the module binds at its top level,
+  the names it imports, its submodules and the deprecated constants Home
+  Assistant's `__getattr__` serves. One missing is a blocker naming the file,
+  line and attribute (`ha_compat.py:293 uses
+  homeassistant.helpers.config_validation.vol, which Home Assistant 2026.10.0
+  does not have`), listing the first three and counting the rest. The source
+  is the running install for the running version, a venv of the target on the
+  volume, or otherwise the target's wheel, downloaded without dependencies into
+  a temporary directory and removed after the check; module contents are kept
+  in memory per version. A download that fails is a warning, never a blocker.
+  Not reported: a read through `getattr()`, under an `if hasattr(...)` for the
+  same name, or in a `try` whose `except` catches `AttributeError` (or
+  broader); a name the code binds again (a parameter, a loop or comprehension
+  variable); dunder attributes; and modules whose names cannot be read off
+  their source (their own `__getattr__`, `globals()` written to, a star import
+  from outside Home Assistant).
 - **The integration's own code.** Every `.py` file is compiled with the
   image's Python, except in the top-level folders `tests`, `test`, `scripts`,
   `tools`, `docs` and `examples`. A syntax error, a file over 5 MB or one too
