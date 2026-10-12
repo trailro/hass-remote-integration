@@ -12,6 +12,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -175,6 +176,18 @@ class ReleaseScanTest(unittest.TestCase):
         self.assertTrue(found)
         self.assertIn("docs eeeeeee", body.splitlines()[0])
         self.assertIn("- 2026-09-20 [Document app_config](https://example.invalid/c)", body)
+
+    def test_mentions_and_references_are_quiet(self):
+        releases = {"home-assistant/supervisor": [_rel("2026.10.0", SUPERVISOR_BODY)]}
+        commits = [{"sha": "1234567890", "html_url": "https://example.invalid/c",
+                    "commit": {"message": "docs: say app (#3408) thanks @frenck", "committer": {"date": "2026-10-07"}}}]
+        _, body = self.m.scan(RECORD, releases, docs_sha="e" * 64, docs_commits=commits)
+        self.assertIn("- `#7153` Use port 80 as default for Core/landingpage `@sairon`", body)
+        self.assertIn("- `#7230` Add feature flag to drop NET_RAW from app containers `@agners`", body)
+        self.assertIn("[docs: say app (`#3408`) thanks `@frenck`]", body)
+        self.assertIsNone(re.search(r"(?<!`)[@#]\w", body.split("\n", 1)[1].replace("## ", "")))
+        self.assertEqual(self.m.quiet("mail a@b.com, `@x`, `/time`, home-assistant/core#12"),
+                         "mail a@b.com, `@x`, `/time`, `home-assistant/core#12`")
 
     def test_nothing_to_say(self):
         self.assertEqual(self.m.scan(RECORD, {"home-assistant/supervisor": [_rel("2026.09.3", SUPERVISOR_BODY)]},
