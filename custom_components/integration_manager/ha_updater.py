@@ -453,10 +453,22 @@ class HaUpdater:
             self._schedule_smoke(delay)
             return
         self._smoke = None
+        if not hung and failed and len(retrying) == len(failed):
+            # still ConfigEntryNotReady after the extra interval: a device, a bridge or a broker that is not there.
+            # It raises that on any version, so it says nothing against this one: kept, the verdict left open
+            bad = retrying[0]
+            note = (f"Home Assistant {HA_VERSION}: smoke test of {domain}: could not confirm: the device was not ready "
+                    f"(config entry '{bad.title}' is still {bad.state.value}" + (f": {scrub_text(str(bad.reason))}" if bad.reason else "")
+                    + f"); Home Assistant version kept, {domain} degraded until the entry sets up")
+            _LOGGER.warning("%s", note)
+            pn.async_create(self.hass, note + ".", title="Home Assistant version", notification_id="hri_ha_smoke")
+            events.emit("ha", note, version=HA_VERSION, state="degraded")
+            await self.hass.async_add_executor_job(self._drop_smoke, None)
+            return
         if hung:
             reason = f"config entry '{setting_up[0].title}' still setting up after {int(waited)} s"
         elif failed:
-            bad = failed[0]
+            bad = next(e for e in failed if e.state.value != "setup_retry")  # what did not load for a reason of its own
             reason = f"config entry '{bad.title}' is {bad.state.value}" + (f": {scrub_text(str(bad.reason))}" if bad.reason else "")
         elif yaml_down:
             reason = f"{domain} is not loaded (no config entry; its YAML setup did not load it)"

@@ -451,7 +451,7 @@ integration update: if the integration's config entries that were loaded before
 the switch do not load on it within the smoke test, the container switches back
 to the previous version once, with the configuration from the switch's backup,
 and says why on the timeline and in a notification; a degraded integration is
-kept and reported. The list offers the ten newest stable releases
+kept and reported, and so is one whose device is still not ready (`setup_retry`). The list offers the ten newest stable releases
 plus every version the box has (*Show all versions* for the rest). Versions
 below the image's floor (`HA_VERSION_MIN`, 2026.5.0) or whose pins have no wheel
 for the image's Python (`python:3.14`) are refused. A downgrade asks whether to
