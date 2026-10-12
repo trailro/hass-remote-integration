@@ -9,6 +9,9 @@ keeps from each body its "Breaking Changes" sections whole, and from the rest th
 word (KEYWORDS; dependency bumps left out).  When the digest of the developer documentation of the app configuration
 differs from the recorded one it lists the commits that touched that page.
 
+Upstream text is copied quiet: every `@handle` and `#123` / `owner/repo#123` in it becomes inline code, so the issue
+neither notifies the people the release notes credit nor links back into their pull requests.
+
 Prints found=true|false (GITHUB_OUTPUT) and writes the body only when something was found.  The body starts with a
 marker naming what it covers, so the report can tell whether it already said this.
 """
@@ -31,6 +34,13 @@ REPOS = (("home-assistant/supervisor", "supervisor", "Supervisor"),
          ("home-assistant/operating-system", "haos", "Home Assistant OS"))
 DOCS_REPO = "home-assistant/developers.home-assistant"
 DOCS_PATH = "docs/apps/configuration.md"
+MENTION = re.compile(r"(?<![\w`/.@-])@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:/[\w.-]+)?(?![\w`@-])")
+REFERENCE = re.compile(r"(?<![\w`/&#-])(?:[\w.-]+/[\w.-]+)?#\d+\b(?!`)")
+
+
+def quiet(text: str) -> str:
+    """``text`` with its mentions and issue references as inline code: neither notifies nor cross-links upstream."""
+    return REFERENCE.sub(lambda m: f"`{m.group(0)}`", MENTION.sub(lambda m: f"`{m.group(0)}`", text))
 
 
 def key(version: str) -> tuple:
@@ -87,6 +97,7 @@ def scan(record: dict, releases: dict, docs_sha: str = "", docs_commits: list | 
             covered.append(f"{field} {tag}")
             pre = " (pre-release)" if rel.get("prerelease") else ""
             parts.append(f"## [{label} {tag}]({rel.get('html_url') or f'https://github.com/{repo}/releases/tag/{tag}'}){pre}\n")
+            breaking, hits = [quiet(line) for line in breaking], [quiet(line) for line in hits]
             if breaking:
                 parts.append("**Breaking changes**\n\n" + "\n".join(breaking) + "\n")
             if hits:
@@ -100,7 +111,7 @@ def scan(record: dict, releases: dict, docs_sha: str = "", docs_commits: list | 
         for c in (docs_commits or [])[:10]:
             first = (c.get("commit", {}).get("message") or "").splitlines()[0] if c.get("commit") else ""
             date = c.get("commit", {}).get("committer", {}).get("date", "")[:10]
-            lines.append(f"- {date} [{first or c.get('sha', '')[:7]}]({c.get('html_url', '')})")
+            lines.append(f"- {date} [{quiet(first) or c.get('sha', '')[:7]}]({c.get('html_url', '')})")
         parts.append("\n".join(lines) + "\n")
     if not parts:
         return False, ""
