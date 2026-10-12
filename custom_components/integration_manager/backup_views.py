@@ -357,8 +357,9 @@ class RestoreCancelView(ManagerView):
                 cancelled, for_version, name = await self.hass.async_add_executor_job(_cancel_restore_by_hand, self.hass.config.config_dir)
                 if for_version:
                     return self.json({"ok": False, "for_version": for_version,
-                                      "error": f"this restore belongs to the scheduled switch to Home Assistant {for_version}: cancel that switch on System "
-                                               "(choose the running version), which drops its restore too"})
+                                      "error": f"this restore belongs to the switch to Home Assistant {for_version} that waits for a restart: restart to "
+                                               "apply it; a switch you chose can instead be cancelled on System (choose the running version), "
+                                               "which drops its restore too"})
             finally:
                 self.installer.busy = False
         if cancelled:  # the timeline's "scheduled for the next restart" is no longer coming

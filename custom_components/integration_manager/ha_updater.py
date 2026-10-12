@@ -628,7 +628,7 @@ class HaUpdater:
                    + (f"except {', '.join(restored)}, which {HA_VERSION} migrated to a format {back} cannot read (or removed): "
                       f"those come back from the switch's backup {rec.get('backup')}, and what changed in them since the switch is "
                       f"only in {saved}" if restored else f"unchanged: nothing in it needed the switch's backup {rec.get('backup')}")
-                   + f". Switching to {HA_VERSION} again is allowed and is smoke-tested again")
+                   + f". Switching to {HA_VERSION} again is refused unless forced, and is smoke-tested again")
             at = time.strftime("%Y-%m-%dT%H:%M:%S")
 
             def fall_back(st: dict[str, Any]) -> None:
