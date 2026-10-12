@@ -3,6 +3,25 @@
 Every version's changes are in the
 [GitHub releases](https://github.com/trailro/hass-remote-integration/releases).
 
+## 0.28.1
+
+- **The preflight catches a Home Assistant module attribute the target no
+  longer has**, such as `cv.vol` (gone in 2026.10 with the move to probatio):
+  ramses_cc 0.60.4 is now blocked for Home Assistant 2026.10, where it fails at
+  setup. The attribute is looked up in the target's own source, never imported;
+  reads guarded by `getattr`, `hasattr`, `try` or a version test are not
+  reported. Report field `removed_ha_attributes`.
+- **A Home Assistant version switch checks the running integration first**
+  (System, `POST /api/ha/check` / `update`, the manager device): a blocker asks
+  before switching anyway; MQTT never forces.
+- **Smoke test after a version switch:** if the integration's entries no longer
+  load on the new version, the container switches back once, after saving the
+  configuration as the new version left it (backup kept 7 days) and restoring
+  only the files the older version cannot read; the reason names the error from
+  the log. An entry waiting for its device (`setup_retry`) keeps the version as
+  degraded. The version left is not offered again automatically. `GET /api/ha`
+  has `smoke` and `smoke_fallback`.
+
 ## 0.28.0
 
 Fixes from a review of the codebase.
