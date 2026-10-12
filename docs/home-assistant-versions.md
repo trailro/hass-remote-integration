@@ -315,6 +315,13 @@ integration smoke test's delay (`smoke_test_s` in the settings on **System**,
 - **Still setting up** is waited for, 60 s at a time, until the smoke test's
   limit (15 minutes or `smoke_test_s`, the longer); still setting up then counts
   as not loaded. An entry in `setup_retry` gets one more interval first.
+- **Still in `setup_retry`** after that interval (`ConfigEntryNotReady`: the
+  device, the bridge or the broker the entry talks to is not reachable), with
+  every other entry loaded: the version is kept, since the entry would wait for
+  its device on any version. The verdict is degraded, and the timeline and a
+  notification say that the smoke test could not confirm the version because
+  the device was not ready. An entry in `setup_error` or `not_loaded` beside it
+  still counts as not loaded.
 - **Not loaded**: with `auto_rollback` on (the default), the container switches
   back to the version before the switch, once: the configuration from the
   backup the switch took is restored for it, `last_error` says what failed and

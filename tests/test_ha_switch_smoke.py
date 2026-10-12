@@ -202,10 +202,43 @@ class VerdictTest(_Base):
     def test_an_entry_retrying_gets_one_more_interval(self):
         self.entries["e1"] = _entry("e1", state="setup_retry")
         self.first_boot()
+        self.later.clear()
         self.check()
         self.assertEqual(self.state()["desired"], NEW)
+        self.assertEqual(self.later, [300])
+        self.assertIn("smoke", self.state())
+        self.entries["e1"] = _entry("e1")
+        self.check()
+        self.assertNotIn("smoke", self.state())
+        self.installer.restart.assert_not_awaited()
+
+    def test_an_entry_still_retrying_keeps_the_version_unconfirmed(self):
+        # the shadow's case: the gateway (a serial bridge, a broker) is offline through the whole window, so the
+        # entry raises ConfigEntryNotReady on any version; that is no reason to leave the new one
+        self.entries["e1"] = _entry("e1", state="setup_retry", title="RAMSES RF", reason="Serial port not available")
+        self.first_boot()
+        self.check()
+        self.check()
+        state = self.state()
+        self.assertEqual(state["desired"], NEW)
+        self.assertNotIn("smoke", state)
+        self.assertNotIn("smoke_fallback", state)
+        self.assertNotIn("fallback_from", state)
+        self.assertFalse(backupkit.pending(self.cfg))
+        self.installer.restart.assert_not_awaited()
+        self.assertEqual(len(self.notified), 1, self.notified)
+        self.assertIn("could not confirm: the device was not ready", self.notified[0])
+        self.assertIn("Serial port not available", self.notified[0])
+        self.assertIn("kept", self.notified[0])
+
+    def test_an_entry_retrying_beside_one_that_failed_still_switches_back(self):
+        self.entries["e1"] = _entry("e1", state="setup_retry")
+        self.entries["e2"] = _entry("e2", state="setup_error", reason="AttributeError: vol")
+        self.first_boot(entries=("e1", "e2"))
+        self.check()
         self.check()
         self.assertEqual(self.state()["desired"], OLD)
+        self.assertIn("setup_error", self.state()["smoke_fallback"]["reason"])
         self.installer.restart.assert_awaited_once()
 
     def test_without_auto_rollback_it_is_reported_and_kept(self):
