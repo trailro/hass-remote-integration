@@ -107,7 +107,8 @@ from a backup if that version does not start. See
 
 **Cancelling.** *Cancel restore* cancels a restore scheduled by hand. One that
 belongs to a scheduled Home Assistant version change is only cancelled with
-that change (choose the running version under Home Assistant). A full
+that change (choose the running version under Home Assistant), and so is the
+restore of an automatic switch back that waits for its restart. A full
 rollback's restore cannot be cancelled: restart to finish the rollback, or
 start the version it left to undo it.
 

@@ -1236,10 +1236,14 @@ def apply_config_changes(state: dict, wanted: str, current: str | None) -> str:
                 state["_config_for"] = wanted
         else:
             back = recovery.get("from")
+            # nothing was scheduled any more and no boot dropped it (drop_orphan_schedule records that): cancelled on Backup
+            cancelled = not restored and not (last.get("backup") == recovery.get("backup") and str(last.get("at") or "") >= str(recovery.get("at") or ""))
             if back and back != wanted and venv_ok(back):
-                log(f"restoring the configuration for the fallback to {wanted} failed: staying on {back}, whose storage this is; retried at the next fallback")
-                state["last_error"] = (f"fallback to Home Assistant {wanted} stopped: the configuration from before the switch to {back} "
-                                       f"could not be restored (see the container log); still on {back}")
+                log(f"restoring the configuration for the fallback to {wanted} " + ("was cancelled by hand" if cancelled else "failed")
+                    + f": staying on {back}, whose storage this is; retried at the next fallback")
+                state["last_error"] = (f"fallback to Home Assistant {wanted} stopped: " + (
+                    f"the restore of the configuration from before the switch to {back} was cancelled by hand" if cancelled else
+                    f"the configuration from before the switch to {back} could not be restored (see the container log)") + f"; still on {back}")
                 state["desired"] = back
                 return back
             log(f"restoring the configuration for the fallback to {wanted} failed and {back} is not installed; booting {wanted}")
