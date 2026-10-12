@@ -813,13 +813,20 @@ class BelongsToVersionChange(ValueError):
 
 
 def _scheduled_change_to(config_dir: str) -> str | None:
-    """The version of the change ha.json records (scheduled from System, not yet applied or dropped)."""
+    """The version of the change ha.json records (scheduled from System, not yet applied or dropped), or of a
+    fallback waiting for its restart (desired is not current, and its recovery is for desired)."""
     try:
         with open(os.path.join(config_dir, STATE_DIR, "ha.json"), encoding="utf-8") as fh:
-            change = json.load(fh).get("change")
+            state = json.load(fh)
+        change, recovery = state.get("change"), state.get("recovery")
     except (OSError, ValueError, AttributeError):
         return None
-    return change.get("to") if isinstance(change, dict) else None
+    if isinstance(change, dict) and change.get("to"):
+        return change["to"]
+    desired = state.get("desired")
+    if desired and desired != state.get("current") and isinstance(recovery, dict) and recovery.get("for") == desired:
+        return desired
+    return None
 
 
 def cancel_restore(config_dir: str, only_zip: str | None = None, by_hand: bool = False) -> bool:

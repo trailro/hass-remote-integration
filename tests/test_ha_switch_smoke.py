@@ -460,6 +460,21 @@ class FallbackRestoreProtectionTest(_Base):
         self.assertIn(fb["saved"], self.installer_for(fb).protected_backups())
         self.assertNotIn(fb["saved"], self.installer_for({**fb, "at": ago(8 * 86400)}).protected_backups())
 
+    def test_the_fallback_s_restore_cannot_be_cancelled_by_hand(self):
+        self.installer.restart = mock.AsyncMock(return_value={"ok": False, "error": "another action is running"})
+        self.entries["e1"] = _entry("e1", state="setup_error")
+        self.first_boot()
+        self.check()
+        with self.assertRaises(backupkit.BelongsToVersionChange) as ctx:
+            backupkit.cancel_restore(self.cfg, by_hand=True)
+        self.assertEqual(ctx.exception.for_version, OLD)
+        self.assertEqual(backupkit.pending_for_version(self.cfg), OLD)
+
+    def test_a_leftover_recovery_for_the_running_version_does_not_hold_a_restore_by_hand(self):
+        self.write({"current": OLD, "desired": OLD, "recovery": {"for": OLD, "from": NEW, "backup": "x.zip"}})
+        backupkit.schedule_restore(self.cfg, "pre-ha.zip", ["storage"], for_version=OLD)
+        self.assertTrue(backupkit.cancel_restore(self.cfg, by_hand=True))
+
 
 class EntrypointAfterTheFallbackTest(EntrypointMainBase):
     """The boot after the manager switched back from B to A (here B is the version that was left)."""
@@ -485,6 +500,8 @@ class EntrypointAfterTheFallbackTest(EntrypointMainBase):
         self.fallen_back(last_restore={})
         self.assertEqual(self.boot(), B)
         self.assertEqual(self.state()["desired"], B)
+        self.assertIn("cancelled by hand", self.state()["last_error"])  # nothing was scheduled: not a restore that failed
+        self.assertNotIn("could not be restored", self.state()["last_error"])
 
     def test_a_version_that_fails_to_boot_still_takes_the_crash_path(self):
         self.write({"current": B, "desired": B, "previous": A, "proven": A, "boot_failures": 3,
