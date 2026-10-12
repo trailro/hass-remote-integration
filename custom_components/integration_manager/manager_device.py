@@ -458,6 +458,8 @@ class ManagerDevice:
         integ_latest = self.integration_latest()
         self._note_ha_latest()
         ha_latest = self._ha_latest
+        if ha_latest and ha_latest == getattr(self.updater, "left_version", None):
+            ha_latest = None  # the smoke test left it: not offered, so an automatic update cannot loop on it
         return {
             "manager_version": self.version,
             "integration": domain,
@@ -618,16 +620,18 @@ class ManagerDevice:
         return {"ok": True, "note": f"{domain} {tag} started", "restart": bool(res.get("restart_required")), "started": res}
 
     async def _do_install_home_assistant(self) -> dict[str, Any]:
-        from .views import async_change_ha_version
+        from .views import async_change_ha_version, async_switch_check
 
         target = (await self.updater.available()).get("latest_stable")
         if not target or ha_vkey(target) <= ha_vkey(HA_VERSION):
             raise ValueError(f"Home Assistant {HA_VERSION} is the newest stable version")
         await self.updater.validate(target)
         # the same refusal as POST /api/ha/update: nothing is scheduled for a version whose pinned
-        # requirements have no wheel for this image's Python.  No force here - a button on a device
-        # has no place to confirm; the System page has.
-        check = await self.updater.dependency_check(target)
+        # requirements have no wheel for this image's Python, on which the running integration reads a name
+        # it no longer has, or that the smoke test left (an automatic update on the parent would otherwise
+        # switch, fall back and switch again).  No force here - a button on a device has no place to confirm;
+        # the System page has.
+        check = await async_switch_check(self.updater, self.installer, target)
         if not check["ok"]:
             raise ValueError("; ".join(check["blockers"]))
         result = await async_change_ha_version(self.installer, self.updater, target, "keep", "mqtt")

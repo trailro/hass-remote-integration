@@ -99,6 +99,18 @@ class DocumentTest(unittest.TestCase):
         self.assertEqual(u["latest_version"], "9999.1.0")
         self.assertEqual(u["release_url"], "https://github.com/home-assistant/core/releases/tag/9999.1.0")
 
+    def test_a_version_the_smoke_test_left_is_not_offered(self):
+        # an automatic update on the parent would switch to it, fall back and switch again
+        upd = FakeUpdater()
+        dev = device(updater=upd)
+        upd._cache = (1.0, {"latest_stable": "9999.1.0"})
+        upd.left_version = "9999.1.0"
+        u = dev.document()["updates"]["home_assistant"]
+        self.assertEqual(u["latest_version"], md.HA_VERSION)
+        self.assertNotIn("release_url", u)
+        upd.left_version = None
+        self.assertEqual(dev.document()["updates"]["home_assistant"]["latest_version"], "9999.1.0")
+
     def test_the_document_writes_no_file(self):
         """C18: document() is read by GET /api/manager and every publication; the known versions are saved by the
         version check and the resource sample instead."""

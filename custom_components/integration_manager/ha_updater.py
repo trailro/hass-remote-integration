@@ -63,6 +63,7 @@ class HaUpdater:
         self._smoke_handle: Any = None
         self._smoke_waiting: float | None = None  # when the recorded entries were first seen still setting up
         self._smoke_rechecked = False  # an entry in setup_retry had its one more interval
+        self.left_version: str | None = None  # ha.json smoke_fallback.from: never offered as an update (async_start_smoke)
 
     def _read(self) -> dict[str, Any]:
         try:
@@ -229,7 +230,9 @@ class HaUpdater:
             "apt": state.get("apt"),  # what the entrypoint did with HRI_APT_PACKAGES at this boot (None: unset)
             "last_error": state.get("last_error", ""),
             "pending": bool(state.get("desired")) and state.get("desired") != current,
-            "update_available": bool(avail.get("latest_stable")) and _key(avail["latest_stable"]) > _key(current),
+            # a version the smoke test left is not offered: switching to it again is chosen in the list, on purpose
+            "update_available": bool(avail.get("latest_stable")) and _key(avail["latest_stable"]) > _key(current)
+            and not (isinstance(state.get("smoke_fallback"), dict) and state["smoke_fallback"].get("from") == avail["latest_stable"]),
             "config_backups": config_backups,  # downgrade target -> the backup its configuration can come from
             **avail,
         }
@@ -315,6 +318,32 @@ class HaUpdater:
                     "missing": [], "python": sys.version.split()[0]}
         return await preflight.ha_version_report(self.hass, version)
 
+    async def switch_blockers(self, installer: Any, version: str) -> tuple[list[str], list[str]]:
+        """(blockers, warnings) of a switch to ``version`` beyond its requirements: the running integration reads
+        an attribute of a Home Assistant module ``version`` does not have (the preflight's check, against that
+        version's own source), or the smoke test left ``version`` before.  Refused unless forced from the UI."""
+        from . import preflight
+
+        version = version.strip()
+        blockers: list[str] = []
+        warnings: list[str] = []
+        left = (await self.hass.async_add_executor_job(self._read)).get("smoke_fallback")
+        if isinstance(left, dict) and left.get("from") == version:
+            blockers.append(f"Home Assistant {version} was left automatically on {left.get('at')}: {left.get('domain')} did not set up "
+                            f"on it ({left.get('reason')})")
+        domain = getattr(installer, "running", None)
+        comp = installer.component_dir(domain) if domain else None
+        if comp and await self.hass.async_add_executor_job(os.path.isdir, comp):
+            hits, note = await self.hass.async_add_executor_job(
+                preflight._ha_attribute_checks, comp, version, sys.executable, installer.config_dir)  # noqa: SLF001
+            if hits:
+                blockers.append(f"{domain} {installer.running_tag or ''} uses names Home Assistant {version} no longer has "
+                                f"({'; '.join(hits[:3])}" + (f" (+{len(hits) - 3} more)" if len(hits) > 3 else "")
+                                + f"): it fails with an AttributeError there; switch {domain} to a release that supports {version} first")
+            if note:
+                warnings.append(f"the attributes {domain} reads from Home Assistant's modules were not checked against {version}: {note}")
+        return blockers, warnings
+
     async def async_set_desired(self, version: str) -> dict[str, Any]:
         """Like set_desired, but validated first (otherwise the entrypoint
         spends minutes in pip and falls back), and written in the executor
@@ -360,6 +389,8 @@ class HaUpdater:
     async def async_start_smoke(self, installer: Any, ha_state: Any) -> None:
         """Boot: the smoke test this boot owes a version change, if any, is scheduled."""
         state = ha_state if isinstance(ha_state, dict) else {}
+        left = state.get("smoke_fallback") if isinstance(state.get("smoke_fallback"), dict) else {}
+        self.left_version = str(left["from"]) if left.get("from") and left.get("from") != HA_VERSION else None
         rec = state.get("smoke") if isinstance(state.get("smoke"), dict) else None
         change = state.get("change") if isinstance(state.get("change"), dict) else {}
         planned = change.get("smoke") if isinstance(change.get("smoke"), dict) else None

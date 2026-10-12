@@ -264,6 +264,18 @@ def _switch_smoke(installer: Installer, mode: str) -> dict[str, Any] | None:
     return {"domain": domain, "from": HA_VERSION, "entries": entries, "loaded": loaded}
 
 
+async def async_switch_check(updater: HaUpdater, installer: Installer, target: str) -> dict[str, Any]:
+    """What POST /api/ha/check answers and an update without force (UI, MQTT) is refused on: the target's
+    requirements (``dependency_check``), and the running integration and the smoke test's verdict on that version
+    (``switch_blockers``)."""
+    check = await updater.dependency_check(target)
+    blockers, warnings = await updater.switch_blockers(installer, target)
+    if not blockers and not warnings:
+        return check
+    return {**check, "ok": bool(check.get("ok")) and not blockers, "blockers": [*(check.get("blockers") or []), *blockers],
+            "warnings": [*(check.get("warnings") or []), *warnings]}
+
+
 async def async_change_ha_version(installer: Installer, updater: HaUpdater, target: str, mode: str, source: str,
                                   restore_backup: str | None = None, parts: list[str] | None = None) -> dict[str, Any]:
     """The one way to schedule a Home Assistant version change (System page,
@@ -439,7 +451,7 @@ class HaActionView(ManagerView):
                 except ValueError as err:
                     return self.json({"ok": True, "check": {"version": target, "ok": False, "checked": True, "blockers": [str(err)],
                                                             "warnings": [], "notes": [], "missing": []}})
-                return self.json({"ok": True, "check": await self.updater.dependency_check(target)})
+                return self.json({"ok": True, "check": await async_switch_check(self.updater, self.installer, target)})
             if action == "update":
                 target = str(body.get("version", "")).strip()
                 if target != HA_VERSION:
@@ -447,8 +459,9 @@ class HaActionView(ManagerView):
                     # before anything is scheduled and before the restart: an older release pins requirements
                     # that have no wheel for this image's Python, and pip only finds that out minutes into the
                     # install, after which the container falls back.  force: the operator knows better (a
-                    # compiler added with HRI_APT_PACKAGES, for example).
-                    if body.get("force") is not True and not (check := await self.updater.dependency_check(target))["ok"]:
+                    # compiler added with HRI_APT_PACKAGES, for example).  The running integration is checked
+                    # against the target too, and a version the smoke test left is not switched to again unasked.
+                    if body.get("force") is not True and not (check := await async_switch_check(self.updater, self.installer, target))["ok"]:
                         return self.json({"ok": False, "needs_force": True, "check": check,
                                           "error": "; ".join(check["blockers"])})
             else:
@@ -467,7 +480,7 @@ class HaActionView(ManagerView):
                 return self.json({"ok": True, "desired": HA_VERSION, "cancelled": desired, "dropped": dropped})
             result = await async_change_ha_version(self.installer, self.updater, target, str(body.get("config") or "keep"), action)
             if action == "update" and body.get("force") is True:
-                events.emit("ha", f"Home Assistant {target} scheduled with the dependency check skipped (force)", version=target)
+                events.emit("ha", f"Home Assistant {target} scheduled with its checks skipped (force)", version=target)
         except (ValueError, BadRequest) as err:
             return self.json({"ok": False, "error": str(err)})
         except OSError as err:  # a full disk while backing up, an unreadable backup
