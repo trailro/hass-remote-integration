@@ -39,6 +39,7 @@ _VERSION = re.compile(r"\d{4}\.\d{1,2}\.\d+(?:b\d+)?")  # a release or a beta, f
 # covers the last two or three months, which is the range a version change is really chosen from.  Not a
 # setting: "show all versions" is one click away and loses nothing, so there is nothing here to get wrong.
 RECENT_N = 10
+SMOKE_CAUSE_MAX = 400  # characters of the error from the log a smoke-test verdict quotes
 SMOKE_RECHECK_S = 60  # the smoke test after a version change looks again this often while it cannot judge
 
 
@@ -401,7 +402,7 @@ class HaUpdater:
             rec = {"version": HA_VERSION, "from": planned.get("from"), "domain": planned.get("domain"),
                    "entries": [str(e) for e in planned.get("entries") or []], "loaded": bool(planned.get("loaded")),
                    "backup": change.get("backup"), "parts": change.get("parts") or ["storage"],
-                   "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+                   "switched": change.get("at"), "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
 
             def record(st: dict[str, Any]) -> dict[str, Any] | None:
                 ch = st.get("change") if isinstance(st.get("change"), dict) else {}
@@ -504,6 +505,11 @@ class HaUpdater:
             reason = f"config entry '{bad.title}' is {bad.state.value}" + (f": {scrub_text(str(bad.reason))}" if bad.reason else "")
         elif yaml_down:
             reason = f"{domain} is not loaded (no config entry; its YAML setup did not load it)"
+        if not hung and (failed or yaml_down):
+            # not_loaded carries no reason: an AttributeError at import is only in the log (homeassistant.loader)
+            cause = await self.hass.async_add_executor_job(_logged_cause, domain, rec.get("switched") or rec.get("at") or "")
+            if cause:
+                reason += f"; logged: {scrub_text(cause)[:SMOKE_CAUSE_MAX]}"
         else:
             try:
                 h = installer.health_source(grace=False) if installer.health_source else installer.health()
@@ -626,3 +632,26 @@ def _installable_files(files: Any) -> list[dict[str, Any]]:
 
 
 _key = ha_vkey
+
+
+def _logged_cause(domain: str, since: str) -> str:
+    """Blocking: the newest error the process log holds about ``domain`` since ``since`` (a timestamp, the switch):
+    its message and the last line of its traceback ("AttributeError: module ... has no attribute 'vol'"), or ""."""
+    try:
+        import logbuffer
+    except ImportError:
+        return ""
+    handler = logbuffer.find()
+    if handler is None:
+        return ""
+    needle = re.compile(rf"(?<![\w]){re.escape(domain)}(?![\w])")
+    try:
+        records, _ = handler.query(min_level=logging.ERROR, limit=1, keep=lambda r: str(r.get("ts", ""))[:19] >= since[:19]
+                                   and bool(needle.search(f"{r.get('logger', '')} {r.get('message', '')}")))
+    except Exception:  # noqa: BLE001 - the verdict stands without its cause
+        return ""
+    if not records:
+        return ""
+    rec = records[-1]
+    lines = [ln.strip() for ln in str(rec.get("exc") or "").splitlines() if ln.strip()]
+    return " ".join(x for x in (str(rec.get("message") or "").splitlines()[0] if rec.get("message") else "", lines[-1] if lines else "") if x)
