@@ -363,6 +363,15 @@ integration smoke test's delay (`smoke_test_s` in the settings on **System**,
   switch's backup unknown, the version is kept and the notification says why it
   was not left.
 
+The reason names the entry and its state, with the entry's own reason when it
+has one, and the newest error the process log holds about the integration since
+the switch (`homeassistant.loader`, `homeassistant.setup` or the integration's
+own logger: its message and the last line of its traceback, such as
+`AttributeError: module 'homeassistant.helpers.config_validation' has no
+attribute 'vol'`), shortened to 400 characters and with secrets masked. That
+reason is in the notification, on the timeline, in `last_error` and in
+`smoke_fallback.reason`.
+
 An entry removed or disabled since the switch is not judged. Nothing is judged
 while another switch is scheduled, another integration runs or an action is in
 progress (it is checked again later). A downgrade with **restore** or **clean

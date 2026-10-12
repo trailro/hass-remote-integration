@@ -231,6 +231,43 @@ class VerdictTest(_Base):
         self.assertEqual(self.state()["desired"], OLD)
         self.assertEqual(backupkit.pending_for_version(self.cfg), OLD)
 
+    def test_the_cause_from_the_log_is_in_the_reason(self):
+        # not_loaded carries no reason: the AttributeError at import is only in the process log (homeassistant.loader)
+        import logging
+
+        import logbuffer
+
+        handler = logbuffer.FileLogHandler(os.path.join(self.cfg, "process.log"))
+        self.addCleanup(handler.close)
+
+        def log(name, level, msg, exc=None, at=None):
+            rec = logging.LogRecord(name, level, __file__, 1, msg, None, exc)
+            if at is not None:
+                rec.created = at
+            handler.emit(rec)
+
+        try:
+            raise AttributeError("module 'homeassistant.helpers.config_validation' has no attribute 'vol' token=abcdef0123456789abcdef")
+        except AttributeError:
+            import sys
+            exc = sys.exc_info()
+        log("homeassistant.loader", logging.ERROR, "Error loading custom_components.demo: the old version's", exc, at=0)  # before the switch
+        self.entries["e1"] = _entry("e1", state="not_loaded", title="Demo")
+        self.first_boot()
+        log("homeassistant.loader", logging.ERROR, "Unexpected exception importing component custom_components.demo", exc)
+        log("homeassistant.loader", logging.ERROR, "Unexpected exception importing component custom_components.other", exc)
+        with mock.patch.object(logbuffer, "find", return_value=handler):
+            self.check()
+        reason = self.state()["smoke_fallback"]["reason"]
+        self.assertIn("config entry 'Demo' is not_loaded", reason)
+        self.assertIn("importing component custom_components.demo", reason)
+        self.assertIn("AttributeError: module 'homeassistant.helpers.config_validation' has no attribute 'vol'", reason)
+        self.assertNotIn("the old version's", reason)
+        self.assertNotIn("abcdef0123456789abcdef", reason)  # scrubbed
+        self.assertLessEqual(len(reason), self.ha_updater.SMOKE_CAUSE_MAX + 200)
+        self.assertIn("has no attribute 'vol'", self.state()["last_error"])
+        self.assertTrue(any("has no attribute 'vol'" in m for m in self.emitted))
+
     def test_an_entry_that_loads_keeps_the_version(self):
         self.entries["e1"] = _entry("e1")
         self.first_boot()
