@@ -476,6 +476,46 @@ class FallbackRestoreProtectionTest(_Base):
         self.assertTrue(backupkit.cancel_restore(self.cfg, by_hand=True))
 
 
+class LeftVersionProvenTest(_Base):
+    """A switch to the version a smoke test left with restore or clean start (not smoke-tested) clears
+    smoke_fallback once the integration's entries load on it, as a passing smoke test does."""
+
+    def boot_left(self, mode="restore"):
+        state = {"current": NEW, "desired": NEW, "previous": OLD,
+                 "smoke_fallback": {"from": NEW, "to": OLD, "domain": "demo", "reason": "x", "at": "2026-10-12T10:00:00"}}
+        self.write(state)
+        self.hass.config_entries.async_entries = lambda domain: [e for e in self.entries.values()] if domain == "demo" else []
+        asyncio.run(self.updater.async_start_smoke(self.installer, state))
+
+    def test_the_entries_loading_clear_it(self):
+        self.entries["e1"] = _entry("e1")
+        self.boot_left()
+        self.assertEqual(len(self.later), 1)
+        asyncio.run(self.updater.async_left_version_check(self.installer, "demo"))
+        self.assertNotIn("smoke_fallback", self.state())
+
+    def test_entries_that_do_not_load_keep_it(self):
+        self.entries["e1"] = _entry("e1", state="setup_error")
+        self.boot_left()
+        asyncio.run(self.updater.async_left_version_check(self.installer, "demo"))
+        self.assertIn("smoke_fallback", self.state())
+
+    def test_entries_still_setting_up_are_waited_for(self):
+        self.entries["e1"] = _entry("e1", state="setup_in_progress")
+        self.boot_left()
+        self.later.clear()
+        asyncio.run(self.updater.async_left_version_check(self.installer, "demo"))
+        self.assertEqual(self.later, [self.ha_updater.SMOKE_RECHECK_S])
+        self.assertIn("smoke_fallback", self.state())
+
+    def test_another_version_booting_does_not_touch_it(self):
+        self.entries["e1"] = _entry("e1")
+        with mock.patch.object(self.ha_updater, "HA_VERSION", OLD):
+            self.boot_left()
+        self.assertEqual(self.later, [])
+        self.assertIn("smoke_fallback", self.state())
+
+
 class EntrypointAfterTheFallbackTest(EntrypointMainBase):
     """The boot after the manager switched back from B to A (here B is the version that was left)."""
 
