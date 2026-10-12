@@ -386,5 +386,7 @@ all still takes the three-crash path above.
 Switching to a version that was left this way is refused unless forced: System
 says why it was left and asks before scheduling it anyway, and MQTT never
 forces it. A forced switch with *keep* is smoke-tested again. `smoke_fallback`
-in `ha.json` (and in `GET /api/ha`) records the last automatic switch back; a
-smoke test that passes on that version clears it.
+in `ha.json` (and in `GET /api/ha`) records the last automatic switch back; it
+is cleared once a boot of that version loads the integration's config entries:
+by a smoke test that passes, or, after a switch with restore or clean start
+(not smoke-tested), when the entries load.

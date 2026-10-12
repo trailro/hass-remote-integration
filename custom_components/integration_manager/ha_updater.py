@@ -413,9 +413,14 @@ class HaUpdater:
                 return st
 
             await self.hass.async_add_executor_job(lambda: update_json(self.file, record, read=lambda _p: self._read_for_update()))
+        delay = installer.settings.int_("smoke_test_s", 0, 86400)
+        if left.get("from") == HA_VERSION and left.get("domain") and (rec is None or rec.get("domain") != installer.running or delay <= 0):
+            # the version a smoke test left boots with no smoke test (a forced switch with restore or clean start,
+            # or the smoke test off): it is no longer marked as left once the integration's entries load on it
+            domain = str(left["domain"])
+            self.hass.loop.call_later(max(SMOKE_RECHECK_S, delay), lambda: self.hass.async_create_task(self.async_left_version_check(installer, domain)))
         if rec is None:
             return
-        delay = installer.settings.int_("smoke_test_s", 0, 86400)
         if rec.get("domain") != installer.running or delay <= 0:
             # another integration runs now, or the smoke test is off (as for an integration switch)
             await self.hass.async_add_executor_job(self._drop_smoke, None)
@@ -425,6 +430,28 @@ class HaUpdater:
         events.emit("ha", f"Home Assistant {HA_VERSION}: smoke test of {rec['domain']} in {delay} s "
                     f"(loaded before the switch from {rec.get('from')})", version=HA_VERSION)
         self._schedule_smoke(delay)
+
+    async def async_left_version_check(self, installer: Any, domain: str) -> None:
+        """The boot of the version a smoke test left, not smoke-tested: ha.json "smoke_fallback" goes once
+        ``domain``'s config entries load (as a passing smoke test clears it); entries still setting up are waited for."""
+        if installer.running != domain:
+            return
+        entries = [e for e in self.hass.config_entries.async_entries(domain) if not e.disabled_by]
+        if not self.hass.is_running or any(e.state.value == "setup_in_progress" for e in entries):
+            self.hass.loop.call_later(SMOKE_RECHECK_S, lambda: self.hass.async_create_task(self.async_left_version_check(installer, domain)))
+            return
+        if not (all(e.state.value == "loaded" for e in entries) if entries else domain in self.hass.config.components):
+            return
+
+        def proven(st: dict[str, Any]) -> dict[str, Any] | None:
+            fb = st.get("smoke_fallback")
+            if not (isinstance(fb, dict) and fb.get("from") == HA_VERSION):
+                return None
+            st.pop("smoke_fallback", None)
+            return st
+
+        if await self.hass.async_add_executor_job(lambda: update_json(self.file, proven, read=lambda _p: self._read_for_update())):
+            events.emit("ha", f"Home Assistant {HA_VERSION}: {domain} sets up on it; no longer marked as left by the smoke test", version=HA_VERSION)
 
     def _schedule_smoke(self, delay: float) -> None:
         if self._smoke_handle is not None:
