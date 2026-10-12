@@ -33,6 +33,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 
@@ -803,6 +804,52 @@ def _ha_symbol_checks(component_dir: str, target: str) -> list[str]:
 
 MAX_HA_MODULE_VERSIONS = 4  # the module contents of a release never change: kept per version, for a few targets
 _HA_MODULE_NAMES: dict[str, dict[str, frozenset[str] | None]] = {}  # version -> module -> names (None: not judged)
+# A downloaded wheel is kept for the life of the process (removed at exit), the newest few: a preflight of another
+# integration needs other modules of the same release, and the wheel is tens of MB to fetch again.
+MAX_HA_WHEELS = 2
+_HA_WHEELS: dict[str, str] = {}  # version -> the directory its wheel was downloaded into (the newest last)
+_HA_WHEEL_DIR: list[str] = []  # this process's directory under the temporary directory, once made
+_HA_SOURCE_LOCK = threading.Lock()  # one check resolves and reads at a time: a wheel is never dropped while read
+
+
+def _wheel_dir() -> str:
+    """Blocking: this process's directory for kept wheels, made at first use; one a process that ended without
+    its cleanup (killed) left behind is removed then."""
+    import atexit
+    import glob
+    import tempfile
+
+    if not _HA_WHEEL_DIR:
+        for old in glob.glob(os.path.join(tempfile.gettempdir(), "hri-ha-wheels-*")):
+            pid = os.path.basename(old).split("-")[3]
+            try:
+                os.kill(int(pid), 0)
+            except (ValueError, ProcessLookupError):
+                shutil.rmtree(old, ignore_errors=True)
+            except OSError:
+                pass  # alive under another user: not ours
+        _HA_WHEEL_DIR.append(tempfile.mkdtemp(prefix=f"hri-ha-wheels-{os.getpid()}-"))
+        atexit.register(_drop_wheels)
+    return _HA_WHEEL_DIR[0]
+
+
+def _drop_wheels() -> None:
+    """The kept wheels go (at exit)."""
+    _HA_WHEELS.clear()
+    while _HA_WHEEL_DIR:
+        shutil.rmtree(_HA_WHEEL_DIR.pop(), ignore_errors=True)
+
+
+def _kept_wheel(target: str) -> str | None:
+    scratch = _HA_WHEELS.pop(target, None)
+    dest = os.path.join(scratch, "download") if scratch else ""
+    wheels = [n for n in (os.listdir(dest) if dest and os.path.isdir(dest) else []) if n.endswith(".whl")]
+    if len(wheels) != 1:
+        if scratch:
+            shutil.rmtree(scratch, ignore_errors=True)
+        return None
+    _HA_WHEELS[target] = scratch  # the newest at the end again
+    return os.path.join(dest, wheels[0])
 
 
 def _running_ha_root() -> str:
@@ -1088,7 +1135,7 @@ def _target_ha_root(target: str, python: str, config_dir: str) -> tuple[str | No
     """Blocking: (where the target's `homeassistant` package is: a directory, or the path of its wheel; a
     directory to remove afterwards; why there is none).  The running install for the running version, a venv
     of the target on the volume, otherwise the target's wheel from the index pip uses, downloaded without its
-    dependencies into a temporary directory."""
+    dependencies and kept for the process (``_HA_WHEELS``)."""
     import tempfile
 
     if not _HA_VERSION_RE.fullmatch(target):
@@ -1098,7 +1145,9 @@ def _target_ha_root(target: str, python: str, config_dir: str) -> tuple[str | No
     site = os.path.join(config_dir, f"venv-{target}", "lib", f"python{sys.version_info[0]}.{sys.version_info[1]}", "site-packages")
     if os.path.isfile(os.path.join(config_dir, f"venv-{target}", ".ok")) and os.path.isfile(os.path.join(site, "homeassistant", "__init__.py")):
         return site, None, ""  # .ok: the entrypoint finished that install (written last)
-    scratch = tempfile.mkdtemp(prefix="hri-ha-source-")
+    if (kept := _kept_wheel(target)) is not None:
+        return kept, None, ""
+    scratch = tempfile.mkdtemp(prefix=f"{target}-", dir=_wheel_dir())
     dest = os.path.join(scratch, "download")
     try:
         proc = _run_pip([python, "-m", "pip", "download", "--no-deps", "--only-binary=:all:", "--ignore-requires-python",
@@ -1115,18 +1164,26 @@ def _target_ha_root(target: str, python: str, config_dir: str) -> tuple[str | No
         err = (proc.stderr or "").strip()
         why = f"PyPI could not be reached: {_pip_reason(err)}" if _pip_unreachable(err) else (_pip_reason(err) if err else "no wheel")
         return None, None, f"Home Assistant {target} could not be downloaded ({why})"
-    return os.path.join(dest, wheels[0]), scratch, ""
+    _HA_WHEELS[target] = scratch
+    while len(_HA_WHEELS) > MAX_HA_WHEELS:
+        shutil.rmtree(_HA_WHEELS.pop(next(iter(_HA_WHEELS))), ignore_errors=True)
+    return os.path.join(dest, wheels[0]), None, ""
 
 
 def _ha_attribute_checks(component_dir: str, target: str, python: str, config_dir: str) -> tuple[list[str], str]:
     """Blocking: (one line per attribute of a Home Assistant module the integration reads and Home Assistant
     ``target`` does not have - "ha_compat.py:293 uses homeassistant.helpers.config_validation.vol, which Home
     Assistant 2026.10.0 does not have" -, why the check could not run)."""
-    import zipfile
-
     uses = _ha_attribute_uses(component_dir, _running_ha_root())
     if not uses:
         return [], ""
+    with _HA_SOURCE_LOCK:
+        return _ha_attribute_verdicts(uses, target, python, config_dir)
+
+
+def _ha_attribute_verdicts(uses: list[tuple[str, int, str, str]], target: str, python: str, config_dir: str) -> tuple[list[str], str]:
+    import zipfile
+
     known = dict(_HA_MODULE_NAMES.get(target, {}))
     missing = sorted({module for _rel, _line, module, _attr in uses if module not in known})
     if missing:
@@ -1148,6 +1205,8 @@ def _ha_attribute_checks(component_dir: str, target: str, python: str, config_di
                     source = _HaSource(wheel=wheel)
                     known.update((m, names(source, m)) for m in missing)
         except (OSError, zipfile.BadZipFile) as err:
+            if not os.path.isdir(where) and (kept := _HA_WHEELS.pop(target, None)):
+                shutil.rmtree(kept, ignore_errors=True)  # downloaded again next time
             return [], f"Home Assistant {target} could not be read: {err}"
         finally:
             if cleanup:

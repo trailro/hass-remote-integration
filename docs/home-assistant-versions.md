@@ -212,9 +212,11 @@ catches: a version that does not set up is rolled back automatically.
   homeassistant.helpers.config_validation.vol, which Home Assistant 2026.10.0
   does not have`), listing the first three and counting the rest. The source
   is the running install for the running version, a venv of the target on the
-  volume whose install finished (its `.ok` marker), or otherwise the target's wheel, downloaded without dependencies into
-  a temporary directory and removed after the check; module contents are kept
-  in memory per version. A download that fails is a warning, never a blocker.
+  volume whose install finished (its `.ok` marker), or otherwise the target's
+  wheel, downloaded without dependencies into a temporary directory and kept
+  there while the process runs (the two newest versions; removed at exit), so
+  a later preflight against the same version downloads nothing; module
+  contents are kept in memory per version. A download that fails is a warning, never a blocker.
   Not reported: a read through `getattr()`; a read in the test or the body of
   an `if`, a conditional expression or a `while` whose test calls `hasattr()`,
   or in an `and`/`or` with such a call (`hasattr(cv, "x") and cv.x`); a read

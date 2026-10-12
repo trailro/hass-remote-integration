@@ -65,6 +65,7 @@ class _Base(unittest.TestCase):
     def setUp(self):
         preflight._HA_MODULE_NAMES.clear()
         self.addCleanup(preflight._HA_MODULE_NAMES.clear)
+        self.addCleanup(preflight._drop_wheels)
         self.target_root = _tree(self, TARGET_TREE)
         # what the running Home Assistant has: config_validation with `vol`, as 2026.9 had it
         running = dict(TARGET_TREE)
@@ -235,13 +236,12 @@ class TargetSourceTest(_Base):
         self.assertNotEqual(root, site)
         pip.assert_called_once()
 
-    def test_any_other_version_comes_from_its_wheel_and_the_download_is_removed(self):
+    def _pip(self, calls, version=TARGET):
         wheel_src = _tree(self, {})
-        wheel = os.path.join(wheel_src, f"homeassistant-{TARGET}-py3-none-any.whl")
+        wheel = os.path.join(wheel_src, f"homeassistant-{version}-py3-none-any.whl")
         with zipfile.ZipFile(wheel, "w") as zf:
             for rel, text in TARGET_TREE.items():
                 zf.writestr(rel, text)
-        calls = []
 
         def pip(cmd):
             calls.append(cmd)
@@ -250,8 +250,14 @@ class TargetSourceTest(_Base):
             shutil.copy(wheel, dest)
             return preflight.subprocess.CompletedProcess(cmd, 0, "", "")
 
+        return pip
+
+    def test_any_other_version_comes_from_its_wheel_kept_for_the_process(self):
+        calls = []
         component = _tree(self, {"__init__.py": "from homeassistant.helpers import config_validation as cv\nA = cv.vol\nB = cv.string\n"})
-        with mock.patch.object(preflight, "_run_pip", side_effect=pip):
+        other = _tree(self, {"__init__.py": "from homeassistant import const\nfrom homeassistant.components import sensor\n"
+                                            "A = const.GONE\nB = sensor.SensorEntity\n"})
+        with mock.patch.object(preflight, "_run_pip", side_effect=self._pip(calls)):
             hits, note = preflight._ha_attribute_checks(component, TARGET, "python", "/nonexistent")
             self.assertEqual(note, "")
             self.assertEqual(len(hits), 1)
@@ -260,10 +266,27 @@ class TargetSourceTest(_Base):
             for flag in ("download", "--no-deps", "--only-binary=:all:"):
                 self.assertIn(flag, calls[0])
             dest = calls[0][calls[0].index("--dest") + 1]
-            self.assertFalse(os.path.exists(dest), "the downloaded wheel was left behind")
-            # the module contents are kept per version: a second check downloads nothing
+            self.assertTrue(os.path.isdir(dest), "the wheel is downloaded again by the next preflight")
+            # the same modules again, and other modules of the same version (another integration): no download
             self.assertEqual(preflight._ha_attribute_checks(component, TARGET, "python", "/nonexistent"), (hits, ""))
+            hits2, _ = preflight._ha_attribute_checks(other, TARGET, "python", "/nonexistent")
+            self.assertEqual([h.split(" uses ")[1].split(",")[0] for h in hits2], ["homeassistant.const.GONE"])
         self.assertEqual(len(calls), 1)
+        preflight._drop_wheels()  # at exit
+        self.assertFalse(os.path.exists(dest), "the wheel outlived the process")
+
+    def test_only_the_newest_wheels_are_kept(self):
+        calls = []
+        versions = [f"2026.{m}.0" for m in range(1, preflight.MAX_HA_WHEELS + 2)]
+        for v in versions:
+            with mock.patch.object(preflight, "_run_pip", side_effect=self._pip(calls, v)):
+                where, cleanup, note = preflight._target_ha_root(v, "python", "/nonexistent")
+            self.assertTrue(where and os.path.isfile(where), note)
+            self.assertIsNone(cleanup)
+        dests = [c[c.index("--dest") + 1] for c in calls]
+        self.assertFalse(os.path.exists(dests[0]), "the oldest wheel was kept beyond the limit")
+        self.assertTrue(all(os.path.isdir(d) for d in dests[1:]))
+        self.assertEqual(list(preflight._HA_WHEELS), versions[1:])
 
     def test_a_download_that_fails_says_so(self):
         failed = preflight.subprocess.CompletedProcess([], 1, "", "ERROR: Could not find a version that satisfies the requirement")
