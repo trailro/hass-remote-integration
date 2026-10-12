@@ -385,8 +385,8 @@ class HaUpdater:
     # kept, a degraded one reported; one still waiting for its device (setup_retry) kept unconfirmed.  Not loaded:
     # with `auto_rollback` on, back to the version before the switch, with the configuration as it is now (saved
     # first) but for the stores the older version cannot read, from the switch's backup - once:
-    # the version it goes back to is not smoke-tested, and ha.json "smoke_fallback" records what happened, which
-    # a later switch to the same version warns about and is still allowed.
+    # the version it goes back to is not smoke-tested, and ha.json "smoke_fallback" records what happened: a later
+    # switch to the same version is refused unless forced (switch_blockers), and smoke-tested again.
 
     async def async_start_smoke(self, installer: Any, ha_state: Any) -> None:
         """Boot: the smoke test this boot owes a version change, if any, is scheduled."""

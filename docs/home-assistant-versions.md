@@ -383,7 +383,8 @@ switch back was skipped because a restore is scheduled. A downgrade with
 set of config entries than the one that ran. A version that fails to boot at
 all still takes the three-crash path above.
 
-Switching to a version that was left this way is allowed: the switch warns that
-it was left, and it is smoke-tested again. `smoke_fallback` in `ha.json` (and
-in `GET /api/ha`) records the last automatic switch back; a smoke test that
-passes on that version clears it.
+Switching to a version that was left this way is refused unless forced: System
+says why it was left and asks before scheduling it anyway, and MQTT never
+forces it. A forced switch with *keep* is smoke-tested again. `smoke_fallback`
+in `ha.json` (and in `GET /api/ha`) records the last automatic switch back; a
+smoke test that passes on that version clears it.
