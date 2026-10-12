@@ -40,14 +40,14 @@ class KeepSwitchAfterRollbackTest(unittest.TestCase):
         async def executor(fn, *args):
             return fn(*args)
 
-        self.hass = SimpleNamespace(config=SimpleNamespace(config_dir=cfg, path=lambda *p: os.path.join(cfg, *p)),
+        self.hass = SimpleNamespace(config=SimpleNamespace(config_dir=cfg, path=lambda *p: os.path.join(cfg, *p), components=set()),
                                     async_add_executor_job=executor)
         self.updater = ha_updater.HaUpdater(self.hass)
 
         async def async_backup(label=""):
             return backupkit.create(cfg, label, RUNNING)
 
-        self.installer = SimpleNamespace(hass=self.hass, busy=False, running="demo", running_tag="v1",
+        self.installer = SimpleNamespace(hass=self.hass, busy=False, running="demo", running_tag="v1", _entries_of=lambda _d: [],
                                          state=SimpleNamespace(rollback_backup=None),
                                          settings=SimpleNamespace(backup_keep=50), async_backup=async_backup,
                                          protected_backups=lambda: set(), min_ha_of=lambda *_a: None)

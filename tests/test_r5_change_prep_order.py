@@ -42,7 +42,7 @@ class PreparationOrderTest(unittest.TestCase):
         async def executor(fn, *args):
             return fn(*args)
 
-        self.hass = SimpleNamespace(config=SimpleNamespace(config_dir=cfg, path=lambda *p: os.path.join(cfg, *p)),
+        self.hass = SimpleNamespace(config=SimpleNamespace(config_dir=cfg, path=lambda *p: os.path.join(cfg, *p), components=set()),
                                     async_add_executor_job=executor)
         self.updater = ha_updater.HaUpdater(self.hass)
         self.backups = []
@@ -52,7 +52,7 @@ class PreparationOrderTest(unittest.TestCase):
             self.backups.append(rec["name"])
             return rec
 
-        self.installer = SimpleNamespace(hass=self.hass, busy=False, running="demo", running_tag="v2",
+        self.installer = SimpleNamespace(hass=self.hass, busy=False, running="demo", running_tag="v2", _entries_of=lambda _d: [],
                                          settings=SimpleNamespace(backup_keep=50), async_backup=async_backup,
                                          protected_backups=lambda: set(), min_ha_of=lambda *_a: None)
 

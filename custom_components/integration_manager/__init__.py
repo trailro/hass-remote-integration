@@ -294,6 +294,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     # each on its own: a state write that fails must not skip the steps after it either
     boot_step("the announced smoke verdict", installer.announce_smoke)  # a failed verdict whose automatic rollback restarted before it could be shown
     await async_announce_ha_error(hass, ha_state)
+    try:
+        await ha_updater.async_start_smoke(installer, ha_state)  # the first boot of a version change smoke-tests the integration
+    except Exception:  # noqa: BLE001 - the UI must come up whatever ha.json holds
+        _LOGGER.exception("the smoke test of the Home Assistant version change was not scheduled")
     boot_step("the released rollback backup", lambda: installer.release_rollback_backup(last_restore))
     if isinstance(last_restore, dict) and last_restore.get("at") and _recent(last_restore["at"]) \
             and last_restore["at"] != installer.state.last_restore_reported:

@@ -1704,6 +1704,9 @@ def _prepare() -> str:
         save_state(refused)
         hold_refused_boot(reason)
 
+    # the manager's smoke test of a version change switched back from ``current`` (ha_updater._smoke_fall_back): a
+    # fallback like the crash one above, decided while Home Assistant ran
+    fell_back = fell_back or (bool(fallback_from) and fallback_from == current and wanted != current)
     if current and current != wanted and venv_ok(current) and not fell_back and failures < MAX_BOOT_FAILURES:
         # (a version that just crashed its way into a fallback is not a rollback target)
         state["previous"] = current

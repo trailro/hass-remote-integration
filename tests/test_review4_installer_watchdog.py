@@ -551,14 +551,14 @@ class BackupViewsOffTheLoopTest(unittest.TestCase):
 
         cfg = _volume()
         self.addCleanup(shutil.rmtree, cfg, True)
-        hass = SimpleNamespace(config=SimpleNamespace(config_dir=cfg, path=lambda *p: os.path.join(cfg, *p)),
+        hass = SimpleNamespace(config=SimpleNamespace(config_dir=cfg, path=lambda *p: os.path.join(cfg, *p), components=set()),
                                async_add_executor_job=_job)
         protected = _Where(set)
 
         async def async_backup(label=""):
             return await _job(backupkit.create, cfg, label)
 
-        installer = SimpleNamespace(hass=hass, busy=False, running="demo", running_tag="v2",
+        installer = SimpleNamespace(hass=hass, busy=False, running="demo", running_tag="v2", _entries_of=lambda _d: [],
                                     settings=SimpleNamespace(backup_keep=50), async_backup=async_backup,
                                     protected_backups=protected, min_ha_of=lambda *_a: None)
         with mock.patch.object(views, "HA_VERSION", "2026.8.3"), mock.patch.object(views.events, "emit"):

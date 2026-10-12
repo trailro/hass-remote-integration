@@ -237,6 +237,20 @@ def _drop_change_restore(config_dir: str) -> bool:
     return False
 
 
+def _switch_smoke(installer: Installer, mode: str) -> dict[str, Any] | None:
+    """What the first boot of a version change smoke-tests (ha_updater.async_start_smoke): the running
+    integration's config entries that are loaded now, or that it is loaded at all when it runs from YAML.  Only
+    for keep: a restore or a clean start brings back another set of entries than the one that runs now."""
+    domain = installer.running
+    if mode != "keep" or not domain:
+        return None
+    entries = [e.entry_id for e in installer._entries_of(domain) if not e.disabled_by and e.state.value == "loaded"]  # noqa: SLF001
+    loaded = domain in installer.hass.config.components
+    if not entries and not loaded:
+        return None  # nothing runs now that the new version could fail to set up
+    return {"domain": domain, "from": HA_VERSION, "entries": entries, "loaded": loaded}
+
+
 async def async_change_ha_version(installer: Installer, updater: HaUpdater, target: str, mode: str, source: str,
                                   restore_backup: str | None = None, parts: list[str] | None = None) -> dict[str, Any]:
     """The one way to schedule a Home Assistant version change (System page,
@@ -320,9 +334,11 @@ async def async_change_ha_version(installer: Installer, updater: HaUpdater, targ
                     # cancel must run neither before it (dropped for a staging that may fail) nor after it
                     await hass.async_add_executor_job(backupkit.validate, os.path.join(cfg, backupkit.BACKUP_DIR, backup["name"]))
                     rebuild = await hass.async_add_executor_job(ha_import.stage_rebuild, cfg, backup["name"], installer.running, HA_VERSION, target)
+            left = (await hass.async_add_executor_job(updater._read)).get("smoke_fallback")  # noqa: SLF001
             state = await hass.async_add_executor_job(updater.set_desired, target, {"to": target, "mode": mode, "backup": backup["name"],
                                                                                    "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                                                                                   **({"parts": restore_parts} if restore is not None else {})})
+                                                                                   **({"parts": restore_parts} if restore is not None else {}),
+                                                                                   **({"smoke": smoke} if (smoke := _switch_smoke(installer, mode)) else {})})
             # an older change's preparations go only now, once this change has one of its own and is recorded: a
             # keep prepares nothing but ha.json, and a rebuild's plan is written above.  Dropped before that, a
             # failure here (a full volume) would leave the box with neither change and say nothing about it.
@@ -349,6 +365,9 @@ async def async_change_ha_version(installer: Installer, updater: HaUpdater, targ
     if mode == "keep" and ha_vkey(target) < ha_vkey(HA_VERSION):
         warnings.append(f"Home Assistant only migrates its configuration forward: if {HA_VERSION} changed a storage format, {target} "
                         "cannot start and the container falls back after 3 attempts (restore or rebuild avoid that)")
+    if isinstance(left, dict) and left.get("from") == target:
+        warnings.append(f"Home Assistant {target} was left automatically on {left.get('at')}: {left.get('domain')} did not set up on it "
+                        f"({left.get('reason')}). It is smoke-tested again after this switch, and left again if it still does not set up")
     note = {"keep": "", "restore": f"; configuration restored from {restore['name'] if restore else ''}",
             "rebuild": f"; clean start, {installer.running or 'no integration'} rebuilt after the boot"}[mode]
     events.emit("ha", f"Home Assistant {target} wanted ({source}), backup {backup['name']}{note}; applied at the next restart",

@@ -289,3 +289,45 @@ count.
 
 What happened (a fallback, a failed install) stays on **System** until the
 next version change and is announced once as a notification.
+
+## When the integration does not set up on the new version
+
+A version can boot fine while the integration that ran before no longer sets up
+on it (an `AttributeError` or `ImportError` in its code, `setup_error`, not
+loaded). A switch with **keep** (every upgrade, and a downgrade that keeps the
+configuration) records which of the running integration's config entries are
+loaded at that moment (or, for an integration set up from YAML, that it is
+loaded). The first boot of the new version smoke-tests exactly those, after the
+integration smoke test's delay (`smoke_test_s` in the settings on **System**,
+300 s by default; `0` turns this off too). The record is kept in `ha.json`
+(`smoke`) until the verdict, so a restart in between does not lose it.
+
+- **Loaded**: the version is kept. A degraded integration (set up, but entities
+  unavailable or silent) is kept as well, and reported on the timeline and in a
+  notification, as after an integration update.
+- **Still setting up** is waited for, 60 s at a time, until the smoke test's
+  limit (15 minutes or `smoke_test_s`, the longer); still setting up then counts
+  as not loaded. An entry in `setup_retry` gets one more interval first.
+- **Not loaded**: with `auto_rollback` on (the default), the container switches
+  back to the version before the switch, once: the configuration from the
+  backup the switch took is restored for it, `last_error` says what failed and
+  that it switched back, and the process restarts. After the restart this is
+  on the timeline and in a notification, and **System** shows it until the
+  next version change. The version it went back to is not smoke-tested, so this
+  cannot loop; the version it left keeps its venv until the one it went back to
+  has booted, as after a crash fallback, and is not offered as the rollback
+  target. With `auto_rollback` off, or with the previous venv gone or the
+  switch's backup unknown, the version is kept and the notification says why it
+  was not left.
+
+An entry removed or disabled since the switch is not judged. Nothing is judged
+while another switch is scheduled, another integration runs or an action is in
+progress (it is checked again later). A downgrade with **restore** or **clean
+start** is not smoke-tested: either brings back another set of config entries
+than the one that ran. A version that fails to boot at all still takes the
+three-crash path above.
+
+Switching to a version that was left this way is allowed: the switch warns that
+it was left, and it is smoke-tested again. `smoke_fallback` in `ha.json` (and
+in `GET /api/ha`) records the last automatic switch back; a smoke test that
+passes on that version clears it.
