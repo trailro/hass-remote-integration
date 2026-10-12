@@ -339,7 +339,9 @@ integration smoke test's delay (`smoke_test_s` in the settings on **System**,
   boot. `last_error` and the notification say what failed, that it switched
   back, which backup holds the configuration as it was, and which files came
   from the switch's backup. What changed in those files since the switch is
-  only in the saved backup. Then the process restarts. After the restart this is
+  only in the saved backup. Then the process restarts. If that restart is
+  refused (another action started meanwhile), no other version change can be
+  scheduled until a restart has applied the switch back. After the restart this is
   on the timeline and in a notification, and **System** shows it until the
   next version change. The version it went back to is not smoke-tested, so this
   cannot loop; the version it left keeps its venv until the one it went back to
