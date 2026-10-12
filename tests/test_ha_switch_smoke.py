@@ -393,6 +393,53 @@ class VerdictTest(_Base):
         self.assertEqual(self.state()["desired"], OLD)
 
 
+class FallbackOverARestoreByHandTest(_Base):
+    """A restore the user scheduled by hand and has not restarted for: the fallback's schedule replaced it."""
+
+    def schedule_by_hand(self):
+        backupkit.schedule_restore(self.cfg, "pre-ha.zip", ["storage"])
+        return backupkit._pending_meta(self.cfg)["zip"]  # noqa: SLF001
+
+    def test_the_fallback_waits_while_a_restore_by_hand_is_scheduled(self):
+        self.entries["e1"] = _entry("e1", state="setup_error")
+        self.first_boot()
+        mine = self.schedule_by_hand()
+        self.later.clear()
+        self.check()
+        state = self.state()
+        self.assertEqual(state["desired"], NEW)
+        self.assertNotIn("smoke_fallback", state)
+        self.assertIn("smoke", state)
+        self.assertEqual(self.later, [self.ha_updater.SMOKE_RECHECK_S])
+        self.assertEqual(backupkit._pending_meta(self.cfg)["zip"], mine)  # noqa: SLF001
+        self.assertIsNone(backupkit.pending_for_version(self.cfg))
+        self.assertTrue(any("restore" in m and "scheduled" in m for m in self.emitted), self.emitted)
+        self.installer.restart.assert_not_awaited()
+        backupkit.cancel_restore(self.cfg, by_hand=True)  # the user cancels it: the fallback goes ahead
+        self.check()
+        self.assertEqual(self.state()["desired"], OLD)
+        self.assertEqual(backupkit.pending_for_version(self.cfg), OLD)
+        self.installer.restart.assert_awaited_once()
+
+    def test_a_restore_still_scheduled_at_the_limit_keeps_the_version(self):
+        self.entries["e1"] = _entry("e1", state="setup_error")
+        self.first_boot()
+        mine = self.schedule_by_hand()
+        self.check()
+        self.updater._smoke_restore_waiting -= self.installer.SETUP_WAIT_S + 1  # noqa: SLF001 - 15 minutes later
+        self.later.clear()
+        self.check()
+        state = self.state()
+        self.assertEqual(state["desired"], NEW)
+        self.assertNotIn("smoke", state)
+        self.assertNotIn("smoke_fallback", state)
+        self.assertEqual(self.later, [])
+        self.assertEqual(backupkit._pending_meta(self.cfg)["zip"], mine)  # noqa: SLF001
+        self.installer.restart.assert_not_awaited()
+        self.assertTrue(self.notified and "not switched back" in self.notified[-1] and "restore is scheduled" in self.notified[-1],
+                        self.notified)
+
+
 class EntrypointAfterTheFallbackTest(EntrypointMainBase):
     """The boot after the manager switched back from B to A (here B is the version that was left)."""
 
