@@ -309,8 +309,9 @@ count.
   picked up while it waits. A downgrade with **keep**, and one whose restore
   or clean start ran, boot as before.
 
-What happened (a fallback, a failed install) stays on **System** until the
-next version change and is announced once as a notification.
+What happened is announced once as a notification. A failed install stays on
+**System** until the next version change; a smoke-test switch back stays until
+the version it left has booted and loaded the integration.
 
 ## When the integration does not set up on the new version
 
@@ -356,7 +357,8 @@ integration smoke test's delay (`smoke_test_s` in the settings on **System**,
   refused (another action started meanwhile), no other version change can be
   scheduled until a restart has applied the switch back. After the restart this is
   on the timeline and in a notification, and **System** shows it until the
-  next version change. The version it went back to is not smoke-tested, so this
+  version it left boots and loads the integration; the next version change
+  only clears `last_error`. The version it went back to is not smoke-tested, so this
   cannot loop; the version it left keeps its venv until the one it went back to
   has booted, as after a crash fallback, and is not offered as the rollback
   target. With `auto_rollback` off, or with the previous venv gone or the

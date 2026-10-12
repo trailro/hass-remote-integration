@@ -453,8 +453,9 @@ falls back to the previous one. One that boots is smoke-tested like an
 integration update: if the integration's config entries that were loaded before
 the switch do not load on it within the smoke test, the container switches back
 to the previous version once. It saves the configuration first, and restores
-from the switch's backup only the `.storage` files the older version cannot
-read. It says why on the timeline and in a notification; a degraded integration is
+from the switch's backup only the `.storage` files the new version wrote at a
+higher major `version`, or removed (the detail is in
+[home-assistant-versions.md](docs/home-assistant-versions.md)). It says why on the timeline and in a notification; a degraded integration is
 kept and reported, and so is one whose device is still not ready (`setup_retry`). The list offers the ten newest stable releases
 plus every version the box has (*Show all versions* for the rest). Versions
 below the image's floor (`HA_VERSION_MIN`, 2026.5.0) or whose pins have no wheel
@@ -772,6 +773,10 @@ without it too, from a copy at most 10 seconds old. See [API](docs/api.md).
   container and confirm the version anyway when the page offers to; building
   takes long and needs the memory. A version that says *could not check* is not
   refused: PyPI was unreachable or pip gave up, and the install may work.
+  The same *unlikely to install* mark is given when the running integration
+  reads a name that version does not have, or when the smoke test left that
+  version (`was left automatically`); *Schedule anyway* still asks, and MQTT
+  never forces it.
 - **A Home Assistant version is refused as "older than this image's floor".**
   The image refuses everything below `HA_VERSION_MIN` (2026.5.0 here), without
   *Schedule anyway*, even when a venv of that version is on the volume. The
