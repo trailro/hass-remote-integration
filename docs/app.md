@@ -19,7 +19,7 @@ below. Supervised installs are deprecated and unsupported by Home Assistant.
 - **Home Assistant OS** in the range the Supervisor supports (the newest major
   release and the three before it).
 
-Tested on Home Assistant OS 18.3 / Supervisor 2026.09.2 / Core 2026.9.3.
+Tested on Home Assistant OS 18.3 / Supervisor 2026.09.3 / Core 2026.10.1.
 
 ## Install
 
