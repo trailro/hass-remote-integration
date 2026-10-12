@@ -798,7 +798,8 @@ def _ha_symbol_checks(component_dir: str, target: str) -> list[str]:
 # level (assignments, definitions, the names it imports, its submodules, the deprecated constants Home
 # Assistant's own __getattr__ serves).  Nothing is imported.  A module whose names cannot be read off its
 # source (a __getattr__ of its own, globals() written to, a star import from outside Home Assistant) is not
-# judged; neither is a read through getattr(), behind hasattr() or in a `try` that catches AttributeError.
+# judged; neither is a read through getattr(), behind hasattr() or a test of the Home Assistant version (`_gate`), or in a
+# `try` that catches AttributeError.
 
 MAX_HA_MODULE_VERSIONS = 4  # the module contents of a release never change: kept per version, for a few targets
 _HA_MODULE_NAMES: dict[str, dict[str, frozenset[str] | None]] = {}  # version -> module -> names (None: not judged)
@@ -824,6 +825,28 @@ def _catches_attribute_error(handler: Any) -> bool:
         return True
     nodes = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
     return any(isinstance(n, ast.Name) and n.id in ("AttributeError", "Exception", "BaseException") for n in nodes)
+
+
+_VERSION_NAMES = frozenset({"HA_VERSION", "HAVERSION", "__version__", "MAJOR_VERSION", "MINOR_VERSION"})
+
+
+def _gate(test: Any) -> str | None:
+    """"version" when ``test`` compares the running Home Assistant's version (HA_VERSION, __version__,
+    MAJOR_VERSION, MINOR_VERSION, AwesomeVersion(...)), "hasattr" when it asks hasattr(); otherwise None.
+    What such a test guards is written for one version or the other: not a read every version must have."""
+    import ast
+
+    kind = None
+    for n in ast.walk(test):
+        if isinstance(n, ast.Name) and n.id in _VERSION_NAMES or isinstance(n, ast.Attribute) and n.attr in _VERSION_NAMES:
+            return "version"
+        if isinstance(n, ast.Call):
+            name = n.func.id if isinstance(n.func, ast.Name) else n.func.attr if isinstance(n.func, ast.Attribute) else None
+            if name == "AwesomeVersion":
+                return "version"
+            if name == "hasattr":
+                kind = "hasattr"
+    return kind
 
 
 def _dotted(node: Any) -> list[str] | None:
@@ -875,13 +898,14 @@ def _ha_attribute_uses(component_dir: str, ha_root: str) -> list[tuple[str, int,
             if isinstance(node, ast.Try) and any(_catches_attribute_error(h) for h in node.handlers):
                 for stmt in node.body:
                     guarded.update(id(n) for n in ast.walk(stmt))
-            elif isinstance(node, ast.If):
-                checked = {(c.args[0].id, c.args[1].value) for c in ast.walk(node.test)
-                           if isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id == "hasattr"
-                           and len(c.args) == 2 and isinstance(c.args[0], ast.Name) and isinstance(c.args[1], ast.Constant)}
-                for stmt in node.body:
-                    guarded.update(id(n) for n in ast.walk(stmt) if isinstance(n, ast.Attribute)
-                                   and isinstance(n.value, ast.Name) and (n.value.id, n.attr) in checked)
+            elif isinstance(node, (ast.If, ast.IfExp, ast.While)) and (gate := _gate(node.test)):
+                # the test and what runs when it holds; behind a version test, what runs otherwise too
+                body = node.body if isinstance(node.body, list) else [node.body]
+                orelse = node.orelse if isinstance(node.orelse, list) else [node.orelse]
+                for part in [node.test, *body, *(orelse if gate == "version" else [])]:
+                    guarded.update(id(n) for n in ast.walk(part))
+            elif isinstance(node, ast.BoolOp) and any(_gate(v) for v in node.values):
+                guarded.update(id(n) for n in ast.walk(node))  # `hasattr(cv, "x") and cv.x`
         # a name the code binds again is not the module there: `for entity in ...` beside `from homeassistant.helpers
         # import entity`, a parameter or a comprehension variable of the same name.  At module level the name is
         # dropped for the whole file; in a function, lambda or comprehension, for that scope.
@@ -936,6 +960,25 @@ def _walk_module_level(node: Any):
         yield from _walk_module_level(child)
 
 
+def _walk_bindings(node: Any):
+    """_walk_module_level, in source order, without what binds nothing when the module runs: the body of an
+    `if TYPE_CHECKING:` (its `else` is walked) and an annotation without a value (`hass: HomeAssistant`)."""
+    import ast
+
+    if isinstance(node, ast.If) and (isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING"
+                                     or isinstance(node.test, ast.Attribute) and node.test.attr == "TYPE_CHECKING"):
+        for stmt in node.orelse:
+            yield from _walk_bindings(stmt)
+        return
+    if isinstance(node, ast.AnnAssign) and node.value is None:
+        return
+    yield node
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+        return
+    for child in ast.iter_child_nodes(node):
+        yield from _walk_bindings(child)
+
+
 def _module_names(source: Any, module: str, _depth: int = 0) -> frozenset[str] | None:
     """What ``module`` binds at its top level, read from its source (``source.read(module)``: (text, is a
     package) or None when it does not exist); None when that cannot be told from the source."""
@@ -952,7 +995,7 @@ def _module_names(source: Any, module: str, _depth: int = 0) -> frozenset[str] |
     names: set[str] = set()
     deprecated_getattr = False
     for stmt in tree.body:
-        for node in _walk_module_level(stmt):
+        for node in _walk_bindings(stmt):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 if node.name == "__getattr__":
                     return None  # the module answers for names it does not bind
@@ -979,8 +1022,10 @@ def _module_names(source: Any, module: str, _depth: int = 0) -> frozenset[str] |
                         and call.args[0].id == "check_if_deprecated_constant"):
                     return None
                 deprecated_getattr = True
-            elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
                 names.add(node.id)
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Del):
+                names.discard(node.id)  # `del vol` at the end of the module: not there afterwards
             elif isinstance(node, ast.ExceptHandler) and node.name:
                 names.add(node.name)
             elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
@@ -1051,8 +1096,8 @@ def _target_ha_root(target: str, python: str, config_dir: str) -> tuple[str | No
     if target == ha_version:
         return _running_ha_root(), None, ""
     site = os.path.join(config_dir, f"venv-{target}", "lib", f"python{sys.version_info[0]}.{sys.version_info[1]}", "site-packages")
-    if os.path.isfile(os.path.join(site, "homeassistant", "__init__.py")):
-        return site, None, ""
+    if os.path.isfile(os.path.join(config_dir, f"venv-{target}", ".ok")) and os.path.isfile(os.path.join(site, "homeassistant", "__init__.py")):
+        return site, None, ""  # .ok: the entrypoint finished that install (written last)
     scratch = tempfile.mkdtemp(prefix="hri-ha-source-")
     dest = os.path.join(scratch, "download")
     try:

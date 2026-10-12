@@ -36,6 +36,14 @@ TARGET_TREE = {
                                                    "def make_entity_service_schema(schema):\n    return schema\n"
                                                    "try:\n    import ujson as fastjson\nexcept ImportError:\n    fastjson = None\n"),
     "homeassistant/helpers/magic.py": "def __getattr__(name):\n    return name\n",
+    "homeassistant/helpers/typed.py": ("from typing import TYPE_CHECKING\n"
+                                       "import voluptuous as vol\n"
+                                       "if TYPE_CHECKING:\n    from homeassistant.core import HomeAssistant\n    import probatio as pb\n"
+                                       "else:\n    REAL = 1\n"
+                                       "hass: HomeAssistant\n"
+                                       "count: int = 0\n"
+                                       "_tmp = 1\n"
+                                       "del _tmp, vol\n"),
     "homeassistant/components/__init__.py": "",
     "homeassistant/components/sensor/__init__.py": "class SensorEntity:\n    pass\n",
     "homeassistant/components/sensor/const.py": "UNIT = 'x'\n",
@@ -103,6 +111,35 @@ class ScanTest(_Base):
                                       "try:\n    V = cv.vol\nexcept AttributeError:\n    V = None\n"})
         self.assertEqual(hits, [])
 
+    def test_a_read_gated_on_the_home_assistant_version_is_not_reported(self):
+        # an integration that supports two Home Assistant versions reads what each one has behind a version test
+        hits, _ = self.check({
+            "a.py": "from homeassistant.helpers import config_validation as cv\n"
+                    "from homeassistant.const import __version__ as HAVERSION\n"
+                    "from awesomeversion import AwesomeVersion\n"
+                    "if AwesomeVersion(HAVERSION) >= '2026.10':\n    A = cv.gone\nelse:\n    A = cv.vol\n",
+            "b.py": "from homeassistant.helpers import config_validation as cv\n"
+                    "from homeassistant.const import MAJOR_VERSION, MINOR_VERSION\n"
+                    "B = cv.gone if (MAJOR_VERSION, MINOR_VERSION) >= (2026, 10) else cv.vol\n"
+                    "C = MAJOR_VERSION >= 2026 and cv.gone\n",
+            "c.py": "from homeassistant.helpers import config_validation as cv\n"
+                    "from homeassistant import const\n"
+                    "while const.__version__ < '2026.10':\n    D = cv.vol\n    break\n",
+            "d.py": "from homeassistant.helpers import config_validation as cv\n"
+                    "E = hasattr(cv, 'vol') and cv.vol\n"
+                    "F = cv.vol if hasattr(cv, 'vol') else None\n"
+                    "if hasattr(cv, 'vol') and cv.vol is not None:\n    G = cv.vol\n"})
+        self.assertEqual(hits, [])
+
+    def test_a_read_beside_a_test_that_is_no_gate_is_still_reported(self):
+        hits, _ = self.check({
+            "a.py": "from homeassistant.helpers import config_validation as cv\n"
+                    "import os\n"
+                    "if os.environ.get('X'):\n    A = cv.vol\n",
+            "b.py": "from homeassistant.helpers import config_validation as cv\n"
+                    "if hasattr(cv, 'string'):\n    pass\nelse:\n    B = cv.gone\n"})
+        self.assertEqual([h.split(" uses ")[0] for h in hits], ["a.py:4", "b.py:5"])
+
     def test_attributes_the_target_has_are_not_reported(self):
         hits, _ = self.check({"__init__.py": "from homeassistant.helpers import config_validation as cv\n"
                                              "from homeassistant import const\n"
@@ -111,6 +148,14 @@ class ScanTest(_Base):
                                              "E = cv.fastjson\nF = const.OLD_NAME\nG = sensor.SensorEntity\nH = sensor.const\n"
                                              "I = cv.__name__\n"})
         self.assertEqual(hits, [])
+
+    def test_names_a_module_deletes_or_only_declares_are_not_bound(self):
+        # `del` unbinds, an import under `if TYPE_CHECKING:` never runs, and `x: T` without a value binds nothing
+        hits, _ = self.check({"__init__.py": "from homeassistant.helpers import typed\n"
+                                             "A = typed.HomeAssistant\nB = typed.pb\nC = typed.hass\nD = typed._tmp\nE = typed.vol\n"
+                                             "F = typed.REAL\nG = typed.count\nH = typed.TYPE_CHECKING\n"})
+        self.assertEqual([h.split(" uses ")[1].split(",")[0] for h in hits],
+                         [f"homeassistant.helpers.typed.{n}" for n in ("HomeAssistant", "pb", "hass", "_tmp", "vol")])
 
     def test_a_module_with_its_own_getattr_is_not_judged(self):
         hits, _ = self.check({"__init__.py": "from homeassistant.helpers import magic\nX = magic.anything\n"})
@@ -173,9 +218,22 @@ class TargetSourceTest(_Base):
         site = os.path.join(cfg, f"venv-{TARGET}", "lib", f"python{preflight.sys.version_info[0]}.{preflight.sys.version_info[1]}", "site-packages")
         os.makedirs(os.path.join(site, "homeassistant"))
         open(os.path.join(site, "homeassistant", "__init__.py"), "w").close()
+        open(os.path.join(cfg, f"venv-{TARGET}", ".ok"), "w").close()
         with mock.patch.object(preflight, "_run_pip", side_effect=AssertionError("downloaded although the venv is there")):
             root, cleanup, note = preflight._target_ha_root(TARGET, "python", cfg)
         self.assertEqual((root, cleanup, note), (site, None, ""))
+
+    def test_a_venv_without_its_ok_marker_is_not_read(self):
+        # an install that was interrupted (the entrypoint writes .ok last): its package may be half there
+        cfg = _tree(self, {})
+        site = os.path.join(cfg, f"venv-{TARGET}", "lib", f"python{preflight.sys.version_info[0]}.{preflight.sys.version_info[1]}", "site-packages")
+        os.makedirs(os.path.join(site, "homeassistant"))
+        open(os.path.join(site, "homeassistant", "__init__.py"), "w").close()
+        failed = preflight.subprocess.CompletedProcess([], 1, "", "ERROR: offline")
+        with mock.patch.object(preflight, "_run_pip", return_value=failed) as pip:
+            root, _cleanup, _note = preflight._target_ha_root(TARGET, "python", cfg)
+        self.assertNotEqual(root, site)
+        pip.assert_called_once()
 
     def test_any_other_version_comes_from_its_wheel_and_the_download_is_removed(self):
         wheel_src = _tree(self, {})

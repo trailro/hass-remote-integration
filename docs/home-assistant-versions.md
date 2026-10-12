@@ -203,18 +203,25 @@ catches: a version that does not set up is rolled back automatically.
   vol`. Every such read (`import homeassistant.x.y as cv`, `from
   homeassistant.x import y` when `y` is a module, and dotted uses of `import
   homeassistant.x.y`; the first attribute of a chain) is looked up in the
-  target's own source, never imported: what the module binds at its top level,
-  the names it imports, its submodules and the deprecated constants Home
+  target's own source, never imported: what the module binds at its top level
+  (a name it deletes with `del`, imports only under `if TYPE_CHECKING:` or
+  declares without a value, `hass: HomeAssistant`, is not bound), the names it
+  imports, its submodules and the deprecated constants Home
   Assistant's `__getattr__` serves. One missing is a blocker naming the file,
   line and attribute (`ha_compat.py:293 uses
   homeassistant.helpers.config_validation.vol, which Home Assistant 2026.10.0
   does not have`), listing the first three and counting the rest. The source
   is the running install for the running version, a venv of the target on the
-  volume, or otherwise the target's wheel, downloaded without dependencies into
+  volume whose install finished (its `.ok` marker), or otherwise the target's wheel, downloaded without dependencies into
   a temporary directory and removed after the check; module contents are kept
   in memory per version. A download that fails is a warning, never a blocker.
-  Not reported: a read through `getattr()`, under an `if hasattr(...)` for the
-  same name, or in a `try` whose `except` catches `AttributeError` (or
+  Not reported: a read through `getattr()`; a read in the test or the body of
+  an `if`, a conditional expression or a `while` whose test calls `hasattr()`,
+  or in an `and`/`or` with such a call (`hasattr(cv, "x") and cv.x`); a read
+  in the test, the body or the `else` of one whose test compares the Home
+  Assistant version (`HA_VERSION`, `__version__`, `MAJOR_VERSION`,
+  `MINOR_VERSION`, `AwesomeVersion(...)`), or in an `and`/`or` with such a
+  comparison; a read in a `try` whose `except` catches `AttributeError` (or
   broader); a name the code binds again (a parameter, a loop or comprehension
   variable); dunder attributes; and modules whose names cannot be read off
   their source (their own `__getattr__`, `globals()` written to, a star import
