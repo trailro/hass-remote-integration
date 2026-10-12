@@ -1093,6 +1093,10 @@ class Installer:
             # picked: ha.json keeps last_restore forever, so an automatic copy would hold a keep slot and
             # refuse deletion for the life of the instance
             out.add(str(last_restore["pre_restore"]))
+        smoke_fallback = ha_state.get("smoke_fallback") if isinstance(ha_state, dict) else None
+        if isinstance(smoke_fallback, dict) and smoke_fallback.get("saved") and _within(smoke_fallback.get("at"), PRE_RESTORE_GRACE_S):
+            # the configuration as the version a smoke test left had it: the only copy of what changed there since the switch
+            out.add(str(smoke_fallback["saved"]))
         # every pre-restore copy of the last 7 days, not only the last restore's: a later restore that was dropped or
         # failed before taking its own copy replaces last_restore, and the copy of the restore before it (the only
         # way back from what that one brought) lost its protection with it.  Dated by the name backupkit gives it.

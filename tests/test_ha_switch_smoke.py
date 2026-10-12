@@ -440,6 +440,27 @@ class FallbackOverARestoreByHandTest(_Base):
                         self.notified)
 
 
+class FallbackRestoreProtectionTest(_Base):
+    def installer_for(self, smoke_fallback):
+        from custom_components.integration_manager.installer import Installer
+
+        inst = object.__new__(Installer)
+        inst.state_dir = os.path.join(self.cfg, backupkit.STATE_DIR)
+        inst.state = SimpleNamespace(installed={}, rollback_backup=None)
+        self.write({"smoke_fallback": smoke_fallback})
+        return inst
+
+    def test_the_saved_configuration_is_protected_for_7_days(self):
+        import time
+
+        def ago(s):
+            return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - s))
+
+        fb = {"from": NEW, "to": OLD, "saved": "20261012-100000-before-fallback-from-2026.10.0.zip", "at": ago(60)}
+        self.assertIn(fb["saved"], self.installer_for(fb).protected_backups())
+        self.assertNotIn(fb["saved"], self.installer_for({**fb, "at": ago(8 * 86400)}).protected_backups())
+
+
 class EntrypointAfterTheFallbackTest(EntrypointMainBase):
     """The boot after the manager switched back from B to A (here B is the version that was left)."""
 
