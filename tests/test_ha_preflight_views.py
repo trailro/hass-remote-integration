@@ -30,7 +30,7 @@ def _request(body):
     return SimpleNamespace(content_type="application/json", json=body_json)
 
 
-class HaUpdateGateTest(unittest.IsolatedAsyncioTestCase):
+class _GateBase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.cfg = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.cfg, True)
@@ -56,6 +56,8 @@ class HaUpdateGateTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(backupkit, "prune", return_value=[]):
             return await self.view.post(_request(body), action)
 
+
+class HaUpdateGateTest(_GateBase):
     async def test_a_blocked_version_is_refused_with_the_package_and_needs_force(self):
         self._view(BLOCKED)
         r = await self._post({"version": TARGET})
@@ -134,6 +136,98 @@ class HaCheckActionTest(HaUpdateGateTest):
         self.assertEqual(r["message"], "unknown action")
 
 
+class HaSwitchIntegrationTest(_GateBase):
+    """The running integration is checked against the target before a switch (ramses_cc 0.60.4 reads cv.vol, which
+    Home Assistant 2026.10.0 no longer has), and a version the smoke test left is not switched to again unasked."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        from custom_components.integration_manager import preflight
+        from tests.test_preflight_ha_attributes import TARGET_TREE, _tree
+
+        running = dict(TARGET_TREE)
+        running["homeassistant/helpers/config_validation.py"] = "import voluptuous as vol\n" + TARGET_TREE["homeassistant/helpers/config_validation.py"]
+        running_root, target_root = _tree(self, running), _tree(self, TARGET_TREE)
+        for p in (mock.patch.object(preflight, "_running_ha_root", return_value=running_root),
+                  mock.patch.object(preflight, "_target_ha_root", return_value=(target_root, None, ""))):
+            p.start()
+            self.addCleanup(p.stop)
+        preflight._HA_MODULE_NAMES.clear()
+        self.addCleanup(preflight._HA_MODULE_NAMES.clear)
+        comp = os.path.join(self.cfg, "custom_components", "ramses_cc")
+        os.makedirs(comp)
+        with open(os.path.join(comp, "ha_compat.py"), "w", encoding="utf-8") as fh:
+            fh.write("from homeassistant.helpers import config_validation as cv\nif cv.vol is not None:\n    pass\n")
+        self.installer.running, self.installer.running_tag = "ramses_cc", "0.60.4"
+        self.installer.config_dir = self.cfg
+        self.installer.component_dir = lambda d: os.path.join(self.cfg, "custom_components", d)
+        self.installer._entries_of = lambda d: []
+        self.hass.config.components = set()
+
+    async def test_the_running_integration_that_reads_a_removed_name_needs_force(self):
+        self._view(CLEAN)
+        r = await self._post({"version": TARGET})
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["needs_force"])
+        self.assertIn("ramses_cc 0.60.4 uses names Home Assistant", r["error"])
+        self.assertIn("ha_compat.py:2 uses homeassistant.helpers.config_validation.vol", r["error"])
+        self.installer.async_backup.assert_not_awaited()
+        self.assertIsNone(self.up._read().get("desired"))
+        r = await self._post({"version": TARGET, "force": True})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.up._read().get("desired"), TARGET)
+
+    async def test_check_shows_it_before_the_switch(self):
+        self._view(CLEAN)
+        r = await self._post({"version": TARGET}, "check")
+        self.assertFalse(r["check"]["ok"])
+        self.assertTrue(any("config_validation.vol" in b for b in r["check"]["blockers"]), r["check"])
+
+    async def test_an_integration_the_target_can_run_goes_through(self):
+        with open(os.path.join(self.cfg, "custom_components", "ramses_cc", "ha_compat.py"), "w", encoding="utf-8") as fh:
+            fh.write("from homeassistant.helpers import config_validation as cv\nS = cv.string\n")
+        self._view(CLEAN)
+        r = await self._post({"version": TARGET})
+        self.assertTrue(r["ok"], r)
+
+    async def test_a_target_that_cannot_be_read_warns_and_goes_through(self):
+        from custom_components.integration_manager import preflight
+
+        self._view(CLEAN)
+        with mock.patch.object(preflight, "_target_ha_root", return_value=(None, None, "PyPI could not be reached")):
+            r = await self._post({"version": TARGET}, "check")
+        self.assertTrue(r["check"]["ok"], r["check"])
+        self.assertTrue(any("PyPI could not be reached" in w for w in r["check"]["warnings"]))
+
+    async def test_a_version_the_smoke_test_left_needs_force(self):
+        with open(os.path.join(self.cfg, "custom_components", "ramses_cc", "ha_compat.py"), "w", encoding="utf-8") as fh:
+            fh.write("X = 1\n")
+        with open(os.path.join(self.cfg, "integration_manager", "ha.json"), "w", encoding="utf-8") as fh:
+            json.dump({"current": views.HA_VERSION, "smoke_fallback": {"from": TARGET, "to": views.HA_VERSION, "domain": "ramses_cc",
+                                                                      "reason": "config entry 'x' is setup_error", "at": "2026-10-12T10:00:00"}}, fh)
+        self._view(CLEAN)
+        r = await self._post({"version": TARGET})
+        self.assertTrue(r["needs_force"], r)
+        self.assertIn(f"Home Assistant {TARGET} was left automatically", r["error"])
+        r = await self._post({"version": TARGET, "force": True})
+        self.assertTrue(r["ok"], r)
+
+    async def test_the_left_version_is_not_offered_as_an_update(self):
+        newer = "2099.1.0"
+        with open(os.path.join(self.cfg, "integration_manager", "ha.json"), "w", encoding="utf-8") as fh:
+            json.dump({"current": views.HA_VERSION, "smoke_fallback": {"from": newer, "to": views.HA_VERSION}}, fh)
+        self.up.available = mock.AsyncMock(return_value={"latest_stable": newer, "recent": [newer]})
+        self.up.config_backups = lambda *a, **k: {}
+        self.up.verdicts = lambda *a, **k: {}
+        with mock.patch.object(backupkit, "list_backups", return_value=[]):
+            status = await self.up.status()
+        self.assertFalse(status["update_available"])
+        with open(os.path.join(self.cfg, "integration_manager", "ha.json"), "w", encoding="utf-8") as fh:
+            json.dump({"current": views.HA_VERSION}, fh)
+        with mock.patch.object(backupkit, "list_backups", return_value=[]):
+            self.assertTrue((await self.up.status())["update_available"])
+
+
 class MqttInstallTest(unittest.IsolatedAsyncioTestCase):
     """The manager device's "install Home Assistant" button takes the same refusal (no force on a device)."""
 
@@ -144,8 +238,18 @@ class MqttInstallTest(unittest.IsolatedAsyncioTestCase):
         dev.hass = None
         dev.installer = SimpleNamespace()
         dev.updater = SimpleNamespace(available=mock.AsyncMock(return_value={"latest_stable": "2099.1.0"}),
-                                      validate=mock.AsyncMock(), dependency_check=mock.AsyncMock(return_value=check))
+                                      validate=mock.AsyncMock(), dependency_check=mock.AsyncMock(return_value=check),
+                                      switch_blockers=mock.AsyncMock(return_value=([], [])))
         return dev
+
+    async def test_a_version_the_integration_cannot_run_on_or_that_was_left_is_not_scheduled(self):
+        dev = self._device(CLEAN)
+        dev.updater.switch_blockers = mock.AsyncMock(return_value=(["Home Assistant 2099.1.0 was left automatically on t: demo did not set up on it (x)"], []))
+        change = mock.AsyncMock()
+        with mock.patch.object(views, "async_change_ha_version", change):
+            with self.assertRaisesRegex(ValueError, "left automatically"):
+                await dev._do_install_home_assistant()
+        change.assert_not_awaited()
 
     async def test_a_blocked_version_is_not_scheduled(self):
         dev = self._device({**BLOCKED, "version": "2099.1.0"})

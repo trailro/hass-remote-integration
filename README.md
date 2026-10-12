@@ -387,7 +387,10 @@ refused: start it again. Blockers stop the switch, with a choice to start
 anyway; warnings do not. One blocker is an attribute of a Home Assistant module
 the code reads (`cv.vol`) that the target Home Assistant does not have, looked
 up in that version's own source: the running install, its venv on the volume,
-or its wheel, downloaded once and kept while the process runs. A switch started over MQTT refuses on blockers and
+or its wheel, downloaded once and kept while the process runs. The same check
+runs for the running integration when a Home Assistant version change is
+scheduled, against that version: a blocker refuses the change, with a choice to
+schedule it anyway on **System**. A switch started over MQTT refuses on blockers and
 says why in its result; for the API's `force`, see [API](docs/api.md).
 
 No preflight runs for the deployed version, a release of an integration without

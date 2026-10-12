@@ -225,13 +225,18 @@ pip. A version the floor, `requires_python` or PyPI refuses answers `ok: false`
 with the refusal as blocker. The request answers `ok: true` in all these cases;
 the verdict is `check.ok`. Cached per version and image Python for an hour.
 
+The check also holds, as blockers, an attribute of a Home Assistant module the
+running integration reads that the version does not have, and a version the
+smoke test switched back from (`smoke_fallback.from`); a version whose source
+could not be read for the first adds a warning.
+
 `POST /api/ha/update` runs the same check first and, without `force: true`,
 refuses a blocked version with `needs_force`, the report in `check` and the
 blockers in `error`, before any backup or write. `force` skips only that check:
 a version below `HA_VERSION_MIN`, one the image's Python cannot run
 (`requires_python`) or one PyPI does not list is refused without
-`needs_force`. A forced update always puts *scheduled with the dependency
-check skipped (force)* on the timeline. The manager device's *Install Home
+`needs_force`. A forced update always puts *scheduled with its checks skipped
+(force)* on the timeline. The manager device's *Install Home
 Assistant* refuses the same and has no force.
 
 ### Backups

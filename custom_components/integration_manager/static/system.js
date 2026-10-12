@@ -82,7 +82,7 @@ async function ha(force){
   const h=await (await fetch('api/ha'+(q?'?'+q:''),{headers:{'X-Requested-With':'fetch'}})).json(); HA=h;
   Object.assign(HACHK,h.verdicts||{});  // what the server already knew: painted, never re-resolved
   $('#hacur').innerHTML=`<span class="ok">${esc(h.current)}</span> <span class="mut">python ${esc(h.python)}${h.in_venv?'':' · <span class="warn">not running from a venv (old image)</span>'}</span>`;
-  $('#halatest').innerHTML=(h.latest_stable?`${esc(h.latest_stable)} <span class="mut">(${esc(h.latest_published||'')})</span>${h.update_available?' <span class="tag warn">update available</span>':' <span class="tag ok">up to date</span>'}`:`<span class="warn">${esc(h.error||'unknown')}</span>`)+` <span class="mut">· checked ${esc((h.checked_at||'').slice(11,16))}</span>`;
+  $('#halatest').innerHTML=(h.latest_stable?`${esc(h.latest_stable)} <span class="mut">(${esc(h.latest_published||'')})</span>${h.update_available?' <span class="tag warn">update available</span>':(h.smoke_fallback&&h.smoke_fallback.from===h.latest_stable)?' <span class="tag bad">left automatically: the integration did not set up on it</span>':' <span class="tag ok">up to date</span>'}`:`<span class="warn">${esc(h.error||'unknown')}</span>`)+` <span class="mut">· checked ${esc((h.checked_at||'').slice(11,16))}</span>`;
   $('#havenvs').textContent=(h.installed_venvs||[]).join(', ')||'—';
   const apt=h.apt;  // what the entrypoint did with HRI_APT_PACKAGES at this boot; a failure is not fatal, so it shows here
   $('#haapt').innerHTML=!apt?'<span class="mut">none (HRI_APT_PACKAGES not set)</span>'
@@ -125,7 +125,7 @@ async function haSet(v,action){
   let r=await post('api/ha/'+action,action==='update'?{version:v,config:mode}:{config:mode});
   if(!r.ok&&r.needs_force){
     HACHK[v]=r.check; haCheckShow(v);
-    if(!confirm(`Home Assistant ${v} is unlikely to install:\n\n- ${(r.check&&r.check.blockers||[r.error]).join('\n- ')}\n\nThe container would fall back to ${HA.current} after pip fails. Schedule it anyway?`)){log('ERROR: '+r.error);return;}
+    if(!confirm(`Home Assistant ${v} is unlikely to install or to run the integration:\n\n- ${(r.check&&r.check.blockers||[r.error]).join('\n- ')}\n\nIf it does not install, the container falls back to ${HA.current}; if the integration does not set up on it, the smoke test switches back. Schedule it anyway?`)){log('ERROR: '+r.error);return;}
     r=await post('api/ha/'+action,{version:v,config:mode,force:true});
   }
   if(!r.ok){log('ERROR: '+r.error);return;}

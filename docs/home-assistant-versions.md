@@ -131,6 +131,19 @@ the manager device's install action has no override. A venv already
 installed for this Python is not resolved again: the entrypoint boots it as
 it is.
 
+Two more checks refuse a version the same way (`force` from **System**
+overrides them, the manager device never does). The running integration's
+code is checked against the version's own source, as the integration
+preflight does below: an attribute of a Home Assistant module it reads that
+the version no longer has (ramses_cc 0.60.4 reads `cv.vol`, which 2026.10.0
+dropped) is a blocker naming the file and line, so the switch is stopped
+before it happens rather than switched back by the smoke test after it. If
+that version's source cannot be read, this is a warning. And a version the
+smoke test switched back from (`smoke_fallback`, below) is refused until it is
+chosen again on purpose; it is not offered as an update on **System** or by
+the manager device's update entity either, so an automatic update on the
+parent cannot switch to it, fall back and switch again.
+
 The floor is where the pin check starts failing, measured in September 2026
 on this image's CPython 3.14.7 on `aarch64`: **2026.5.0 and newer resolve
 entirely from wheels**; every release from 2026.4.4 back does not (2026.4.x on
