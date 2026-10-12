@@ -64,8 +64,11 @@ class _Base(unittest.TestCase):
             async_create_task=lambda coro: coro.close())
         self.updater = ha_updater.HaUpdater(self.hass)
         self.settings = {"smoke_test_s": 300, "auto_rollback": True}
+        async def async_backup(label=""):
+            return backupkit.create(cfg, label)
+
         self.installer = SimpleNamespace(
-            hass=self.hass, busy=False, running="demo", SETUP_WAIT_S=900, health_source=None,
+            hass=self.hass, busy=False, running="demo", SETUP_WAIT_S=900, health_source=None, async_backup=async_backup,
             health=lambda: {"state": "ok"},
             settings=SimpleNamespace(int_=lambda key, *_a: self.settings[key], bool_=lambda key: self.settings[key]),
             restart=mock.AsyncMock(return_value={"ok": True}))
@@ -159,7 +162,7 @@ class VerdictTest(_Base):
         state = self.state()
         self.assertEqual((state["desired"], state["fallback_from"]), (OLD, NEW))
         self.assertEqual(state["recovery"]["for"], OLD)
-        self.assertEqual(state["recovery"]["backup"], "pre-ha.zip")
+        self.assertIn(f"fallback-config-for-{OLD}", state["recovery"]["backup"])
         self.assertEqual((state["smoke_fallback"]["from"], state["smoke_fallback"]["to"]), (NEW, OLD))
         self.assertIn("setup_error", state["smoke_fallback"]["reason"])
         self.assertIn(f"switched back to Home Assistant {OLD}", state["last_error"])
@@ -168,6 +171,49 @@ class VerdictTest(_Base):
         self.assertEqual(backupkit.pending_for_version(self.cfg), OLD, "the configuration from before the switch is not scheduled")
         self.installer.restart.assert_awaited_once()
         self.assertTrue(any("switched back" in m for m in self.emitted))
+
+    def test_the_fallback_saves_the_configuration_and_brings_back_only_what_the_old_version_cannot_read(self):
+        # the switch's backup is days old; HA ran on NEW since, and the user changed things there
+        def store(version, data, minor=1):
+            return json.dumps({"version": version, "minor_version": minor, "key": "x", "data": data})
+
+        bdir = os.path.join(self.cfg, backupkit.BACKUP_DIR)
+        with backupkit.zipfile.ZipFile(os.path.join(bdir, "pre-ha.zip"), "w") as zf:
+            zf.writestr(backupkit.MARKER, "{}")
+            zf.writestr("backup-info.json", json.dumps({"ha_version": OLD}))
+            zf.writestr(".storage/core.config_entries", store(1, "old entries", minor=5))
+            zf.writestr(".storage/core.entity_registry", store(1, "old registry", minor=18))
+            zf.writestr(".storage/auth", store(1, "old tokens"))
+            zf.writestr(".storage/core.migrated_away", store(1, "only before"))
+        current = {"core.config_entries": store(1, "new entries", minor=6),  # a newer minor version: OLD reads it
+                   "core.entity_registry": store(2, "new registry"),  # a newer major version: OLD cannot
+                   "auth": store(1, "new tokens"), "input_boolean": store(1, "helper made on NEW")}
+        for name, text in current.items():
+            with open(os.path.join(self.cfg, ".storage", name), "w", encoding="utf-8") as fh:
+                fh.write(text)
+        self.entries["e1"] = _entry("e1", state="setup_error", reason="AttributeError: vol")
+        self.first_boot()
+        self.check()
+        state = self.state()
+        saved = state["smoke_fallback"]["saved"]
+        self.assertIn(f"before-fallback-from-{NEW}", saved)
+        self.assertEqual(sorted(state["smoke_fallback"]["restored"]), [".storage/core.entity_registry", ".storage/core.migrated_away"])
+        self.assertIn(saved, state["last_error"])
+        self.assertIn(".storage/core.entity_registry", state["last_error"])
+        with backupkit.zipfile.ZipFile(os.path.join(bdir, saved)) as zf:  # the configuration as NEW left it
+            self.assertIn("helper made on NEW", zf.read(".storage/input_boolean").decode())
+        # the boot of OLD applies the scheduled restore: NEW's configuration, but the files OLD cannot read
+        self.assertIsNotNone(backupkit.apply_pending(self.cfg, log=lambda *_a: None))
+
+        def data(name):
+            with open(os.path.join(self.cfg, ".storage", name), encoding="utf-8") as fh:
+                return json.load(fh)["data"]
+
+        self.assertEqual(data("core.entity_registry"), "old registry")
+        self.assertEqual(data("core.migrated_away"), "only before")
+        self.assertEqual(data("core.config_entries"), "new entries")
+        self.assertEqual(data("auth"), "new tokens")
+        self.assertEqual(data("input_boolean"), "helper made on NEW")
 
     def test_an_entry_that_loads_keeps_the_version(self):
         self.entries["e1"] = _entry("e1")

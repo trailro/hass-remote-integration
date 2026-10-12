@@ -325,9 +325,21 @@ integration smoke test's delay (`smoke_test_s` in the settings on **System**,
   the device was not ready. An entry in `setup_error` or `not_loaded` beside it
   still counts as not loaded.
 - **Not loaded**: with `auto_rollback` on (the default), the container switches
-  back to the version before the switch, once: the configuration from the
-  backup the switch took is restored for it, `last_error` says what failed and
-  that it switched back, and the process restarts. After the restart this is
+  back to the version before the switch, once. The configuration the new
+  version ran with is saved first, in a backup named
+  `<date>-before-fallback-from-<version>.zip`. The older version starts with
+  that configuration, except the `.storage` files it cannot read: those come
+  back from the backup the switch took. A file is taken from the switch's
+  backup when the new version wrote it at a higher major `version` (Home
+  Assistant reads a newer minor version, not a newer major one), or when the
+  switch's backup has it and the new version removed it. Every other
+  `.storage` file, including files created since the switch, stays as the new
+  version left it. The two are combined in a backup named
+  `<date>-fallback-config-for-<version>.zip`, which is restored at the next
+  boot. `last_error` and the notification say what failed, that it switched
+  back, which backup holds the configuration as it was, and which files came
+  from the switch's backup. What changed in those files since the switch is
+  only in the saved backup. Then the process restarts. After the restart this is
   on the timeline and in a notification, and **System** shows it until the
   next version change. The version it went back to is not smoke-tested, so this
   cannot loop; the version it left keeps its venv until the one it went back to
