@@ -351,8 +351,9 @@ class HaUpdater:
     # (views.async_change_ha_version, change["smoke"]); the first boot of the new version turns that into
     # ha.json "smoke", kept until the verdict so a restart in between does not lose it, and checks those entries
     # `smoke_test_s` later, the way the integration's own smoke test does after a switch.  Loaded (also degraded):
-    # kept, a degraded one reported.  Not loaded: with `auto_rollback` on, back to the version before the switch,
-    # with the configuration from the switch's backup, the way the entrypoint's crash fallback goes back - once:
+    # kept, a degraded one reported; one still waiting for its device (setup_retry) kept unconfirmed.  Not loaded:
+    # with `auto_rollback` on, back to the version before the switch, with the configuration as it is now (saved
+    # first) but for the stores the older version cannot read, from the switch's backup - once:
     # the version it goes back to is not smoke-tested, and ha.json "smoke_fallback" records what happened, which
     # a later switch to the same version warns about and is still allowed.
 
@@ -523,21 +524,35 @@ class HaUpdater:
             pn.async_create(self.hass, msg + ".", title="Home Assistant version", notification_id="hri_ha_smoke")
             await self.hass.async_add_executor_job(self._drop_smoke, None)
             return
-        msg = (f"{failed}; switched back to Home Assistant {back} automatically, with the configuration from before "
-               f"the switch (backup {backup}). Switching to {HA_VERSION} again is allowed and is smoke-tested again")
+        cfg = self.hass.config.config_dir
         async with _HA_CHANGE_LOCK:  # no version change is scheduled while this one is written
+            saved: str | None = None
+            installer.busy = True  # no install or start replaces files while the backups are taken
             try:
-                # the configuration from before the switch: this version may have migrated .storage forward, which
-                # the older one cannot read (the entrypoint refuses to start it on that), as after a crash fallback
+                # what this version ran with since the switch (the switch's backup may be days old): saved first,
+                # and kept but for the stores the older version cannot read (backupkit.storage_for_version)
+                saved = (await installer.async_backup(label=f"before-fallback-from-{HA_VERSION}"))["name"]
+                merged, restored = await self.hass.async_add_executor_job(
+                    backupkit.storage_for_version, cfg, saved, str(backup), back, f"fallback-config-for-{back}")
                 await self.hass.async_add_executor_job(
-                    lambda: backupkit.schedule_restore(self.hass.config.config_dir, str(backup), parts, for_version=back, force=True))
+                    lambda: backupkit.schedule_restore(cfg, merged["name"], parts, for_version=back, force=True))
             except Exception as err:  # noqa: BLE001
-                msg = f"{failed}; not switched back to Home Assistant {back}: its configuration from {backup} could not be scheduled ({err})"
+                msg = (f"{failed}; not switched back to Home Assistant {back}: its configuration could not be prepared from {backup} ({err})"
+                       + (f"; the configuration as it is now is saved in backup {saved}" if saved else ""))
                 _LOGGER.error("%s", msg)
                 events.emit("ha", msg, version=HA_VERSION, state="error")
                 pn.async_create(self.hass, msg + ".", title="Home Assistant version", notification_id="hri_ha_smoke")
                 await self.hass.async_add_executor_job(self._drop_smoke, None)
                 return
+            finally:
+                installer.busy = False
+            backup = merged["name"]
+            msg = (f"{failed}; switched back to Home Assistant {back} automatically. The configuration as it was on {HA_VERSION} "
+                   f"is saved in backup {saved}, and {back} starts with it, "
+                   + (f"except {', '.join(restored)}, which {HA_VERSION} migrated to a format {back} cannot read (or removed): "
+                      f"those come back from the switch's backup {rec.get('backup')}, and what changed in them since the switch is "
+                      f"only in {saved}" if restored else f"unchanged: nothing in it needed the switch's backup {rec.get('backup')}")
+                   + f". Switching to {HA_VERSION} again is allowed and is smoke-tested again")
             at = time.strftime("%Y-%m-%dT%H:%M:%S")
 
             def fall_back(st: dict[str, Any]) -> None:
@@ -545,7 +560,8 @@ class HaUpdater:
                 st["fallback_from"] = HA_VERSION  # its venv stays until the version it goes back to booted
                 st["recovery"] = {"backup": backup, "from": HA_VERSION, "for": back, "parts": parts, "at": at}
                 st["last_error"] = msg  # announced after the restart (async_announce_ha_error), as a crash fallback's
-                st["smoke_fallback"] = {"from": HA_VERSION, "to": back, "domain": domain, "reason": reason, "at": at}
+                st["smoke_fallback"] = {"from": HA_VERSION, "to": back, "domain": domain, "reason": reason, "at": at,
+                                        "saved": saved, "restored": restored}
                 st.pop("change", None)
 
             await self.hass.async_add_executor_job(self._drop_smoke, fall_back)

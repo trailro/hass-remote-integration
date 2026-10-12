@@ -372,6 +372,72 @@ def create(config_dir: str, label: str = "", storage_version: str | None = None,
             "files": count, "ha_version": info["ha_version"]}
 
 
+def _store_major(raw: bytes) -> int | None:
+    """The major ``version`` a Home Assistant store file records, None for anything else."""
+    try:
+        data = json.loads(raw)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        return None
+    version = data.get("version") if isinstance(data, dict) else None
+    return version if isinstance(version, int) and not isinstance(version, bool) else None
+
+
+def storage_for_version(config_dir: str, current: str, older: str, version: str, label: str) -> tuple[dict, list[str]]:
+    """A backup to go back to Home Assistant ``version`` with: ``current`` (a backup of the configuration as it is
+    now), except the .storage files ``version`` cannot read, which come from ``older`` (a backup made on
+    ``version``).  Home Assistant reads a store whose minor version is newer than its own, not one whose major
+    version is: a file of ``older`` is taken when ``current`` has it at a higher major version, or does not have it
+    (a newer version moved it elsewhere).  Everything else - other stores, files only ``current`` has, the
+    other parts - is ``current``'s.  Returns (its record, the members taken from ``older``)."""
+    import tempfile
+
+    bdir = os.path.join(config_dir, BACKUP_DIR)
+    validate(os.path.join(bdir, current))
+    validate(os.path.join(bdir, older))
+    with zipfile.ZipFile(os.path.join(bdir, current)) as cur, zipfile.ZipFile(os.path.join(bdir, older)) as old:
+        have = {n for n in _names(cur) if not n.endswith("/")}
+        taken = []
+        for n in sorted(_names(old)):
+            if n.endswith("/") or not n.startswith(".storage/"):
+                continue
+            if n not in have:
+                taken.append(n)
+                continue
+            new_major, old_major = _store_major(cur.read(n)), _store_major(old.read(n))
+            if new_major is not None and old_major is not None and new_major > old_major:
+                taken.append(n)
+        info = json.loads(cur.read("backup-info.json")) if "backup-info.json" in cur.namelist() else {}
+        info = info if isinstance(info, dict) else {}
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        name = reserve_name(bdir, f"{stamp}-{re.sub(r'[.]{2,}', '.', file_label(label))[:48]}")
+        final = os.path.join(bdir, name)
+        fd, tmp = tempfile.mkstemp(dir=bdir, prefix=f".{name}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                with zipfile.ZipFile(fh, "w", zipfile.ZIP_DEFLATED) as zf:
+                    count = 0
+                    for src, members in ((cur, [n for n in sorted(have) if n not in taken]), (old, taken)):
+                        for n in members:
+                            with src.open(n) as s, zf.open(zipfile.ZipInfo(n, src.getinfo(n).date_time), "w") as d:
+                                shutil.copyfileobj(s, d, 1 << 20)
+                            count += 1
+                    info = {**info, "created": stamp, "label": label, "files": count, "ha_version": version,
+                            "configuration": current, "storage_from": {"backup": older, "files": taken}}
+                    zf.writestr("backup-info.json", json.dumps(info))
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, final)
+            fsync_dir(bdir)
+        except BaseException:
+            for leftover in (tmp, final):
+                try:
+                    os.remove(leftover)
+                except OSError:
+                    pass
+            raise
+    return {"name": name, "created": stamp, "label": label, "files": count, "ha_version": version}, taken
+
+
 def reserve_name(bdir: str, stem: str, max_len: int | None = None) -> str:
     """<stem>.zip, else <stem>-2.zip, -3 ...: the name is reserved atomically (an empty file), so two backups
     or uploads with one name never share it and an existing backup is never overwritten.  ``max_len``: the
