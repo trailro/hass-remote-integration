@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import copy
+import fnmatch
 import hashlib
 import json
 import secrets
@@ -101,15 +102,53 @@ NO_DATA_STATES = ("unknown", "unavailable")  # a change to one of these is never
 # of only these is no fresh data.  Ages and staleness counters are recomputed on every write, a dead source included.
 # Ignoring one that never changes costs nothing; one that carries data on its own would hide it, so the list is short.
 HEALTH_VOLATILE_ATTRIBUTES = ("staleness*", "*_staleness*", "*_age", "*_age_s", "*_age_seconds")
-# ...and per integration, what it is known to write without new data.  ramses_cc 0.61.1: every device status sensor
-# rewrites staleness_seconds / last_rssi_age_seconds each minute, its per-gateway RSSI trackers expire after five
-# minutes, and missed polls count up (and turn the sensor off) only because nothing answers.  A real packet moves
-# last_seen and the device's own entities, so ignoring the status sensors loses no fresh data; the attributes are
-# there for status sensors renamed out of the glob.
-HEALTH_VOLATILE_DEFAULTS: dict[str, dict[str, tuple[str, ...]]] = {
+# ...and per integration, what it is known to write without new data, with what still counts on those entities:
+# - ignore_attributes / ignore_entities: left out, as the user's own lists in the health rules;
+# - liveness_attributes: on an ignored entity, a change of one of these (to a value) is fresh data all the same;
+# - liveness_exclude: (attribute, glob) pairs naming the ignored entities whose liveness attributes do not count.
+# ramses_cc 0.61.1: every device status sensor rewrites staleness_seconds / last_rssi_age_seconds each minute, its
+# per-gateway RSSI trackers expire after five minutes, missed polls count up and the sensor turns off only because
+# nothing answers, so its state and those attributes are left out.  Its last_seen is the time of the device's last
+# message (ramses_rf DeviceBase.last_seen) and last_rssi_seen that of its last RSSI reading: both move only when a
+# packet arrives, and on a quiet system with steady values (the other entities write only a changed value) they are
+# the only sign of life.  The gateway's own entities (18:*) are excluded: its echoes can move while the radio is deaf.
+# The attributes are listed too for status sensors renamed out of the glob.
+HEALTH_VOLATILE_DEFAULTS: dict[str, dict[str, tuple[Any, ...]]] = {
     "ramses_cc": {"ignore_attributes": ("rssi_per_hgi", "best_rssi", "rssi_quality", "is_stale", "consecutive_missed_polls"),
-                  "ignore_entities": ("binary_sensor.*_status",)},
+                  "ignore_entities": ("binary_sensor.*_status",),
+                  "liveness_attributes": ("last_seen", "last_rssi_seen"),
+                  "liveness_exclude": (("id", "18:*"),)},
 }
+
+
+def _globs_re(globs: Iterable[str]) -> re.Pattern[str] | None:
+    """One compiled pattern for a list of names/globs (fnmatchcase semantics: a name without *?[ matches itself)."""
+    parts = [fnmatch.translate(g) for g in globs]
+    return re.compile("|".join(f"(?:{p})" for p in parts)) if parts else None
+
+
+def _has_data(value: Any) -> bool:
+    """An attribute that went to None or an empty container lost its data (an expired message), it did not get new."""
+    return value is not None and not (isinstance(value, (dict, list, tuple)) and not value)
+
+
+@dataclass(frozen=True)
+class _HealthIgnores:
+    attributes: re.Pattern[str] | None
+    entities: re.Pattern[str] | None
+    liveness: tuple[str, ...]
+    liveness_exclude: tuple[tuple[str, re.Pattern[str]], ...]
+
+    def entity_ignored(self, entity_id: str) -> bool:
+        return self.entities is not None and self.entities.fullmatch(entity_id) is not None
+
+    def attribute_ignored(self, name: Any) -> bool:
+        return self.attributes is not None and self.attributes.fullmatch(str(name)) is not None
+
+    def liveness_excluded(self, attributes: Any) -> bool:
+        return any(attributes.get(name) is not None and pattern.fullmatch(str(attributes.get(name)))
+                   for name, pattern in self.liveness_exclude)
+
 
 CONFIG_FILE = "integration_manager/mqtt.json"
 # Entities Home Assistant creates by itself in every instance, not by the integration or by the user: zone.home is the
@@ -714,6 +753,9 @@ class MqttPublisher:
     # _track_fresh, read by build_health.  None until the state listener runs; _fresh_since is when it started
     _fresh: dict[str, list[Any]] | None = None
     _fresh_since: float | None = None
+    _ignore_cache: dict[str, _HealthIgnores] | None = None  # per domain, by _health_ignores
+    _ignore_keys: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] | None = None  # the settings each was built from
+    _fresh_warned = False  # a failure of the tracking is logged once: it must never hold up the publication
     # _calls is iterated and changed on paho's thread and changed on the loop (a call refused for the in-flight cap)
     _calls_lock = threading.Lock()
     _subscribing: list[Any] | None = None  # [client, mid, topics, online announced] of the SUBSCRIBE waiting for its SUBACK
@@ -3752,22 +3794,23 @@ class MqttPublisher:
         return base
 
     def _last_fresh(self, domain: str, rules: dict[str, Any], with_state: list[tuple[str, State]]) -> float | None:
-        """The newest fresh data of the integration's entities (the ignored ones left out).  An entity with no fresh
-        change seen since the state listener started counts its last_updated, but never later than that start: what
-        moved it afterwards was judged not fresh.  None only with no entity to judge and no listener."""
-        entity_globs = self._health_ignores(domain, rules)[1]
+        """The newest fresh data of the integration's entities.  An entity with no fresh change seen since the state
+        listener started counts its last_updated, but never later than that start (what moved it afterwards was judged
+        not fresh), and only with a value; an ignored entity counts only a fresh change of its liveness attributes.
+        None without any state (no silence verdict: "no entities with a state yet", or the config entries alone)."""
+        ignores = self._health_ignores(domain, rules)
         fresh = self._fresh or {}
         times = []
         for entity_id, st in with_state:
-            if any(matches(g, entity_id) for g in entity_globs):
-                continue
             rec = fresh.get(entity_id)
             if rec is not None and rec[0] is not None:
                 times.append(rec[0])
-            elif st.state not in NO_DATA_STATES:
+            elif st.state not in NO_DATA_STATES and not ignores.entity_ignored(entity_id):
                 t = st.last_updated.timestamp()
                 times.append(t if self._fresh_since is None else min(t, self._fresh_since))
-        return max(times, default=self._fresh_since)
+        if times:
+            return max(times)
+        return self._fresh_since if with_state else None
 
     def publish_health(self) -> dict[str, Any]:
         doc = self.build_health()
@@ -4024,7 +4067,13 @@ class MqttPublisher:
         new: State | None = event.data.get("new_state")
         old: State | None = event.data.get("old_state")
         if self._fresh is not None:
-            self._track_fresh(event.data.get("entity_id") or (new or old).entity_id, old, new)
+            entity_id = event.data.get("entity_id") or (new or old).entity_id
+            try:
+                self._track_fresh(entity_id, old, new)
+            except Exception:  # noqa: BLE001 - an attribute this did not expect must not stop the publication
+                if not self._fresh_warned:
+                    self._fresh_warned = True
+                    _LOGGER.warning("health: tracking fresh data failed on %s (logged once)", entity_id, exc_info=True)
         if new is not None:
             # An event entity's state is the time of its last event: only a
             # changed state is a new event (restore at startup, availability
@@ -4050,44 +4099,68 @@ class MqttPublisher:
             else:
                 self._clear(old.entity_id)
 
-    def _health_ignores(self, domain: str, rules: dict[str, Any] | None = None) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """The attribute and entity globs the "updated" basis leaves out for this integration: the built-in ones plus
-        its own health settings."""
+    def _health_ignores(self, domain: str, rules: dict[str, Any] | None = None) -> _HealthIgnores:
+        """What the "updated" basis leaves out for this integration: the built-in globs plus its own health settings,
+        compiled once per domain.  build_health passes the rules it just read, which renews the cache: a changed
+        setting applies from the next verdict (within a minute); a state change reads the cache."""
+        cached = (self._ignore_cache or {}).get(domain)
+        if rules is None and cached is not None:
+            return cached
         own = rules if rules is not None else self._rules_provider(domain)
         builtin = HEALTH_VOLATILE_DEFAULTS.get(domain, {})
-        return ((*HEALTH_VOLATILE_ATTRIBUTES, *builtin.get("ignore_attributes", ()), *(own.get("ignore_attributes") or ())),
-                (*builtin.get("ignore_entities", ()), *(own.get("ignore_entities") or ())))
+        key = (tuple(own.get("ignore_attributes") or ()), tuple(own.get("ignore_entities") or ()))
+        if cached is not None and (self._ignore_keys or {}).get(domain) == key:
+            return cached
+        ignores = _HealthIgnores(
+            attributes=_globs_re((*HEALTH_VOLATILE_ATTRIBUTES, *builtin.get("ignore_attributes", ()), *key[0])),
+            entities=_globs_re((*builtin.get("ignore_entities", ()), *key[1])),
+            liveness=tuple(builtin.get("liveness_attributes", ())),
+            liveness_exclude=tuple((name, re.compile(fnmatch.translate(glob))) for name, glob in builtin.get("liveness_exclude", ())))
+        if self._ignore_cache is None:
+            self._ignore_cache, self._ignore_keys = {}, {}
+        self._ignore_cache[domain], self._ignore_keys[domain] = ignores, key
+        return ignores
 
     def _track_fresh(self, entity_id: str, old: State | None, new: State | None) -> None:
         """When each entity last brought fresh data, for the "updated" stale basis: HA's last_updated also moves on a
         change to unknown/unavailable and on attributes that tick with the clock, which kept a dead source "ok".
-        Fresh = a value (state or attribute, the ignored attributes left out) that differs from the last value the
-        entity had: a change to unknown/unavailable is not, and neither is the first value an entity shows in this
-        process nor the one it comes back with (a reload, an outage) when that is the one it had.  On the loop."""
+        Fresh = a value that differs from the last value the entity had (_is_fresh_change).  A change to
+        unknown/unavailable is not, and neither is the first value an entity shows in this process nor the one it
+        comes back with (a reload, an outage) when that is the one it had.  On the loop."""
         fresh = self._fresh  # set: _on_state calls this only then
         if new is None:  # removed: kept while its registry entry stays (a reload puts it back), so the size is bounded
             if er.async_get(self.hass).async_get(entity_id) is None:
                 fresh.pop(entity_id, None)
             return
         rec = fresh.get(entity_id)
-        if rec is None:
-            domain = platform_of(self.hass, entity_id)
+        if rec is None or old is None:  # (re)appearing: another integration may have taken the id since
+            domain = platform_of(self.hass, entity_id) or (rec[2] if rec is not None else None)
             if domain is None:
                 return
-            rec = fresh[entity_id] = [None, old if old is not None and old.state not in NO_DATA_STATES else None, domain]
+            if rec is None:
+                rec = fresh[entity_id] = [None, old if old is not None and old.state not in NO_DATA_STATES else None, domain]
+            rec[2] = domain
         if new.state in NO_DATA_STATES:
             return
         base, rec[1] = rec[1], new
-        if base is None:
-            return
+        if base is not None and self._is_fresh_change(rec[2], entity_id, base, new):
+            rec[0] = new.last_updated.timestamp()
+
+    def _is_fresh_change(self, domain: str, entity_id: str, base: State, new: State) -> bool:
+        """A changed state, or a changed attribute that is not ignored; on an ignored entity only its liveness
+        attributes.  An attribute that went to None or empty lost its data (ramses_rf drops expired messages)."""
         if new.state == base.state and new.attributes == base.attributes:
-            return
-        if new.state == base.state:
-            attr_globs = self._health_ignores(rec[2])[0]
-            keys = {k for k in (*new.attributes, *base.attributes) if not any(matches(g, k) for g in attr_globs)}
-            if all(new.attributes.get(k) == base.attributes.get(k) for k in keys):
-                return
-        rec[0] = new.last_updated.timestamp()
+            return False
+        ignores = self._health_ignores(domain)
+        if ignores.entity_ignored(entity_id):
+            if ignores.liveness_excluded(new.attributes):
+                return False
+            keys: Iterable[Any] = ignores.liveness
+        elif new.state != base.state:
+            return True
+        else:
+            keys = [k for k in {*new.attributes, *base.attributes} if not ignores.attribute_ignored(k)]
+        return any(_has_data(new.attributes.get(k)) and new.attributes.get(k) != base.attributes.get(k) for k in keys)
 
     def _refresh_discovery_if_reshaped(self, state: State) -> None:
         """A discovery component is not only a set of topics, it is also what the entity's attributes say
@@ -4130,6 +4203,8 @@ class MqttPublisher:
         action = event.data.get("action")
         entity_id = event.data.get("entity_id", "")
         if action == "remove":
+            if self._fresh is not None and self.hass.states.get(entity_id) is None:
+                self._fresh.pop(entity_id, None)  # its state went first: _track_fresh kept it for the registry entry
             if self.config.discovery_enabled:
                 self._remove_component(entity_id)
             self._clear(entity_id)

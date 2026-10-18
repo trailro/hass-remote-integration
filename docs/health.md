@@ -35,21 +35,31 @@ of the integration's entities and records when each last brought a new value:
 - the first value an entity shows in this process is not fresh, and neither is
   the value it comes back with after a reload or an outage when it is the one
   it had before; a different value is;
+- a change of an attribute to nothing (`null`, an empty list or object) is
+  not fresh: an integration that drops expired readings loses data one
+  attribute at a time after its source dies;
 - a change of only attributes that move with the clock is not fresh: built in
   for every integration `staleness*`, `*_staleness*`, `*_age`, `*_age_s` and
   `*_age_seconds`; for `ramses_cc` also `rssi_per_hgi`, `best_rssi`,
-  `rssi_quality`, `is_stale` and `consecutive_missed_polls`, and its status
-  sensors (`binary_sensor.*_status`) are left out entirely, since they rewrite
-  their ages every minute and turn off on their own when nothing is heard. A
-  real packet still moves the device's own entities;
+  `rssi_quality`, `is_stale` and `consecutive_missed_polls`;
+- for `ramses_cc` the state and the other attributes of its status sensors
+  (`binary_sensor.*_status`) do not count either: they rewrite their ages every
+  minute and turn off on their own when nothing is heard. Their `last_seen`
+  (the time of the device's last message) and `last_rssi_seen` (its last
+  signal reading) do count, since only a received packet moves them; on a
+  quiet system with steady values they are the only sign of life. The
+  gateway's own (`id` `18:*`) do not, as its echoes can move while the radio
+  hears nothing;
 - any other attribute counts: a climate entity's measured temperature is an
   attribute.
 
-An entity with no fresh change since the manager started counts from that
-start. Add attribute names and entity ids (globs, at most 50 each) for an
-integration through `ignore_attributes` and `ignore_entities` in its health
-rules ([`POST /api/settings`](api.md#settings)); they only apply under
-`updated`, and the built-in ones always apply.
+An entity with no fresh change seen since the manager started counts its last
+update, but no later than that start, and only while it has a value. Add
+attribute names and entity ids (globs, at most 50 each) for an integration
+through `ignore_attributes` and `ignore_entities` in its health rules
+([`POST /api/settings`](api.md#settings)); they only apply under `updated`,
+the built-in ones always apply, and a change is used from the next verdict
+(within a minute).
 
 For the first *stale* seconds after a start (at most 15 minutes), and again
 after the MQTT identity changes, the entity checks (unavailable, silence, no
@@ -77,7 +87,7 @@ is the first bad verdict after a boot; the way back to `ok` once at INFO.
 | `reason` | Why the verdict is not `ok`, masked as on the Logs page; empty when it is |
 | `entities` | Its enabled entities, those without a unique id included |
 | `entities_with_state`, `entities_unavailable`, `entities_unknown` | Of those: how many have a state, and how many are `unavailable` or `unknown` |
-| `last_state_update`, `last_state_update_age_s` | The newest fresh data under the `updated` rules above, whatever the basis (local time with its offset), and its age in seconds; the manager's start when no entity has changed since; `null` without a state |
+| `last_state_update`, `last_state_update_age_s` | The newest fresh data under the `updated` rules above, whatever the basis (local time with its offset), and its age in seconds; an entity with no fresh change since the manager started counts its last update, no later than that start; `null` when the integration has no entity with a state |
 | `last_report`, `last_report_age_s` | The newest state write of a value, even an unchanged one, and its age (writes of `unknown`/`unavailable` only when no entity has a value); `null` without a state |
 | `rules` | The health rules in use: `stale_s`, `mode`, `unavailable_pct`, `stale_basis`, `ignore_attributes`, `ignore_entities` (the integration's own; the built-in ones are not listed) |
 | `grace` | `true` on an `ok` inside the grace after a start; absent otherwise |
