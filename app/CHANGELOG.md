@@ -26,6 +26,10 @@ Every version's changes are in the
   quiet stretch** (for ramses_cc 0.60.4 at least 900 s), or the verdict flaps
   and, with *also on a lasting degraded*, the watchdog can act on a healthy
   integration.
+- **The MQTT page keeps `ignore_attributes` / `ignore_entities`** when it
+  saves an integration's row; the lists are set through the API only.
+- **A fresh volume told not to take the newest Home Assistant** (or without
+  PyPI) now installs 2026.10.1 (was 2026.9.4).
 - **Going back to 0.28.1:** it ignores the `ignore_attributes` /
   `ignore_entities` lists, and saving an integration's row on its **MQTT** page
   drops them.
