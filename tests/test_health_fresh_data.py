@@ -52,6 +52,9 @@ class _Sim:
         return mock.Mock(entities=self.registry, async_get=self.registry.get)
 
     def write(self, t, entity_id, state, **attrs):
+        self.write_attrs(t, entity_id, state, attrs)
+
+    def write_attrs(self, t, entity_id, state, attrs):
         self.registry.setdefault(entity_id, SimpleNamespace(entity_id=entity_id, platform=self.domain, disabled=False))
         old = self.states.get(entity_id)
         if old is not None and old.state == state and dict(old.attributes) == attrs:
@@ -69,6 +72,14 @@ class _Sim:
             self.registry.pop(entity_id)
         self._event(entity_id, old, None)
 
+    def unregister(self, entity_id):
+        """The registry entry deleted, after the state is gone."""
+        self.registry.pop(entity_id)
+        event = SimpleNamespace(data={"action": "remove", "entity_id": entity_id})
+        with mock.patch.object(er, "async_get", return_value=self._reg()), mock.patch.object(self.pub, "_clear"), \
+                mock.patch.object(self.pub, "_remove_component"):
+            self.pub._on_registry(event)
+
     def _event(self, entity_id, old, new):
         event = SimpleNamespace(data={"entity_id": entity_id, "old_state": old, "new_state": new})
         with mock.patch.object(er, "async_get", return_value=self._reg()), \
@@ -84,9 +95,9 @@ class _Sim:
             return self.pub.build_health()
 
 
-def _status_attrs(t, last_heard):
+def _status_attrs(t, last_heard, device_id="04:092960"):
     """A ramses_cc 0.61.1 device status sensor: ages recomputed at every write."""
-    return {"last_seen": _ts(last_heard).isoformat(), "staleness_seconds": t - last_heard, "heartbeat_timeout": 3600.0,
+    return {"id": device_id, "last_seen": _ts(last_heard).isoformat(), "staleness_seconds": t - last_heard, "heartbeat_timeout": 3600.0,
             "consecutive_missed_polls": 0, "best_rssi": -60, "rssi_quality": "good", "is_stale": False,
             "rssi_per_hgi": {"18:010399": -60}, "last_known_rssi": -60, "last_known_rssi_per_hgi": {"18:010399": -60},
             "last_rssi_seen": _ts(last_heard).isoformat(), "last_rssi_age_seconds": t - last_heard}
@@ -291,6 +302,158 @@ class StateListenerTest(unittest.TestCase):
                 mock.patch.object(mp.time, "time", return_value=T0):
             asyncio.run(pub.async_start())
         self.assertEqual((pub._fresh, pub._fresh_since), ({}, T0))
+
+
+class LivenessTest(unittest.TestCase):
+    """A quiet ramses_cc system with steady values: its entities write only a changed value, and the device
+    status sensors' last_seen (the time of the device's last message) is the only sign of life."""
+
+    STATUS = "binary_sensor.trv_04_092960_status"
+    HGI = "binary_sensor.hgi_18_010399_status"
+
+    def quiet(self, status_id=STATUS, device_id="04:092960", minutes=20, start=T0):
+        sim = _Sim("ramses_cc")
+        sim.write(start, "sensor.thm_22_216226_temperature", "21.5")
+        sim.write(start, "climate.zone_01", "heat", current_temperature=21.5)
+        sim.write(start, status_id, "on", **_status_attrs(start, start, device_id))
+        self.packets(sim, status_id, device_id, start, minutes)
+        return sim
+
+    def packets(self, sim, status_id, device_id, start, minutes):
+        for minute in range(1, minutes + 1):
+            t = start + 60 * minute
+            heard = start + 240 * (minute // 4)  # a packet every four minutes, same values
+            sim.write(t, status_id, "on", **_status_attrs(t, heard, device_id))
+
+    def test_only_last_seen_moving_keeps_it_ok(self):
+        doc = self.quiet().health(T0 + 20 * 60 + 1)
+        self.assertEqual((doc["state"], doc["last_state_update_age_s"]), ("ok", 1))
+
+    def test_the_gateway_last_seen_alone_does_not(self):
+        sim = self.quiet(self.HGI, "18:010399")
+        doc = sim.health(T0 + 20 * 60 + 1)
+        self.assertEqual((doc["state"], doc["reason"]), ("degraded", "no entity value change for 1201 s"))
+
+    def test_a_working_reload_on_a_steady_system_is_ok_again_within_stale_s(self):
+        sim = self.quiet(minutes=0)
+        t = T0 + 3600  # an hour of nothing: degraded, the watchdog reloads
+        self.assertEqual(sim.health(t)["state"], "degraded")
+        for entity_id in list(sim.states):
+            sim.write_attrs(t, entity_id, "unavailable", {"restored": True})
+        sim.remove("sensor.thm_22_216226_temperature")
+        sim.write(t + 5, "sensor.thm_22_216226_temperature", "21.5")  # put back as it was
+        sim.write(t + 5, "climate.zone_01", "heat", current_temperature=21.5)
+        sim.write(t + 5, self.STATUS, "on", **_status_attrs(t + 5, T0))  # last_seen from the packet cache
+        self.assertEqual(sim.health(t + 6)["state"], "degraded")
+        sim.write(t + 120, self.STATUS, "on", **_status_attrs(t + 120, t + 120))  # the first packet after it
+        doc = sim.health(t + 121)
+        self.assertEqual((doc["state"], doc["last_state_update_age_s"]), ("ok", 1))
+        self.assertLess(121, STALE_S)
+
+    def test_last_rssi_seen_counts_and_a_lost_last_seen_does_not(self):
+        sim = self.quiet(minutes=0)
+        attrs = _status_attrs(T0 + 200, T0)
+        sim.write(T0 + 200, self.STATUS, "on", **{**attrs, "last_rssi_seen": _ts(T0 + 200).isoformat()})
+        self.assertEqual(sim.health(T0 + 201)["last_state_update_age_s"], 1)
+        sim.write(T0 + 900, self.STATUS, "on", **{**attrs, "last_seen": None, "last_rssi_seen": None})
+        self.assertEqual(sim.health(T0 + 901)["last_state_update_age_s"], 701)
+
+
+class LostDataTest(unittest.TestCase):
+    """ramses_rf drops expired messages, so the attributes read from them go to None one by one after the feed
+    dies (six minutes for a temperature, an hour by default, a day for some): losing data is not new data."""
+
+    def test_an_attribute_going_to_none_or_empty_is_not_fresh(self):
+        sim = _Sim("ramses_cc")
+        attrs = {"current_temperature": 21.5, "heat_demand": 0.3, "params": {"window": 1}, "schedule": [1, 2],
+                 "mode": {"mode": "follow_schedule"}}
+        sim.write(T0, "climate.zone_01", "heat", **attrs)
+        for i, (name, empty) in enumerate((("heat_demand", None), ("params", {}), ("schedule", []), ("mode", None))):
+            attrs = {**attrs, name: empty}
+            sim.write(T0 + 400 + 600 * i, "climate.zone_01", "heat", **attrs)
+        attrs.pop("current_temperature")  # an attribute that is gone reads as None
+        sim.write(T0 + 3000, "climate.zone_01", "heat", **attrs)
+        doc = sim.health(T0 + 3001)
+        self.assertEqual((doc["state"], doc["reason"]), ("degraded", "no entity value change for 3001 s"))
+        sim.write(T0 + 3100, "climate.zone_01", "heat", **{**attrs, "heat_demand": 0.0})  # data again
+        self.assertEqual(sim.health(T0 + 3101)["state"], "ok")
+
+
+class NoStateTest(unittest.TestCase):
+    def test_no_entities_and_no_states_are_judged_as_before_under_updated(self):
+        sim = _Sim("demo")
+        doc = sim.health(T0 + 86400)
+        self.assertEqual((doc["state"], doc.get("reason") or "", doc["last_state_update"]), ("ok", "", None))
+        sim = _Sim("demo", registry=["sensor.demo_t"])
+        doc = sim.health(T0 + 86400)
+        self.assertEqual((doc["state"], doc["reason"], doc["last_state_update"]), ("degraded", "no entities with a state yet", None))
+
+    def test_states_without_any_value_count_from_the_start(self):
+        sim = _Sim("demo")
+        sim.write(T0 + 10, "sensor.demo_t", "unknown")
+        doc = sim.health(T0 + STALE_S + 1)
+        self.assertEqual((doc["state"], doc["reason"]), ("degraded", f"no entity value change for {STALE_S + 1} s"))
+
+
+class RobustnessTest(unittest.TestCase):
+    def test_a_non_string_attribute_key_is_compared(self):
+        sim = _Sim("demo")
+        sim.write_attrs(T0, "sensor.demo_t", "1", {1: "a", "unit": "x"})
+        sim.write_attrs(T0 + 100, "sensor.demo_t", "1", {1: "b", "unit": "x"})
+        self.assertEqual(sim.health(T0 + 101)["last_state_update_age_s"], 1)
+
+    def test_a_failure_of_the_tracking_is_logged_once_and_the_state_still_published(self):
+        sim = _Sim("demo")
+        published = []
+        with mock.patch.object(sim.pub, "_track_fresh", side_effect=TypeError("boom")), \
+                self.assertLogs(mp._LOGGER, "WARNING") as logs:
+            for i in range(3):
+                event = SimpleNamespace(data={"entity_id": "sensor.demo_t", "old_state": None,
+                                              "new_state": State("sensor.demo_t", str(i))})
+                with mock.patch.object(sim.pub, "_publish_state", side_effect=lambda st, **kw: published.append(st.state)), \
+                        mock.patch.object(sim.pub, "_refresh_discovery_if_reshaped"):
+                    sim.pub._on_state(event)
+        self.assertEqual(published, ["0", "1", "2"])
+        self.assertEqual(len([r for r in logs.records if "tracking fresh data failed" in r.getMessage()]), 1)
+
+    def test_a_registry_entry_deleted_after_its_state_is_forgotten(self):
+        sim = _Sim("demo")
+        sim.write(T0, "sensor.demo_t", "1")
+        sim.remove("sensor.demo_t")
+        self.assertIn("sensor.demo_t", sim.pub._fresh)
+        sim.unregister("sensor.demo_t")
+        self.assertNotIn("sensor.demo_t", sim.pub._fresh)
+
+    def test_an_entity_id_taken_by_another_integration_follows_it(self):
+        sim = _Sim("demo")
+        sim.write(T0, "sensor.shared", "1")
+        sim.remove("sensor.shared")
+        sim.registry["sensor.shared"] = SimpleNamespace(entity_id="sensor.shared", platform="other", disabled=False)
+        sim.write(T0 + 10, "sensor.shared", "2")
+        self.assertEqual(sim.pub._fresh["sensor.shared"][2], "other")
+
+
+class MergeTest(unittest.TestCase):
+    def test_the_built_in_and_the_users_lists_both_apply(self):
+        sim = _Sim("ramses_cc", {"ignore_attributes": ["uptime"]})
+        attrs = {"uptime": 0, "staleness_seconds": 0, "best_rssi": -60, "zone_idx": "01"}
+        sim.write(T0, "sensor.demo_t", "1", **attrs)
+        sim.write(T0 + 60, "sensor.demo_t", "1", **{**attrs, "uptime": 60, "staleness_seconds": 60, "best_rssi": -61})
+        self.assertEqual(sim.health(T0 + 61)["last_state_update_age_s"], 61)
+        sim.write(T0 + 120, "sensor.demo_t", "1", **{**attrs, "zone_idx": "02"})
+        self.assertEqual(sim.health(T0 + 121)["last_state_update_age_s"], 1)
+
+    def test_a_changed_setting_applies_from_the_next_verdict(self):
+        rules = {"stale_s": STALE_S, "mode": "periodic", "unavailable_pct": 50, "stale_basis": "updated"}
+        sim = _Sim("demo")
+        sim.pub._rules_provider = lambda domain: dict(rules)
+        sim.write(T0, "sensor.demo_t", "1", uptime=0)
+        sim.write(T0 + 60, "sensor.demo_t", "1", uptime=60)
+        self.assertEqual(sim.health(T0 + 61)["last_state_update_age_s"], 1)
+        rules["ignore_attributes"] = ["uptime"]
+        sim.health(T0 + 62)  # the minute's verdict reads the settings again
+        sim.write(T0 + 120, "sensor.demo_t", "1", uptime=120)
+        self.assertEqual(sim.health(T0 + 121)["last_state_update_age_s"], 61)
 
 
 if __name__ == "__main__":
