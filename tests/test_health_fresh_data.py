@@ -379,6 +379,51 @@ class LostDataTest(unittest.TestCase):
         self.assertEqual(sim.health(T0 + 3101)["state"], "ok")
 
 
+class ShrinkingContainerTest(unittest.TestCase):
+    """A dict or list attribute fed by several messages loses entries one by one as they expire."""
+
+    def climate(self, before, after):
+        sim = _Sim("ramses_cc")
+        sim.write(T0, "climate.ctl", "heat", heat_demands=before)
+        sim.write(T0 + 200, "climate.ctl", "heat", heat_demands=after)
+        return sim.health(T0 + 201)["last_state_update_age_s"]
+
+    def test_entries_lost_are_not_fresh_and_a_changed_value_is(self):
+        demands = {"01": 0.3, "02": 0.5, "03": {"a": 1, "b": 2}}
+        for after in ({"01": 0.3, "02": 0.5}, {"01": 0.3, "02": None, "03": {"a": 1, "b": 2}},
+                      {"01": 0.3, "02": 0.5, "03": {"a": 1}}, {"01": 0.3, "02": 0.5, "03": {"a": 1, "b": None}}):
+            with self.subTest(after=after):
+                self.assertEqual(self.climate(demands, after), 201)
+        for after in ({"01": 0.4, "02": 0.5, "03": {"a": 1, "b": 2}}, {**demands, "04": 0.1},
+                      {"01": 0.3, "02": 0.5, "03": {"a": 1, "b": 3}}, {"01": 0.3, "02": 0.0}):
+            with self.subTest(after=after):
+                self.assertEqual(self.climate(demands, after), 1)
+
+    def test_a_list_that_shrinks_or_gains_only_empty_items_is_not_fresh(self):
+        for after, age in (([1, 2], 201), ([1, 2, 3, None], 201), ([2, 1, 3], 201), ([1, 2, 4], 1), ([1, 2, 3, 4], 1)):
+            with self.subTest(after=after):
+                self.assertEqual(self.climate([1, 2, 3], after), age)
+
+
+class GatewayTest(unittest.TestCase):
+    """ramses_cc: nothing on the gateway's own entities counts, ignored or not (its own transmissions move them)."""
+
+    def test_the_gateway_last_msg_sensor_never_counts(self):
+        sim = _Sim("ramses_cc")
+        sim.write(T0, "sensor.hgi_18_010399_last_msg", "RQ 3EF0", id="18:010399", sent=_ts(T0).isoformat())
+        for minute in range(1, 11):
+            t = T0 + 60 * minute
+            sim.write(t, "sensor.hgi_18_010399_last_msg", f"RQ {minute}", id="18:010399", sent=_ts(t).isoformat())
+        doc = sim.health(T0 + 601)
+        self.assertEqual((doc["state"], doc["reason"]), ("degraded", "no entity value change for 601 s"))
+
+    def test_another_device_last_msg_sensor_counts(self):
+        sim = _Sim("ramses_cc")
+        sim.write(T0, "sensor.trv_04_092960_last_msg", "I 3150", id="04:092960", sent=_ts(T0).isoformat())
+        sim.write(T0 + 500, "sensor.trv_04_092960_last_msg", "I 3150", id="04:092960", sent=_ts(T0 + 500).isoformat())
+        self.assertEqual(sim.health(T0 + 501)["state"], "ok")
+
+
 class NoStateTest(unittest.TestCase):
     def test_no_entities_and_no_states_are_judged_as_before_under_updated(self):
         sim = _Sim("demo")
