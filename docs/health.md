@@ -75,8 +75,8 @@ does not count this way either, only through a fresh change of `last_seen` /
 counts from the manager's start. Add
 attribute names and entity ids (globs, at most 50 each) for an integration
 through `ignore_attributes` and `ignore_entities` in its health rules
-([`POST /api/settings`](api.md#settings)); they only apply under `updated`,
-the built-in ones always apply, and a change is used from the next verdict
+([`POST /api/settings`](api.md#settings)); they apply to `last_state_update`
+under either basis and to the verdict under `updated`; the built-in ones always apply, and a change is used from the next verdict
 (within a minute).
 
 For the first *stale* seconds after a start (at most 15 minutes), and again
