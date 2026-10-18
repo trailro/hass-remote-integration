@@ -3,7 +3,7 @@
 Every version's changes are in the
 [GitHub releases](https://github.com/trailro/hass-remote-integration/releases).
 
-## Unreleased
+## 0.28.2
 
 - **The `updated` stale basis no longer mistakes a dead source for a live
   one.** A value expiring to `unknown` or `unavailable`, an attribute losing
