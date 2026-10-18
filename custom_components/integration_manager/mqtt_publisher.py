@@ -105,19 +105,20 @@ HEALTH_VOLATILE_ATTRIBUTES = ("staleness*", "*_staleness*", "*_age", "*_age_s", 
 # ...and per integration, what it is known to write without new data, with what still counts on those entities:
 # - ignore_attributes / ignore_entities: left out, as the user's own lists in the health rules;
 # - liveness_attributes: on an ignored entity, a change of one of these (to a value) is fresh data all the same;
-# - liveness_exclude: (attribute, glob) pairs naming the ignored entities whose liveness attributes do not count.
+# - never_fresh: (attribute, glob) pairs naming entities none of whose changes count, ignored or not.
 # ramses_cc 0.61.1: every device status sensor rewrites staleness_seconds / last_rssi_age_seconds each minute, its
 # per-gateway RSSI trackers expire after five minutes, missed polls count up and the sensor turns off only because
 # nothing answers, so its state and those attributes are left out.  Its last_seen is the time of the device's last
 # message (ramses_rf DeviceBase.last_seen) and last_rssi_seen that of its last RSSI reading: both move only when a
 # packet arrives, and on a quiet system with steady values (the other entities write only a changed value) they are
-# the only sign of life.  The gateway's own entities (18:*) are excluded: its echoes can move while the radio is deaf.
+# the only sign of life.  Nothing of the gateway's own entities (id 18:*) counts: its echoes of what it sends move its
+# last_seen, and its last_msg sensor (disabled by default) on every poll, while the radio hears nothing.
 # The attributes are listed too for status sensors renamed out of the glob.
 HEALTH_VOLATILE_DEFAULTS: dict[str, dict[str, tuple[Any, ...]]] = {
     "ramses_cc": {"ignore_attributes": ("rssi_per_hgi", "best_rssi", "rssi_quality", "is_stale", "consecutive_missed_polls"),
                   "ignore_entities": ("binary_sensor.*_status",),
                   "liveness_attributes": ("last_seen", "last_rssi_seen"),
-                  "liveness_exclude": (("id", "18:*"),)},
+                  "never_fresh": (("id", "18:*"),)},
 }
 
 
@@ -132,12 +133,26 @@ def _has_data(value: Any) -> bool:
     return value is not None and not (isinstance(value, (dict, list, tuple)) and not value)
 
 
+def _brings_data(new: Any, old: Any) -> bool:
+    """Whether a changed attribute value carries data the old one did not.  Messages expire one at a time, so a dict
+    or list loses entries one by one after its source dies: a dict brings data only through a key whose value changed
+    to one that brings data itself (a removed key, or one gone to None, does not); a list only when it did not shrink
+    and holds an item the old one did not have that is not empty.  Anything else that changed to a value does."""
+    if not _has_data(new):
+        return False
+    if isinstance(new, dict) and isinstance(old, dict):
+        return any(v != old.get(k) and _brings_data(v, old.get(k)) for k, v in new.items())
+    if isinstance(new, (list, tuple)) and isinstance(old, (list, tuple)):
+        return len(new) >= len(old) and any(_has_data(item) and item not in old for item in new)
+    return new != old
+
+
 @dataclass(frozen=True)
 class _HealthIgnores:
     attributes: re.Pattern[str] | None
     entities: re.Pattern[str] | None
     liveness: tuple[str, ...]
-    liveness_exclude: tuple[tuple[str, re.Pattern[str]], ...]
+    never_fresh: tuple[tuple[str, re.Pattern[str]], ...]
 
     def entity_ignored(self, entity_id: str) -> bool:
         return self.entities is not None and self.entities.fullmatch(entity_id) is not None
@@ -145,9 +160,9 @@ class _HealthIgnores:
     def attribute_ignored(self, name: Any) -> bool:
         return self.attributes is not None and self.attributes.fullmatch(str(name)) is not None
 
-    def liveness_excluded(self, attributes: Any) -> bool:
-        return any(attributes.get(name) is not None and pattern.fullmatch(str(attributes.get(name)))
-                   for name, pattern in self.liveness_exclude)
+    def never_fresh_entity(self, state: State) -> bool:
+        return any(state.attributes.get(name) is not None and pattern.fullmatch(str(state.attributes.get(name))) is not None
+                   for name, pattern in self.never_fresh)
 
 
 CONFIG_FILE = "integration_manager/mqtt.json"
@@ -3796,7 +3811,8 @@ class MqttPublisher:
     def _last_fresh(self, domain: str, rules: dict[str, Any], with_state: list[tuple[str, State]]) -> float | None:
         """The newest fresh data of the integration's entities.  An entity with no fresh change seen since the state
         listener started counts its last_updated, but never later than that start (what moved it afterwards was judged
-        not fresh), and only with a value; an ignored entity counts only a fresh change of its liveness attributes.
+        not fresh), and only with a value; an ignored entity counts only a fresh change of its liveness attributes, and
+        a never_fresh one nothing.
         None without any state (no silence verdict: "no entities with a state yet", or the config entries alone)."""
         ignores = self._health_ignores(domain, rules)
         fresh = self._fresh or {}
@@ -3805,7 +3821,8 @@ class MqttPublisher:
             rec = fresh.get(entity_id)
             if rec is not None and rec[0] is not None:
                 times.append(rec[0])
-            elif st.state not in NO_DATA_STATES and not ignores.entity_ignored(entity_id):
+            elif st.state not in NO_DATA_STATES and not ignores.entity_ignored(entity_id) \
+                    and not ignores.never_fresh_entity(st):
                 t = st.last_updated.timestamp()
                 times.append(t if self._fresh_since is None else min(t, self._fresh_since))
         if times:
@@ -4115,7 +4132,7 @@ class MqttPublisher:
             attributes=_globs_re((*HEALTH_VOLATILE_ATTRIBUTES, *builtin.get("ignore_attributes", ()), *key[0])),
             entities=_globs_re((*builtin.get("ignore_entities", ()), *key[1])),
             liveness=tuple(builtin.get("liveness_attributes", ())),
-            liveness_exclude=tuple((name, re.compile(fnmatch.translate(glob))) for name, glob in builtin.get("liveness_exclude", ())))
+            never_fresh=tuple((name, re.compile(fnmatch.translate(glob))) for name, glob in builtin.get("never_fresh", ())))
         if self._ignore_cache is None:
             self._ignore_cache, self._ignore_keys = {}, {}
         self._ignore_cache[domain], self._ignore_keys[domain] = ignores, key
@@ -4147,20 +4164,21 @@ class MqttPublisher:
             rec[0] = new.last_updated.timestamp()
 
     def _is_fresh_change(self, domain: str, entity_id: str, base: State, new: State) -> bool:
-        """A changed state, or a changed attribute that is not ignored; on an ignored entity only its liveness
-        attributes.  An attribute that went to None or empty lost its data (ramses_rf drops expired messages)."""
+        """A changed state, or a changed attribute that is not ignored and brings data (_brings_data); on an ignored
+        entity only its liveness attributes; nothing on a never_fresh one."""
         if new.state == base.state and new.attributes == base.attributes:
             return False
         ignores = self._health_ignores(domain)
+        if ignores.never_fresh_entity(new) or ignores.never_fresh_entity(base):
+            return False
         if ignores.entity_ignored(entity_id):
-            if ignores.liveness_excluded(new.attributes):
-                return False
             keys: Iterable[Any] = ignores.liveness
         elif new.state != base.state:
             return True
         else:
             keys = [k for k in {*new.attributes, *base.attributes} if not ignores.attribute_ignored(k)]
-        return any(_has_data(new.attributes.get(k)) and new.attributes.get(k) != base.attributes.get(k) for k in keys)
+        return any(new.attributes.get(k) != base.attributes.get(k) and _brings_data(new.attributes.get(k), base.attributes.get(k))
+                   for k in keys)
 
     def _refresh_discovery_if_reshaped(self, state: State) -> None:
         """A discovery component is not only a set of topics, it is also what the entity's attributes say

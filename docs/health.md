@@ -20,8 +20,16 @@ that re-writes every entity on each poll keeps reporting after its connection
 dies, so the verdict stays `ok`. For such an integration set the **stale
 basis** to `updated` on the **MQTT** page: silence is then measured on the last
 changed value or attribute, and the verdict turns `degraded` after *stale*
-seconds. Pick a *stale* longer than its quietest normal stretch, or steady
-values read as a fault. The document names the basis under `rules.stale_basis`.
+seconds. The document names the basis under `rules.stale_basis`.
+
+Under `updated`, *stale* must be longer than the longest stretch in which the
+integration normally changes nothing, or steady values read as a fault: the
+verdict flips to `degraded` and back every time, and with
+`watchdog_on_degraded` the watchdog can start reloading a healthy integration
+as soon as a stretch outlasts its window. For ramses_cc 0.60.4 that is at least
+900 s: at 300 s a quiet night flips it for a minute or two many times over. On
+0.61.x the status sensors' `last_seen` moves with every packet a device sends,
+which makes it far less quiet.
 
 Under either basis a write of `unknown` or `unavailable` is not data: under
 `reported` such writes count only when no entity has a value at all (buttons,
@@ -35,9 +43,13 @@ of the integration's entities and records when each last brought a new value:
 - the first value an entity shows in this process is not fresh, and neither is
   the value it comes back with after a reload or an outage when it is the one
   it had before; a different value is;
-- a change of an attribute to nothing (`null`, an empty list or object) is
-  not fresh: an integration that drops expired readings loses data one
-  attribute at a time after its source dies;
+- a change of an attribute that only loses data is not fresh: an integration
+  that drops expired readings loses them one at a time after its source dies.
+  That is an attribute going to nothing (`null`, an empty list or object) or
+  disappearing; an object that only loses keys or has values going to `null`
+  (at any depth); and a list that gets shorter, or gains only empty items. An
+  object counts when one of its values changes to one that brings data, a
+  list when it holds an item it did not have (a reordered list does not);
 - a change of only attributes that move with the clock is not fresh: built in
   for every integration `staleness*`, `*_staleness*`, `*_age`, `*_age_s` and
   `*_age_seconds`; for `ramses_cc` also `rssi_per_hgi`, `best_rssi`,
@@ -47,14 +59,20 @@ of the integration's entities and records when each last brought a new value:
   minute and turn off on their own when nothing is heard. Their `last_seen`
   (the time of the device's last message) and `last_rssi_seen` (its last
   signal reading) do count, since only a received packet moves them; on a
-  quiet system with steady values they are the only sign of life. The
-  gateway's own (`id` `18:*`) do not, as its echoes can move while the radio
-  hears nothing;
+  quiet system with steady values they are the only sign of life;
+- for `ramses_cc` nothing on the gateway's own entities (attribute `id`
+  `18:*`) counts, status sensor or not: its `last_seen` and its `last_msg`
+  sensor (disabled by default) move with what it sends itself, also while the
+  radio hears nothing;
 - any other attribute counts: a climate entity's measured temperature is an
   attribute.
 
 An entity with no fresh change seen since the manager started counts its last
-update, but no later than that start, and only while it has a value. Add
+update, but no later than that start, and only while it has a value; an
+entity whose changes never count (a left-out one, or the ramses_cc gateway's)
+does not count this way either, only through a fresh change of `last_seen` /
+`last_rssi_seen` where those apply. With no entity left to count, the verdict
+counts from the manager's start. Add
 attribute names and entity ids (globs, at most 50 each) for an integration
 through `ignore_attributes` and `ignore_entities` in its health rules
 ([`POST /api/settings`](api.md#settings)); they only apply under `updated`,
@@ -132,7 +150,9 @@ The watchdog (on **System**, off by default) acts when the verdict has been
 | `watchdog_max_per_day` (restarts in 24 h) | 3 | 1–24 |
 
 `error` always counts; `degraded` only with `watchdog_on_degraded` (tick it
-with the `updated` stale basis to catch a zombie on a dead source); `stopped`
+with the `updated` stale basis to catch a zombie on a dead source, after
+setting *stale* above the integration's quietest normal stretch, as
+[above](#the-health-verdict)); `stopped`
 is your decision. An integration installed but not configured reports `error`
 (`not loaded (no config entry, no YAML setup)`); a restart cannot fix that, so
 it is left alone. One with YAML stored on the Integration page that did not

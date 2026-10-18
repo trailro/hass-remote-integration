@@ -16,7 +16,19 @@ Every version's changes are in the
   entity ids for an integration with `ignore_attributes` / `ignore_entities`
   in its health rules (`POST /api/settings`). Under `reported`, writes of
   `unknown`/`unavailable` count only when no entity has a value.
-  `last_state_update` follows the same rules.
+- **Health document:** `last_state_update` / `last_state_update_age_s` follow
+  the fresh-data rules under either basis, and `last_report` /
+  `last_report_age_s` leave out writes of `unknown`/`unavailable`. They no
+  longer move with ticking attributes or expiring values, and an entity that
+  has not changed since a restart counts from that start, so the ages can be
+  larger than before.
+- **Under `updated`, *stale* must exceed the integration's longest normal
+  quiet stretch** (for ramses_cc 0.60.4 at least 900 s), or the verdict flaps
+  and, with *also on a lasting degraded*, the watchdog can act on a healthy
+  integration.
+- **Going back to 0.28.1:** it ignores the `ignore_attributes` /
+  `ignore_entities` lists, and saving an integration's row on its **MQTT** page
+  drops them.
 
 ## 0.28.1
 
