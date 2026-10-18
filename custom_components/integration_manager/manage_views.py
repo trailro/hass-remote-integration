@@ -19,7 +19,7 @@ from .installer import _DOMAIN_RE, Installer
 from .installer import save_lock as _save_lock
 from .installer import tag_ok as _tag_ok
 from .logfiles_page import clean_log_format
-from .settings import DEFAULTS, HEALTH_MODES, STALE_BASES, WATCHDOG_BOUNDS
+from .settings import DEFAULTS, HEALTH_IGNORE_KEYS, HEALTH_IGNORE_MAX, HEALTH_MODES, STALE_BASES, WATCHDOG_BOUNDS, clean_health_ignore
 from .mqtt_publisher import MqttPublisher
 from .http_util import ManagerView, with_body
 
@@ -459,6 +459,15 @@ class SettingsView(ManagerView):
                     if rules["stale_basis"] not in STALE_BASES:
                         return self.json({"ok": False, "error": f"health.{dom}.stale_basis must be one of {', '.join(STALE_BASES)}"})
                     r["stale_basis"] = rules["stale_basis"]
+                for key in HEALTH_IGNORE_KEYS:
+                    if rules.get(key) in (None, "", []):
+                        continue
+                    cleaned = clean_health_ignore(key, rules[key])
+                    if cleaned is None:
+                        what = "attribute names" if key == "ignore_attributes" else "entity ids"
+                        return self.json({"ok": False, "error": f"health.{dom}.{key} must be a list of at most "
+                                                                f"{HEALTH_IGNORE_MAX} {what} or globs (up to 100 characters each)"})
+                    r[key] = cleaned
                 if r:
                     clean[str(dom)] = r
             new["health"] = clean

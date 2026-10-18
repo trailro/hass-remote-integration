@@ -479,7 +479,8 @@ restore](docs/backups.md).
 `hass_<domain>/health` carries a verdict: `ok`, `degraded`, `error` or
 `stopped`. Set the thresholds on **MQTT**; mark an integration that only writes
 on events as `event`, and use the `updated` stale basis for one that keeps
-re-writing the same states on a dead source. The **health watchdog** (on
+re-writing the same states on a dead source (values expiring to `unknown` and
+attributes that tick with the clock are not fresh data there). The **health watchdog** (on
 **System**, off by default) reloads, then restarts, an integration stuck in
 `error`, or in `degraded` if you tick it (15 minutes by default). The Overview keeps a resource history. See
 [Health and the health watchdog](docs/health.md).

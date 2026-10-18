@@ -3,6 +3,20 @@
 Every version's changes are in the
 [GitHub releases](https://github.com/trailro/hass-remote-integration/releases).
 
+## Unreleased
+
+- **The `updated` stale basis no longer mistakes a dead source for a live
+  one.** A value expiring to `unknown` or `unavailable`, the old value an
+  entity is put back with after a reload, and attributes that tick with the
+  clock (ages and staleness counters; for ramses_cc 0.61.1 its device status
+  sensors) are no longer fresh data: with ramses_cc 0.61.1 on a dead
+  connection the verdict stayed `ok` and the watchdog never acted. A climate
+  entity's temperature, an attribute, still counts. Add attribute names and
+  entity ids for an integration with `ignore_attributes` / `ignore_entities`
+  in its health rules (`POST /api/settings`). Under `reported`, writes of
+  `unknown`/`unavailable` count only when no entity has a value.
+  `last_state_update` follows the same rules.
+
 ## 0.28.1
 
 - **The preflight catches a Home Assistant module attribute the target no
