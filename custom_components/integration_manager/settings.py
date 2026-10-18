@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import time
 
@@ -31,7 +32,8 @@ DEFAULTS: dict[str, Any] = {
     "health_stale_s": 900,      # degraded when no entity reported for this long (default for every integration)
     "health_unavailable_pct": 50,  # degraded when at least this share of the entities is unavailable
     # per integration: {"<domain>": {"stale_s": 900, "mode": "periodic"|"event", "unavailable_pct": 50,
-    #                                 "stale_basis": "reported"|"updated"}}
+    #                                 "stale_basis": "reported"|"updated",
+    #                                 "ignore_attributes": [glob, ...], "ignore_entities": [glob, ...]}}
     "health": {},
     # Health watchdog: when the verdict stays "error" (and, opted in, "degraded"), reload the integration's
     # config entries first, then restart the process if that did not help (never stopped or unconfigured)
@@ -53,6 +55,24 @@ HEALTH_MODES = ("periodic", "event")  # event: the integration only writes state
 # of a value or an attribute.  An integration whose coordinator re-writes the same states on a dead source is only
 # caught by "updated".
 STALE_BASES = ("reported", "updated")
+# under "updated": attribute names (and entity ids) whose changes are no fresh data, on top of the built-in ones
+# (mqtt_publisher.HEALTH_VOLATILE_*).  Globs; the API and health_for() keep the same shape.
+HEALTH_IGNORE_KEYS = ("ignore_attributes", "ignore_entities")
+HEALTH_IGNORE_MAX = 50
+_IGNORE_RE = {"ignore_attributes": re.compile(r"[^\x00-\x1f\x7f]{1,100}"), "ignore_entities": re.compile(r"[a-z0-9_.*?\[\]!-]{1,100}")}
+
+
+def clean_health_ignore(key: str, value: Any) -> list[str] | None:
+    """The list as saved, or None when it is not a list of at most HEALTH_IGNORE_MAX names/globs of the right form."""
+    if not isinstance(value, list) or len(value) > HEALTH_IGNORE_MAX:
+        return None
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not _IGNORE_RE[key].fullmatch(item.strip()):
+            return None
+        if item.strip() not in out:
+            out.append(item.strip())
+    return out
 
 
 class Settings:
@@ -157,7 +177,8 @@ class Settings:
         """The effective health rules of one integration: its overrides on
         top of the global defaults."""
         base = {"stale_s": self.int_("health_stale_s", 60, 86400), "mode": "periodic",
-                "unavailable_pct": self.int_("health_unavailable_pct", 1, 100), "stale_basis": "reported"}
+                "unavailable_pct": self.int_("health_unavailable_pct", 1, 100), "stale_basis": "reported",
+                "ignore_attributes": [], "ignore_entities": []}
         per = self.data.get("health") or {}
         own = per.get(domain or "") if isinstance(per, dict) else None
         if isinstance(own, dict):
@@ -172,6 +193,10 @@ class Settings:
                 base["mode"] = own["mode"]
             if own.get("stale_basis") in STALE_BASES:
                 base["stale_basis"] = own["stale_basis"]
+            for key in HEALTH_IGNORE_KEYS:
+                cleaned = clean_health_ignore(key, own.get(key))
+                if cleaned is not None:
+                    base[key] = cleaned
         return base
 
     def watchdog(self) -> dict[str, Any]:

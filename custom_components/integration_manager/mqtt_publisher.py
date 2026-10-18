@@ -96,6 +96,20 @@ REPUBLISH_BATCH = 200          # documents per batch before yielding to the even
 REPUBLISH_BATCH_PAUSE_S = 0.02
 HEALTH_GRACE_S = 900  # after a (re)start, at most this long before unavailable / silent entities count
 HEALTH_STALE_S = 900  # no state written by the integration's entities (last_reported, value changed or not) for this long = degraded
+NO_DATA_STATES = ("unknown", "unavailable")  # a change to one of these is never fresh data
+# Under the "updated" stale basis, attributes (globs) that move with the clock instead of with received data: a change
+# of only these is no fresh data.  Ages and staleness counters are recomputed on every write, a dead source included.
+# Ignoring one that never changes costs nothing; one that carries data on its own would hide it, so the list is short.
+HEALTH_VOLATILE_ATTRIBUTES = ("staleness*", "*_staleness*", "*_age", "*_age_s", "*_age_seconds")
+# ...and per integration, what it is known to write without new data.  ramses_cc 0.61.1: every device status sensor
+# rewrites staleness_seconds / last_rssi_age_seconds each minute, its per-gateway RSSI trackers expire after five
+# minutes, and missed polls count up (and turn the sensor off) only because nothing answers.  A real packet moves
+# last_seen and the device's own entities, so ignoring the status sensors loses no fresh data; the attributes are
+# there for status sensors renamed out of the glob.
+HEALTH_VOLATILE_DEFAULTS: dict[str, dict[str, tuple[str, ...]]] = {
+    "ramses_cc": {"ignore_attributes": ("rssi_per_hgi", "best_rssi", "rssi_quality", "is_stale", "consecutive_missed_polls"),
+                  "ignore_entities": ("binary_sensor.*_status",)},
+}
 
 CONFIG_FILE = "integration_manager/mqtt.json"
 # Entities Home Assistant creates by itself in every instance, not by the integration or by the user: zone.home is the
@@ -696,6 +710,10 @@ class MqttPublisher:
     # process publishes comes back to it.  False until one says otherwise (the safe side: 3.1.1 echoes)
     _session_v5 = False
     _health_since: str | None = None  # when the verdict last published first took that value
+    # entity_id -> [time of its last fresh change or None, its last state with a value, its integration]: kept by
+    # _track_fresh, read by build_health.  None until the state listener runs; _fresh_since is when it started
+    _fresh: dict[str, list[Any]] | None = None
+    _fresh_since: float | None = None
     # _calls is iterated and changed on paho's thread and changed on the loop (a call refused for the in-flight cap)
     _calls_lock = threading.Lock()
     _subscribing: list[Any] | None = None  # [client, mid, topics, online announced] of the SUBSCRIBE waiting for its SUBACK
@@ -1181,6 +1199,7 @@ class MqttPublisher:
         self._cleanup_pending = await self.hass.async_add_executor_job(self._read_cleanup_pending)
         self._manager_announced = await self.hass.async_add_executor_job(self._read_manager_announced)
         # listeners for the life of the process: the publisher is never set up twice
+        self._fresh, self._fresh_since = {}, time.time()
         self.hass.bus.async_listen(EVENT_STATE_CHANGED, self._on_state)
         self.hass.bus.async_listen(er.EVENT_ENTITY_REGISTRY_UPDATED, self._on_registry)
         # A device renamed (or removed) here changes the device block of its
@@ -3682,14 +3701,19 @@ class MqttPublisher:
                 ids.update(platform.entities)
             has_entities = bool(ids) or any(p.entities for p in platforms)
             ids = sorted(ids)
-            states = [st for st in (self.hass.states.get(i) for i in ids) if st is not None]
+            with_state = [(i, st) for i in ids if (st := self.hass.states.get(i)) is not None]
+            states = [st for _, st in with_state]
             unavailable = sum(1 for st in states if st.state == "unavailable")
             unknown = sum(1 for st in states if st.state == "unknown")
-            last = max((st.last_updated.timestamp() for st in states), default=None)
+            rules = self._rules_provider(domain)
+            last = self._last_fresh(domain, rules, with_state)
             # last_reported moves whenever the integration writes a state, even an
             # unchanged value (a message received): a quiet bus with steady values
-            # is alive, a silent integration is not
-            reported = max((st.last_reported.timestamp() for st in states), default=None)
+            # is alive, a silent integration is not.  A write of unknown/unavailable
+            # is not a value received; when no entity has a value, every write counts
+            # as before (buttons, scenes, events that never fired are "unknown")
+            with_value = [st for st in states if st.state not in NO_DATA_STATES] or states
+            reported = max((st.last_reported.timestamp() for st in with_value), default=None)
             base.update({
                 "entities": len(ids), "entities_with_state": len(states), "entities_unavailable": unavailable, "entities_unknown": unknown,
                 "last_state_update": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(last)) if last else None,
@@ -3697,7 +3721,6 @@ class MqttPublisher:
                 "last_report": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(reported)) if reported else None,
                 "last_report_age_s": int(now - reported) if reported else None,
             })
-            rules = self._rules_provider(domain)
             base["rules"] = rules
             booting = grace and now - self._started_at < min(rules["stale_s"], HEALTH_GRACE_S)  # grace: entities fill in after the first traffic
             if base.get("state") == "ok" and booting:
@@ -3705,7 +3728,8 @@ class MqttPublisher:
                 base["grace"] = True
             elif base.get("state") == "ok":
                 # opted in ("updated"): a coordinator that re-writes the same states on a dead source keeps
-                # last_reported moving; only a value (or attribute) that changes counts as fresh data
+                # last_reported moving; only fresh data counts (_track_fresh: a changed value or attribute,
+                # never a change to unknown/unavailable, ticking attributes and ignored entities left out)
                 updated = rules.get("stale_basis") == "updated"
                 if states and unavailable * 100 >= len(states) * rules["unavailable_pct"]:
                     base["state"], base["reason"] = "degraded", f"{unavailable} of {len(states)} entities unavailable"
@@ -3726,6 +3750,24 @@ class MqttPublisher:
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         })
         return base
+
+    def _last_fresh(self, domain: str, rules: dict[str, Any], with_state: list[tuple[str, State]]) -> float | None:
+        """The newest fresh data of the integration's entities (the ignored ones left out).  An entity with no fresh
+        change seen since the state listener started counts its last_updated, but never later than that start: what
+        moved it afterwards was judged not fresh.  None only with no entity to judge and no listener."""
+        entity_globs = self._health_ignores(domain, rules)[1]
+        fresh = self._fresh or {}
+        times = []
+        for entity_id, st in with_state:
+            if any(matches(g, entity_id) for g in entity_globs):
+                continue
+            rec = fresh.get(entity_id)
+            if rec is not None and rec[0] is not None:
+                times.append(rec[0])
+            elif st.state not in NO_DATA_STATES:
+                t = st.last_updated.timestamp()
+                times.append(t if self._fresh_since is None else min(t, self._fresh_since))
+        return max(times, default=self._fresh_since)
 
     def publish_health(self) -> dict[str, Any]:
         doc = self.build_health()
@@ -3981,6 +4023,8 @@ class MqttPublisher:
     def _on_state(self, event: Event) -> None:
         new: State | None = event.data.get("new_state")
         old: State | None = event.data.get("old_state")
+        if self._fresh is not None:
+            self._track_fresh(event.data.get("entity_id") or (new or old).entity_id, old, new)
         if new is not None:
             # An event entity's state is the time of its last event: only a
             # changed state is a new event (restore at startup, availability
@@ -4005,6 +4049,45 @@ class MqttPublisher:
                 self._publish_disabled(old.entity_id, old)  # disabling removes the state: see _on_registry
             else:
                 self._clear(old.entity_id)
+
+    def _health_ignores(self, domain: str, rules: dict[str, Any] | None = None) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The attribute and entity globs the "updated" basis leaves out for this integration: the built-in ones plus
+        its own health settings."""
+        own = rules if rules is not None else self._rules_provider(domain)
+        builtin = HEALTH_VOLATILE_DEFAULTS.get(domain, {})
+        return ((*HEALTH_VOLATILE_ATTRIBUTES, *builtin.get("ignore_attributes", ()), *(own.get("ignore_attributes") or ())),
+                (*builtin.get("ignore_entities", ()), *(own.get("ignore_entities") or ())))
+
+    def _track_fresh(self, entity_id: str, old: State | None, new: State | None) -> None:
+        """When each entity last brought fresh data, for the "updated" stale basis: HA's last_updated also moves on a
+        change to unknown/unavailable and on attributes that tick with the clock, which kept a dead source "ok".
+        Fresh = a value (state or attribute, the ignored attributes left out) that differs from the last value the
+        entity had: a change to unknown/unavailable is not, and neither is the first value an entity shows in this
+        process nor the one it comes back with (a reload, an outage) when that is the one it had.  On the loop."""
+        fresh = self._fresh  # set: _on_state calls this only then
+        if new is None:  # removed: kept while its registry entry stays (a reload puts it back), so the size is bounded
+            if er.async_get(self.hass).async_get(entity_id) is None:
+                fresh.pop(entity_id, None)
+            return
+        rec = fresh.get(entity_id)
+        if rec is None:
+            domain = platform_of(self.hass, entity_id)
+            if domain is None:
+                return
+            rec = fresh[entity_id] = [None, old if old is not None and old.state not in NO_DATA_STATES else None, domain]
+        if new.state in NO_DATA_STATES:
+            return
+        base, rec[1] = rec[1], new
+        if base is None:
+            return
+        if new.state == base.state and new.attributes == base.attributes:
+            return
+        if new.state == base.state:
+            attr_globs = self._health_ignores(rec[2])[0]
+            keys = {k for k in (*new.attributes, *base.attributes) if not any(matches(g, k) for g in attr_globs)}
+            if all(new.attributes.get(k) == base.attributes.get(k) for k in keys):
+                return
+        rec[0] = new.last_updated.timestamp()
 
     def _refresh_discovery_if_reshaped(self, state: State) -> None:
         """A discovery component is not only a set of topics, it is also what the entity's attributes say

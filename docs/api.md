@@ -186,7 +186,13 @@ outside the range are clamped, not refused:
 
 Its `health` object holds per-integration rules, any left out for the default:
 `{"<domain>": {"mode": "periodic"|"event", "stale_s": 60–86400,
-"unavailable_pct": 1–100, "stale_basis": "reported"|"updated"}}`.
+"unavailable_pct": 1–100, "stale_basis": "reported"|"updated",
+"ignore_attributes": [...], "ignore_entities": [...]}}`. The two lists (at most
+50 names or globs each, up to 100 characters; entity ids in lower case) name
+what the `updated` basis does not count as fresh data, on top of the built-in
+ones ([what counts](health.md#the-health-verdict)); an empty list removes it,
+and anything else is refused. The **MQTT** page keeps them when it saves a
+row.
 
 ### Home Assistant versions
 

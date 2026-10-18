@@ -23,6 +23,34 @@ changed value or attribute, and the verdict turns `degraded` after *stale*
 seconds. Pick a *stale* longer than its quietest normal stretch, or steady
 values read as a fault. The document names the basis under `rules.stale_basis`.
 
+Under either basis a write of `unknown` or `unavailable` is not data: under
+`reported` such writes count only when no entity has a value at all (buttons,
+scenes, events that never fired), as before.
+
+Under `updated`, only fresh data counts. The manager watches every state change
+of the integration's entities and records when each last brought a new value:
+
+- a change to `unknown` or `unavailable` is not fresh, and neither is an entity
+  that appears in one of them (a value expiring on a dead source);
+- the first value an entity shows in this process is not fresh, and neither is
+  the value it comes back with after a reload or an outage when it is the one
+  it had before; a different value is;
+- a change of only attributes that move with the clock is not fresh: built in
+  for every integration `staleness*`, `*_staleness*`, `*_age`, `*_age_s` and
+  `*_age_seconds`; for `ramses_cc` also `rssi_per_hgi`, `best_rssi`,
+  `rssi_quality`, `is_stale` and `consecutive_missed_polls`, and its status
+  sensors (`binary_sensor.*_status`) are left out entirely, since they rewrite
+  their ages every minute and turn off on their own when nothing is heard. A
+  real packet still moves the device's own entities;
+- any other attribute counts: a climate entity's measured temperature is an
+  attribute.
+
+An entity with no fresh change since the manager started counts from that
+start. Add attribute names and entity ids (globs, at most 50 each) for an
+integration through `ignore_attributes` and `ignore_entities` in its health
+rules ([`POST /api/settings`](api.md#settings)); they only apply under
+`updated`, and the built-in ones always apply.
+
 For the first *stale* seconds after a start (at most 15 minutes), and again
 after the MQTT identity changes, the entity checks (unavailable, silence, no
 state yet) are skipped while the entities fill in; the config entries are
@@ -49,9 +77,9 @@ is the first bad verdict after a boot; the way back to `ok` once at INFO.
 | `reason` | Why the verdict is not `ok`, masked as on the Logs page; empty when it is |
 | `entities` | Its enabled entities, those without a unique id included |
 | `entities_with_state`, `entities_unavailable`, `entities_unknown` | Of those: how many have a state, and how many are `unavailable` or `unknown` |
-| `last_state_update`, `last_state_update_age_s` | The newest changed value or attribute (local time with its offset) and its age in seconds; `null` without a state |
-| `last_report`, `last_report_age_s` | The newest state write, even an unchanged value, and its age; `null` without a state |
-| `rules` | The health rules in use: `stale_s`, `mode`, `unavailable_pct`, `stale_basis` |
+| `last_state_update`, `last_state_update_age_s` | The newest fresh data under the `updated` rules above, whatever the basis (local time with its offset), and its age in seconds; the manager's start when no entity has changed since; `null` without a state |
+| `last_report`, `last_report_age_s` | The newest state write of a value, even an unchanged one, and its age (writes of `unknown`/`unavailable` only when no entity has a value); `null` without a state |
+| `rules` | The health rules in use: `stale_s`, `mode`, `unavailable_pct`, `stale_basis`, `ignore_attributes`, `ignore_entities` (the integration's own; the built-in ones are not listed) |
 | `grace` | `true` on an `ok` inside the grace after a start; absent otherwise |
 | `since` | When this process first published the current verdict |
 | `ha_version` | The Home Assistant version in the container |
@@ -119,8 +147,9 @@ and is acted on: with no config entry to reload, the first step is the restart.
 A reload or restart it decided against puts one line on the timeline for that
 stretch, not one a minute.
 
-**It cannot loop.** A reload makes every entity write fresh states, so the
-verdict can read `ok` for a minute or two with nothing fixed, and after a
+**It cannot loop.** A reload makes every entity write its states again, so
+under the `reported` basis the verdict can read `ok` for a minute or two with
+nothing fixed, and after a
 restart the grace reads `ok` for up to *stale* seconds. Neither is a recovery:
 only `ok` held for a whole window (`watchdog_after_min`, never doubled) resets
 the ladder, the backoff and a give-up. A grace `ok` counts as no verdict at

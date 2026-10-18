@@ -77,7 +77,7 @@ async function healthRules(){
      <td><input type="number" min="60" max="86400" data-h="stale_s" data-d="${esc(d)}" value="${esc(own.stale_s??'')}" placeholder="${esc(r.health_stale_s)}" style="width:90px"></td><td><input type="number" min="1" max="100" data-h="unavailable_pct" data-d="${esc(d)}" value="${esc(own.unavailable_pct??'')}" placeholder="${esc(r.health_unavailable_pct)}" style="width:70px"></td><td><button data-hs="${esc(d)}">Save</button></td>`;
     t.appendChild(tr); }
   t.querySelectorAll('button[data-hs]').forEach(b=>b.onclick=async()=>{const d=b.dataset.hs; const rules={}; t.querySelectorAll(`[data-d="${d}"]`).forEach(el=>{ if(el.value!=='') rules[el.dataset.h]=el.tagName==='SELECT'?el.value:parseInt(el.value,10); });
-    const cur=(await (await fetch('api/settings')).json()).health||{}; cur[d]=rules; const res=await post('api/settings',{health:cur}); $('#hmsg').textContent=res.ok?`rules of ${d} saved (empty = default)`:'ERROR: '+res.error; });
+    const cur=(await (await fetch('api/settings')).json()).health||{}; cur[d]={...Object.fromEntries(Object.entries(cur[d]||{}).filter(([k])=>k.startsWith('ignore_'))),...rules}; /* the ignore lists are set through the API */ const res=await post('api/settings',{health:cur}); $('#hmsg').textContent=res.ok?`rules of ${d} saved (empty = default)`:'ERROR: '+res.error; });
 }
 $('#hsave').onclick=async()=>{const r=await post('api/settings',{health_stale_s:parseInt($('#hstale').value,10)||900,health_unavailable_pct:parseInt($('#hunav').value,10)||50}); $('#hmsg').textContent=r.ok?'defaults saved':'ERROR: '+r.error; healthRules();};
 healthRules().catch(()=>{});
