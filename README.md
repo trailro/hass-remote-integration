@@ -394,7 +394,8 @@ the code reads (`cv.vol`) that the target Home Assistant does not have, looked
 up in that version's own source: the running install, its venv on the volume,
 or its wheel, downloaded once and kept while the process runs. The same check
 runs for the running integration when a Home Assistant version change is
-scheduled, against that version: a blocker refuses the change, with a choice to
+scheduled, against that version, together with its requirements resolved
+against that version's pins: a blocker refuses the change, with a choice to
 schedule it anyway on **System**. A switch started over MQTT refuses on blockers and
 says why in its result; for the API's `force`, see [API](docs/api.md).
 

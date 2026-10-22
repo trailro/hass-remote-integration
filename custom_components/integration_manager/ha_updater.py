@@ -323,7 +323,9 @@ class HaUpdater:
     async def switch_blockers(self, installer: Any, version: str) -> tuple[list[str], list[str]]:
         """(blockers, warnings) of a switch to ``version`` beyond its requirements: the running integration reads
         an attribute of a Home Assistant module ``version`` does not have (the preflight's check, against that
-        version's own source), or the smoke test left ``version`` before.  Refused unless forced from the UI."""
+        version's own source), its requirements do not resolve against ``version``'s pins
+        (preflight.switch_requirement_checks), or the smoke test left ``version`` before.  Refused unless forced
+        from the UI."""
         from . import preflight
 
         version = version.strip()
@@ -344,6 +346,9 @@ class HaUpdater:
                                 + f"): it fails with an AttributeError there; switch {domain} to a release that supports {version} first")
             if note:
                 warnings.append(f"the attributes {domain} reads from Home Assistant's modules were not checked against {version}: {note}")
+            req_blockers, req_warnings = await preflight.switch_requirement_checks(self.hass, installer, version)
+            blockers += req_blockers
+            warnings += req_warnings
         return blockers, warnings
 
     async def async_set_desired(self, version: str) -> dict[str, Any]:

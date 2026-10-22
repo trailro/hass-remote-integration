@@ -1633,6 +1633,75 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
             await hass.async_add_executor_job(_cleanup)
 
 
+# ----- the running integration's requirements, before a Home Assistant switch -----
+#
+# The integration preflight above resolves a new integration version against the Home Assistant it is for; a
+# Home Assistant switch is the other half: the integration that runs stays, and the target's pins change under
+# it.  Same verdicts: a conflict is a blocker, a target whose pins cannot be read or a PyPI that cannot be reached
+# is a warning.  Kept per (integration copy, target, image Python) for CACHE_S; "could not check" is not kept.
+
+_SWITCH_REPORTS: dict[tuple[str, ...], tuple[float, tuple[list[str], list[str]]]] = {}
+
+
+async def switch_requirement_checks(hass: HomeAssistant, installer, version: str) -> tuple[list[str], list[str]]:
+    """(blockers, warnings) of resolving the running integration's requirements, with the recursive dependency
+    closure start() installs, against Home Assistant ``version``'s pins.  Nothing when no integration runs (a
+    stopped one is not checked: its requirements are resolved by the preflight of the start that follows)."""
+    domain = getattr(installer, "running", None)
+    if not domain or version == ha_version:
+        return [], []
+    comp = installer.component_dir(domain)
+    manifest = await hass.async_add_executor_job(_read_manifest, comp)
+    if not manifest or not (manifest.get("requirements") or manifest.get("dependencies") or manifest.get("after_dependencies")):
+        return [], []
+    tag = getattr(installer, "running_tag", None) or ""
+    key = (domain, tag, json.dumps([manifest.get(k) for k in ("requirements", "dependencies", "after_dependencies")]),
+           version, _ha_python_key())
+    now = time.monotonic()
+    for old in [k for k, (at, _) in _SWITCH_REPORTS.items() if now - at >= CACHE_S]:
+        del _SWITCH_REPORTS[old]
+    if (hit := _SWITCH_REPORTS.get(key)) is not None:
+        return list(hit[1][0]), list(hit[1][1])
+    who = f"{domain} {tag}".strip()
+    pins, why = await hass.async_add_executor_job(_target_pins, version, sys.executable, installer.config_dir)
+    if pins is None:
+        return [], [f"the requirements of {who} were not checked against Home Assistant {version}'s pins: {why}"]
+    blockers: list[str] = []
+    warnings: list[str] = []
+    reqs = list(manifest.get("requirements") or [])
+    for row in await _dependency_rows(hass, domain, manifest, builtin=pins[1]):
+        reqs.extend(row["requirements"])
+        if not row["found"] and row["required"]:
+            blockers.append(f"{who} depends on '{row['domain']}', which Home Assistant {version} does not have")
+    reqs = [r for r in dict.fromkeys(reqs) if r and not bad_requirement(r)]
+    constraints = await hass.async_add_executor_job(_write_constraints, pins[0])
+    try:
+        async with LOCK:
+            pip = await hass.async_add_executor_job(_pip_dry_run, sys.executable, reqs, constraints)
+    finally:
+        await hass.async_add_executor_job(_remove, constraints)
+    if not pip["ok"]:
+        err = pip.get("stderr_full") or pip["stderr"]
+        if _pip_unreachable(err):
+            return blockers, [f"the requirements of {who} were not checked against Home Assistant {version}: "
+                              f"PyPI could not be reached ({_pip_reason(err)})"]
+        blockers.append(f"the requirements of {who} cannot be resolved against Home Assistant {version}'s pins: {_pip_reason(err)}; "
+                        f"switch {domain} to a release that supports {version} first")
+    _SWITCH_REPORTS[key] = (now, (blockers, warnings))
+    while len(_SWITCH_REPORTS) > MAX_REPORTS:
+        del _SWITCH_REPORTS[min(_SWITCH_REPORTS, key=lambda k: _SWITCH_REPORTS[k][0])]
+    return list(blockers), list(warnings)
+
+
+def _read_manifest(component_dir: str) -> dict[str, Any] | None:
+    try:
+        with open(os.path.join(component_dir, "manifest.json"), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 # ----- a Home Assistant version, before the restart installs it ------------
 #
 # The image carries one Python and no compiler; Home Assistant pins every
