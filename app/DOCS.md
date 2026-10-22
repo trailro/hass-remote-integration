@@ -27,9 +27,10 @@ minutes; the web UI shows the progress. It needs internet access.
   of the app brings that version back, which leaves them out until you
   update again. Those backups hold the tokens and MQTT password of the time
   each was made: keep Home Assistant backups password-protected (encrypted).
-- Any logged-in Home Assistant user, administrator or not, can open the UI
-  through Home Assistant (the panel is hidden from the others, not closed to
-  them): the `ingress_users` option narrows it to the user names listed. Clear the
+- Only administrators can open the UI through Home Assistant on Supervisor
+  2026.10.2 and newer; on older Supervisors any logged-in user can (the panel
+  is hidden from the others, not closed to them). The `ingress_users` option
+  narrows it to the user names listed. Clear the
   port on the Network tab if you use only the sidebar.
 - Uninstalling leaves the app's folder
   (`app_configs/<id>_hass_remote_integration`, about 800 MB) unless you also

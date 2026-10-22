@@ -5,6 +5,11 @@ Every version's changes are in the
 
 ## Unreleased
 
+- **Docs: ingress is closed to non-administrators from Supervisor 2026.10.2.**
+  The Supervisor now refuses an ingress session of a user who is not an
+  administrator for an app with `panel_admin` (this app keeps it on), so the
+  sidebar panel is no longer reachable by other users there. `ingress_users`
+  still narrows it further; on older Supervisors it remains the only gate.
 - **The environment builder's combined change goes back as a whole.** After
   *Prepare* with a Home Assistant version and *start*, the new integration
   version starts at the target's first boot; when it does not set up there
