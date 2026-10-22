@@ -310,11 +310,14 @@ The web UI opens two ways, with a different gate each:
   remote access over HTTPS and Home Assistant Cloud (Nabu Casa) included,
   with nothing opened on your network. Home Assistant's login is the gate:
   HRI's password and host guard do not apply. The panel shows only for
-  administrators, but that only hides it: the Supervisor opens ingress
-  sessions for every logged-in Home Assistant user, administrator or not, so
-  anyone with the panel's address can open the UI, which installs code and
-  runs service calls. `ingress_users` is the way to restrict it: set it to
-  the users who may (anyone else gets `403`). The user comes from the
+  administrators. From Supervisor 2026.10.2 the Supervisor also refuses an
+  ingress session of a user who is not an administrator (`403`), since the app
+  keeps `panel_admin` on. Older Supervisors open ingress sessions for every
+  logged-in Home Assistant user, so there anyone with the panel's address can
+  open the UI, which installs code and runs service calls. `ingress_users`
+  narrows it further, on any Supervisor: set it to the users who may (anyone
+  else gets `403`); on 2026.10.2 and newer only administrators can be among
+  them. The user comes from the
   `X-Remote-User-Name` header the Supervisor sets, and both it and
   `X-Remote-User-Id` must be in the Supervisor's exact spelling: the
   Supervisor forwards a browser's own copy spelled in another case in place
