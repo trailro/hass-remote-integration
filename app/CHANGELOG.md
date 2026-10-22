@@ -18,6 +18,13 @@ Every version's changes are in the
   running version is unchanged, except that a conflict on one of its pins
   says so and suggests switching Home Assistant first, or checking both
   together in the environment builder.
+- **A Home Assistant switch checks the running integration's requirements
+  against the target's pins** (`POST /api/ha/check` and `/api/ha/update`,
+  **System**, the manager device's install action), as the integration
+  preflight does: a conflict is a blocker (`needs_force`; the manager device
+  never forces), pins that cannot be read or PyPI that cannot be reached are
+  a warning. Before, only the attributes the integration reads were checked.
+  A stopped integration is not checked.
 - **Log files lists the logs an integration writes in a folder of the config
   dir.** ramses_cc 0.61.1 writes `ramses_rf_logs/packet_log.log` (0.60.4
   wrote `packet_log.log` in the config root) and names no path in its
