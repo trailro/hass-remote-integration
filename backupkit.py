@@ -83,7 +83,7 @@ INCLUDE_ROOT_GLOBS = ("*.yaml", "*.yml")
 # (a restore must not revive logged-out sessions; a new key is made at first use).
 DISPOSABLE_GLOBS = (
     f"{STATE_DIR}/auth_key", f"{STATE_DIR}/auth_key.tmp", f"{STATE_DIR}/auth_revoked", f"{STATE_DIR}/auth_revoked.tmp",
-    "venv-*", "venv-current", "backups", "backups/*", "*.log",
+    "venv-*", "venv-current", ".venv-current.tmp", ".venv-removing-*", "backups", "backups/*", "*.log",
     "*.log.*", "__pycache__", "*/__pycache__", "*/__pycache__/*", "*.pyc", "deps", "deps/*", "tts", "tts/*",
     f"{STATE_DIR}/restore-pending*.zip", f"{STATE_DIR}/restore-pending.json", f"{STATE_DIR}/restore-applied.json", f"{STATE_DIR}/restore-failed.json", f"{STATE_DIR}/*.tmp", f"{STATE_DIR}/pre-restore-*", f"{STATE_DIR}/ha-install.log",
     f"{STATE_DIR}/staging-*", f"{STATE_DIR}/staging-*/*", f"{STATE_DIR}/backups", f"{STATE_DIR}/backups/*",

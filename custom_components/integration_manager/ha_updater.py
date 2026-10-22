@@ -106,14 +106,21 @@ class HaUpdater:
         site = os.path.join(venv, "lib", f"python{sys.version_info[0]}.{sys.version_info[1]}", "site-packages", "homeassistant", "__init__.py")
         return all(os.path.isfile(p) for p in (os.path.join(venv, ".ok"), os.path.join(venv, "bin", "python"), site))
 
-    def venv_removal_refusal(self, version: str) -> str | None:
+    def venv_removal_refusal(self, version: str) -> VenvRemovalRefused | None:
         """Blocking: why the venv of ``version`` must stay, or None.  Called under views._HA_CHANGE_LOCK with the
         installer busy, so no version change can be scheduled between this answer and the removal."""
+        if not _VERSION.fullmatch(version):
+            return VenvRemovalRefused(f"{version[:40]!r} is not a Home Assistant version", 400)
+        try:
+            why = self._venv_needed(version)
+        except ValueError as err:  # ha.json unreadable: refused, as a write over it would be
+            why = str(err)
+        return VenvRemovalRefused(why) if why else None
+
+    def _venv_needed(self, version: str) -> str | None:
         import backupkit
 
-        if not _VERSION.fullmatch(version):
-            return f"{version[:40]!r} is not a Home Assistant version"
-        state = self._read_for_update()  # unreadable: refused, as a write over it would be
+        state = self._read_for_update()
         if version in (HA_VERSION, state.get("current")):
             return f"Home Assistant {version} is the version running now"
         if state.get("desired") == version:
@@ -144,26 +151,23 @@ class HaUpdater:
             return f"venv-{version} is the venv running now"
         return None
 
-    def remove_venv(self, version: str) -> int:
+    def remove_venv(self, version: str) -> tuple[int, int]:
         """Blocking: the venv of ``version`` renamed out of the way (a name the entrypoint's prune does not take for a
-        version, and sweeps if a kill left it), then deleted.  Returns the bytes freed.  Check
-        venv_removal_refusal first, under the same lock."""
+        version, and sweeps at every boot), then deleted.  Returns (bytes freed, bytes left for the next boot's
+        sweep).  Check venv_removal_refusal first, under the same lock.  An integration preflight (a builder Check)
+        may be reading this venv as a target's source at the same time (preflight._target_ha_root): its reads fail
+        with an OSError and it says the target could not be read, a warning, never a wrong verdict."""
         import secrets
         import shutil
 
         cfg = self.hass.config.config_dir
         path = os.path.join(cfg, f"venv-{version}")
-        size = 0
-        for root, _dirs, files in os.walk(path):
-            for name in files:
-                try:
-                    size += os.lstat(os.path.join(root, name)).st_size
-                except OSError:
-                    pass
+        before = _tree_bytes(path)
         aside = os.path.join(cfg, f".venv-removing-{version}-{secrets.token_hex(4)}")
         os.rename(path, aside)  # gone under its name at once: nothing can boot a half-deleted venv
         shutil.rmtree(aside, ignore_errors=True)
-        return size
+        left = _tree_bytes(aside) if os.path.lexists(aside) else 0
+        return max(0, before - left), left
 
     async def available(self, force: bool = False) -> dict[str, Any]:
         now = time.monotonic()
@@ -469,7 +473,9 @@ class HaUpdater:
             rec = {"version": HA_VERSION, "from": planned.get("from"), "domain": planned.get("domain"),
                    "entries": [str(e) for e in planned.get("entries") or []], "loaded": bool(planned.get("loaded")),
                    "backup": change.get("backup"), "parts": change.get("parts") or ["storage"],
-                   "switched": change.get("at"), "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+                   "switched": change.get("at"), "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                   # the environment builder's start of another integration version at this boot (views.async_change_ha_version)
+                   **({"start": change["start"]} if isinstance(change.get("start"), dict) else {})}
 
             def record(st: dict[str, Any]) -> dict[str, Any] | None:
                 ch = st.get("change") if isinstance(st.get("change"), dict) else {}
@@ -634,7 +640,16 @@ class HaUpdater:
 
         domain, back, backup = str(rec.get("domain")), rec.get("from"), rec.get("backup")
         parts = rec.get("parts") or ["storage"]
-        failed = f"Home Assistant {HA_VERSION} started, but {domain} did not set up on it ({reason})"
+        # The environment builder switched Home Assistant AND started another version of the integration at this boot
+        # (its deferred start): the integration version that ran before goes back with Home Assistant, from the
+        # switch's own backup, which was taken with it deployed.  The integration's smoke test of that start does not
+        # roll back on its own (Installer.async_run_pending_start): this verdict is the one that acts, once.
+        start = rec.get("start") if isinstance(rec.get("start"), dict) else {}
+        from_tag, left_tag = start.get("from_tag"), start.get("tag")
+        revert = bool(from_tag and left_tag and start.get("domain") == domain and installer.running == domain
+                      and installer.running_tag == left_tag
+                      and from_tag in ((installer.state.installed.get(domain) or {}).get("versions") or {}))
+        failed = f"Home Assistant {HA_VERSION} started, but {domain}{f' {left_tag}' if revert else ''} did not set up on it ({reason})"
         why_not = ""
         if not installer.settings.bool_("auto_rollback"):
             why_not = "automatic rollback is off"
@@ -661,10 +676,20 @@ class HaUpdater:
             why_not = f"a configuration restore is scheduled (still not applied after {installer.SETUP_WAIT_S // 60} min), and switching back would replace it"
         if why_not:
             msg = f"{failed}; not switched back: {why_not}"
+            res: dict[str, Any] = {}
+            if revert and installer.settings.bool_("auto_rollback"):
+                # Home Assistant stays; the integration still goes back, by its own full rollback (the backup its start
+                # took on this version), which its smoke test left to this verdict
+                res = await installer.rollback_full(domain, rejected=True)
+                msg += (f"; {domain} rolled back to {res.get('tag')} on Home Assistant {HA_VERSION} instead (its backup "
+                        f"{res.get('restore')} restored at the restart)" if res.get("ok")
+                        else f"; {domain} not rolled back either: {res.get('error')}")
             _LOGGER.error("%s", msg)
             events.emit("ha", msg, version=HA_VERSION, state="error")
             pn.async_create(self.hass, msg + ".", title="Home Assistant version", notification_id="hri_ha_smoke")
             await self.hass.async_add_executor_job(self._drop_smoke, None)
+            if res.get("ok"):
+                await installer.restart()
             return
         cfg = self.hass.config.config_dir
         async with _HA_CHANGE_LOCK:  # no version change is scheduled while this one is written
@@ -674,10 +699,18 @@ class HaUpdater:
                 # what this version ran with since the switch (the switch's backup may be days old): saved first,
                 # and kept but for the stores the older version cannot read (backupkit.storage_for_version)
                 saved = (await installer.async_backup(label=f"before-fallback-from-{HA_VERSION}"))["name"]
-                merged, restored = await self.hass.async_add_executor_job(
-                    backupkit.storage_for_version, cfg, saved, str(backup), back, f"fallback-config-for-{back}")
+                if revert:
+                    # the integration goes back too: the configuration both ran with before the builder's change, whole
+                    # (.storage as that version left it, and its files), not merged with what the new one migrated
+                    merged, restored = {"name": str(backup)}, []
+                    parts = sorted({*parts, "storage", "custom_components"})
+                else:
+                    merged, restored = await self.hass.async_add_executor_job(
+                        backupkit.storage_for_version, cfg, saved, str(backup), back, f"fallback-config-for-{back}")
                 await self.hass.async_add_executor_job(
                     lambda: backupkit.schedule_restore(cfg, merged["name"], parts, for_version=back, force=True))
+                if revert:
+                    installer.revert_for_ha_fallback(domain, str(from_tag), str(left_tag), str(back))
             except Exception as err:  # noqa: BLE001
                 msg = (f"{failed}; not switched back to Home Assistant {back}: its configuration could not be prepared from {backup} ({err})"
                        + (f"; the configuration as it is now is saved in backup {saved}" if saved else ""))
@@ -689,12 +722,18 @@ class HaUpdater:
             finally:
                 installer.busy = False
             backup = merged["name"]
-            msg = (f"{failed}; switched back to Home Assistant {back} automatically. The configuration as it was on {HA_VERSION} "
-                   f"is saved in backup {saved}, and {back} starts with it, "
-                   + (f"except {', '.join(restored)}, which {HA_VERSION} migrated to a format {back} cannot read (or removed): "
-                      f"those come back from the switch's backup {rec.get('backup')}, and what changed in them since the switch is "
-                      f"only in {saved}" if restored else f"unchanged: nothing in it needed the switch's backup {rec.get('backup')}")
-                   + f". Switching to {HA_VERSION} again is refused unless forced, and is smoke-tested again")
+            if revert:
+                msg = (f"{failed}; switched back to Home Assistant {back} with {domain} {from_tag}, the version that ran before the "
+                       f"environment builder's change, automatically. Both start with the configuration from the switch's backup "
+                       f"{backup}; the configuration as it was on {HA_VERSION} is saved in backup {saved}. Switching to {HA_VERSION} "
+                       "again is refused unless forced, and is smoke-tested again")
+            else:
+                msg = (f"{failed}; switched back to Home Assistant {back} automatically. The configuration as it was on {HA_VERSION} "
+                       f"is saved in backup {saved}, and {back} starts with it, "
+                       + (f"except {', '.join(restored)}, which {HA_VERSION} migrated to a format {back} cannot read (or removed): "
+                          f"those come back from the switch's backup {rec.get('backup')}, and what changed in them since the switch is "
+                          f"only in {saved}" if restored else f"unchanged: nothing in it needed the switch's backup {rec.get('backup')}")
+                       + f". Switching to {HA_VERSION} again is refused unless forced, and is smoke-tested again")
             at = time.strftime("%Y-%m-%dT%H:%M:%S")
 
             def fall_back(st: dict[str, Any]) -> None:
@@ -703,7 +742,8 @@ class HaUpdater:
                 st["recovery"] = {"backup": backup, "from": HA_VERSION, "for": back, "parts": parts, "at": at}
                 st["last_error"] = msg  # announced after the restart (async_announce_ha_error), as a crash fallback's
                 st["smoke_fallback"] = {"from": HA_VERSION, "to": back, "domain": domain, "reason": reason, "at": at,
-                                        "saved": saved, "restored": restored}
+                                        "saved": saved, "restored": restored,
+                                        **({"integration": {"from": left_tag, "to": from_tag}} if revert else {})}
                 st.pop("change", None)
 
             await self.hass.async_add_executor_job(self._drop_smoke, fall_back)
@@ -737,6 +777,26 @@ def _installable_files(files: Any) -> list[dict[str, Any]]:
 
 
 _key = ha_vkey
+
+
+class VenvRemovalRefused(ValueError):
+    """Why a venv is not removed, with the HTTP status it answers: 400 for a request that names no version, 409 for a
+    venv something still needs."""
+
+    def __init__(self, reason: str, status: int = 409) -> None:
+        super().__init__(reason)
+        self.status = status
+
+
+def _tree_bytes(path: str) -> int:
+    size = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                size += os.lstat(os.path.join(root, name)).st_size
+            except OSError:
+                pass
+    return size
 
 
 def _logged_cause(domain: str, since: str) -> str:

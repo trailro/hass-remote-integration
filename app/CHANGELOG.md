@@ -5,6 +5,16 @@ Every version's changes are in the
 
 ## Unreleased
 
+- **The environment builder's combined change goes back as a whole.** After
+  *Prepare* with a Home Assistant version and *start*, the new integration
+  version starts at the target's first boot; when it does not set up there,
+  the smoke test now switches back to the old Home Assistant **and** to the
+  integration version that ran before, from the switch's backup, in one
+  restart. Before, Home Assistant went back alone with the new integration
+  version still deployed (it often does not run there), and that version's
+  own smoke test then tried a full rollback that failed. The new version's
+  smoke test only reports now; `smoke_fallback.integration` names both
+  versions.
 - **The integration preflight for another Home Assistant version resolves
   the requirements against that version's pins** (its
   `package_constraints.txt` and the requirements of the built-in components
@@ -24,11 +34,13 @@ Every version's changes are in the
 - **Remove the previous Home Assistant venv by hand.** *Remove HA <version>
   venv* on **System** (`POST /api/ha/venv/remove`, the version typed to
   confirm) frees the 0.7-1 GB the rollback target takes once an upgrade is
-  settled. A rollback to it then installs it again from PyPI, and a new
-  version that crashes before it ever booted is kept and says so rather than
-  falling back. Refused while a version change, its smoke test, a switch back
-  or a restore for that version still needs it. `GET /api/ha` adds
-  `previous_installed`.
+  settled. A rollback to it then installs it again from PyPI, after the same
+  checks as a switch to it. Refused while a version change, its smoke test,
+  a switch back or a restore for that version still needs it. `GET /api/ha`
+  adds `previous_installed`. A new version that crashes before it ever booted
+  while the previous one has no venv for the image's Python (a newer image)
+  is kept, and `last_error` says to set `"desired"` in
+  `integration_manager/ha.json` to go back.
 - **A Home Assistant switch checks the running integration's requirements
   against the target's pins** (`POST /api/ha/check` and `/api/ha/update`,
   **System**, the manager device's install action), as the integration

@@ -465,15 +465,17 @@ to the previous version once. It saves the configuration first, and restores
 from the switch's backup only the `.storage` files the new version wrote at a
 higher major `version`, or removed (the detail is in
 [home-assistant-versions.md](docs/home-assistant-versions.md)). It says why on the timeline and in a notification; a degraded integration is
-kept and reported, and so is one whose device is still not ready (`setup_retry`). The list offers the ten newest stable releases
+kept and reported, and so is one whose device is still not ready (`setup_retry`). When the
+environment builder switched Home Assistant and started another integration
+version together, a failed smoke test takes both back: the old Home Assistant
+with the integration version that ran before, from the switch's backup. The list offers the ten newest stable releases
 plus every version the box has (*Show all versions* for the rest). Versions
 below the image's floor (`HA_VERSION_MIN`, 2026.5.0) or whose pins have no wheel
 for the image's Python (`python:3.14`) are refused. A downgrade asks whether to
 restore from a backup, start clean and rebuild, or keep the configuration.
 Once you are happy with an upgrade, *Remove HA <version> venv* next to *Roll
 back* frees the previous version's venv (0.7-1 GB): a later rollback installs
-it again from PyPI, and a new version that fails to boot can no longer fall
-back to it on its own. See
+it again from PyPI (it needs the network and takes a few minutes). See
 [Home Assistant and Python versions](docs/home-assistant-versions.md).
 
 ### Backups

@@ -182,6 +182,7 @@ class HaJsonOffTheLoopTest(unittest.IsolatedAsyncioTestCase):
     async def test_rollback_reads_and_writes_in_the_executor(self):
         cfg = tempfile.mkdtemp()
         hass, up, on_loop = self._updater(cfg, {"current": views.HA_VERSION, "previous": "2026.1.0"})
+        up._venv_for_this_python = lambda version: True  # the previous venv is on the volume: no install, no check
         inst = SimpleNamespace(hass=hass, busy=False, running=None, async_backup=mock.AsyncMock(return_value={"name": "b.zip"}),
                                settings=SimpleNamespace(backup_keep=5), protected_backups=set)
         view = views.HaActionView(up, inst)
