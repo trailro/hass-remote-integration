@@ -382,8 +382,96 @@ def _store_major(raw: bytes) -> int | None:
     return version if isinstance(version, int) and not isinstance(version, bool) else None
 
 
+# The three registries an integration shares with every other one: going back to an older version of one integration,
+# only its own items come from the older backup (merge_domain_store), the rest stays as it is now.
+DOMAIN_MERGED_STORES = (".storage/core.config_entries", ".storage/core.entity_registry", ".storage/core.device_registry")
+
+
+def _device_entry_ids(device: dict) -> set[str]:
+    """The config entries a device registry item belongs to, in either shape (a ``config_entries`` list up to 2026.7,
+    ``config_entry_id`` from 2026.8; ``primary_config_entry`` in both)."""
+    ids = {str(e) for e in device.get("config_entries") or [] if e}
+    ids |= {str(device[k]) for k in ("config_entry_id", "primary_config_entry") if device.get(k)}
+    return ids
+
+
+def domain_entry_ids(raws: list[bytes], domain: str) -> set[str]:
+    """The ids of ``domain``'s config entries in any of these core.config_entries files."""
+    out: set[str] = set()
+    for raw in raws:
+        try:
+            doc = json.loads(raw)
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            continue
+        data = doc.get("data") if isinstance(doc, dict) else None
+        for e in (data.get("entries") or []) if isinstance(data, dict) else []:
+            if isinstance(e, dict) and e.get("domain") == domain and e.get("entry_id"):
+                out.add(str(e["entry_id"]))
+    return out
+
+
+def merge_domain_store(name: str, live_raw: bytes, older_raw: bytes, domain: str, mine: set[str]) -> tuple[bytes, str]:
+    """One of DOMAIN_MERGED_STORES for an integration going back to the version ``older_raw`` was saved with: its own
+    items (config entries of ``domain``; entities of those entries - ``mine``, from both files' config entries - or of
+    the ``domain`` platform; devices that belong only to those entries) as ``older_raw`` has them, every other item as ``live_raw`` has it.  Items of ``domain``
+    created since the older backup go: they belong to the version that is left.  A device shared with other entries
+    stays live, with ``domain``'s entries as the older backup had them.  The result has the older file's schema: when
+    the live file was migrated to a higher major version (which the older Home Assistant cannot read), it is the older
+    file whole, and the note says so; otherwise it keeps the live file's version, whose minor the older one reads.  Returns (the bytes to restore, a note: "" or why other items were not kept)."""
+    try:
+        older = json.loads(older_raw)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        return live_raw, ""  # nothing of the older file can be read: the live one stays
+    try:
+        live = json.loads(live_raw)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        live = None
+    old_major, live_major = _store_major(older_raw), _store_major(live_raw)
+    if not isinstance(older, dict) or not isinstance(older.get("data"), dict):
+        return live_raw, ""
+    if not isinstance(live, dict) or not isinstance(live.get("data"), dict) or old_major is None or live_major is None \
+            or live_major > old_major:
+        return older_raw, (f"{name}: the current file is a newer major version than the older Home Assistant reads, so it comes "
+                           "back whole from the switch's backup (changes to other integrations since then are only in the saved backup)")
+    od, ld = older["data"], live["data"]
+    if name.endswith("core.config_entries"):
+        def entries(d: dict) -> list:
+            return [e for e in d.get("entries") or [] if isinstance(e, dict)]
+
+        merged = {**ld, "entries": [e for e in entries(ld) if e.get("domain") != domain] + [e for e in entries(od) if e.get("domain") == domain]}
+    else:
+        if name.endswith("core.entity_registry"):
+            def ours(e: dict) -> bool:
+                return e.get("platform") == domain or (bool(e.get("config_entry_id")) and str(e["config_entry_id"]) in mine)
+
+            merged = dict(ld)
+            for key in ("entities", "deleted_entities"):
+                merged[key] = [e for e in ld.get(key) or [] if not (isinstance(e, dict) and ours(e))] \
+                    + [e for e in od.get(key) or [] if isinstance(e, dict) and ours(e)]
+        else:
+            older_devices = {str(dv.get("id")): dv for dv in od.get("devices") or [] if isinstance(dv, dict)}
+            merged = dict(ld)
+            for key in ("devices", "deleted_devices"):
+                kept = []
+                for dv in ld.get(key) or []:
+                    if not isinstance(dv, dict):
+                        kept.append(dv)
+                        continue
+                    ids = _device_entry_ids(dv)
+                    if ids and ids <= mine:
+                        continue  # only the domain's: the older backup's item stands for it
+                    if ids & mine and isinstance(dv.get("config_entries"), list):
+                        before = older_devices.get(str(dv.get("id")))
+                        theirs = (_device_entry_ids(before) & mine) if isinstance(before, dict) else set()
+                        dv = {**dv, "config_entries": [e for e in dv["config_entries"] if str(e) not in mine] + sorted(theirs)}
+                    kept.append(dv)
+                kept += [dv for dv in od.get(key) or [] if isinstance(dv, dict) and _device_entry_ids(dv) and _device_entry_ids(dv) <= mine]
+                merged[key] = kept
+    return json.dumps({**live, "data": merged}, ensure_ascii=False).encode("utf-8"), ""
+
+
 def storage_for_version(config_dir: str, current: str, older: str, version: str, label: str,
-                        force_older: tuple[str, ...] = ()) -> tuple[dict, list[str]]:
+                        force_older: tuple[str, ...] = (), domain: str | None = None) -> tuple[dict, list[str]]:
     """A backup to go back to Home Assistant ``version`` with: ``current`` (a backup of the configuration as it is
     now), except the .storage files ``version`` cannot read, which come from ``older`` (a backup made on
     ``version``).  Home Assistant reads a store whose minor version is newer than its own, not one whose major
@@ -400,8 +488,19 @@ def storage_for_version(config_dir: str, current: str, older: str, version: str,
     with zipfile.ZipFile(os.path.join(bdir, current)) as cur, zipfile.ZipFile(os.path.join(bdir, older)) as old:
         have = {n for n in _names(cur) if not n.endswith("/")}
         taken = []
+        merged_members: dict[str, bytes] = {}
+        notes: list[str] = []
+        entries_name = ".storage/core.config_entries"
+        mine = domain_entry_ids([z.read(entries_name) for z in (cur, old) if entries_name in _names(z)], domain) if domain else set()
         for n in sorted(_names(old)):
             if n.endswith("/") or not n.startswith(".storage/"):
+                continue
+            if domain and n in DOMAIN_MERGED_STORES and n in have:
+                data, note = merge_domain_store(n, cur.read(n), old.read(n), domain, mine)
+                merged_members[n] = data
+                taken.append(n)
+                if note:
+                    notes.append(note)
                 continue
             if n not in have or any(fnmatch.fnmatch(n, g) for g in force_older):
                 taken.append(n)
@@ -419,13 +518,17 @@ def storage_for_version(config_dir: str, current: str, older: str, version: str,
             with os.fdopen(fd, "wb") as fh:
                 with zipfile.ZipFile(fh, "w", zipfile.ZIP_DEFLATED) as zf:
                     count = 0
-                    for src, members in ((cur, [n for n in sorted(have) if n not in taken]), (old, taken)):
+                    for n, data in merged_members.items():
+                        zf.writestr(zipfile.ZipInfo(n, time.localtime(time.time())[:6]), data)
+                        count += 1
+                    for src, members in ((cur, [n for n in sorted(have) if n not in taken]), (old, [n for n in taken if n not in merged_members])):
                         for n in members:
                             with src.open(n) as s, zf.open(zipfile.ZipInfo(n, src.getinfo(n).date_time), "w") as d:
                                 shutil.copyfileobj(s, d, 1 << 20)
                             count += 1
                     info = {**info, "created": stamp, "label": label, "files": count, "ha_version": version,
-                            "configuration": current, "storage_from": {"backup": older, "files": taken}}
+                            "configuration": current, "storage_from": {"backup": older, "files": taken,
+                                                                       **({"merged_for": domain, "notes": notes} if domain else {})}}
                     zf.writestr("backup-info.json", json.dumps(info))
                 fh.flush()
                 os.fsync(fh.fileno())
@@ -438,7 +541,8 @@ def storage_for_version(config_dir: str, current: str, older: str, version: str,
                 except OSError:
                     pass
             raise
-    return {"name": name, "created": stamp, "label": label, "files": count, "ha_version": version}, taken
+    return {"name": name, "created": stamp, "label": label, "files": count, "ha_version": version,
+            **({"notes": notes} if notes else {})}, taken
 
 
 def reserve_name(bdir: str, stem: str, max_len: int | None = None) -> str:

@@ -11,9 +11,10 @@ Every version's changes are in the
   (`setup_retry` after the extra interval included), the smoke test now
   switches back to the old Home Assistant **and** to the integration version
   that ran before, in one restart. The configuration since the switch is
-  kept but for the integration's config entries, the registries and its own
-  stores, which come from the switch's backup; the boot deploys and patches
-  the older version. A stop at any step is finished at the next boot
+  kept but for what that version owns, which comes from the switch's backup:
+  its own stores, and its config entries, entities and devices merged per
+  domain into the current registries (other integrations' items stay as they
+  are). The boot deploys and patches the older version. A stop at any step is finished at the next boot
   (`ha.json` `integration_revert`), and a crash loop of the new version does
   the same. Before, Home Assistant went back alone with the new integration
   version still deployed (it often does not run there), and that version's
