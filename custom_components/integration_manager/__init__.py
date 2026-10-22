@@ -40,6 +40,7 @@ from .change_report import ChangeReportsView
 from .parity import CutoverView, ParityActionView, ParityPageView, ParityView
 from .views import (
     HaActionView,
+    HaVenvRemoveView,
     HaStatusView,
     RegistryView,
     MqttDiscoveryPreviewView,
@@ -376,6 +377,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         CutoverView(hass, installer, publisher),
         MqttRulesView(publisher),
         HaActionView(ha_updater, installer),
+        HaVenvRemoveView(ha_updater, installer),
         ReleasesView(installer),
         SummaryView(installer, publisher),
         InstallView(installer, publisher),
