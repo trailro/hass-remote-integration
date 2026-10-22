@@ -418,17 +418,19 @@ def merge_domain_store(name: str, live_raw: bytes, older_raw: bytes, domain: str
     stays live, with ``domain``'s entries as the older backup had them.  The result has the older file's schema: when
     the live file was migrated to a higher major version (which the older Home Assistant cannot read), it is the older
     file whole, and the note says so; otherwise it keeps the live file's version, whose minor the older one reads.  Returns (the bytes to restore, a note: "" or why other items were not kept)."""
+    unreadable = (f"{name}: the switch's backup has no readable copy of it, so {domain}'s items stay as the version that "
+                  "is left wrote them")
     try:
         older = json.loads(older_raw)
     except (ValueError, UnicodeDecodeError, RecursionError):
-        return live_raw, ""  # nothing of the older file can be read: the live one stays
+        return live_raw, unreadable  # nothing of the older file can be read: the live one stays
     try:
         live = json.loads(live_raw)
     except (ValueError, UnicodeDecodeError, RecursionError):
         live = None
     old_major, live_major = _store_major(older_raw), _store_major(live_raw)
     if not isinstance(older, dict) or not isinstance(older.get("data"), dict):
-        return live_raw, ""
+        return live_raw, unreadable
     if not isinstance(live, dict) or not isinstance(live.get("data"), dict) or old_major is None or live_major is None \
             or live_major > old_major:
         return older_raw, (f"{name}: the current file is a newer major version than the older Home Assistant reads, so it comes "
@@ -445,9 +447,22 @@ def merge_domain_store(name: str, live_raw: bytes, older_raw: bytes, domain: str
                 return e.get("platform") == domain or (bool(e.get("config_entry_id")) and str(e["config_entry_id"]) in mine)
 
             merged = dict(ld)
+            dropped: list[str] = []
             for key in ("entities", "deleted_entities"):
-                merged[key] = [e for e in ld.get(key) or [] if not (isinstance(e, dict) and ours(e))] \
-                    + [e for e in od.get(key) or [] if isinstance(e, dict) and ours(e)]
+                kept = [e for e in ld.get(key) or [] if not (isinstance(e, dict) and ours(e))]
+                # an entity id another integration holds now: Home Assistant keeps the last item of an id, so the
+                # backup's would silently replace it.  Left out; the integration registers its entity again under a
+                # free id when it sets up
+                # (deleted entities are kept by platform and unique id, not by entity id: no collision there)
+                held = {e.get("entity_id") for e in kept if isinstance(e, dict)} if key == "entities" else set()
+                back = [e for e in od.get(key) or [] if isinstance(e, dict) and ours(e)]
+                dropped += [str(e.get("entity_id")) for e in back if e.get("entity_id") in held]
+                merged[key] = kept + [e for e in back if e.get("entity_id") not in held]
+            if dropped:
+                note = (f"{name}: {', '.join(sorted(dropped))} of {domain} not brought back: another integration holds "
+                        f"{'that entity id' if len(dropped) == 1 else 'those entity ids'} now ({domain} registers "
+                        f"{'it' if len(dropped) == 1 else 'them'} again under a free id)")
+                return json.dumps({**live, "data": merged}, ensure_ascii=False).encode("utf-8"), note
         else:
             older_devices = {str(dv.get("id")): dv for dv in od.get("devices") or [] if isinstance(dv, dict)}
             merged = dict(ld)

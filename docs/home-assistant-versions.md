@@ -443,7 +443,10 @@ integration version that ran before *Prepare* (A), in one restart:
   every other integration's stay as they are now; entries of the integration
   created since *Prepare* go (B made them). In `core.entity_registry` the
   entities (and deleted entities) of the integration's platform or of its
-  config entries come from the backup, the rest stays. In
+  config entries come from the backup, the rest stays; an entity id another
+  integration holds now is left to it (the integration registers its entity
+  again under a free id, and the note names it). A registry the switch's
+  backup has no readable copy of stays as it is, and the note says so. In
   `core.device_registry` a device that belongs only to the integration's
   entries comes from the backup; one shared with other entries stays as it is,
   with the integration's entries as the backup had them. The result keeps the
