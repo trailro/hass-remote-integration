@@ -48,6 +48,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.json import json_bytes
 
 from . import events
+from .discovery import device_config_entries
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -372,11 +373,7 @@ def _dkey(entry_id: str, identifier: Any) -> str:
 
 
 def _device_owners(dev: Any) -> set[str]:
-    owners = set(getattr(dev, "config_entries", None) or ())
-    for attr in ("config_entry_id", "primary_config_entry"):
-        if owner := getattr(dev, attr, None):
-            owners.add(owner)
-    return owners
+    return set(device_config_entries(dev))
 
 
 def _ekey(entity_domain: str, unique_id: Any) -> str:

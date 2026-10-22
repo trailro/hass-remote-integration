@@ -3,6 +3,14 @@
 Every version's changes are in the
 [GitHub releases](https://github.com/trailro/hass-remote-integration/releases).
 
+## Unreleased
+
+- **No device registry deprecation warnings on Home Assistant 2026.10.** The
+  manager read `DeviceEntry.config_entries` and `primary_config_entry` (the
+  **Devices** page, a device delete, the registry import), which 2026.10
+  logs as deprecated for a custom component. It now reads `config_entry_id`
+  on 2026.8 and newer and the old set before that.
+
 ## 0.28.2
 
 - **The `updated` stale basis no longer mistakes a dead source for a live
