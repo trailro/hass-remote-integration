@@ -153,7 +153,9 @@ def _installer(test, code, ref="2.0"):
 
 
 def _report(inst, target_ha, ref="2.0"):
-    with mock.patch.object(preflight, "_pip_dry_run", return_value={"ok": True, "install": [], "stderr": ""}):
+    # the target's pins are not what these tests are about: never downloaded here
+    with mock.patch.object(preflight, "_pip_dry_run", return_value={"ok": True, "install": [], "stderr": ""}), \
+            mock.patch.object(preflight, "_target_pins", return_value=(None, "not read in this test")):
         return asyncio.run(preflight.run(_hass(), inst, "demo", ref, target_ha=target_ha,
                                          source_dir=inst._version_dir("demo", ref)))
 
