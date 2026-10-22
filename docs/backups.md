@@ -52,7 +52,7 @@ Not in a backup, so a restore never rolls them back:
   ([the Watchdog](app.md#restarts-and-the-watchdog)), so a restore never
   turns it on again;
 - what the boot rebuilds or is only in flight: the Home Assistant venvs
-  (`venv-*`), logs (`*.log`, `*.log.*`), caches (`__pycache__`, `*.pyc`,
+  (`venv-*`, and `.venv-current.tmp` / `.venv-removing-*` in flight), logs (`*.log`, `*.log.*`), caches (`__pycache__`, `*.pyc`,
   `deps`, `tts`), the backups themselves (a backup never holds another one;
   the app's Home Assistant backup does hold them, see
   [app backups](app.md#backups)), `integration_manager/*.tmp`,

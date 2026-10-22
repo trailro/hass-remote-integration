@@ -69,7 +69,7 @@ Every version's changes are in the
   logs as deprecated for a custom component. On 2026.10 and newer it reads
   `config_entry_id` (and the set only on the composite device 2026.10
   synthesizes for a pre-migration id, which does not log); before 2026.10
-  it reads the set, which logs nothing there.
+  it reads both the set and `config_entry_id`, which log nothing there.
 
 ## 0.28.2
 

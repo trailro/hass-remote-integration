@@ -43,8 +43,9 @@ its own, such as traffic dumps or debug logs. They are found through:
   `blueprints`, `www`, `tts`, `image`, `themes`, `__pycache__`) are not
   scanned.
 
-Files written in the last hour come first, newest first, so a log the running
-version writes is listed before one an older version left behind.
+Files written in the last hour come first; then a current file before its
+rotated copies, newest first, so a log the running version writes is listed
+before one an older version left behind.
 
 Symbolic links are never listed, nor a file with more than one hard link (a
 `secrets.yaml` linked under a `*.log` name would look like a log). Rotation by
