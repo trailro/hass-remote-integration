@@ -428,20 +428,42 @@ integration smoke test's delay (`smoke_test_s` in the settings on **System**,
 
 **A switch from the environment builder that also starts another integration
 version** (*Prepare* with a Home Assistant version and *start*): that version
-is started at the target's first boot, and the smoke test above judges it. If
-it does not set up, the container goes back to the old Home Assistant **and**
-to the integration version that ran before *Prepare*, in one step: the
-configuration and the integration's files come back from the switch's backup
-(taken with that version deployed; `.storage` whole, not merged), the version
-store records the older integration version as running, and its patches are
-applied at the boot. `smoke_fallback.integration` says which versions
-(`from`, `to`). The new integration version's own smoke test only reports, so
-two rollbacks never act on one failure. If Home Assistant cannot go back (its
-venv gone, the switch's backup unknown), the integration still does, by its
-own full rollback on the new Home Assistant; with `auto_rollback` off nothing
-moves. Earlier versions of the manager sent Home Assistant back alone and left
-the new integration version deployed on the old one, where it often does not run
-(ramses_cc 0.61.1 needs `serialx>=1.11.0`, which 2026.9.4 does not allow).
+(B) starts at the target's first boot, and the smoke test above judges it
+first. An entry of B still in `setup_retry` after the extra interval counts as
+not set up here (B's own smoke test would roll it back too). If B does not set
+up, the container goes back to the old Home Assistant **and** to the
+integration version that ran before *Prepare* (A), in one restart:
+
+- The configuration is the one Home Assistant ran with since the switch, saved
+  first as `<date>-before-fallback-from-<version>.zip` (kept from pruning for 7
+  days) and merged as above, except that the integration's config entries, the
+  entity and device registries and the integration's own stores
+  (`.storage/<domain>*`) come from the switch's backup, as A left them. What
+  Home Assistant and you changed elsewhere is kept; what changed in those
+  stores since *Prepare* is only in the saved backup.
+- The integration's files are not restored: the version store records A as
+  running, and the boot deploys A, installs its requirements and applies its
+  patches, touching only `custom_components/<domain>/`.
+- The steps are written so that a stop between any two of them leaves a
+  volume the next boot finishes: the restore for the old version first (a boot
+  of the new version drops it, and the smoke test runs again), then `ha.json`
+  in one write with the switch back and the integration's way back
+  (`integration_revert`), then the version store. The boot of the old version
+  completes what is missing from `integration_revert`.
+- A crash loop of the new version (three failed boots) after such a change
+  takes the integration back the same way.
+
+`smoke_fallback.integration` says which versions (`from`, `to`). While that
+smoke test is pending, B's own smoke test waits; once it is done without
+acting (the version kept or not judged, or nothing to judge because A had no
+loaded entry at *Prepare*), B's own smoke test judges as always, its full
+rollback included, and so it also judges entries B created that the switch did
+not record. If Home Assistant cannot go back (its venv gone, the switch's
+backup unknown), the integration still goes back, by its own full rollback on
+the new Home Assistant. With `auto_rollback` off nothing moves. Earlier versions
+of the manager sent Home Assistant back alone and left B deployed on the old
+version, where it often does not run (ramses_cc 0.61.1 needs `serialx>=1.11.0`,
+which 2026.9.4 does not allow).
 
 The reason names the entry and its state, with the entry's own reason when it
 has one, and the newest error the process log holds about the integration since

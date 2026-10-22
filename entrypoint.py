@@ -1632,6 +1632,13 @@ def _prepare() -> str:
             log(f"{wanted} failed to boot {failures} times; falling back to {fallback_to}")
             state["last_error"] = f"{wanted} crashed at boot {failures} times; rolled back to {fallback_to} (see container log)"
             state["fallback_from"] = wanted
+            start = change.get("start") if change.get("to") == wanted and isinstance(change.get("start"), dict) else {}
+            if start.get("domain") and start.get("tag") and start.get("from_tag"):
+                # the environment builder started another integration version with that switch: it goes back too,
+                # recorded by the manager at the boot of the version this falls back to (Installer._apply_ha_integration_revert)
+                state["integration_revert"] = {"domain": start["domain"], "from": start["tag"], "to": start["from_tag"],
+                                               "back": fallback_to, "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+                log(f"{start['domain']} goes back to {start['from_tag']} with {fallback_to}")
             state["desired"] = wanted = fallback_to
             fell_back = True
         else:

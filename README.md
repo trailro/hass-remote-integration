@@ -468,7 +468,8 @@ higher major `version`, or removed (the detail is in
 kept and reported, and so is one whose device is still not ready (`setup_retry`). When the
 environment builder switched Home Assistant and started another integration
 version together, a failed smoke test takes both back: the old Home Assistant
-with the integration version that ran before, from the switch's backup. The list offers the ten newest stable releases
+with the integration version that ran before (its config entries, registries
+and stores from the switch's backup, the rest of the configuration as it is). The list offers the ten newest stable releases
 plus every version the box has (*Show all versions* for the rest). Versions
 below the image's floor (`HA_VERSION_MIN`, 2026.5.0) or whose pins have no wheel
 for the image's Python (`python:3.14`) are refused. A downgrade asks whether to

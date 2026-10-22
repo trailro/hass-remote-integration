@@ -7,14 +7,19 @@ Every version's changes are in the
 
 - **The environment builder's combined change goes back as a whole.** After
   *Prepare* with a Home Assistant version and *start*, the new integration
-  version starts at the target's first boot; when it does not set up there,
-  the smoke test now switches back to the old Home Assistant **and** to the
-  integration version that ran before, from the switch's backup, in one
-  restart. Before, Home Assistant went back alone with the new integration
+  version starts at the target's first boot; when it does not set up there
+  (`setup_retry` after the extra interval included), the smoke test now
+  switches back to the old Home Assistant **and** to the integration version
+  that ran before, in one restart. The configuration since the switch is
+  kept but for the integration's config entries, the registries and its own
+  stores, which come from the switch's backup; the boot deploys and patches
+  the older version. A stop at any step is finished at the next boot
+  (`ha.json` `integration_revert`), and a crash loop of the new version does
+  the same. Before, Home Assistant went back alone with the new integration
   version still deployed (it often does not run there), and that version's
-  own smoke test then tried a full rollback that failed. The new version's
-  smoke test only reports now; `smoke_fallback.integration` names both
-  versions.
+  own smoke test then tried a full rollback that failed. That smoke test now
+  waits for the Home Assistant one and judges as always once it is done
+  without acting; `smoke_fallback.integration` names both versions.
 - **The integration preflight for another Home Assistant version resolves
   the requirements against that version's pins** (its
   `package_constraints.txt` and the requirements of the built-in components
