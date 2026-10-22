@@ -43,6 +43,13 @@ def _ha_files(serialx):
                 f'{{"domain": "usb", "requirements": ["aiousbwatcher==1.1.2", "serialx=={serialx}"], "dependencies": []}}'}
 
 
+def _cannot_install(reqs):
+    joined = reqs[0] if len(reqs) == 1 else ", ".join(reqs[:-1]) + " and " + reqs[-1]
+    return (f"ERROR: Cannot install {joined} because these package versions have conflicting dependencies.\n"
+            "ERROR: ResolutionImpossible: for help visit https://pip.pypa.io/en/latest/topics/dependency-resolution/"
+            "#dealing-with-dependency-conflicts")
+
+
 def _resolve(python, requirements, constraints):
     """What pip answers, for serialx only: one version satisfying every requirement and constraint, or a conflict."""
     specs = [(req, False) for req in requirements]
@@ -56,11 +63,8 @@ def _resolve(python, requirements, constraints):
     if fits:
         return {"ok": True, "install": [{"name": "serialx", "version": fits[-1], "url": "", "requested": True,
                                          "requires_python": None, "source_only": False}], "stderr": ""}
-    lines = [f"    The user requested {'(constraint) ' if c else ''}{r}" for r, c in wanted]
-    err = ("ERROR: Cannot install " + " and ".join(str(r) for r, c in wanted if not c) + " because these package versions have "
-           "conflicting dependencies.\n\nThe conflict is caused by:\n" + "\n".join(lines)
-           + "\n\nTo fix this you could try to:\n1. loosen the range of package versions you've specified\n"
-           "ERROR: ResolutionImpossible: for help visit https://pip.pypa.io/en/latest/topics/dependency-resolution/")
+    # what pip 25 prints with --quiet (as _pip_dry_run runs it): only the requirements it was given, never the constraint
+    err = _cannot_install(sorted(str(r) for r, c in wanted if not c))
     return {"ok": False, "install": [], "stderr": err, "stderr_full": err}
 
 
@@ -111,7 +115,9 @@ class TargetPinsTest(_Base):
         self.assertFalse(report["ok"])
         blocker = next(b for b in report["blockers"] if b.startswith("requirements cannot be resolved"))
         self.assertIn(f"serialx pinned by the running Home Assistant {preflight.ha_version}", blocker)
-        self.assertIn("switch Home Assistant first", blocker)
+        self.assertIn("environment builder", blocker)
+        self.assertIn("switching Home Assistant alone first works only if the integration version running now supports", blocker)
+        self.assertLess(blocker.index("environment builder"), blocker.index("switching Home Assistant alone"))
         self.where.assert_not_called()  # the running version's pins are its own: nothing else is read
         reqs, constraints, _text = self.resolved[0]
         self.assertEqual(constraints, self.inst.constraints)

@@ -16,8 +16,11 @@ Every version's changes are in the
   on a package the running version pins is a warning, not a blocker; so is
   PyPI that cannot be reached for another version. Checking against the
   running version is unchanged, except that a conflict on one of its pins
-  says so and suggests switching Home Assistant first, or checking both
-  together in the environment builder.
+  says so and points at the environment builder, which checks the
+  integration version with a newer Home Assistant and switches both
+  (switching Home Assistant alone first only helps if the running
+  integration version supports it). A pin is blamed only when pip's
+  conflict is about a requirement it does not satisfy.
 - **Remove the previous Home Assistant venv by hand.** *Remove HA <version>
   venv* on **System** (`POST /api/ha/venv/remove`, the version typed to
   confirm) frees the 0.7-1 GB the rollback target takes once an upgrade is
@@ -30,8 +33,9 @@ Every version's changes are in the
   against the target's pins** (`POST /api/ha/check` and `/api/ha/update`,
   **System**, the manager device's install action), as the integration
   preflight does: a conflict is a blocker (`needs_force`; the manager device
-  never forces), pins that cannot be read or PyPI that cannot be reached are
-  a warning. Before, only the attributes the integration reads were checked.
+  never forces); pins that cannot be read, PyPI that cannot be reached, a
+  pip that times out or gives no report, or another integration check
+  holding pip for more than 10 s are a warning, asked again next time. Before, only the attributes the integration reads were checked.
   A stopped integration is not checked.
 - **Log files lists the logs an integration writes in a folder of the config
   dir.** ramses_cc 0.61.1 writes `ramses_rf_logs/packet_log.log` (0.60.4
@@ -44,8 +48,10 @@ Every version's changes are in the
 - **No device registry deprecation warnings on Home Assistant 2026.10.** The
   manager read `DeviceEntry.config_entries` and `primary_config_entry` (the
   **Devices** page, a device delete, the registry import), which 2026.10
-  logs as deprecated for a custom component. It now reads `config_entry_id`
-  on 2026.8 and newer and the old set before that.
+  logs as deprecated for a custom component. On 2026.10 and newer it reads
+  `config_entry_id` (and the set only on the composite device 2026.10
+  synthesizes for a pre-migration id, which does not log); before 2026.10
+  it reads the set, which logs nothing there.
 
 ## 0.28.2
 
