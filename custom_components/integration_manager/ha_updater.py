@@ -66,6 +66,10 @@ class HaUpdater:
         self._smoke_rechecked = False  # an entry in setup_retry had its one more interval
         self._smoke_restore_waiting: float | None = None  # when the fallback first found a restore scheduled by hand
         self.left_version: str | None = None  # ha.json smoke_fallback.from: never offered as an update (async_start_smoke)
+        # (domain, tag) of the environment builder's start whose verdict is being given right now: from the moment the
+        # check starts until it took the lock to act, or finished without acting (decides(): the start's own smoke test waits)
+        self._deciding: tuple[str, str] | None = None
+        self._acted = False  # this verdict switched back or rolled back and asked for the restart
 
     def _read(self) -> dict[str, Any]:
         try:
@@ -77,16 +81,7 @@ class HaUpdater:
     def _read_for_update(self) -> dict[str, Any]:
         """Like _read, but an unreadable file is not empty: writing over it would drop current and
         previous, and the entrypoint would then prune the venv a rollback needs."""
-        try:
-            with open(self.file, encoding="utf-8") as fh:
-                data = json.load(fh)
-        except FileNotFoundError:
-            return {}
-        except (OSError, ValueError) as err:
-            raise ValueError(f"ha.json is unreadable ({err}): restart the container, the entrypoint rebuilds it from the volume") from None
-        if not isinstance(data, dict):
-            raise ValueError("ha.json is unreadable: restart the container, the entrypoint rebuilds it from the volume")
-        return data
+        return read_ha_json_for_update(self.file)
 
     def _installed_venvs(self) -> list[str]:
         out = []
@@ -529,6 +524,8 @@ class HaUpdater:
         """This boot's smoke test of a version change is still to judge the environment builder's start of ``tag``
         (change.start, copied into the smoke record): that start's own smoke test waits for it (Installer._smoke_check).
         False once the verdict is given (``_smoke`` is cleared on every path that gives one) or when there is none."""
+        if self._deciding == (domain, tag):
+            return True
         rec = self._smoke
         start = rec.get("start") if isinstance(rec, dict) and isinstance(rec.get("start"), dict) else {}
         return bool(rec) and rec.get("version") == HA_VERSION and rec.get("domain") == domain and start.get("tag") == tag
@@ -549,7 +546,27 @@ class HaUpdater:
         update_json(self.file, apply, read=lambda _p: self._read_for_update())
 
     async def async_smoke_check(self) -> None:
-        """The verdict on the integration's config entries that were loaded before the version change."""
+        """The verdict on the integration's config entries that were loaded before the version change.  While it is
+        given, decides() stays true for the environment builder's start it covers; an unexpected error drops the
+        in-memory verdict (logged; the ha.json record judges again at the next boot), so that start's own smoke test
+        never waits on a check that died."""
+        rec = self._smoke
+        start = rec.get("start") if isinstance(rec, dict) and isinstance(rec.get("start"), dict) else {}
+        if start.get("tag"):
+            self._deciding = (str(rec.get("domain")), str(start["tag"]))
+        self._acted = False
+        try:
+            await self._async_smoke_check()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.exception("the Home Assistant smoke test failed")
+            events.emit("ha", f"Home Assistant {HA_VERSION}: the smoke test could not judge ({type(err).__name__}: {err}); "
+                        "the integration's own smoke test judges instead", version=HA_VERSION, state="error")
+            self._smoke = None
+        finally:
+            if self._smoke is None and not self._acted:
+                self._deciding = None
+
+    async def _async_smoke_check(self) -> None:
         from homeassistant.components import persistent_notification as pn
 
         from .diagnostics import scrub_text
@@ -702,6 +719,7 @@ class HaUpdater:
             pn.async_create(self.hass, msg + ".", title="Home Assistant version", notification_id="hri_ha_smoke")
             await self.hass.async_add_executor_job(self._drop_smoke, None)
             if res.get("ok"):
+                self._acted = True
                 await installer.restart()
             return
         cfg = self.hass.config.config_dir
@@ -712,11 +730,12 @@ class HaUpdater:
                 # what this version ran with since the switch (the switch's backup may be days old): saved first,
                 # and kept but for the stores the older version cannot read (backupkit.storage_for_version)
                 saved = (await installer.async_backup(label=f"before-fallback-from-{HA_VERSION}"))["name"]
-                # a combined change also takes from the switch's backup the stores the integration's version wrote:
-                # its config entries, the registries and its own stores, as the version going back left them
+                # a combined change also takes from the switch's backup what the integration's version wrote: its own
+                # stores whole, and its items of the config entries and the two registries (merged per domain:
+                # every other integration's items stay as they are now)
                 merged, restored = await self.hass.async_add_executor_job(
                     backupkit.storage_for_version, cfg, saved, str(backup), back, f"fallback-config-for-{back}",
-                    _integration_stores(domain) if revert else ())
+                    _integration_stores(domain) if revert else (), domain if revert else None)
                 # 1. the restore, for ``back`` only: killed before step 2, the boot is still the new version's, whose
                 # entrypoint drops a restore scheduled for another version, and this smoke test runs again
                 zip_name = os.path.basename(await self.hass.async_add_executor_job(
@@ -735,9 +754,10 @@ class HaUpdater:
             if revert:
                 msg = (f"{failed}; switched back to Home Assistant {back} with {domain} {from_tag}, the version that ran before the "
                        f"environment builder's change, automatically. The configuration as it was on {HA_VERSION} is saved in backup "
-                       f"{saved}, and {back} starts with it, except {', '.join(restored) or 'nothing'}: {domain}'s config entries, the "
-                       f"registries and its own stores as {from_tag} left them, and what {back} cannot read, from the switch's backup "
-                       f"{rec.get('backup')}. Switching to {HA_VERSION} again is refused unless forced, and is smoke-tested again")
+                       f"{saved}, and {back} starts with it, except {domain}'s config entries, entities, devices and own stores, "
+                       f"as {from_tag} left them, and what {back} cannot read, from the switch's backup {rec.get('backup')} "
+                       f"({', '.join(restored) or 'nothing'})" + "".join(f". {n}" for n in merged.get("notes") or [])
+                       + f". Switching to {HA_VERSION} again is refused unless forced, and is smoke-tested again")
             else:
                 msg = (f"{failed}; switched back to Home Assistant {back} automatically. The configuration as it was on {HA_VERSION} "
                        f"is saved in backup {saved}, and {back} starts with it, "
@@ -781,6 +801,7 @@ class HaUpdater:
                                     domain, from_tag, back, err)
         _LOGGER.error("%s", msg)
         events.emit("ha", msg, version=HA_VERSION, state="error", fallback=back)
+        self._acted = True
         result = await installer.restart()
         if not result.get("ok"):
             _LOGGER.error("switching back to Home Assistant %s waits for the next restart: %s", back, result.get("error"))
@@ -811,11 +832,25 @@ def _installable_files(files: Any) -> list[dict[str, Any]]:
 _key = ha_vkey
 
 
+def read_ha_json_for_update(path: str) -> dict[str, Any]:
+    """ha.json for a read-modify-write (jsonio.update_json's ``read``): {} when missing, ValueError when unreadable,
+    never an empty document to write over it (that would drop current and previous)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as err:
+        raise ValueError(f"ha.json is unreadable ({err}): restart the container, the entrypoint rebuilds it from the volume") from None
+    if not isinstance(data, dict):
+        raise ValueError("ha.json is unreadable: restart the container, the entrypoint rebuilds it from the volume")
+    return data
+
+
 def _integration_stores(domain: str) -> tuple[str, ...]:
-    """The .storage members an integration's version shapes, taken from the switch's backup when the environment
-    builder's combined change goes back: its config entries, the registries and its own stores."""
-    return (".storage/core.config_entries", ".storage/core.entity_registry", ".storage/core.device_registry",
-            f".storage/{domain}", f".storage/{domain}.*", f".storage/{domain}_*")
+    """The .storage members an integration owns whole, taken from the switch's backup when the environment builder's
+    combined change goes back (its items of the shared registries are merged: backupkit.merge_domain_store)."""
+    return (f".storage/{domain}", f".storage/{domain}.*", f".storage/{domain}_*")
 
 
 class VenvRemovalRefused(ValueError):

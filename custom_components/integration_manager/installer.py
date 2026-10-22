@@ -81,7 +81,8 @@ _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")  # GitHub owner/nam
 SCRATCH_PREFIXES = (".staging-", ".old-", ".preflight-")  # never a tag: tags do not start with a dot
 SCRATCH_MAX_AGE_S = 3600
 STORE_STAMP = ".hri-stored"  # in a stored version: the install that put that copy there, matched against its record ("stored")
-PRE_RESTORE_GRACE_S = 7 * 86400  # as backupkit's upload grace: a restore proves itself wrong within days
+PRE_RESTORE_GRACE_S = 7 * 86400
+HA_SMOKE_WAIT_MARGIN_S = 300  # what a start's own smoke test adds to the Home Assistant smoke test's longest wait  # as backupkit's upload grace: a restore proves itself wrong within days
 _PRE_RESTORE_NAME = re.compile(r"(\d{8}-\d{6})-pre-restore(?:-\d+)?\.zip")  # backupkit.create(label="pre-restore")
 CORRUPT_STATE_KEEP = 3  # state.json.corrupt-<stamp> copies kept; the older ones are the same damage, twice removed
 
@@ -1854,7 +1855,7 @@ class Installer:
                 self.state.pending_smoke = None  # only this start's record: a newer start's survives
                 self._save_state()
             return
-        if self.ha_smoke_decides is not None and self.ha_smoke_decides(domain, tag):
+        if self._waits_for_ha_smoke(domain, tag):
             # the environment builder's combined change: the Home Assistant smoke test of this boot judges this start
             # first, and takes Home Assistant and the integration back together.  Once it is done without acting (the
             # version kept, its record dropped) this verdict judges as always - its own rollback included, and entries
@@ -1952,6 +1953,11 @@ class Installer:
                     domain=domain, tag=tag, state=h.get("state"))
         if ok:
             _LOGGER.info("smoke test %s %s: ok", domain, tag)
+        elif rollback and self._waits_for_ha_smoke(domain, tag):
+            # the Home Assistant verdict started meanwhile (no await since the check above, but said where it acts)
+            self._smoke_handle = self.hass.loop.call_later(
+                60, lambda: self.hass.async_create_task(self._smoke_check(domain, tag, can_rollback)))
+            return
         elif rollback:
             _LOGGER.error("smoke test %s %s FAILED (%s: %s): full rollback", domain, tag, h.get("state"), h.get("reason"))
             res = await self.rollback_full(domain, rejected=True)
@@ -2411,6 +2417,27 @@ class Installer:
                     domain=ps["domain"], tag=ps.get("tag"))
         return res  # the boot hands MQTT its identity from this, the way every other start path does
 
+    def _waits_for_ha_smoke(self, domain: str, tag: str) -> bool:
+        """This start's verdict waits for the Home Assistant smoke test of its version change (ha_smoke_decides), but
+        not for longer than that smoke test can take (its setup wait, its extra interval for setup_retry, its wait for a
+        scheduled restore, and a margin): past that, it judges itself and says so."""
+        waiting = self.__dict__.setdefault("_ha_wait_since", {})
+        if self.ha_smoke_decides is None or not self.ha_smoke_decides(domain, tag):
+            waiting.pop((domain, tag), None)
+            return False
+        smoke_s = self.settings.int_("smoke_test_s", 0, 86400)
+        limit = 2 * max(self.SETUP_WAIT_S, smoke_s) + max(60, smoke_s) + HA_SMOKE_WAIT_MARGIN_S
+        since = waiting.setdefault((domain, tag), time.monotonic())
+        if time.monotonic() - since < limit:
+            return True
+        said = self.__dict__.setdefault("_ha_wait_said", set())
+        if (domain, tag) not in said:
+            said.add((domain, tag))
+            _LOGGER.warning("smoke test %s %s: the Home Assistant smoke test has not judged it after %d s: judged here instead", domain, tag, limit)
+            events.emit("smoke", f"{domain} {tag}: the Home Assistant smoke test of its version change gave no verdict within "
+                        f"{limit} s; judged by its own smoke test instead", domain=domain, tag=tag)
+        return False
+
     def _apply_ha_integration_revert(self) -> None:
         """Boot: the Home Assistant smoke test switched back after the environment builder's combined change, and the
         integration goes back to the version that ran before it (ha.json integration_revert, written with the switch
@@ -2443,7 +2470,12 @@ class Installer:
                 return st
             return None
 
-        jsonio.update_json(path, drop)
+        from .ha_updater import read_ha_json_for_update
+
+        try:
+            jsonio.update_json(path, drop, read=read_ha_json_for_update)
+        except (ValueError, OSError) as err:  # kept, and done again at the next boot (it changes nothing twice)
+            _LOGGER.warning("ha.json integration_revert not cleared: %s", err)
 
     def revert_for_ha_fallback(self, domain: str, tag: str, left_tag: str, ha: str, at_boot: bool = False) -> None:
         """The Home Assistant smoke test switches back to ``ha`` after the environment builder's combined change, and
@@ -2457,6 +2489,13 @@ class Installer:
             self._revert_state(domain, tag, left_tag, ha, at_boot)
         except Exception:
             self.state = self._load_state()  # nothing of the half-made change stays in memory
+            ps = self.state.pending_smoke
+            if isinstance(ps, dict) and ps.get("domain") == self.state.domain and ps.get("tag") == self.running_tag:
+                try:
+                    # _revert_state cancelled that start's timer before the write failed: what is on disk runs again
+                    self._schedule_smoke(str(ps["domain"]), str(ps["tag"]), bool(ps.get("can_rollback")))
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception("the smoke test of %s %s could not be scheduled again", ps.get("domain"), ps.get("tag"))
             raise
         events.emit("rollback", f"{domain} back to {tag} with Home Assistant {ha}" + (" (completed at this boot)" if at_boot else " at the restart")
                     + f" ({left_tag} did not set up on the newer Home Assistant)", domain=domain, tag=tag)

@@ -436,11 +436,23 @@ integration version that ran before *Prepare* (A), in one restart:
 
 - The configuration is the one Home Assistant ran with since the switch, saved
   first as `<date>-before-fallback-from-<version>.zip` (kept from pruning for 7
-  days) and merged as above, except that the integration's config entries, the
-  entity and device registries and the integration's own stores
-  (`.storage/<domain>*`) come from the switch's backup, as A left them. What
-  Home Assistant and you changed elsewhere is kept; what changed in those
-  stores since *Prepare* is only in the saved backup.
+  days) and merged as above, except for what A owns, which comes from the
+  switch's backup as A left it: its own stores (`.storage/<domain>*`) whole,
+  and its items of the three shared registries, merged per domain. In
+  `core.config_entries` the integration's entries come from the backup and
+  every other integration's stay as they are now; entries of the integration
+  created since *Prepare* go (B made them). In `core.entity_registry` the
+  entities (and deleted entities) of the integration's platform or of its
+  config entries come from the backup, the rest stays. In
+  `core.device_registry` a device that belongs only to the integration's
+  entries comes from the backup; one shared with other entries stays as it is,
+  with the integration's entries as the backup had them. The result keeps the
+  current file's version when the old Home Assistant reads it (the same major
+  version; a newer minor is read). When the new version migrated a registry to
+  a higher major version, the old one cannot read it, so that file comes back
+  whole from the switch's backup, and `last_error` and the timeline say that
+  changes of other integrations in it since *Prepare* are only in the saved
+  backup.
 - The integration's files are not restored: the version store records A as
   running, and the boot deploys A, installs its requirements and applies its
   patches, touching only `custom_components/<domain>/`.
@@ -454,8 +466,11 @@ integration version that ran before *Prepare* (A), in one restart:
   takes the integration back the same way.
 
 `smoke_fallback.integration` says which versions (`from`, `to`). While that
-smoke test is pending, B's own smoke test waits; once it is done without
-acting (the version kept or not judged, or nothing to judge because A had no
+smoke test is pending or giving its verdict, B's own smoke test waits (and
+checks again right before its own rollback), for at most the longest that
+smoke test can take plus 5 minutes, after which it judges on its own and the
+timeline says so; a smoke test that fails with an error lets go at once. Once
+it is done without acting (the version kept or not judged, or nothing to judge because A had no
 loaded entry at *Prepare*), B's own smoke test judges as always, its full
 rollback included, and so it also judges entries B created that the switch did
 not record. If Home Assistant cannot go back (its venv gone, the switch's

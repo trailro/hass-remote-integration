@@ -37,12 +37,24 @@ class _Builder(_Base):
         with zipfile.ZipFile(os.path.join(bdir, "pre-ha.zip"), "w") as zf:
             zf.writestr(backupkit.MARKER, "{}")
             zf.writestr("backup-info.json", json.dumps({"ha_version": OLD}))
-            zf.writestr(".storage/core.config_entries", _store(1, "entries as v1 left them"))
-            zf.writestr(".storage/core.entity_registry", _store(1, "registry as v1 left it"))
+            zf.writestr(".storage/core.config_entries", _store(1, {"entries": [
+                {"entry_id": "e1", "domain": "demo", "version": 2, "data": {"as": "v1"}},
+                {"entry_id": "m1", "domain": "mqtt", "data": {"broker": "before"}}]}))
+            zf.writestr(".storage/core.entity_registry", _store(1, {"entities": [
+                {"entity_id": "sensor.demo", "platform": "demo", "config_entry_id": "e1", "name": "v1 name"},
+                {"entity_id": "sensor.mqtt", "platform": "mqtt", "config_entry_id": "m1", "name": "before"}], "deleted_entities": []}))
             zf.writestr(".storage/demo.data", _store(1, "v1 store"))
             zf.writestr(".storage/input_boolean", _store(1, "helper before"))
         # what runs now on NEW, with v2
-        for name, text in {"core.config_entries": _store(1, "entries v2 migrated"), "core.entity_registry": _store(1, "registry v2"),
+        live_entries = {"entries": [{"entry_id": "e1", "domain": "demo", "version": 3, "data": {"as": "v2"}},
+                                    {"entry_id": "e9", "domain": "demo", "data": {"made": "by v2"}},
+                                    {"entry_id": "m1", "domain": "mqtt", "data": {"broker": "changed on NEW"}},
+                                    {"entry_id": "i1", "domain": "integration_manager", "data": {}}]}
+        live_entities = {"entities": [{"entity_id": "sensor.demo", "platform": "demo", "config_entry_id": "e1", "name": "v2 name"},
+                                      {"entity_id": "sensor.demo_new", "platform": "demo", "config_entry_id": "e9"},
+                                      {"entity_id": "sensor.mqtt", "platform": "mqtt", "config_entry_id": "m1", "name": "renamed on NEW"}],
+                         "deleted_entities": []}
+        for name, text in {"core.config_entries": _store(1, live_entries), "core.entity_registry": _store(1, live_entities),
                            "demo.data": _store(1, "v2 store"), "input_boolean": _store(1, "helper changed on NEW"),
                            "counter": _store(1, "made on NEW")}.items():
             with open(os.path.join(self.cfg, ".storage", name), "w", encoding="utf-8") as fh:
@@ -90,9 +102,11 @@ class BuilderRevertTest(_Builder):
                                                        "at": state["smoke_fallback"]["at"]})
         self.assertEqual(backupkit.pending_for_version(self.cfg), OLD)
         stores = self.pending_storage()
-        # the integration's stores as v1 left them; what HA and the user wrote on NEW is kept
-        self.assertEqual(stores["core.config_entries"], "entries as v1 left them")
-        self.assertEqual(stores["core.entity_registry"], "registry as v1 left it")
+        # the integration's items as v1 left them (and nothing v2 created); every other integration's as they are now
+        self.assertEqual({e["entry_id"]: e["data"] for e in stores["core.config_entries"]["entries"]},
+                         {"e1": {"as": "v1"}, "m1": {"broker": "changed on NEW"}, "i1": {}})
+        self.assertEqual({e["entity_id"]: e.get("name") for e in stores["core.entity_registry"]["entities"]},
+                         {"sensor.demo": "v1 name", "sensor.mqtt": "renamed on NEW"})
         self.assertEqual(stores["demo.data"], "v1 store")
         self.assertEqual(stores["input_boolean"], "helper changed on NEW")
         self.assertEqual(stores["counter"], "made on NEW")
@@ -126,7 +140,8 @@ class BuilderRevertTest(_Builder):
         state = self.state()
         self.assertNotIn("integration", state["smoke_fallback"])
         self.assertNotIn("integration_revert", state)
-        self.assertEqual(self.pending_storage()["core.config_entries"], "entries v2 migrated")
+        entries = {e["entry_id"]: e["data"] for e in self.pending_storage()["core.config_entries"]["entries"]}
+        self.assertEqual(entries["e1"], {"as": "v2"}, "a plain fallback keeps what the integration has now")
         self.installer.revert_for_ha_fallback.assert_not_called()
 
     def test_a_previous_version_gone_from_the_store_is_a_plain_fallback(self):
@@ -288,10 +303,13 @@ class BootIntentTest(_RealInstaller):
     def test_a_failed_write_leaves_memory_as_on_disk(self):
         inst = self.make()
         inst._save_state.side_effect = OSError("read-only")
-        inst._load_state = mock.Mock(return_value="from disk")
+        from custom_components.integration_manager.installer import State
+
+        on_disk = State(domain="demo", installed={"demo": {"running_tag": "v2", "versions": {"v1": {}, "v2": {}}}})
+        inst._load_state = mock.Mock(return_value=on_disk)
         with self.assertRaises(OSError):
             inst.revert_for_ha_fallback("demo", "v1", "v2", OLD)
-        self.assertEqual(inst.state, "from disk")
+        self.assertIs(inst.state, on_disk)
 
     def test_the_revert_in_process_asks_for_the_restart(self):
         inst = self.make()
@@ -330,6 +348,7 @@ class DeferralTest(_RealInstaller):
 
     def test_the_smoke_check_waits_without_judging(self):
         inst = self.make()
+        inst.settings = SimpleNamespace(int_=lambda *a: 60)
         inst.ha_smoke_decides = lambda domain, tag: (domain, tag) == ("demo", "v2")
         inst.health_source = mock.Mock(side_effect=AssertionError("judged while the Home Assistant verdict is pending"))
         inst.rollback_full = mock.AsyncMock()
@@ -351,3 +370,85 @@ class EntrypointCrashFallbackTest(EntrypointMainBase):
                     "change": {"to": EP_B, "mode": "keep"}})
         self.assertEqual(self.boot(), EP_A)
         self.assertNotIn("integration_revert", self.state())
+
+
+class RaceAndBoundTest(_RealInstaller):
+    """The verdict in progress keeps the start's own smoke test waiting until it acted or let go; a verdict that dies,
+    or never comes, does not keep it waiting for good."""
+
+    def test_decides_stays_true_while_the_verdict_acts(self):
+        self.entries["e1"] = _entry("e1", state="not_loaded")
+        self.builder_boot()
+        seen = []
+        real = self.installer.async_backup
+
+        async def backup(label=""):
+            seen.append(self.updater.decides("demo", "v2"))  # awaits before the lock, where B's timer could fire
+            return await real(label)
+
+        self.installer.async_backup = backup
+        self.check()
+        self.assertEqual(seen, [True])
+        self.assertTrue(self.updater.decides("demo", "v2"), "it acted: B waits for the restart")
+
+    def test_a_verdict_that_dies_lets_go_and_says_so(self):
+        self.entries["e1"] = _entry("e1", state="not_loaded")
+        self.builder_boot()
+        with mock.patch.object(self.updater, "_smoke_fall_back", mock.AsyncMock(side_effect=RuntimeError("boom"))):
+            self.check()
+        self.assertFalse(self.updater.decides("demo", "v2"))
+        self.assertTrue(any("could not judge" in m for m in self.emitted), self.emitted)
+
+    def test_the_wait_is_bounded(self):
+        from custom_components.integration_manager import installer as inst_mod
+
+        inst = self.make()
+        inst.ha_smoke_decides = lambda domain, tag: True
+        inst.settings = SimpleNamespace(int_=lambda *a: 60)
+        limit = 2 * max(inst.SETUP_WAIT_S, 60) + 60 + inst_mod.HA_SMOKE_WAIT_MARGIN_S
+        with mock.patch.object(inst_mod.time, "monotonic", return_value=1000.0):
+            self.assertTrue(inst._waits_for_ha_smoke("demo", "v2"))
+        with mock.patch.object(inst_mod.time, "monotonic", return_value=1000.0 + limit + 1):
+            self.assertFalse(inst._waits_for_ha_smoke("demo", "v2"))
+            self.assertFalse(inst._waits_for_ha_smoke("demo", "v2"))
+        self.assertEqual(sum("gave no verdict" in m for m in self.emitted), 1)
+
+    def test_it_waits_again_right_before_its_own_rollback(self):
+        inst = self.make()
+        answers = iter([False, True])  # free at the top of the check, the Home Assistant verdict starts before the rollback
+        inst.ha_smoke_decides = lambda domain, tag: next(answers)
+        inst.settings = SimpleNamespace(int_=lambda *a: 60, bool_=lambda *a: True)
+        inst.busy = False
+        inst._entries_of = lambda domain: [_entry("e1", state="not_loaded")]
+        inst.health_source = lambda grace=False: {"state": "error", "reason": "not loaded"}
+        inst.yaml_path = lambda domain: "/nonexistent"
+        inst.rollback_full = mock.AsyncMock()
+        with mock.patch.object(self.views, "_ha_change_lock_taken", return_value=False):
+            asyncio.run(inst._smoke_check("demo", "v2", True))
+        inst.rollback_full.assert_not_awaited()
+        self.assertEqual(self.later, [60])
+
+
+class RevertWriteFailureTest(_RealInstaller):
+    def test_the_start_s_own_smoke_test_is_scheduled_again(self):
+        from custom_components.integration_manager.installer import State
+
+        inst = self.make()
+        inst._save_state.side_effect = OSError("read-only")
+        inst._load_state = mock.Mock(return_value=State(domain="demo", installed={"demo": {"running_tag": "v2", "versions": {"v2": {}}}},
+                                                        pending_smoke={"domain": "demo", "tag": "v2", "can_rollback": True}))
+        inst._schedule_smoke = mock.Mock()
+        with self.assertRaises(OSError):
+            inst.revert_for_ha_fallback("demo", "v1", "v2", OLD)
+        inst._schedule_smoke.assert_called_once_with("demo", "v2", True)
+
+    def test_the_intent_is_cleared_with_the_ha_json_reader(self):
+        import homeassistant
+        from custom_components.integration_manager import ha_updater, installer as inst_mod
+
+        self.write({"current": OLD, "desired": OLD, "integration_revert": {"domain": "demo", "from": "v2", "to": "v1", "back": OLD}})
+        inst = self.make()
+        with mock.patch.object(homeassistant.const, "__version__", OLD), \
+                mock.patch.object(inst_mod.jsonio, "update_json", side_effect=ValueError("ha.json is unreadable")) as upd:
+            inst._apply_ha_integration_revert()  # unreadable at the write: kept for the next boot, no crash
+        self.assertIs(upd.call_args.kwargs["read"], ha_updater.read_ha_json_for_update)
