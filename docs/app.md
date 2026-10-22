@@ -157,7 +157,8 @@ A Home Assistant backup that includes the app holds its whole folder except
 what no backup needs (`backupkit.APP_BACKUP_EXCLUDE_GLOBS`: what the
 manager's own backups leave out, but those backups themselves):
 
-- `venv-*`, one installed Home Assistant each, about 800 MB. After a restore
+- `venv-*` (and `.venv-current.tmp`, `.venv-removing-*` while a link is replaced
+  or a venv removed), one installed Home Assistant each, about 800 MB. After a restore
   the first start installs Home Assistant again, which takes a few minutes and
   needs internet access;
 - log files, Python caches, `deps/` and `tts/`;
