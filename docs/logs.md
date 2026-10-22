@@ -33,7 +33,17 @@ its own, such as traffic dumps or debug logs. They are found through:
 - the integration's config entries: any setting ending in `.log`, with its
   rotated copies;
 - `*.log` files and their rotated copies (`*.log.1`, `*.log.2026-09-10`) in the
-  registry's `log_dir` and in the config root.
+  registry's `log_dir` and in the config root;
+- the same in each folder directly under the config dir (one level, never
+  deeper), for an integration that writes into a folder of its own without
+  naming it in a setting: ramses_cc 0.61.1 writes
+  `ramses_rf_logs/packet_log.log`. Linked folders, folders whose name starts
+  with a dot or `venv-`, and Home Assistant's and the manager's own
+  (`integration_manager`, `backups`, `deps`, `custom_components`,
+  `blueprints`, `www`, `tts`, `image`, `themes`) are not scanned.
+
+Files written in the last hour come first, newest first, so a log the running
+version writes is listed before one an older version left behind.
 
 Symbolic links are never listed, nor a file with more than one hard link (a
 `secrets.yaml` linked under a `*.log` name would look like a log). Rotation by

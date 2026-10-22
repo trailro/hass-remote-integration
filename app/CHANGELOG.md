@@ -18,6 +18,14 @@ Every version's changes are in the
   running version is unchanged, except that a conflict on one of its pins
   says so and suggests switching Home Assistant first, or checking both
   together in the environment builder.
+- **Log files lists the logs an integration writes in a folder of the config
+  dir.** ramses_cc 0.61.1 writes `ramses_rf_logs/packet_log.log` (0.60.4
+  wrote `packet_log.log` in the config root) and names no path in its
+  config entry, so the page listed only the old version's stale file. Each
+  folder directly under the config dir is now scanned too (one level; not
+  links, hidden folders, venvs or Home Assistant's and the manager's own),
+  with the same rules as before: no links, no file with more than one hard
+  link.
 - **No device registry deprecation warnings on Home Assistant 2026.10.** The
   manager read `DeviceEntry.config_entries` and `primary_config_entry` (the
   **Devices** page, a device delete, the registry import), which 2026.10
