@@ -73,9 +73,9 @@ GB). Once you are happy with an upgrade, *Remove HA <version> venv* next to
 (`POST /api/ha/venv/remove`; not on MQTT). Home Assistant keeps running and
 nothing restarts. The version stays the rollback target: *Roll back* then says
 it installs it again, which needs PyPI and takes a few minutes, as for any
-version not on the volume. Until a new previous version exists, a new version
-that never booted and crashes three times is not left automatically (below),
-and the smoke test cannot switch back to it either.
+version not on the volume. The next version change records a new previous
+version with its venv, so the automatic fallbacks below have one again; until
+then there is no change in progress for them to undo.
 
 The removal is refused while anything still needs that venv: it is the running
 version, a switch to it is scheduled, a version change is scheduled or has not
@@ -330,10 +330,13 @@ count.
 - **A version that never booted** and fails three times in a row: the
   container falls back to the previous version. The new version's venv is
   removed only once the previous one has booted.
-- **A version that never booted, with the previous version's venv removed**
-  (by hand on **System**, or built for another Python): it is kept and retried,
-  and `last_error` says the previous version is not installed here and that
-  *Roll back* on **System** installs it again.
+- **A version that never booted, when the previous version has no venv for
+  this image's Python** (a newer image moved the Python; removing it by hand on
+  **System** is refused until a version change has booted, so that path does
+  not lead here): it is kept and retried, and `last_error` says so. **System**
+  is down with Home Assistant, so the way back is to set `"desired":
+  "<previous>"` in `integration_manager/ha.json` and restart the container: the
+  venv is installed again from PyPI first.
 - **A version that has booted once** is never left automatically. When it
   later crashes three times in a row (a changed setting or port, too little
   memory), the container keeps retrying it, and **System** and the log say so.
@@ -422,6 +425,23 @@ integration smoke test's delay (`smoke_test_s` in the settings on **System**,
   target. With `auto_rollback` off, or with the previous venv gone or the
   switch's backup unknown, the version is kept and the notification says why it
   was not left.
+
+**A switch from the environment builder that also starts another integration
+version** (*Prepare* with a Home Assistant version and *start*): that version
+is started at the target's first boot, and the smoke test above judges it. If
+it does not set up, the container goes back to the old Home Assistant **and**
+to the integration version that ran before *Prepare*, in one step: the
+configuration and the integration's files come back from the switch's backup
+(taken with that version deployed; `.storage` whole, not merged), the version
+store records the older integration version as running, and its patches are
+applied at the boot. `smoke_fallback.integration` says which versions
+(`from`, `to`). The new integration version's own smoke test only reports, so
+two rollbacks never act on one failure. If Home Assistant cannot go back (its
+venv gone, the switch's backup unknown), the integration still does, by its
+own full rollback on the new Home Assistant; with `auto_rollback` off nothing
+moves. Earlier versions of the manager sent Home Assistant back alone and left
+the new integration version deployed on the old one, where it often does not run
+(ramses_cc 0.61.1 needs `serialx>=1.11.0`, which 2026.9.4 does not allow).
 
 The reason names the entry and its state, with the entry's own reason when it
 has one, and the newest error the process log holds about the integration since

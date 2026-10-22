@@ -12,7 +12,7 @@ from unittest import mock
 
 import backupkit
 from custom_components.integration_manager import views
-from tests.test_ha_preflight_views import TARGET, _GateBase
+from tests.test_ha_preflight_views import BLOCKED, CLEAN, TARGET, _GateBase
 from tests.test_r4_lifecycle import A, B, EntrypointMainBase, make_venv
 
 
@@ -67,10 +67,50 @@ class RemoveViewTest(_GateBase):
 
     async def test_a_rollback_afterwards_schedules_the_reinstall(self):
         await self.post()
+        self._view(CLEAN)
         with mock.patch.object(backupkit, "prune", return_value=[]):
             r = await self.view.post(_request({"config": "keep"}), "rollback")
         self.assertTrue(r["ok"], r)
         self.assertEqual(self.up._read()["desired"], TARGET)  # the entrypoint installs what is not on the volume
+        self.up.validate.assert_awaited_with(TARGET)
+        self.up.dependency_check.assert_awaited_with(TARGET)
+
+    async def test_a_rollback_that_reinstalls_a_version_that_cannot_install_needs_force(self):
+        await self.post()
+        self._view(BLOCKED)
+        with mock.patch.object(backupkit, "prune", return_value=[]):
+            r = await self.view.post(_request({"config": "keep"}), "rollback")
+            self.assertTrue(r["needs_force"], r)
+            self.installer.async_backup.assert_not_awaited()
+            r = await self.view.post(_request({"config": "keep", "force": True}), "rollback")
+        self.assertTrue(r["ok"], r)
+
+    async def test_a_rollback_to_an_installed_venv_runs_no_check(self):
+        self._view(BLOCKED)
+        with mock.patch.object(backupkit, "prune", return_value=[]):
+            r = await self.view.post(_request({"config": "keep"}), "rollback")
+        self.assertTrue(r["ok"], r)
+        self.up.dependency_check.assert_not_awaited()
+
+    async def test_a_removal_that_leaves_files_says_so(self):
+        real = shutil.rmtree
+
+        def partial(path, ignore_errors=False):
+            os.remove(os.path.join(path, ".ok"))  # one file goes, the rest stays
+
+        with open(os.path.join(self.prev_venv, "bin", "python"), "wb") as fh:
+            fh.write(b"x" * 4096)
+        with open(os.path.join(self.prev_venv, ".ok"), "wb") as fh:
+            fh.write(b"y" * 100)
+        with mock.patch.object(shutil, "rmtree", side_effect=partial):
+            status, r = await self.post()
+        self.assertEqual(status, 200, r)
+        self.assertEqual((r["freed_bytes"], r["left_bytes"]), (100, 4096))
+        self.assertIn("next boot", r["note"])
+        self.assertFalse(os.path.exists(self.prev_venv))
+        left = [n for n in os.listdir(self.cfg) if n.startswith(".venv-removing-")]
+        self.assertEqual(len(left), 1, "renamed aside for the next boot's sweep")
+        real(os.path.join(self.cfg, left[0]))
 
     async def test_the_typed_version_must_match(self):
         status, r = await self.post(confirm="2026.1")
@@ -149,8 +189,8 @@ class BootWithoutThePreviousVenvTest(EntrypointMainBase):
         self.assertEqual(self.boot(), B)
         state = self.state()
         self.assertNotIn("fallback_from", state)
-        self.assertIn(f"{A} is not installed here", state["last_error"])
-        self.assertIn("roll back", state["last_error"])
+        self.assertIn(f"{A} has no venv here", state["last_error"])
+        self.assertIn(f'"desired": "{A}" in integration_manager/ha.json', state["last_error"])
 
     def test_a_rollback_installs_it_again(self):
         shutil.rmtree(os.path.join(self.cfg, f"venv-{A}"))

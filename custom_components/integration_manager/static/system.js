@@ -147,7 +147,7 @@ $('#harollback').onclick=()=>{const v=HA&&HA.previous; if(!v)return; const sel=$
   if(vcmp(v,HA.current)<0&&!shown){haPlan(v); $('#haplan').scrollIntoView({block:'center'}); log(`Choose below what Home Assistant ${v} starts with, then click Roll back again.`); return;}
   haSet(v,'rollback');};
 $('#harmvenv').onclick=async()=>{const v=$('#harmvenv').dataset.v; if(!v)return;
-  const typed=prompt(`Remove the venv of Home Assistant ${v}?\n\n- Its space on the volume is freed (about 0.7-1 GB).\n- A later rollback to ${v} installs it again from PyPI: that needs the network and takes a few minutes.\n- If a new version fails to boot, the container cannot fall back to ${v} on its own any more.\n- Home Assistant ${HA.current} keeps running; nothing restarts.\n\nType ${v} to remove it:`);
+  const typed=prompt(`Remove the venv of Home Assistant ${v}?\n\n- Its space on the volume is freed (about 0.7-1 GB).\n- A later rollback to ${v} installs it again from PyPI: that needs the network and takes a few minutes.\n- Home Assistant ${HA.current} keeps running; nothing restarts.\n\nType ${v} to remove it:`);
   if(typed===null)return;
   if(typed.trim()!==v){log(`venv not removed: type ${v} to confirm`);return;}
   $('#harmvenv').disabled=true;

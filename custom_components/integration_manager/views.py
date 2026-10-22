@@ -277,7 +277,8 @@ async def async_switch_check(updater: HaUpdater, installer: Installer, target: s
 
 
 async def async_change_ha_version(installer: Installer, updater: HaUpdater, target: str, mode: str, source: str,
-                                  restore_backup: str | None = None, parts: list[str] | None = None) -> dict[str, Any]:
+                                  restore_backup: str | None = None, parts: list[str] | None = None,
+                                  start: dict[str, Any] | None = None) -> dict[str, Any]:
     """The one way to schedule a Home Assistant version change (System page,
     environment builder, a restore with its backup's version): a backup
     first, then what the target starts with (keep, restore, rebuild: see
@@ -366,6 +367,9 @@ async def async_change_ha_version(installer: Installer, updater: HaUpdater, targ
             state = await hass.async_add_executor_job(updater.set_desired, target, {"to": target, "mode": mode, "backup": backup["name"],
                                                                                    "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                                                                                    **({"parts": restore_parts} if restore is not None else {}),
+                                                                                   # the environment builder's integration start at that
+                                                                                   # boot: its smoke test takes both back (_smoke_fall_back)
+                                                                                   **({"start": start} if start else {}),
                                                                                    **({"smoke": smoke} if (smoke := _switch_smoke(installer, mode)) else {})})
             # an older change's preparations go only now, once this change has one of its own and is recorded: a
             # keep prepares nothing but ha.json, and a rebuild's plan is written above.  Dropped before that, a
@@ -466,6 +470,13 @@ class HaActionView(ManagerView):
                                           "error": "; ".join(check["blockers"])})
             else:
                 target = await hass.async_add_executor_job(self.updater.previous_version)
+                if target != HA_VERSION and not await hass.async_add_executor_job(self.updater._venv_for_this_python, target):  # noqa: SLF001
+                    # its venv was removed (by hand on System, or by a newer image's Python): the rollback installs it
+                    # again, so it gets the checks a switch to it gets
+                    await self.updater.validate(target)
+                    if body.get("force") is not True and not (check := await async_switch_check(self.updater, self.installer, target))["ok"]:
+                        return self.json({"ok": False, "needs_force": True, "check": check,
+                                          "error": "; ".join(check["blockers"])})
             if target == HA_VERSION:
                 desired = (await hass.async_add_executor_job(self.updater._read)).get("desired")
                 if not desired or desired == HA_VERSION:
@@ -513,23 +524,20 @@ class HaVenvRemoveView(ManagerView):
         async with _HA_CHANGE_LOCK:  # what schedules a version change takes it too: no switch between check and removal
             self.installer.busy = True
             try:
+                refused = await hass.async_add_executor_job(self.updater.venv_removal_refusal, version)
+                if refused is not None:
+                    return self.json({"ok": False, "error": str(refused)}, status_code=refused.status)
                 try:
-                    why = await hass.async_add_executor_job(self.updater.venv_removal_refusal, version)
-                except ValueError as err:  # ha.json unreadable
-                    why = str(err)
-                if why:
-                    status = 400 if why.endswith("is not a Home Assistant version") else 409
-                    return self.json({"ok": False, "error": why}, status_code=status)
-                try:
-                    freed = await hass.async_add_executor_job(self.updater.remove_venv, version)
-                except OSError as err:
+                    freed, left = await hass.async_add_executor_job(self.updater.remove_venv, version)
+                except OSError as err:  # the rename: nothing was removed
                     return self.json({"ok": False, "error": f"venv-{version} not removed: {err.strerror or type(err).__name__}"}, status_code=500)
             finally:
                 self.installer.busy = False
-        mb = round(freed / 1048576)
-        events.emit("ha", f"venv of Home Assistant {version} removed by hand ({mb} MB freed); a rollback to it installs it "
-                    "again from PyPI", version=version)
-        return self.json({"ok": True, "removed": version, "freed_bytes": freed})
+        rest = f"; {round(left / 1048576)} MB could not be deleted now and go at the next boot" if left else ""
+        events.emit("ha", f"venv of Home Assistant {version} removed by hand ({round(freed / 1048576)} MB freed{rest}); a rollback "
+                    "to it installs it again from PyPI", version=version)
+        return self.json({"ok": True, "removed": version, "freed_bytes": freed, "left_bytes": left,
+                          **({"note": rest[2:]} if left else {})})
 
 
 class InstallView(ManagerView):

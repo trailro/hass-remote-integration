@@ -214,7 +214,7 @@ What the floor and the check mean is in
 | `verdicts` | version → its `check`, where known without resolving (a cached report, or the Python a release needs) |
 | `change` | the scheduled or booting version change until its version booted (`to`, `mode`, `backup`, `at`, `applied`, `parts`; `smoke`: the config entries a keep switch smoke-tests) |
 | `smoke` | the smoke test the booting version change still owes the integration (`version`, `from`, `domain`, `entries`, `loaded`, `backup`, `parts`, `switched`, `at`); `null` when none |
-| `smoke_fallback` | the last automatic switch back after that smoke test failed (`from`, `to`, `domain`, `reason`, `at`; `saved`: the backup of the configuration as the version left had it; `restored`: the `.storage` files taken from the switch's backup); cleared when the version left passes it later |
+| `smoke_fallback` | the last automatic switch back after that smoke test failed (`from`, `to`, `domain`, `reason`, `at`; `saved`: the backup of the configuration as the version left had it; `restored`: the `.storage` files taken from the switch's backup; `integration`: `from`/`to` when the integration version the environment builder started went back too); cleared when the version left passes it later |
 
 `?all=1` reads the release list in memory: no PyPI call, no
 `X-Requested-With`. While PyPI has never answered in this process,

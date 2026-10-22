@@ -1146,7 +1146,10 @@ def _target_ha_root(target: str, python: str, config_dir: str) -> tuple[str | No
         return _running_ha_root(), None, ""
     site = os.path.join(config_dir, f"venv-{target}", "lib", f"python{sys.version_info[0]}.{sys.version_info[1]}", "site-packages")
     if os.path.isfile(os.path.join(config_dir, f"venv-{target}", ".ok")) and os.path.isfile(os.path.join(site, "homeassistant", "__init__.py")):
-        return site, None, ""  # .ok: the entrypoint finished that install (written last)
+        # .ok: the entrypoint finished that install (written last).  Read in place, with no lock against a removal by
+        # hand on System (HaUpdater.remove_venv renames it away): a read that loses that race fails with an OSError,
+        # which the callers report as "could not be read" (a warning), never as a verdict on the target
+        return site, None, ""
     if (kept := _kept_wheel(target)) is not None:
         return kept, None, ""
     scratch = tempfile.mkdtemp(prefix=f"{target}-", dir=_wheel_dir())

@@ -743,13 +743,21 @@ def ensure_extra_requirements(version: str) -> None:
     _write_requirements_stamp(d)
 
 
-def prune(keep: set[str]) -> None:
-    for name in os.listdir(CONFIG_DIR):
+def sweep_removed_venvs() -> None:
+    """A venv removed by hand on System (HaUpdater.remove_venv) whose deletion a stop interrupted: renamed out of the
+    way already, so no version is in it any more.  Swept at every boot, also one that prunes nothing."""
+    try:
+        names = os.listdir(CONFIG_DIR)
+    except OSError:
+        return
+    for name in names:
         if name.startswith(".venv-removing-"):
-            # a venv removed by hand on System (HaUpdater.remove_venv) whose deletion a stop interrupted
             log(f"removing {name}")
             shutil.rmtree(os.path.join(CONFIG_DIR, name), ignore_errors=True)
-            continue
+
+
+def prune(keep: set[str]) -> None:
+    for name in os.listdir(CONFIG_DIR):
         if not name.startswith("venv-") or name == "venv-current":
             continue
         v = name[5:]
@@ -1633,13 +1641,15 @@ def _prepare() -> str:
         state["boot_failures"] = 0
         save_state(state)
     elif failures >= MAX_BOOT_FAILURES and fallback_to and fallback_to != wanted:
-        # the previous version is recorded, but its venv is gone (removed by hand on System): it is not installed
-        # again here, unasked, from a network the boot may not have - the version stays, as after a smoke test
-        log(f"{wanted} failed to boot {failures} times; {fallback_to} is no longer installed here: no fallback, retrying")
+        # the previous version is recorded, but no venv of it runs on this image's Python (a newer image moved the
+        # Python; removing it by hand on System is refused until a version change has booted): it is not installed
+        # again here, unasked, from a network the boot may not have.  System is down with Home Assistant, so the
+        # way back is said as the file to edit
+        log(f"{wanted} failed to boot {failures} times; {fallback_to} is not installed here: no fallback, retrying")
         state["last_error"] = (f"Home Assistant {wanted} crashed at boot {failures} times in a row; the previous version "
-                               f"{fallback_to} is not installed here for this image's Python (its venv was removed, or built for another "
-                               "Python), so it is not rolled back "
-                               f"automatically: roll back to {fallback_to} on System to install it again (see the container log)")
+                               f"{fallback_to} has no venv here for this image's Python, so it is not rolled back automatically. "
+                               f"To go back, set \"desired\": \"{fallback_to}\" in integration_manager/ha.json and restart the "
+                               "container: its venv is installed again from PyPI first (a few minutes; see the container log)")
         save_state(state)
     elif failures >= MAX_BOOT_FAILURES:
         # a fresh volume whose first version cannot boot: nothing to go back to, but say what is wrong
@@ -1741,6 +1751,7 @@ def _prepare() -> str:
     state.setdefault("proven", "")
     save_state(state)
     _phase("removing unused venvs", wanted)
+    sweep_removed_venvs()
     if not state.get("_corrupt"):
         keep = {wanted, state.get("previous") or wanted, state.get("fallback_from") or wanted}
         prune(keep | ({state["recovery"]["for"]} if isinstance(state.get("recovery"), dict) and state["recovery"].get("for") else set()))

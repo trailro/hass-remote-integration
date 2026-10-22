@@ -297,7 +297,12 @@ class BuildPrepareView(ManagerView):
             try:
                 from .views import async_change_ha_version  # the same backup and change record as the System page
 
-                st = await async_change_ha_version(self.installer, self.updater, ha, "keep", "environment builder")
+                # the integration version running now (A) goes back with Home Assistant if the deferred start of ``ref``
+                # does not set up on ``ha`` (ha_updater._smoke_fall_back); the switch's backup is taken with A deployed
+                before = getattr(self.installer, "running_tag", None) if getattr(self.installer, "running", None) == domain else None
+                deferred = {"domain": domain, "tag": ref, "from_tag": before} if body.get("start") and before and before != ref else None
+                st = await async_change_ha_version(self.installer, self.updater, ha, "keep", "environment builder",
+                                                   **({"start": deferred} if deferred else {}))
                 steps.append({"step": "ha", "ok": True, "desired": st["desired"], "backup": st["backup"]})
                 restart_required = True
             except (ValueError, OSError) as err:

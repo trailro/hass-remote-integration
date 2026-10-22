@@ -69,6 +69,8 @@ backup_exclude:
   - "*_hass_remote_integration/integration_manager/auth_revoked.tmp"
   - "*_hass_remote_integration/venv-*"
   - "*_hass_remote_integration/venv-current"
+  - "*_hass_remote_integration/.venv-current.tmp"
+  - "*_hass_remote_integration/.venv-removing-*"
   - "*.log"
   - "*.log.*"
   - "*_hass_remote_integration/__pycache__"
