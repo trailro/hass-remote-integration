@@ -40,7 +40,8 @@ its own, such as traffic dumps or debug logs. They are found through:
   `ramses_rf_logs/packet_log.log`. Linked folders, folders whose name starts
   with a dot or `venv-`, and Home Assistant's and the manager's own
   (`integration_manager`, `backups`, `deps`, `custom_components`,
-  `blueprints`, `www`, `tts`, `image`, `themes`) are not scanned.
+  `blueprints`, `www`, `tts`, `image`, `themes`, `__pycache__`) are not
+  scanned.
 
 Files written in the last hour come first, newest first, so a log the running
 version writes is listed before one an older version left behind.

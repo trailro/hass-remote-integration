@@ -165,9 +165,11 @@ that version's source cannot be read, this is a warning. The running
 integration's requirements, with those of the built-in components it depends
 on, are resolved against the version's pins as the integration preflight does
 below (ramses_cc 0.61.1's `serialx>=1.11.0` against a version that pins
-`serialx==1.10.0`): a conflict is a blocker; pins that cannot be read, or PyPI
-that cannot be reached, are a warning. The answer is kept for 30 minutes per
-integration version and target (a *could not check* is asked again). A
+`serialx==1.10.0`): a conflict is a blocker; pins that cannot be read, PyPI
+that cannot be reached, a pip that times out or gives no report, or another
+integration check holding pip for more than 10 seconds are a warning (*not
+checked*). The answer is kept for 30 minutes per integration version and
+target (a *could not check* is asked again). A
 stopped integration is not checked: the preflight of its next start is. And a version the
 smoke test switched back from (`smoke_fallback`, below) is refused until it is
 chosen again on purpose; it is not offered as an update on **System** or by
@@ -202,13 +204,19 @@ catches: a version that does not set up is rolled back automatically.
   `serialx>=1.11.0`; 2026.9.4 pins `serialx==1.10.0` (its `usb` component),
   2026.10.x pins 1.11.0, so it blocks on 2026.9.4 and passes for 2026.10.2.
   When the running version's pins are what conflicts, the blocker names them
-  and says to switch Home Assistant first, or to check both together in the
-  environment builder, whose *Prepare* switches Home Assistant and starts the
-  integration after the restart. If the other version's pins cannot be read
-  (no network, no wheel), pip resolves against the running version's, and a
-  conflict on a package the running version pins is a warning (*not checked
-  against* that version's pins), not a blocker; so is a pip that could not
-  reach PyPI for another version. A package
+  and points at the environment builder: check this version together with the
+  newer Home Assistant, and *Prepare* switches Home Assistant and starts the
+  integration after the restart. Switching Home Assistant alone first works
+  only if the integration version running now supports the newer one. A pin
+  is held responsible only when pip's conflict is about a requirement that
+  pin does not satisfy (`Cannot install serialx>=1.11.0` with `serialx==1.10.0`
+  pinned), never because its name appears elsewhere in pip's output: a
+  version that does not exist (`Could not find a version`) or a conflict
+  between packages Home Assistant does not pin is a plain blocker. If the
+  other version's pins cannot be read (no network, no wheel), pip resolves
+  against the running version's, and a conflict on a running pin is a warning
+  (*not checked against* that version's pins), not a blocker; so is a pip
+  that could not reach PyPI for another version. A package
   whose `requires_python` excludes the image's Python, or that conflicts with
   Home Assistant's pins, is a blocker. A package with no wheel for this Python
   and architecture is built from source for real: pure Python builds, C code

@@ -194,7 +194,7 @@ def _pip_dry_run(python: str, requirements: list[str], constraints: str | None) 
     try:
         proc = _run_pip(cmd)
     except subprocess.TimeoutExpired:
-        return {"ok": False, "install": [], "stderr": f"pip did not finish within {PIP_TIMEOUT_S}s"}
+        return {"ok": False, "install": [], "stderr": f"pip did not finish within {PIP_TIMEOUT_S}s", "unchecked": True}
     if proc.returncode != 0:
         err = proc.stderr.strip()
         # The line that says why can sit far above pip's closing summary (scipy's meson prints the missing
@@ -204,7 +204,7 @@ def _pip_dry_run(python: str, requirements: list[str], constraints: str | None) 
     try:
         report = json.loads(proc.stdout or "{}")
     except ValueError:
-        return {"ok": False, "install": [], "stderr": "pip report was not JSON"}
+        return {"ok": False, "install": [], "stderr": "pip report was not JSON", "unchecked": True}
     rows = []
     for item in report.get("install", []):
         meta = item.get("metadata", {})
@@ -1287,12 +1287,57 @@ def _target_pins(target: str, python: str, config_dir: str) -> tuple[tuple[str, 
         return _HA_PINS[target], ""
 
 
-_PINNED_NAME_RE = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:===|==|>=|<=|~=|!=|<|>)")
+# What pip says about a conflict.  With --quiet (as _pip_dry_run runs it) only the first line is printed, naming the
+# requirements it was given that cannot be installed together - a pin from the constraints file is not among them:
+#   ERROR: Cannot install serialx>=1.11.0 because these package versions have conflicting dependencies.
+#   ERROR: Cannot install serialx==1.10.0 and serialx>=1.11.0 because these package versions have conflicting dependencies.
+# (captured from pip 25 in this image: a constraint serialx==1.10.0, and usb's serialx==1.10.0 passed as a requirement).
+# Without --quiet the lines under "The conflict is caused by:" say more ("The user requested (constraint) ...").
+_CANNOT_INSTALL_RE = re.compile(r"Cannot install (.+?) because these package versions have conflicting dependencies")
+_CAUSED_BY_RE = re.compile(r"^\s*The user requested (\(constraint\) )?(\S.*?)\s*$", re.M)
 
 
-def _pinned_in(stderr: str, pinned: set[str]) -> list[str]:
-    """The packages Home Assistant pins that a failed pip run names with a version (``serialx==1.10.0``)."""
-    return sorted({_canon(m.group(1)) for m in _PINNED_NAME_RE.finditer(stderr or "")} & pinned)
+def _ha_pin_conflicts(stderr: str, constraints_text: str, ha_reqs: list[str]) -> list[str]:
+    """The packages a failed pip run's conflict is about where a Home Assistant pin is one side of it: a requirement
+    pip names in the conflict that the version Home Assistant pins (``package_constraints.txt``, or a requirement of a
+    component the integration depends on: ``ha_reqs``) does not satisfy.  Decided on the requirements, never on a
+    package name appearing somewhere in the text: "Could not find a version", or a conflict between two packages
+    Home Assistant does not pin, is [] whatever else the output mentions."""
+    from packaging.requirements import InvalidRequirement, Requirement
+
+    def parse(text: str) -> Requirement | None:
+        try:
+            return Requirement(text.strip())
+        except (InvalidRequirement, ValueError):
+            return None
+
+    m = _CANNOT_INSTALL_RE.search(stderr or "")
+    listed = re.split(r", | and ", m.group(1)) if m else []
+    pins: dict[str, list[Requirement]] = {}
+    for line in [*(constraints_text or "").splitlines(), *ha_reqs]:
+        line = line.split("#", 1)[0].strip()
+        if line and not line.startswith("-") and (req := parse(line)) is not None:
+            pins.setdefault(_canon(req.name), []).append(req)
+    for constraint, text in _CAUSED_BY_RE.findall(stderr or ""):
+        if constraint:
+            if (req := parse(text)) is not None:
+                pins.setdefault(_canon(req.name), []).append(req)
+        else:
+            listed.append(text)
+    if not listed:
+        return []
+    out: set[str] = set()
+    for text in listed:
+        if (req := parse(text)) is None:
+            continue
+        name = _canon(req.name)
+        for pin in pins.get(name, []):
+            if str(pin.specifier) == str(req.specifier):
+                continue  # the pin itself, as pip lists it among the requirements
+            exact = [spec.version for spec in pin.specifier if spec.operator in ("==", "===")]
+            if any(not req.specifier.contains(v, prereleases=True) for v in exact):
+                out.add(name)
+    return sorted(out)
 
 
 def _write_constraints(text: str) -> str:
@@ -1473,9 +1518,8 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
         if not pip["ok"]:
             err = pip.get("stderr_full") or pip["stderr"]
             reason = _pip_reason(err)
-            pinned = await hass.async_add_executor_job(_constraint_names, constraints)
-            pinned |= {_canon(_req_name(req)) for req in dep_reqs if req}
-            ha_pinned = _pinned_in(err, pinned)
+            ha_pinned = _ha_pin_conflicts(err, await hass.async_add_executor_job(_read_text, constraints) if constraints else "",
+                                          [req for req in dep_reqs if req and req not in new_reqs])
             if target != ha_version and _pip_unreachable(err):
                 # the target venv is built at the restart: nothing here says its requirements would not install
                 warnings.append(f"the requirements were not checked for Home Assistant {target}: PyPI could not be reached ({reason})")
@@ -1484,8 +1528,10 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
                                 f"running {ha_version}'s they conflict on {', '.join(ha_pinned)}, which {ha_version} pins: {reason}")
             elif target == ha_version and ha_pinned and not _pip_unreachable(err):
                 blockers.append(f"requirements cannot be resolved: {reason} ({', '.join(ha_pinned)} pinned by the running Home Assistant "
-                                f"{ha_version}: a newer Home Assistant that pins a version that fits resolves it - switch Home Assistant "
-                                "first, or check both together in the environment builder)")
+                                f"{ha_version}: a newer Home Assistant may pin a version that fits. Check this version together with "
+                                "that Home Assistant in the environment builder (Install page), whose Prepare switches Home Assistant "
+                                "and starts this version after the restart; switching Home Assistant alone first works only if the "
+                                "integration version running now supports the newer Home Assistant)")
             else:
                 blockers.append("requirements cannot be resolved: " + reason)
         py = ".".join(str(x) for x in sys.version_info[:3])
@@ -1641,6 +1687,7 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
 # is a warning.  Kept per (integration copy, target, image Python) for CACHE_S; "could not check" is not kept.
 
 _SWITCH_REPORTS: dict[tuple[str, ...], tuple[float, tuple[list[str], list[str]]]] = {}
+SWITCH_LOCK_WAIT_S = 10
 
 
 async def switch_requirement_checks(hass: HomeAssistant, installer, version: str) -> tuple[list[str], list[str]]:
@@ -1674,14 +1721,25 @@ async def switch_requirement_checks(hass: HomeAssistant, installer, version: str
         if not row["found"] and row["required"]:
             blockers.append(f"{who} depends on '{row['domain']}', which Home Assistant {version} does not have")
     reqs = [r for r in dict.fromkeys(reqs) if r and not bad_requirement(r)]
-    constraints = await hass.async_add_executor_job(_write_constraints, pins[0])
     try:
-        async with LOCK:
-            pip = await hass.async_add_executor_job(_pip_dry_run, sys.executable, reqs, constraints)
+        # an environment-builder Check or a release preflight can hold LOCK for minutes: a version check from System
+        # does not wait that long for it
+        await asyncio.wait_for(LOCK.acquire(), SWITCH_LOCK_WAIT_S)
+    except asyncio.TimeoutError:
+        return blockers, [f"the requirements of {who} were not checked against Home Assistant {version} now: another "
+                          "integration check is running (check again in a moment)"]
+    constraints = ""
+    try:
+        constraints = await hass.async_add_executor_job(_write_constraints, pins[0])
+        pip = await hass.async_add_executor_job(_pip_dry_run, sys.executable, reqs, constraints)
     finally:
-        await hass.async_add_executor_job(_remove, constraints)
+        LOCK.release()
+        if constraints:
+            await hass.async_add_executor_job(_remove, constraints)
     if not pip["ok"]:
         err = pip.get("stderr_full") or pip["stderr"]
+        if pip.get("unchecked"):  # a pip that timed out or answered no report said nothing about the requirements
+            return blockers, [f"the requirements of {who} were not checked against Home Assistant {version}: {err}"]
         if _pip_unreachable(err):
             return blockers, [f"the requirements of {who} were not checked against Home Assistant {version}: "
                               f"PyPI could not be reached ({_pip_reason(err)})"]

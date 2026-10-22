@@ -387,9 +387,12 @@ reused. If the version is installed again while its check runs, the start is
 refused: start it again. Blockers stop the switch, with a choice to start
 anyway; warnings do not. Requirements are resolved against the running Home
 Assistant's pins; when one of those is what conflicts (ramses_cc 0.61.1's
-`serialx>=1.11.0` against 2026.9.4's `serialx==1.10.0`), the blocker says so:
-switch Home Assistant first, or check and prepare both together in the
-environment builder, which resolves against the chosen version's pins. One blocker is an attribute of a Home Assistant module
+`serialx>=1.11.0` against 2026.9.4's `serialx==1.10.0`), the blocker says so.
+Check and prepare both together in the environment builder: it resolves
+against the chosen Home Assistant version's pins, and *Prepare* switches Home
+Assistant and starts the new integration version after the restart. Switching
+Home Assistant alone first works only if the integration version running now
+supports the newer Home Assistant (ramses_cc 0.60.4 does not run on 2026.10). One blocker is an attribute of a Home Assistant module
 the code reads (`cv.vol`) that the target Home Assistant does not have, looked
 up in that version's own source: the running install, its venv on the volume,
 or its wheel, downloaded once and kept while the process runs. The same check
