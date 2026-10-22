@@ -18,6 +18,14 @@ Every version's changes are in the
   running version is unchanged, except that a conflict on one of its pins
   says so and suggests switching Home Assistant first, or checking both
   together in the environment builder.
+- **Remove the previous Home Assistant venv by hand.** *Remove HA <version>
+  venv* on **System** (`POST /api/ha/venv/remove`, the version typed to
+  confirm) frees the 0.7-1 GB the rollback target takes once an upgrade is
+  settled. A rollback to it then installs it again from PyPI, and a new
+  version that crashes before it ever booted is kept and says so rather than
+  falling back. Refused while a version change, its smoke test, a switch back
+  or a restore for that version still needs it. `GET /api/ha` adds
+  `previous_installed`.
 - **A Home Assistant switch checks the running integration's requirements
   against the target's pins** (`POST /api/ha/check` and `/api/ha/update`,
   **System**, the manager device's install action), as the integration

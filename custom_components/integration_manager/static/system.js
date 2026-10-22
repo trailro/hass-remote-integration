@@ -92,7 +92,9 @@ async function ha(force){
       +' <span class="mut">· log: integration_manager/apt-install.log</span>';
   $('#haerr').textContent=h.last_error||'—';
   $('#haupdate').textContent=`Update to ${h.latest_stable||'…'}`; $('#haupdate').disabled=!h.update_available; $('#haupdate').dataset.v=h.latest_stable||'';
-  $('#harollback').disabled=!h.previous; $('#harollback').textContent=h.previous?`Roll back HA to ${h.previous}`:'Roll back HA';
+  $('#harollback').disabled=!h.previous; $('#harollback').textContent=h.previous?`Roll back HA to ${h.previous}`+(h.previous_installed?'':' (installs it again)'):'Roll back HA';
+  const rm=h.previous&&h.previous!==h.current&&h.previous_installed?h.previous:'';  // removable: kept only for a rollback
+  $('#harmvenv').hidden=!rm; $('#harmvenv').dataset.v=rm; $('#harmvenv').textContent=rm?`Remove HA ${rm} venv`:'Remove venv';
   haOptions(h);
   $('#hanote').textContent=h.pending?`wanted version ${h.desired}: applied at the next process restart (choose ${h.current} and Install selected version to cancel)`:'';
   haPlan($('#haver').value);
@@ -144,6 +146,14 @@ $('#harollback').onclick=()=>{const v=HA&&HA.previous; if(!v)return; const sel=$
   const shown=$('#haplan').dataset.v===v; sel.value=v;
   if(vcmp(v,HA.current)<0&&!shown){haPlan(v); $('#haplan').scrollIntoView({block:'center'}); log(`Choose below what Home Assistant ${v} starts with, then click Roll back again.`); return;}
   haSet(v,'rollback');};
+$('#harmvenv').onclick=async()=>{const v=$('#harmvenv').dataset.v; if(!v)return;
+  const typed=prompt(`Remove the venv of Home Assistant ${v}?\n\n- Its space on the volume is freed (about 0.7-1 GB).\n- A later rollback to ${v} installs it again from PyPI: that needs the network and takes a few minutes.\n- If a new version fails to boot, the container cannot fall back to ${v} on its own any more.\n- Home Assistant ${HA.current} keeps running; nothing restarts.\n\nType ${v} to remove it:`);
+  if(typed===null)return;
+  if(typed.trim()!==v){log(`venv not removed: type ${v} to confirm`);return;}
+  $('#harmvenv').disabled=true;
+  try{const r=await post('api/ha/venv/remove',{version:v,confirm:typed.trim()});
+    log(r.ok?`venv of Home Assistant ${v} removed (${Math.round((r.freed_bytes||0)/1048576)} MB freed); a rollback to it installs it again`:'ERROR: '+(r.error||r.message));}
+  finally{$('#harmvenv').disabled=false; ha();}};
 let IMS=null, IMSEL=null;
 function imRender(){
   const s=IMS, box=$('#imsummary'); if(!s){box.innerHTML='';$('#imform').hidden=true;$('#imall').hidden=true;return;}

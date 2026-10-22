@@ -65,6 +65,29 @@ picked for a first start. A venv of it, or of a version PyPI no longer lists,
 already installed for this Python can still be switched to. The API is in
 [api.md](api.md) (`GET /api/ha`, `POST /api/ha/check`, `POST /api/ha/update`).
 
+### Removing the previous version's venv
+
+The previous version's venv stays on the volume as the rollback target (0.7-1
+GB). Once you are happy with an upgrade, *Remove HA <version> venv* next to
+*Roll back* on **System** deletes it after you type the version
+(`POST /api/ha/venv/remove`; not on MQTT). Home Assistant keeps running and
+nothing restarts. The version stays the rollback target: *Roll back* then says
+it installs it again, which needs PyPI and takes a few minutes, as for any
+version not on the volume. Until a new previous version exists, a new version
+that never booted and crashes three times is not left automatically (below),
+and the smoke test cannot switch back to it either.
+
+The removal is refused while anything still needs that venv: it is the running
+version, a switch to it is scheduled, a version change is scheduled or has not
+finished booting (`change`), its smoke test has not finished (`smoke`), a switch
+back has not settled (`fallback_from`, `recovery`), a restore scheduled for
+that version waits for it, or another action or version change is running. The
+check runs under the lock version changes take, so a switch cannot be scheduled
+between the check and the removal. Only a directory `venv-<version>` directly in
+the config dir is removed, never a link or the venv `venv-current` points at; it
+is renamed out of the way first and then deleted, and a removal a stop cut off
+is finished at the next boot. The timeline records it with the space freed.
+
 ## Downgrading
 
 Home Assistant migrates its configuration forward only: a newer version
@@ -299,6 +322,10 @@ count.
 - **A version that never booted** and fails three times in a row: the
   container falls back to the previous version. The new version's venv is
   removed only once the previous one has booted.
+- **A version that never booted, with the previous version's venv removed**
+  (by hand on **System**, or built for another Python): it is kept and retried,
+  and `last_error` says the previous version is not installed here and that
+  *Roll back* on **System** installs it again.
 - **A version that has booted once** is never left automatically. When it
   later crashes three times in a row (a changed setting or port, too little
   memory), the container keeps retrying it, and **System** and the log say so.

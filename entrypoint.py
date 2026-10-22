@@ -745,6 +745,11 @@ def ensure_extra_requirements(version: str) -> None:
 
 def prune(keep: set[str]) -> None:
     for name in os.listdir(CONFIG_DIR):
+        if name.startswith(".venv-removing-"):
+            # a venv removed by hand on System (HaUpdater.remove_venv) whose deletion a stop interrupted
+            log(f"removing {name}")
+            shutil.rmtree(os.path.join(CONFIG_DIR, name), ignore_errors=True)
+            continue
         if not name.startswith("venv-") or name == "venv-current":
             continue
         v = name[5:]
@@ -1626,6 +1631,15 @@ def _prepare() -> str:
             state["last_error"] = (f"{wanted} crashed at boot {failures} times; no fallback to {fallback_to}, because the configuration "
                                    "from before the switch could not be restored (see container log)")
         state["boot_failures"] = 0
+        save_state(state)
+    elif failures >= MAX_BOOT_FAILURES and fallback_to and fallback_to != wanted:
+        # the previous version is recorded, but its venv is gone (removed by hand on System): it is not installed
+        # again here, unasked, from a network the boot may not have - the version stays, as after a smoke test
+        log(f"{wanted} failed to boot {failures} times; {fallback_to} is no longer installed here: no fallback, retrying")
+        state["last_error"] = (f"Home Assistant {wanted} crashed at boot {failures} times in a row; the previous version "
+                               f"{fallback_to} is not installed here for this image's Python (its venv was removed, or built for another "
+                               "Python), so it is not rolled back "
+                               f"automatically: roll back to {fallback_to} on System to install it again (see the container log)")
         save_state(state)
     elif failures >= MAX_BOOT_FAILURES:
         # a fresh volume whose first version cannot boot: nothing to go back to, but say what is wrong

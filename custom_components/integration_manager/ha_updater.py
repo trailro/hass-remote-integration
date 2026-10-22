@@ -106,6 +106,65 @@ class HaUpdater:
         site = os.path.join(venv, "lib", f"python{sys.version_info[0]}.{sys.version_info[1]}", "site-packages", "homeassistant", "__init__.py")
         return all(os.path.isfile(p) for p in (os.path.join(venv, ".ok"), os.path.join(venv, "bin", "python"), site))
 
+    def venv_removal_refusal(self, version: str) -> str | None:
+        """Blocking: why the venv of ``version`` must stay, or None.  Called under views._HA_CHANGE_LOCK with the
+        installer busy, so no version change can be scheduled between this answer and the removal."""
+        import backupkit
+
+        if not _VERSION.fullmatch(version):
+            return f"{version[:40]!r} is not a Home Assistant version"
+        state = self._read_for_update()  # unreadable: refused, as a write over it would be
+        if version in (HA_VERSION, state.get("current")):
+            return f"Home Assistant {version} is the version running now"
+        if state.get("desired") == version:
+            return f"a switch to Home Assistant {version} is scheduled: cancel it first"
+        change = state.get("change")
+        if isinstance(change, dict) and change:
+            return (f"a version change to Home Assistant {change.get('to')} is scheduled or has not finished booting: "
+                    "remove the venv once it has booted, or cancel the change")
+        if state.get("smoke"):
+            return "the smoke test of the last version change has not finished: remove the venv once it has passed"
+        if state.get("fallback_from"):
+            return (f"the switch back from Home Assistant {state['fallback_from']} has not finished: remove the venv once "
+                    "the version it went back to has booted")
+        recovery = state.get("recovery")
+        if isinstance(recovery, dict) and recovery:
+            return f"a switch back to Home Assistant {recovery.get('for')} is still restoring its configuration"
+        if backupkit.pending_for_version(self.hass.config.config_dir) == version:
+            return f"a restore scheduled for Home Assistant {version} waits for it to boot: cancel it first"
+        cfg = self.hass.config.config_dir
+        path = os.path.join(cfg, f"venv-{version}")
+        if os.path.islink(path):
+            return f"venv-{version} is a link, not a venv this manager installed"
+        real = os.path.realpath(path)
+        if os.path.dirname(real) != os.path.realpath(cfg) or not os.path.isdir(real):
+            return f"Home Assistant {version} is not installed here"
+        in_use = {os.path.realpath(os.path.join(cfg, "venv-current")), os.path.realpath(sys.prefix)}
+        if real in in_use:
+            return f"venv-{version} is the venv running now"
+        return None
+
+    def remove_venv(self, version: str) -> int:
+        """Blocking: the venv of ``version`` renamed out of the way (a name the entrypoint's prune does not take for a
+        version, and sweeps if a kill left it), then deleted.  Returns the bytes freed.  Check
+        venv_removal_refusal first, under the same lock."""
+        import secrets
+        import shutil
+
+        cfg = self.hass.config.config_dir
+        path = os.path.join(cfg, f"venv-{version}")
+        size = 0
+        for root, _dirs, files in os.walk(path):
+            for name in files:
+                try:
+                    size += os.lstat(os.path.join(root, name)).st_size
+                except OSError:
+                    pass
+        aside = os.path.join(cfg, f".venv-removing-{version}-{secrets.token_hex(4)}")
+        os.rename(path, aside)  # gone under its name at once: nothing can boot a half-deleted venv
+        shutil.rmtree(aside, ignore_errors=True)
+        return size
+
     async def available(self, force: bool = False) -> dict[str, Any]:
         now = time.monotonic()
         if not force and self._cache and now - self._cache[0] < CACHE_S:
@@ -225,6 +284,8 @@ class HaUpdater:
             "in_venv": sys.prefix != sys.base_prefix,
             "desired": state.get("desired") or current,
             "previous": state.get("previous"),
+            # a previous version whose venv was removed: a rollback to it installs it again from PyPI first
+            "previous_installed": bool(state.get("previous")) and state.get("previous") in venvs,
             "change": state.get("change"),  # {to, mode, backup, applied?, smoke?} until that version booted
             "smoke": state.get("smoke"),  # the smoke test this version change still owes the integration
             "smoke_fallback": state.get("smoke_fallback"),  # the last automatic switch back after one failed

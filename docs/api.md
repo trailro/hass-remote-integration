@@ -43,7 +43,7 @@ Exceptions:
 | Patches | `GET /api/patches/<domain>`, `POST /api/patches/<domain>/upload`, `POST /api/patches/<domain>/<name>/{apply,delete}`, `GET /api/patch_editor/<domain>?name=`, `POST /api/patch_editor/<domain>/{check,save}` |
 | MQTT | `GET/POST /api/mqtt/config`, `GET/POST /api/mqtt/rules`, `POST /api/mqtt/{reconnect,republish,move_identity,id_format}`, `GET /api/mqtt/discovery`, `GET /api/mqtt/commands` |
 | Entities | `GET /api/entities`, `POST /api/entities/<entity_id>/{rename,name,disable,enable,delete,mqtt_exclude,mqtt_include,mqtt_name}`, `GET /api/devices`, `POST /api/devices/<device_id>/{name,delete}`, `GET /api/services`, `POST /api/services/call` |
-| System | `GET /api/ha`, `POST /api/ha/{update,rollback,check}`, `POST /api/restart`, `GET/POST /api/settings` |
+| System | `GET /api/ha`, `POST /api/ha/{update,rollback,check}`, `POST /api/ha/venv/remove`, `POST /api/restart`, `GET/POST /api/settings` |
 | Backups | `GET /api/backups`, `POST /api/backups/create`, `POST /api/backups/upload`, `GET /api/backups/<name>/download`, `POST /api/backups/<name>/{restore,delete}`, `POST /api/backups/restore/cancel` |
 | Import | `POST /api/import/upload`, `GET/POST /api/import/inspect`, `POST /api/import/{apply,apply_all,clear,resolve}` |
 | Cutover | `GET /api/parity`, `POST /api/parity/{test,remove_orphans}`, `POST /api/cutover/{status,enable,undo}` |
@@ -207,6 +207,7 @@ What the floor and the check mean is in
 | `apt` | what this boot did with `HRI_APT_PACKAGES` (`packages`, `refused`, `ok`, `note`, `error`, `at`); `null` when unset |
 | `versions` | the `recent_n` newest stable releases (`recent` is only those), every installed venv, the running, a scheduled and the previous version |
 | `versions_total` | how many versions exist in all |
+| `previous_installed` | whether the previous version's venv is on the volume; `false` after it was removed, when a rollback installs it again from PyPI |
 | `all_versions` | with `?all=1`: every stable release plus the local entries |
 | `baseline` | the floor, `HA_VERSION_MIN`; anything older is refused |
 | `default_version` | `HA_VERSION_DEFAULT`, what a fresh volume installs; not a floor |
@@ -233,9 +234,18 @@ with the refusal as blocker. The request answers `ok: true` in all these cases;
 the verdict is `check.ok`. Cached per version and image Python for an hour.
 
 The check also holds, as blockers, an attribute of a Home Assistant module the
-running integration reads that the version does not have, and a version the
-smoke test switched back from (`smoke_fallback.from`); a version whose source
-could not be read for the first adds a warning.
+running integration reads that the version does not have, the running
+integration's requirements (and those of the components it depends on) that do
+not resolve against the version's pins, and a version the smoke test switched
+back from (`smoke_fallback.from`); a version whose source or pins could not be
+read, or PyPI that could not be reached, adds a warning instead.
+
+`POST /api/ha/venv/remove` (`{"version": v, "confirm": v}`, with
+`X-Requested-With: fetch`) deletes the venv of a version that does not run and
+answers `removed` and `freed_bytes`. `400`: `confirm` is not the version, or it
+is not a version; `409`: something still needs that venv (the reasons are in
+[home-assistant-versions.md](home-assistant-versions.md#removing-the-previous-versions-venv)),
+or the version is not installed. A later rollback to it installs it again.
 
 `POST /api/ha/update` runs the same check first and, without `force: true`,
 refuses a blocked version with `needs_force`, the report in `check` and the

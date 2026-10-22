@@ -488,6 +488,50 @@ class HaActionView(ManagerView):
         return self.json({"ok": True, **result})
 
 
+class HaVenvRemoveView(ManagerView):
+    """POST /api/ha/venv/remove ``{"version": v, "confirm": v}``: delete the venv of a Home Assistant version that
+    does not run (the previous one, kept for a rollback, is 0.7-1 GB).  A later rollback to it installs it again
+    from PyPI.  Refused (409) while anything still needs it: a scheduled or booting version change, its smoke test,
+    a switch back that has not settled, a restore scheduled for that version, another action.  Not on MQTT."""
+
+    url = "/api/ha/venv/remove"
+
+    def __init__(self, updater: HaUpdater, installer: Installer) -> None:
+        self.updater = updater
+        self.installer = installer
+
+    @with_body
+    async def post(self, request: web.Request, body: dict[str, Any]) -> web.Response:
+        if request.headers.get("X-Requested-With") != "fetch":
+            return self.json({"ok": False, "error": "X-Requested-With: fetch required"}, status_code=400)
+        version = str(body.get("version") or "").strip()
+        if not version or body.get("confirm") != version:
+            return self.json({"ok": False, "error": "type the version in confirm to remove its venv"}, status_code=400)
+        hass = self.installer.hass
+        if self.installer.busy or _ha_change_lock_taken():
+            return self.json({"ok": False, "error": "another action or a version change is running: try again in a moment"}, status_code=409)
+        async with _HA_CHANGE_LOCK:  # what schedules a version change takes it too: no switch between check and removal
+            self.installer.busy = True
+            try:
+                try:
+                    why = await hass.async_add_executor_job(self.updater.venv_removal_refusal, version)
+                except ValueError as err:  # ha.json unreadable
+                    why = str(err)
+                if why:
+                    status = 400 if why.endswith("is not a Home Assistant version") else 409
+                    return self.json({"ok": False, "error": why}, status_code=status)
+                try:
+                    freed = await hass.async_add_executor_job(self.updater.remove_venv, version)
+                except OSError as err:
+                    return self.json({"ok": False, "error": f"venv-{version} not removed: {err.strerror or type(err).__name__}"}, status_code=500)
+            finally:
+                self.installer.busy = False
+        mb = round(freed / 1048576)
+        events.emit("ha", f"venv of Home Assistant {version} removed by hand ({mb} MB freed); a rollback to it installs it "
+                    "again from PyPI", version=version)
+        return self.json({"ok": True, "removed": version, "freed_bytes": freed})
+
+
 class InstallView(ManagerView):
     url = "/api/install"
 
