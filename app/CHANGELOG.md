@@ -3,8 +3,10 @@
 Every version's changes are in the
 [GitHub releases](https://github.com/trailro/hass-remote-integration/releases).
 
-## Unreleased
+## 0.28.3
 
+- **A fresh volume told not to take the newest Home Assistant** (or without
+  PyPI) now installs 2026.10.2 (was 2026.10.1).
 - **Docs: ingress is closed to non-administrators from Supervisor 2026.10.2.**
   The Supervisor now refuses an ingress session of a user who is not an
   administrator for an app with `panel_admin` (this app keeps it on), so the
