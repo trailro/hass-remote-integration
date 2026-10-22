@@ -2,8 +2,11 @@
 
 Discovery, in this order: paths found in the running integration's config
 entries (any string value ending in .log, plus rotated siblings), the
-registry's ``log_dir`` directory, and ``*.log`` / ``*.log.*`` files in the
-config dir root that are not Home Assistant's own.  ``/logfiles`` is the
+registry's ``log_dir`` directory, ``*.log`` / ``*.log.*`` files in the
+config dir root that are not Home Assistant's own, and the same in each
+immediate subfolder of the config dir (one level, never deeper; not a link,
+not one of Home Assistant's or the manager's own folders, ``NOT_SCANNED``):
+ramses_rf 0.61 writes ``ramses_rf_logs/packet_log.log`` and names no path.  ``/logfiles`` is the
 page, ``/api/log_files`` the file list and ``/api/log_files/tail`` the last
 lines of one file (default 50) and ``/api/log_files/download`` the whole
 of one file, masked the same way and streamed as an attachment.
@@ -42,6 +45,10 @@ from .ui import load_template, render
 
 ACTIVE_S = 3600  # written within the last hour = "active"
 NOT_OURS = ("home-assistant.log", "OZW_Log", "ha-install.log")
+# subfolders of the config dir that hold Home Assistant's or the manager's own files, never an integration's log
+# (a folder whose name starts with a dot, or with venv-, is not scanned either)
+NOT_SCANNED = frozenset({"integration_manager", "backups", "deps", "custom_components", "blueprints", "www", "tts",
+                         "image", "themes", "__pycache__"})
 DEFAULT_LINES = 50
 MAX_LINES = 5000
 MAX_SCAN_BYTES = 32 * 1024 * 1024  # a filter that matches nothing must not read a 7-day log
@@ -297,6 +304,18 @@ def _log_files(config_dir: str, installer, entry_paths: list[str]) -> list[dict[
                 add(os.path.join(config_dir, name), "config root")
     except OSError:
         pass
+    try:
+        subdirs = [e.name for e in os.scandir(config_dir) if e.is_dir(follow_symlinks=False)
+                   and not e.name.startswith((".", "venv-")) and e.name not in NOT_SCANNED]
+    except OSError:
+        subdirs = []
+    for sub in subdirs:
+        try:
+            for name in os.listdir(os.path.join(config_dir, sub)):
+                if name.endswith(".log") or ".log." in name:
+                    add(os.path.join(config_dir, sub, name), "config subfolder")
+        except OSError:
+            pass
     out = list(seen.values())
     # active first, current file before rotated ones, newest first
     out.sort(key=lambda f: (not f["active"], not f["name"].endswith(".log"), -f["mtime"]))
