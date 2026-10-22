@@ -162,7 +162,23 @@ The integration preflight checks the following against the image's Python and
 the target Home Assistant. What it cannot see, the smoke test after the switch
 catches: a version that does not set up is rolled back automatically.
 
-- **Requirements.** pip resolves them against the running venv. A package
+- **Requirements.** pip resolves them in the running venv, against the pins
+  of the Home Assistant version the check is for: for the running version its
+  own, for another one (the environment builder's *Check* with a Home
+  Assistant version, `POST /api/releases/preflight` with `ha`) that version's
+  `package_constraints.txt` and the requirements of the built-in components
+  the integration depends on, read from the same source as the attribute
+  check below (a finished venv of it, else its wheel). ramses_cc 0.61.1 needs
+  `serialx>=1.11.0`; 2026.9.4 pins `serialx==1.10.0` (its `usb` component),
+  2026.10.x pins 1.11.0, so it blocks on 2026.9.4 and passes for 2026.10.2.
+  When the running version's pins are what conflicts, the blocker names them
+  and says to switch Home Assistant first, or to check both together in the
+  environment builder, whose *Prepare* switches Home Assistant and starts the
+  integration after the restart. If the other version's pins cannot be read
+  (no network, no wheel), pip resolves against the running version's, and a
+  conflict on a package the running version pins is a warning (*not checked
+  against* that version's pins), not a blocker; so is a pip that could not
+  reach PyPI for another version. A package
   whose `requires_python` excludes the image's Python, or that conflicts with
   Home Assistant's pins, is a blocker. A package with no wheel for this Python
   and architecture is built from source for real: pure Python builds, C code

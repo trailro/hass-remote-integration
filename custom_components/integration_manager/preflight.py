@@ -1,6 +1,7 @@
 """Preflight of an integration version before the switch: the release is
 unpacked into a scratch directory, its requirements are resolved by pip in
-dry-run mode against this venv (nothing is installed into it), every package
+dry-run mode in this venv (nothing is installed into it) against the pins of
+the Home Assistant version it is checked for, every package
 pip would take from a source archive is built into a temporary directory,
 every patch is evaluated against the new code and against the requirement
 versions the update would bring, a requirement known to be a wrapper over a
@@ -653,16 +654,17 @@ def _constraint_names(path: str) -> set[str]:
 
 
 async def _resolution_warnings(hass: HomeAssistant, installer, own_reqs: list[str], pip_rows: list[dict[str, Any]],
-                               dep_reqs: list[str]) -> list[str]:
+                               dep_reqs: list[str], constraints: str | None = None) -> list[str]:
     """One line per package of the resolved set pip settled far behind on.  The manifest's own requirements
-    are looked up first, because the number of PyPI round trips is capped."""
+    are looked up first, because the number of PyPI round trips is capped.  ``constraints``: the pins pip
+    resolved against (the running Home Assistant's by default)."""
     own: dict[str, str] = {}
     for req in own_reqs:
         if req and (name := _req_name(req)):
             own.setdefault(_canon(name), req)
     if not own:
         return []  # a version that declares no requirements of its own has nothing here that is its doing
-    pinned = await hass.async_add_executor_job(_constraint_names, installer.constraints)
+    pinned = await hass.async_add_executor_job(_constraint_names, constraints or installer.constraints)
     from_ha = {_canon(_req_name(req)) for req in dep_reqs if req} - set(own)
     rows = [row for row in pip_rows if row.get("name") and row.get("version")
             and _canon(str(row["name"])) not in pinned and _canon(str(row["name"])) not in from_ha]
@@ -1219,6 +1221,97 @@ def _ha_attribute_verdicts(uses: list[tuple[str, int, str, str]], target: str, p
             for rel, line, module, attr in uses if known.get(module) is not None and attr not in known[module]], ""
 
 
+# What another Home Assistant version pins, for resolving an integration's requirements against it rather than
+# against the running one: its package_constraints.txt, and the requirements and dependencies of each of its
+# built-in components (``usb`` pins serialx: 1.10.0 in 2026.9, 1.11.0 in 2026.10).  Read from the same source
+# as the attribute check above (a finished venv of the target, else its wheel kept for the process), kept per
+# version: a release never changes.
+_HA_PINS: dict[str, tuple[str, dict[str, dict[str, list[str]]]]] = {}
+_MANIFEST_RE = re.compile(r"homeassistant/components/([a-z0-9_]+)/manifest\.json\Z")
+
+
+def _manifest_lists(raw: bytes | str) -> dict[str, list[str]] | None:
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return {key: [str(v) for v in data.get(key) or [] if isinstance(v, str)]
+            for key in ("requirements", "dependencies", "after_dependencies")}
+
+
+def _target_pins(target: str, python: str, config_dir: str) -> tuple[tuple[str, dict[str, dict[str, list[str]]]] | None, str]:
+    """Blocking: ((the text of Home Assistant ``target``'s package_constraints.txt, its built-in components'
+    requirements / dependencies / after_dependencies by domain), why there is none)."""
+    import zipfile
+
+    with _HA_SOURCE_LOCK:
+        if (hit := _HA_PINS.pop(target, None)) is not None:
+            _HA_PINS[target] = hit  # the newest at the end
+            return hit, ""
+        where, cleanup, why = _target_ha_root(target, python, config_dir)
+        if where is None:
+            return None, why
+        constraints: str | None = None
+        components: dict[str, dict[str, list[str]]] = {}
+        try:
+            if os.path.isdir(where):
+                path = os.path.join(where, "homeassistant", "package_constraints.txt")
+                if os.path.isfile(path):
+                    constraints = _read_text(path)
+                base = os.path.join(where, "homeassistant", "components")
+                for domain in (os.listdir(base) if os.path.isdir(base) else []):
+                    manifest = os.path.join(base, domain, "manifest.json")
+                    if os.path.isfile(manifest) and (lists := _manifest_lists(_read_text(manifest))) is not None:
+                        components[domain] = lists
+            else:
+                with zipfile.ZipFile(where) as wheel:
+                    for name in wheel.namelist():
+                        if name == "homeassistant/package_constraints.txt":
+                            constraints = wheel.read(name).decode("utf-8", "replace")
+                        elif (m := _MANIFEST_RE.fullmatch(name)) and (lists := _manifest_lists(wheel.read(name))) is not None:
+                            components[m.group(1)] = lists
+        except (OSError, zipfile.BadZipFile) as err:
+            if not os.path.isdir(where) and (kept := _HA_WHEELS.pop(target, None)):
+                shutil.rmtree(kept, ignore_errors=True)  # downloaded again next time
+            return None, f"Home Assistant {target} could not be read: {err}"
+        finally:
+            if cleanup:
+                shutil.rmtree(cleanup, ignore_errors=True)
+        if constraints is None:
+            return None, f"Home Assistant {target} has no package_constraints.txt"
+        _HA_PINS[target] = (constraints, components)
+        while len(_HA_PINS) > MAX_HA_MODULE_VERSIONS:
+            del _HA_PINS[next(iter(_HA_PINS))]
+        return _HA_PINS[target], ""
+
+
+_PINNED_NAME_RE = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:===|==|>=|<=|~=|!=|<|>)")
+
+
+def _pinned_in(stderr: str, pinned: set[str]) -> list[str]:
+    """The packages Home Assistant pins that a failed pip run names with a version (``serialx==1.10.0``)."""
+    return sorted({_canon(m.group(1)) for m in _PINNED_NAME_RE.finditer(stderr or "")} & pinned)
+
+
+def _write_constraints(text: str) -> str:
+    """Blocking: ``text`` in a temporary file, for pip's ``-c``."""
+    import tempfile
+
+    fd, path = tempfile.mkstemp(prefix="hri-constraints-", suffix=".txt")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return path
+
+
+def _remove(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 def _config_flow_version(component_dir: str) -> int | None:
     """Blocking: VERSION of the ConfigFlow class in <component>/config_flow.py, read with ast (never imported)."""
     import ast
@@ -1321,6 +1414,7 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
         raise ValueError(f"{domain}: no GitHub repository known (registry)")
     blockers: list[str] = []
     warnings: list[str] = []
+    pins_file = ""
 
     # 1. the release: the stored copy, or the archive (by its commit when known) into a scratch directory
     if source_dir:
@@ -1346,32 +1440,58 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
         if min_ha and ha_vkey(str(min_ha)) > ha_vkey(target):
             blockers.append(f"needs Home Assistant >= {min_ha}, target is {target}")
 
+        # 2b. another Home Assistant than the running one: its own pins (package_constraints.txt and the
+        # requirements of its built-in components), or the running ones when the target's cannot be read
+        constraints, pins_note = installer.constraints, ""
+        target_pins = None
+        if target != ha_version:
+            target_pins, pins_note = await hass.async_add_executor_job(_target_pins, target, sys.executable, installer.config_dir)
+            if target_pins is not None:
+                constraints = pins_file = await hass.async_add_executor_job(_write_constraints, target_pins[0])
+
         # 3. the same recursive requirement closure start() will install
         dep_rows = []
         dep_reqs: list[str] = []
-        for row in await _dependency_rows(hass, domain, manifest):
+        for row in await _dependency_rows(hass, domain, manifest, builtin=target_pins[1] if target_pins is not None else None):
             dep = row["domain"]
             dep_rows.append({key: row[key] for key in ("domain", "found", "requirements")})
             dep_reqs.extend(row["requirements"])
             if not row["found"]:
                 if row["required"]:
-                    blockers.append(f"dependency '{dep}' is not available in this Home Assistant")
+                    blockers.append(f"dependency '{dep}' is not available in "
+                                    + (f"Home Assistant {target}" if target_pins is not None else "this Home Assistant"))
                 else:
-                    warnings.append(f"after_dependency '{dep}' is not available here")
+                    warnings.append(f"after_dependency '{dep}' is not available " + (f"in Home Assistant {target}" if target_pins is not None else "here"))
 
-        # 4. requirements: pip dry-run against this venv
+        # 4. requirements: pip dry-run in this venv, against the pins of the Home Assistant they are for
         all_reqs = list(dict.fromkeys(new_reqs + dep_reqs))
         refused = [r for r in all_reqs if bad_requirement(r)]
         blockers += [str(bad_requirement(r)) for r in refused]
         all_reqs = [r for r in all_reqs if r not in refused]
         installed_now = {_req_name(req): ver for req, ver in (await hass.async_add_executor_job(installer._requirement_versions, all_reqs)).items()}
-        pip = await hass.async_add_executor_job(_pip_dry_run, sys.executable, all_reqs, installer.constraints)
+        pip = await hass.async_add_executor_job(_pip_dry_run, sys.executable, all_reqs, constraints)
         if not pip["ok"]:
-            blockers.append("requirements cannot be resolved: " + _pip_reason(pip.get("stderr_full") or pip["stderr"]))
+            err = pip.get("stderr_full") or pip["stderr"]
+            reason = _pip_reason(err)
+            pinned = await hass.async_add_executor_job(_constraint_names, constraints)
+            pinned |= {_canon(_req_name(req)) for req in dep_reqs if req}
+            ha_pinned = _pinned_in(err, pinned)
+            if target != ha_version and _pip_unreachable(err):
+                # the target venv is built at the restart: nothing here says its requirements would not install
+                warnings.append(f"the requirements were not checked for Home Assistant {target}: PyPI could not be reached ({reason})")
+            elif target_pins is None and target != ha_version and ha_pinned:
+                warnings.append(f"the requirements were not checked against Home Assistant {target}'s pins ({pins_note}); against the "
+                                f"running {ha_version}'s they conflict on {', '.join(ha_pinned)}, which {ha_version} pins: {reason}")
+            elif target == ha_version and ha_pinned and not _pip_unreachable(err):
+                blockers.append(f"requirements cannot be resolved: {reason} ({', '.join(ha_pinned)} pinned by the running Home Assistant "
+                                f"{ha_version}: a newer Home Assistant that pins a version that fits resolves it - switch Home Assistant "
+                                "first, or check both together in the environment builder)")
+            else:
+                blockers.append("requirements cannot be resolved: " + reason)
         py = ".".join(str(x) for x in sys.version_info[:3])
         import platform
 
-        source_builds = await hass.async_add_executor_job(_build_from_source, sys.executable, pip["install"], installer.constraints) if pip["ok"] else []
+        source_builds = await hass.async_add_executor_job(_build_from_source, sys.executable, pip["install"], constraints) if pip["ok"] else []
         for b in source_builds:
             if not b["built"]:
                 blockers.append(f"{b['name']} {b['version']} has no wheel for Python {py} on {platform.machine()} and cannot be built here "
@@ -1383,7 +1503,7 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
         # 4c. where pip's backtracking landed: a resolution years behind installs cleanly and breaks at runtime
         if pip["ok"]:
             warnings += await _resolution_warnings(hass, installer, [r for r in new_reqs if r not in refused],
-                                                   pip["install"], dep_reqs)
+                                                   pip["install"], dep_reqs, constraints)
 
         new_versions = {str(r["name"]).lower().replace("_", "-"): str(r["version"]) for r in pip["install"] if r.get("name")}
         for name, ver in installed_now.items():
@@ -1399,8 +1519,12 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
                              "from_dependency": req in dep_reqs and req not in new_reqs})
         extra = [r for r in pip["install"] if str(r.get("name", "")).lower().replace("_", "-") not in
                  {_req_name(q).lower().replace("_", "-") for q in all_reqs}]
-        if target != ha_version:
-            warnings.append(f"requirements were resolved against Home Assistant {ha_version} (this venv); the {target} venv is built at the restart and the requirements reinstalled there")
+        if target_pins is not None:
+            warnings.append(f"requirements were resolved against the pins of Home Assistant {target} (its package_constraints.txt and the "
+                            f"requirements of its components); the {target} venv is built at the restart and the requirements reinstalled there")
+        elif target != ha_version:
+            warnings.append(f"requirements were resolved against the running Home Assistant {ha_version}'s pins, not {target}'s ({pins_note}); "
+                            f"the {target} venv is built at the restart and the requirements reinstalled there")
 
         # 5. patches against the new code and the new requirement versions
         rows = await hass.async_add_executor_job(
@@ -1495,6 +1619,9 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
             "duration_s": round(time.monotonic() - t0, 1),
         }
     finally:
+        if pins_file:
+            await hass.async_add_executor_job(_remove, pins_file)
+
         def _cleanup() -> None:
             shutil.rmtree(scratch, ignore_errors=True)
             try:

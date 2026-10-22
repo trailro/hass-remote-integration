@@ -208,7 +208,8 @@ Nothing runs yet: the version sits in the version store.
 For more control, the **environment builder** on the same page takes the
 integration, any release, branch or commit, and a Home Assistant version.
 *Check* resolves the ref to a commit, downloads it into a scratch directory,
-resolves its requirements with `pip --dry-run`, evaluates patches, dependencies
+resolves its requirements with `pip --dry-run` (against the pins of the Home
+Assistant version chosen, not the running one's), evaluates patches, dependencies
 and the minimum HA version, and reports blockers and warnings. It installs
 nothing and leaves nothing on the volume, but building a source-only package
 runs its build code (`setup.py`, PEP 517 hooks), as an install would.
@@ -384,7 +385,11 @@ the last 30 minutes, kept in memory per copy and running Home Assistant
 version; the *Preflight* button checks the release on GitHub and is never
 reused. If the version is installed again while its check runs, the start is
 refused: start it again. Blockers stop the switch, with a choice to start
-anyway; warnings do not. One blocker is an attribute of a Home Assistant module
+anyway; warnings do not. Requirements are resolved against the running Home
+Assistant's pins; when one of those is what conflicts (ramses_cc 0.61.1's
+`serialx>=1.11.0` against 2026.9.4's `serialx==1.10.0`), the blocker says so:
+switch Home Assistant first, or check and prepare both together in the
+environment builder, which resolves against the chosen version's pins. One blocker is an attribute of a Home Assistant module
 the code reads (`cv.vol`) that the target Home Assistant does not have, looked
 up in that version's own source: the running install, its venv on the volume,
 or its wheel, downloaded once and kept while the process runs. The same check

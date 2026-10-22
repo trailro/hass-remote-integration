@@ -5,6 +5,19 @@ Every version's changes are in the
 
 ## Unreleased
 
+- **The integration preflight for another Home Assistant version resolves
+  the requirements against that version's pins** (its
+  `package_constraints.txt` and the requirements of the built-in components
+  the integration depends on), not the running one's. ramses_cc 0.61.1 for
+  2026.10.2, checked on 2026.9.4, was blocked on `serialx==1.10.0`, which
+  2026.9.4 pins and 2026.10 does not. The pins come from the source the
+  attribute check already reads (a finished venv of that version, else its
+  wheel, kept while the process runs). When they cannot be read, a conflict
+  on a package the running version pins is a warning, not a blocker; so is
+  PyPI that cannot be reached for another version. Checking against the
+  running version is unchanged, except that a conflict on one of its pins
+  says so and suggests switching Home Assistant first, or checking both
+  together in the environment builder.
 - **No device registry deprecation warnings on Home Assistant 2026.10.** The
   manager read `DeviceEntry.config_entries` and `primary_config_entry` (the
   **Devices** page, a device delete, the registry import), which 2026.10

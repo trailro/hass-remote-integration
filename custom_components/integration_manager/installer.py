@@ -44,6 +44,7 @@ import threading
 import time
 import zipfile
 from dataclasses import asdict, dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 import homeassistant
@@ -637,12 +638,16 @@ def track_delayed_stores() -> None:
     Store.async_delay_save = async_delay_save
 
 
-async def _dependency_rows(hass: HomeAssistant, domain: str | None, manifest: dict[str, Any]) -> list[dict[str, Any]]:
+async def _dependency_rows(hass: HomeAssistant, domain: str | None, manifest: dict[str, Any],
+                           builtin: dict[str, dict[str, list[str]]] | None = None) -> list[dict[str, Any]]:
     """The dependency closure used by both preflight and requirements installation.
 
     Load each domain once, including cycles and shared children. A missing
     domain reached through a hard dependency stays required even if an
     after_dependency reached it first. Loader cancellation propagates.
+    ``builtin``: the built-in components of another Home Assistant version
+    (preflight._target_pins), which stand in for the running one's; a custom
+    integration on the volume still comes from the loader, as it would there.
     """
     todo = [(dep, True) for dep in manifest.get("dependencies", [])]
     todo += [(dep, False) for dep in manifest.get("after_dependencies", [])]
@@ -661,6 +666,12 @@ async def _dependency_rows(hass: HomeAssistant, domain: str | None, manifest: di
         try:
             integ = await loader.async_get_integration(hass, dep)
         except loader.IntegrationNotFound:
+            integ = None
+        if builtin is not None and (integ is None or getattr(integ, "is_built_in", True)):
+            spec = builtin.get(dep)
+            integ = None if spec is None else SimpleNamespace(requirements=spec["requirements"], dependencies=spec["dependencies"],
+                                                              after_dependencies=spec["after_dependencies"])
+        if integ is None:
             continue
         row.update(found=True, requirements=list(integ.requirements or []))
         hard_children[dep] = list(integ.dependencies or [])
