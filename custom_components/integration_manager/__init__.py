@@ -260,6 +260,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     flows = FlowDriver(hass)
 
     flows.on_entry_created = functools.partial(async_disable_foreign_entry, installer)
+    installer.ha_smoke_decides = ha_updater.decides  # B's own smoke test waits for the version change's (combined change)
     installer.reload_entry = flows.reload_entry  # the watchdog's first step is the manual Reload button's path
 
     # Entity -> MQTT translator: publishes every entity (state, attributes,

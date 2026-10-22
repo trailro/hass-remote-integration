@@ -441,6 +441,7 @@ class HaActionView(ManagerView):
         if action not in ("update", "rollback", "check"):
             return self.json_message("unknown action", status_code=400)
         hass = self.installer.hass
+        reinstall = False  # a rollback to a version whose venv is gone: checked like an update
         try:
             body = await _json_object(request)
             if action == "check":
@@ -470,7 +471,8 @@ class HaActionView(ManagerView):
                                           "error": "; ".join(check["blockers"])})
             else:
                 target = await hass.async_add_executor_job(self.updater.previous_version)
-                if target != HA_VERSION and not await hass.async_add_executor_job(self.updater._venv_for_this_python, target):  # noqa: SLF001
+                reinstall = target != HA_VERSION and not await hass.async_add_executor_job(self.updater._venv_for_this_python, target)  # noqa: SLF001
+                if reinstall:
                     # its venv was removed (by hand on System, or by a newer image's Python): the rollback installs it
                     # again, so it gets the checks a switch to it gets
                     await self.updater.validate(target)
@@ -490,7 +492,7 @@ class HaActionView(ManagerView):
                             version=HA_VERSION)
                 return self.json({"ok": True, "desired": HA_VERSION, "cancelled": desired, "dropped": dropped})
             result = await async_change_ha_version(self.installer, self.updater, target, str(body.get("config") or "keep"), action)
-            if action == "update" and body.get("force") is True:
+            if (action == "update" or reinstall) and body.get("force") is True:
                 events.emit("ha", f"Home Assistant {target} scheduled with its checks skipped (force)", version=target)
         except (ValueError, BadRequest) as err:
             return self.json({"ok": False, "error": str(err)})

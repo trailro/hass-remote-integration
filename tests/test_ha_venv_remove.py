@@ -84,6 +84,7 @@ class RemoveViewTest(_GateBase):
             self.installer.async_backup.assert_not_awaited()
             r = await self.view.post(_request({"config": "keep", "force": True}), "rollback")
         self.assertTrue(r["ok"], r)
+        self.assertTrue(any("checks skipped (force)" in a[1] for a in self.emitted), self.emitted)
 
     async def test_a_rollback_to_an_installed_venv_runs_no_check(self):
         self._view(BLOCKED)

@@ -382,13 +382,16 @@ def _store_major(raw: bytes) -> int | None:
     return version if isinstance(version, int) and not isinstance(version, bool) else None
 
 
-def storage_for_version(config_dir: str, current: str, older: str, version: str, label: str) -> tuple[dict, list[str]]:
+def storage_for_version(config_dir: str, current: str, older: str, version: str, label: str,
+                        force_older: tuple[str, ...] = ()) -> tuple[dict, list[str]]:
     """A backup to go back to Home Assistant ``version`` with: ``current`` (a backup of the configuration as it is
     now), except the .storage files ``version`` cannot read, which come from ``older`` (a backup made on
     ``version``).  Home Assistant reads a store whose minor version is newer than its own, not one whose major
     version is: a file of ``older`` is taken when ``current`` has it at a higher major version, or does not have it
     (a newer version moved it elsewhere).  Everything else - other stores, files only ``current`` has, the
-    other parts - is ``current``'s.  Returns (its record, the members taken from ``older``)."""
+    other parts - is ``current``'s.  ``force_older``: fnmatch patterns of .storage members always taken from
+    ``older`` when it has them (the stores of an integration that goes back to the version ``older`` was taken
+    with).  Returns (its record, the members taken from ``older``)."""
     import tempfile
 
     bdir = os.path.join(config_dir, BACKUP_DIR)
@@ -400,7 +403,7 @@ def storage_for_version(config_dir: str, current: str, older: str, version: str,
         for n in sorted(_names(old)):
             if n.endswith("/") or not n.startswith(".storage/"):
                 continue
-            if n not in have:
+            if n not in have or any(fnmatch.fnmatch(n, g) for g in force_older):
                 taken.append(n)
                 continue
             new_major, old_major = _store_major(cur.read(n)), _store_major(old.read(n))

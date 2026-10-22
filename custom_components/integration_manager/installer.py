@@ -685,6 +685,9 @@ class Installer:
     manager: Any = None
     # set by __init__: FlowDriver.reload_entry, the path of the manual Reload button; the watchdog's first step
     reload_entry: Any = None
+    # set by __init__: HaUpdater.decides, whether the Home Assistant smoke test of this boot's version change is still to
+    # judge an integration start (the environment builder's combined change); None: nothing defers to it
+    ha_smoke_decides: Any = None
     mqtt_identity: MqttIdentity | None = None  # set in __init__; without one (tests) the identity is the plain hass_<domain>
 
     def __init__(self, hass: HomeAssistant) -> None:
@@ -1512,16 +1515,12 @@ class Installer:
 
     # ----- start / stop -----------------------------------------------------
 
-    async def start(self, domain: str, tag: str | None = None, boot: bool = False, own_restore: str | None = None,
-                    ha_judges: bool = False) -> dict[str, Any]:
+    async def start(self, domain: str, tag: str | None = None, boot: bool = False, own_restore: str | None = None) -> dict[str, Any]:
         """Make (domain, tag) the running integration.  ``boot``: called by
         the deferred start during this boot, where run.py applies the YAML
         and sets the domain up right after (no restart for either).
         ``own_restore``: the archive of a restore the caller scheduled itself as the first
-        step of the same operation (a full rollback); any other scheduled restore refuses.
-        ``ha_judges``: the smoke test of the Home Assistant version change this start belongs to decides, and
-        takes the integration back with Home Assistant (ha_updater._smoke_fall_back): this start's own smoke
-        test reports, never rolls back, so the two never act on one failure."""
+        step of the same operation (a full rollback); any other scheduled restore refuses."""
         if tag and not tag_ok(tag):  # none: the running or newest stored tag
             return {"ok": False, "error": f"invalid tag {str(tag)[:80]!r}"}
         if (why := manager_domain_error(domain)):
@@ -1676,7 +1675,7 @@ class Installer:
                                               else f" (from {rec.get('previous_tag')})") if switching and was_running else "")
                         + (f"; stopped {prev_domain}" if prev_domain else "") + ("; restart required" if needs_restart or yaml_pending else ""),
                         domain=domain, tag=tag, patches=patch_outcome, pip_failed=failed)
-            can_rollback = switching and had_previous and bool(backup) and abandoned is None and not ha_judges
+            can_rollback = switching and had_previous and bool(backup) and abandoned is None
             # A start of the version that already runs is not "effective", but the code it deploys is new
             # (a dev build, a repair), or a dev install deployed it just before and asked for the restart.
             # Without a verdict nothing notices that the entry fails to set up and the Overview goes on saying
@@ -1854,6 +1853,14 @@ class Installer:
             if isinstance(ps, dict) and (ps.get("domain"), ps.get("tag")) == (domain, tag):
                 self.state.pending_smoke = None  # only this start's record: a newer start's survives
                 self._save_state()
+            return
+        if self.ha_smoke_decides is not None and self.ha_smoke_decides(domain, tag):
+            # the environment builder's combined change: the Home Assistant smoke test of this boot judges this start
+            # first, and takes Home Assistant and the integration back together.  Once it is done without acting (the
+            # version kept, its record dropped) this verdict judges as always - its own rollback included, and entries
+            # that smoke test did not know
+            self._smoke_handle = self.hass.loop.call_later(
+                60, lambda: self.hass.async_create_task(self._smoke_check(domain, tag, can_rollback)))
             return
         still_setting_up = any(e.state.value == "setup_in_progress" for e in self._entries_of(domain) if not e.disabled_by)
         if still_setting_up:  # the clock runs only while the entry is setting up, not while an install was busy
@@ -2398,24 +2405,63 @@ class Installer:
             return None  # kept, blocked: cancel it or fix the HA version
         self.state.pending_start = None
         self._save_state()
-        # the environment builder's combined change: when the Home Assistant smoke test of this boot covers this start
-        # (ha.json change.start, recorded by views.async_change_ha_version), that verdict acts for both
-        ha_state = await self.hass.async_add_executor_job(jsonio.read_json, os.path.join(self.state_dir, "ha.json"), {})
-        change = ha_state.get("change") if isinstance(ha_state, dict) and isinstance(ha_state.get("change"), dict) else {}
-        planned = change.get("start") if isinstance(change.get("start"), dict) else {}
-        judged = change.get("to") == homeassistant.const.__version__ and planned.get("domain") == ps["domain"] \
-            and planned.get("tag") == ps.get("tag")
-        res = await self.start(ps["domain"], ps.get("tag"), boot=True, ha_judges=judged)
+        res = await self.start(ps["domain"], ps.get("tag"), boot=True)
         events.emit("start" if res.get("ok") else "error",
                     f"deferred start of {ps['domain']} {ps.get('tag')} after the restart: " + ("ok" if res.get("ok") else str(res.get("error"))),
                     domain=ps["domain"], tag=ps.get("tag"))
         return res  # the boot hands MQTT its identity from this, the way every other start path does
 
-    def revert_for_ha_fallback(self, domain: str, tag: str, left_tag: str, ha: str) -> None:
+    def _apply_ha_integration_revert(self) -> None:
+        """Boot: the Home Assistant smoke test switched back after the environment builder's combined change, and the
+        integration goes back to the version that ran before it (ha.json integration_revert, written with the switch
+        back in one write).  Recorded here when the switch back was cut off before state.json said so; nothing more
+        when it did.  A boot of another version than the one it went back to drops it."""
+        path = os.path.join(self.state_dir, "ha.json")
+        ha_state = jsonio.read_json(path, {})
+        intent = ha_state.get("integration_revert") if isinstance(ha_state, dict) else None
+        if not isinstance(intent, dict):
+            return
+        here = homeassistant.const.__version__
+        if intent.get("back") != here and (ha_state.get("desired") or here) == intent.get("back"):
+            return  # still on its way back (a boot the entrypoint refused, a restore being retried)
+        domain, frm, to = str(intent.get("domain")), str(intent.get("from")), str(intent.get("to"))
+        if intent.get("back") == here:
+            rec = self.state.installed.get(domain) or {}
+            if rec.get("running_tag") == frm and to in (rec.get("versions") or {}):
+                self.revert_for_ha_fallback(domain, to, frm, here, at_boot=True)
+            elif isinstance(self.state.pending_start, dict) and self.state.pending_start.get("domain") == domain \
+                    and self.state.pending_start.get("tag") == frm:
+                self.state.pending_start = None  # the start never ran: it is not run on this version either
+                self._save_state()
+        else:
+            events.emit("error", f"the switch of {domain} back to {to} is dropped: Home Assistant {here} boots, not {intent.get('back')}",
+                        domain=domain, tag=to)
+
+        def drop(st: Any) -> Any:
+            if isinstance(st, dict) and st.get("integration_revert") == intent:
+                st.pop("integration_revert", None)
+                return st
+            return None
+
+        jsonio.update_json(path, drop)
+
+    def revert_for_ha_fallback(self, domain: str, tag: str, left_tag: str, ha: str, at_boot: bool = False) -> None:
         """The Home Assistant smoke test switches back to ``ha`` after the environment builder's combined change, and
-        ``domain`` goes back to ``tag``, the version that ran before it: recorded now, before the restart, so the
-        boot of ``ha`` (whose restore brings back that version's files and .storage) deploys and patches ``tag``,
-        not ``left_tag``.  Nothing behind it to roll back to; a verdict on it after the restart, never a rollback."""
+        ``domain`` goes back to ``tag``, the version that ran before it: recorded before the restart (or, cut off,
+        at the boot of ``ha``), so that boot deploys and patches ``tag``, not ``left_tag``.  Nothing behind it to
+        roll back to; a verdict on it after the restart, never a rollback.  A state.json that cannot be written
+        leaves the state in memory as it was on disk (the boot completes it from ha.json's intent)."""
+        if domain not in self.state.installed:
+            return
+        try:
+            self._revert_state(domain, tag, left_tag, ha, at_boot)
+        except Exception:
+            self.state = self._load_state()  # nothing of the half-made change stays in memory
+            raise
+        events.emit("rollback", f"{domain} back to {tag} with Home Assistant {ha}" + (" (completed at this boot)" if at_boot else " at the restart")
+                    + f" ({left_tag} did not set up on the newer Home Assistant)", domain=domain, tag=tag)
+
+    def _revert_state(self, domain: str, tag: str, left_tag: str, ha: str, at_boot: bool) -> None:
         rec = self.state.installed.get(domain) or {}
         self._cancel_smoke()
         rec["running_tag"] = tag
@@ -2425,11 +2471,9 @@ class Installer:
         if isinstance(self.state.pending_change, dict) and self.state.pending_change.get("domain") == domain:
             self.state.pending_change = None
         self.state.pending_smoke = {"domain": domain, "tag": tag, "can_rollback": False}
-        self.state.restart_required = True
-        self.state.last_action = f"{domain} back to {tag} with Home Assistant {ha}: {left_tag} did not set up on {homeassistant.const.__version__}"
+        self.state.restart_required = self.state.restart_required or not at_boot  # this boot is that restart
+        self.state.last_action = f"{domain} back to {tag} with Home Assistant {ha}: {left_tag} did not set up on the newer Home Assistant"
         self._save_state()
-        events.emit("rollback", f"{domain} back to {tag} with Home Assistant {ha} at the restart ({left_tag} did not set up on "
-                    f"{homeassistant.const.__version__})", domain=domain, tag=tag)
 
     def cancel_pending_start(self) -> dict[str, Any] | None:
         ps = self.state.pending_start
@@ -3022,6 +3066,7 @@ class Installer:
         if self.state_load_error:
             self._report_state_loss()  # before the rollback/deploy below: they act on the state it repairs
         self._apply_pending_rollback()  # before anything is deployed: it decides which tag this boot runs
+        self._apply_ha_integration_revert()  # the same, for the environment builder's combined change that went back
         if not self.state.domain and self.state.installed:
             self._adopt_enabled_entries()  # before the entries are set up (run.py waits for this reconcile)
         domain = self.state.domain

@@ -525,6 +525,14 @@ class HaUpdater:
         if await self.hass.async_add_executor_job(lambda: update_json(self.file, proven, read=lambda _p: self._read_for_update())):
             events.emit("ha", f"Home Assistant {HA_VERSION}: {domain} sets up on it; no longer marked as left by the smoke test", version=HA_VERSION)
 
+    def decides(self, domain: str, tag: str) -> bool:
+        """This boot's smoke test of a version change is still to judge the environment builder's start of ``tag``
+        (change.start, copied into the smoke record): that start's own smoke test waits for it (Installer._smoke_check).
+        False once the verdict is given (``_smoke`` is cleared on every path that gives one) or when there is none."""
+        rec = self._smoke
+        start = rec.get("start") if isinstance(rec, dict) and isinstance(rec.get("start"), dict) else {}
+        return bool(rec) and rec.get("version") == HA_VERSION and rec.get("domain") == domain and start.get("tag") == tag
+
     def _schedule_smoke(self, delay: float) -> None:
         if self._smoke_handle is not None:
             self._smoke_handle.cancel()
@@ -586,7 +594,11 @@ class HaUpdater:
             self._schedule_smoke(delay)
             return
         self._smoke = None
-        if not hung and failed and len(retrying) == len(failed):
+        # the environment builder's combined change: B's entry still in setup_retry is what B's own smoke test would
+        # roll back (after the same extra interval); this verdict acts for B, so it does here too
+        start = rec.get("start") if isinstance(rec.get("start"), dict) else {}
+        combined = bool(start.get("tag")) and getattr(installer, "running_tag", None) == start.get("tag")
+        if not hung and failed and len(retrying) == len(failed) and not combined:
             # still ConfigEntryNotReady after the extra interval: a device, a bridge or a broker that is not there.
             # It raises that on any version, so it says nothing against this one: kept, the verdict left open
             bad = retrying[0]
@@ -601,7 +613,8 @@ class HaUpdater:
         if hung:
             reason = f"config entry '{setting_up[0].title}' still setting up after {int(waited)} s"
         elif failed:
-            bad = next(e for e in failed if e.state.value != "setup_retry")  # what did not load for a reason of its own
+            # what did not load for a reason of its own (a combined change also judges one still in setup_retry)
+            bad = next((e for e in failed if e.state.value != "setup_retry"), failed[0])
             reason = f"config entry '{bad.title}' is {bad.state.value}" + (f": {scrub_text(str(bad.reason))}" if bad.reason else "")
         elif yaml_down:
             reason = f"{domain} is not loaded (no config entry; its YAML setup did not load it)"
@@ -699,18 +712,15 @@ class HaUpdater:
                 # what this version ran with since the switch (the switch's backup may be days old): saved first,
                 # and kept but for the stores the older version cannot read (backupkit.storage_for_version)
                 saved = (await installer.async_backup(label=f"before-fallback-from-{HA_VERSION}"))["name"]
-                if revert:
-                    # the integration goes back too: the configuration both ran with before the builder's change, whole
-                    # (.storage as that version left it, and its files), not merged with what the new one migrated
-                    merged, restored = {"name": str(backup)}, []
-                    parts = sorted({*parts, "storage", "custom_components"})
-                else:
-                    merged, restored = await self.hass.async_add_executor_job(
-                        backupkit.storage_for_version, cfg, saved, str(backup), back, f"fallback-config-for-{back}")
-                await self.hass.async_add_executor_job(
-                    lambda: backupkit.schedule_restore(cfg, merged["name"], parts, for_version=back, force=True))
-                if revert:
-                    installer.revert_for_ha_fallback(domain, str(from_tag), str(left_tag), str(back))
+                # a combined change also takes from the switch's backup the stores the integration's version wrote:
+                # its config entries, the registries and its own stores, as the version going back left them
+                merged, restored = await self.hass.async_add_executor_job(
+                    backupkit.storage_for_version, cfg, saved, str(backup), back, f"fallback-config-for-{back}",
+                    _integration_stores(domain) if revert else ())
+                # 1. the restore, for ``back`` only: killed before step 2, the boot is still the new version's, whose
+                # entrypoint drops a restore scheduled for another version, and this smoke test runs again
+                zip_name = os.path.basename(await self.hass.async_add_executor_job(
+                    lambda: backupkit.schedule_restore(cfg, merged["name"], parts, for_version=back, force=True)))
             except Exception as err:  # noqa: BLE001
                 msg = (f"{failed}; not switched back to Home Assistant {back}: its configuration could not be prepared from {backup} ({err})"
                        + (f"; the configuration as it is now is saved in backup {saved}" if saved else ""))
@@ -724,9 +734,10 @@ class HaUpdater:
             backup = merged["name"]
             if revert:
                 msg = (f"{failed}; switched back to Home Assistant {back} with {domain} {from_tag}, the version that ran before the "
-                       f"environment builder's change, automatically. Both start with the configuration from the switch's backup "
-                       f"{backup}; the configuration as it was on {HA_VERSION} is saved in backup {saved}. Switching to {HA_VERSION} "
-                       "again is refused unless forced, and is smoke-tested again")
+                       f"environment builder's change, automatically. The configuration as it was on {HA_VERSION} is saved in backup "
+                       f"{saved}, and {back} starts with it, except {', '.join(restored) or 'nothing'}: {domain}'s config entries, the "
+                       f"registries and its own stores as {from_tag} left them, and what {back} cannot read, from the switch's backup "
+                       f"{rec.get('backup')}. Switching to {HA_VERSION} again is refused unless forced, and is smoke-tested again")
             else:
                 msg = (f"{failed}; switched back to Home Assistant {back} automatically. The configuration as it was on {HA_VERSION} "
                        f"is saved in backup {saved}, and {back} starts with it, "
@@ -744,9 +755,30 @@ class HaUpdater:
                 st["smoke_fallback"] = {"from": HA_VERSION, "to": back, "domain": domain, "reason": reason, "at": at,
                                         "saved": saved, "restored": restored,
                                         **({"integration": {"from": left_tag, "to": from_tag}} if revert else {})}
+                if revert:
+                    # the intent the boot of ``back`` completes (Installer._apply_ha_integration_revert), whatever of
+                    # step 3 below happened: written with the switch itself, in one write
+                    st["integration_revert"] = {"domain": domain, "from": left_tag, "to": from_tag, "back": back, "at": at}
                 st.pop("change", None)
 
-            await self.hass.async_add_executor_job(self._drop_smoke, fall_back)
+            try:
+                # 2. the commit point: the switch back and the integration's way back, together in ha.json
+                await self.hass.async_add_executor_job(self._drop_smoke, fall_back)
+            except Exception as err:  # noqa: BLE001 - nothing switches: the restore of step 1 goes with it
+                await self.hass.async_add_executor_job(lambda: backupkit.cancel_restore(cfg, only_zip=zip_name))
+                msg = f"{failed}; not switched back to Home Assistant {back}: ha.json could not be written ({err})"
+                _LOGGER.error("%s", msg)
+                events.emit("ha", msg, version=HA_VERSION, state="error")
+                pn.async_create(self.hass, msg + ".", title="Home Assistant version", notification_id="hri_ha_smoke")
+                return
+            if revert:
+                # 3. state.json now, so the restart below needs nothing more; killed before it, the boot of ``back``
+                # finishes it from step 2's intent
+                try:
+                    installer.revert_for_ha_fallback(domain, str(from_tag), str(left_tag), str(back))
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.warning("the switch of %s back to %s is recorded at the boot of Home Assistant %s instead: %s",
+                                    domain, from_tag, back, err)
         _LOGGER.error("%s", msg)
         events.emit("ha", msg, version=HA_VERSION, state="error", fallback=back)
         result = await installer.restart()
@@ -777,6 +809,13 @@ def _installable_files(files: Any) -> list[dict[str, Any]]:
 
 
 _key = ha_vkey
+
+
+def _integration_stores(domain: str) -> tuple[str, ...]:
+    """The .storage members an integration's version shapes, taken from the switch's backup when the environment
+    builder's combined change goes back: its config entries, the registries and its own stores."""
+    return (".storage/core.config_entries", ".storage/core.entity_registry", ".storage/core.device_registry",
+            f".storage/{domain}", f".storage/{domain}.*", f".storage/{domain}_*")
 
 
 class VenvRemovalRefused(ValueError):
