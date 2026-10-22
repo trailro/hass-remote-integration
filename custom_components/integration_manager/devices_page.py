@@ -73,7 +73,7 @@ def device_rows(hass: HomeAssistant, publisher: MqttPublisher) -> list[dict[str,
                 "via_device_id": via_id,
                 "via_name": (via.name_by_user or via.name) if via else None,
                 "area": area.name if area else None,
-                "config_entries": [dev.config_entry_id] if child else sorted(dev.config_entries),
+                "config_entries": sorted(disc.device_config_entries(dev)),
                 "disabled_by": dev.disabled_by.value if dev.disabled_by else None,
                 "integrations": integrations,
                 "entities": ents,
@@ -136,7 +136,7 @@ class DeviceActionView(ManagerView):
         detached cannot be undone (that hook has done its cleanup); the answer names what was detached."""
         dev = reg.async_get(device_id)
         child = disc.is_child_device(dev)
-        entry_ids = [dev.config_entry_id] if child and getattr(dev, "config_entry_id", None) else list(getattr(dev, "config_entries", None) or [])
+        entry_ids = disc.device_config_entries(dev)
         targets = []
         for entry_id in entry_ids:
             entry = self.hass.config_entries.async_get_entry(entry_id)

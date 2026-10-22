@@ -1050,6 +1050,20 @@ def is_child_device(dev: Any) -> bool:
     return child_cls is not None and isinstance(dev, child_cls)
 
 
+def device_config_entries(dev: Any) -> list[str]:
+    """The config entries a device belongs to, on every Home Assistant this image installs.  Up to 2026.7 a
+    device has a set, ``config_entries``; from 2026.8 it belongs to one, ``config_entry_id``, and
+    ``config_entries`` / ``primary_config_entry`` are compatibility shims that from 2026.10 log a deprecation
+    for a custom component - except on the read-only composite ``async_get`` synthesizes for a pre-migration
+    device id, the one device that still has several (2026.10 says which with ``is_composite_device``)."""
+    composite = getattr(dev, "is_composite_device", None)  # 2026.10+; a 2026.9 child device's shim raises AttributeError
+    if composite is None:  # before 2026.10 neither attribute logs anything
+        return [e for e in dict.fromkeys([*(getattr(dev, "config_entries", None) or ()), getattr(dev, "config_entry_id", None)]) if e]
+    if composite:
+        return list(dev.config_entries)
+    return [dev.config_entry_id] if dev.config_entry_id else []
+
+
 def device_block(hass: HomeAssistant, device_id: str | None, integration: str, prefix: str) -> tuple[str, dict[str, Any]]:
     """Return (discovery_id, device dict) for a device or a per-integration bucket."""
     if device_id:
