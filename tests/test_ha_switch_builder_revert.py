@@ -427,6 +427,8 @@ class RaceAndBoundTest(_RealInstaller):
             asyncio.run(inst._smoke_check("demo", "v2", True))
         inst.rollback_full.assert_not_awaited()
         self.assertEqual(self.later, [60])
+        self.assertFalse(any("full rollback" in m for m in self.emitted), "said only when it acts, not at every wait")
+        self.assertEqual(inst.state.pending_smoke, {"domain": "demo", "tag": "v2", "can_rollback": True}, "kept for a restart")
 
 
 class RevertWriteFailureTest(_RealInstaller):

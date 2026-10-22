@@ -1928,6 +1928,13 @@ class Installer:
         unconfigured = h.get("state") == "unconfigured"
         unknown = h.get("state") == "unknown"  # the health check itself kept failing: nothing is known about the version
         rollback = not ok and not degraded and not unconfigured and not unknown and can_rollback and self.settings.bool_("auto_rollback")
+        if rollback and self._waits_for_ha_smoke(domain, tag):
+            # the Home Assistant verdict of the combined change started meanwhile: it acts, this one waits - before
+            # anything of this verdict is recorded or said, so nothing repeats while it waits
+            self.state.pending_smoke = {"domain": domain, "tag": tag, "can_rollback": can_rollback}
+            self._smoke_handle = self.hass.loop.call_later(
+                60, lambda: self.hass.async_create_task(self._smoke_check(domain, tag, can_rollback)))
+            return
         if ok:
             await self.async_finish_change_report(domain, tag)
             prev = self.state.last_smoke if isinstance(self.state.last_smoke, dict) else {}
@@ -1953,11 +1960,6 @@ class Installer:
                     domain=domain, tag=tag, state=h.get("state"))
         if ok:
             _LOGGER.info("smoke test %s %s: ok", domain, tag)
-        elif rollback and self._waits_for_ha_smoke(domain, tag):
-            # the Home Assistant verdict started meanwhile (no await since the check above, but said where it acts)
-            self._smoke_handle = self.hass.loop.call_later(
-                60, lambda: self.hass.async_create_task(self._smoke_check(domain, tag, can_rollback)))
-            return
         elif rollback:
             _LOGGER.error("smoke test %s %s FAILED (%s: %s): full rollback", domain, tag, h.get("state"), h.get("reason"))
             res = await self.rollback_full(domain, rejected=True)
