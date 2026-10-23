@@ -181,8 +181,11 @@ version installed, so:
 They hold no venv, so each is small: about one to a few MB,
 depending on the integration's `.storage`. A Home Assistant backup of the app
 grows by roughly *Backups to keep* (`backup_keep`, 5 by default) times that,
-plus the backups pruning keeps on top of it (the pre-update backup, a
-pre-restore backup for 7 days, an upload for 7 days). With *Backups to keep*
+plus the backups pruning keeps on top of it (the pre-update backup, the
+backup a rollback to an older Home Assistant restores while that version is
+still installed or the previous one, the backups of a version change, its
+smoke test and a switch back still in progress, a pre-restore backup for 7
+days, an upload for 7 days; **System** says why each is kept). With *Backups to keep*
 at 0 (keep all) nothing is pruned, so every Home Assistant backup of the app
 holds every backup HRI ever made and grows with each one. Delete the ones you
 no longer need from **System**.

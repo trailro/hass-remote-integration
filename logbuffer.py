@@ -256,6 +256,14 @@ class FileLogHandler(logging.Handler):
         self.loggers: dict[str, int] = {}  # logger name -> record count since boot
         self._main = _Stream(path, max_bytes, keep)
         self._debug: _Stream | None = None  # opened with the first DEBUG record: most instances never write one
+        # a crash cut the last DEBUG record short: repaired now, as the main file is, not when the next DEBUG record
+        # comes (after a restart none may come, and that torn line would read as one still being written for good)
+        if os.path.isfile(self.debug_path) and os.path.getsize(self.debug_path) and not _ends_with_newline(self.debug_path):
+            try:
+                with open(self.debug_path, "a", encoding="utf-8") as fh:
+                    fh.write("\n")
+            except OSError:
+                pass
         # ids keep growing across restarts, over both sets of files
         self._written = max(_last_id(self._files()), _last_id(self._debug_files()))
         self._ids = itertools.count(self._written + 1)

@@ -903,14 +903,37 @@ def pre_switch_backup(config_dir: str, version: str, current: str, backups: list
     return idle
 
 
+_INSTALLED_IN: dict[str, tuple[tuple[int, int, int], set[str] | None]] = {}  # path -> ((mtime_ns, size, ino), installed)
+_INSTALLED_IN_MAX = 64
+
+
 def _installed_in_backup(config_dir: str, name: str) -> set[str] | None:
-    """Blocking: the integrations the backup's state.json holds (installed, running or not); None when it cannot be read."""
+    """Blocking: the integrations the backup's state.json holds (installed, running or not); None when it cannot be read.
+    Read once per file version: every prune and every backup list asks (Installer.protected_backup_reasons)."""
+    import backupkit
+
+    path = os.path.join(config_dir, backupkit.BACKUP_DIR, name)
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (st.st_mtime_ns, st.st_size, st.st_ino)
+    hit = _INSTALLED_IN.get(path)
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    if len(_INSTALLED_IN) >= _INSTALLED_IN_MAX:
+        _INSTALLED_IN.clear()
+    _INSTALLED_IN[path] = (key, out := _read_installed_in(path))
+    return out
+
+
+def _read_installed_in(path: str) -> set[str] | None:
     import zipfile
 
     import backupkit
 
     try:
-        with zipfile.ZipFile(os.path.join(config_dir, backupkit.BACKUP_DIR, name)) as zf:
+        with zipfile.ZipFile(path) as zf:
             member = zf.getinfo(backupkit.MARKER)
             if member.file_size > backupkit._STATE_MAX:  # noqa: SLF001
                 return None

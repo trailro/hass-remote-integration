@@ -21,7 +21,10 @@ minutes; the web UI shows the progress. It needs internet access.
 - A Home Assistant backup of the app holds the manager's own backups once
   the installed app is 0.25.2 or newer (they hold no venv, so it grows by
   about *Backups to keep* times one to a few MB; with 0, keep all, by every
-  backup ever made), the one a Full rollback needs included. Restoring it brings them back as they were then: download
+  backup ever made), the ones still needed included: the one a Full rollback
+  restores, the one a rollback to an older Home Assistant restores while that
+  version is still installed, and those of a version change, its smoke test or
+  a switch back in progress (**System** says why each is kept). Restoring it brings them back as they were then: download
   the ones made since first. The backup taken right before the update to
   0.25.2 still leaves them out, and restoring one made on an older version
   of the app brings that version back, which leaves them out until you
