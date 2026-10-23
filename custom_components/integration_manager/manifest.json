@@ -1,7 +1,7 @@
 {
   "domain": "integration_manager",
   "name": "Remote Integration Manager",
-  "version": "0.28.3",
+  "version": "0.28.4",
   "documentation": "https://github.com/trailro/hass-remote-integration",
   "dependencies": [
     "http"
