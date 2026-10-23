@@ -264,28 +264,61 @@ def _switch_smoke(installer: Installer, mode: str) -> dict[str, Any] | None:
     return {"domain": domain, "from": HA_VERSION, "entries": entries, "loaded": loaded}
 
 
-async def async_switch_check(updater: HaUpdater, installer: Installer, target: str) -> dict[str, Any]:
+async def async_switch_check(updater: HaUpdater, installer: Installer, target: str, requirements: bool = True) -> dict[str, Any]:
     """What POST /api/ha/check answers and an update without force (UI, MQTT) is refused on: the target's
     requirements (``dependency_check``), and the running integration and the smoke test's verdict on that version
-    (``switch_blockers``)."""
-    check = await updater.dependency_check(target)
-    blockers, warnings = await updater.switch_blockers(installer, target)
+    (``switch_blockers``).  ``requirements=False``: the target's venv is on the volume (a rollback), nothing to resolve."""
+    check = await updater.dependency_check(target) if requirements else {
+        "version": target, "ok": True, "checked": False, "blockers": [], "warnings": [], "missing": [],
+        "notes": [f"Home Assistant {target} is installed here: nothing to resolve"]}
+    integration: list[str] = []
+    blockers, warnings = await updater.switch_blockers(installer, target, integration)
     if not blockers and not warnings:
         return check
     return {**check, "ok": bool(check.get("ok")) and not blockers, "blockers": [*(check.get("blockers") or []), *blockers],
-            "warnings": [*(check.get("warnings") or []), *warnings]}
+            "warnings": [*(check.get("warnings") or []), *warnings],
+            # the running integration's own: stopping it (or switching it to another version) removes them
+            **({"integration_blockers": integration} if integration else {})}
+
+
+def _config_backup_refusal(updater: HaUpdater, name: str, target: str, running: str | None) -> tuple[dict[str, Any] | None, str]:
+    """Blocking: (the backup, "") when ``name`` may be what the older ``target`` starts with (config=restore and a
+    chosen backup: only its .storage comes back), else (None, why not).  A known backup of this volume, made on
+    ``target`` or older, not a pre-restore copy (whatever was on the volume at that moment), made while no
+    integration ran or this container's one."""
+    listed = {str(b.get("name")): b for b in backupkit.list_backups(updater.hass.config.config_dir)}
+    b = listed.get(name)
+    if b is None:
+        return None, f"{name[:130]!r} is not a backup on this volume (see Backup on System)"
+    made = b.get("ha_version")
+    if not made:
+        return None, f"{name} does not record the Home Assistant version it was made on, so {target} may not read it: choose another backup"
+    if ha_vkey(made) > ha_vkey(target):
+        return None, f"{name} was made on Home Assistant {made}, newer than {target}, which cannot read its configuration: choose one made on {target} or older"
+    if "pre-restore" in name:
+        return None, f"{name} is a copy taken before a restore (whatever was on the volume then, a half-migrated configuration too): choose another backup"
+    domain = b["domain"] if "domain" in b else backupkit.backup_domain(updater.hass.config.config_dir, name)
+    allowed = {d for d in (running, *updater.installed_domains()) if d}
+    if domain is backupkit.UNKNOWN_DOMAIN:
+        return None, f"{name} does not say which integration ran when it was made: choose another backup"
+    if domain is not None and domain not in allowed:
+        return None, f"{name} was made while {domain} ran: its config entries would come back under {running or 'this container'}; choose another backup"
+    return b, ""
 
 
 async def async_change_ha_version(installer: Installer, updater: HaUpdater, target: str, mode: str, source: str,
                                   restore_backup: str | None = None, parts: list[str] | None = None,
-                                  start: dict[str, Any] | None = None) -> dict[str, Any]:
+                                  start: dict[str, Any] | None = None, config_backup: str | None = None) -> dict[str, Any]:
     """The one way to schedule a Home Assistant version change (System page,
     environment builder, a restore with its backup's version): a backup
     first, then what the target starts with (keep, restore, rebuild: see
     HaActionView.post), recorded in ha.json so the entrypoint applies it only
     to that version and can fall back.  ``restore_backup`` restores exactly
     that backup (``parts`` of it, everything by default) when ``target``
-    boots, in either direction.  Raises ValueError; OSError passes through."""
+    boots, in either direction.  ``config_backup``: the backup a downgrade
+    with config=restore takes its ``.storage`` from, instead of the default
+    (HaUpdater.restore_source: the switch's own backup taken on ``target``).
+    Raises ValueError; OSError passes through."""
     hass = installer.hass
     cfg = hass.config.config_dir
     if _ha_change_lock_taken():
@@ -295,7 +328,7 @@ async def async_change_ha_version(installer: Installer, updater: HaUpdater, targ
             raise ValueError("config must be keep, restore or rebuild")
         if target == HA_VERSION:
             raise ValueError(f"Home Assistant {target} is already running")
-        if restore_backup is not None and mode != "restore":
+        if (restore_backup is not None or config_backup is not None) and mode != "restore":
             raise ValueError("a chosen backup is restored with config=restore")
         if mode != "keep" and restore_backup is None and ha_vkey(target) >= ha_vkey(HA_VERSION):
             raise ValueError(f"config={mode} only applies to a downgrade")
@@ -323,13 +356,20 @@ async def async_change_ha_version(installer: Installer, updater: HaUpdater, targ
                 raise ValueError(f"a restore scheduled on System (a backup made on Home Assistant {made_on}) is waiting for the restart "
                                  f"and {target} cannot read it: cancel it first, or restart before the switch")
             restore = None
+            restore_why = ""
             if mode == "restore" and restore_backup is not None:
                 restore = await hass.async_add_executor_job(backupkit.describe, cfg, restore_backup)
+            elif mode == "restore" and config_backup is not None:
+                restore, refusal = await hass.async_add_executor_job(_config_backup_refusal, updater, config_backup, target, installer.running)
+                if restore is None:
+                    raise ValueError(refusal)
+                restore_why = "the backup chosen"
             elif mode == "restore":
                 # only .storage comes back and the manager state stays: a backup from another integration's time
-                # would bring its config entries back under the one that runs (as a partial restore, backup_views)
+                # would bring its config entries back under the one that runs (as a partial restore, backup_views).
+                # The switch's own backup on ``target`` first, whether the integration runs now or not
                 skipped: list[dict[str, Any]] = []
-                restore = await hass.async_add_executor_job(updater.config_backup_for, target, None, installer.running, skipped)
+                restore, restore_why = await hass.async_add_executor_job(updater.restore_source, target, installer.running, None, skipped)
                 if restore is None:
                     why = ""
                     if skipped:
@@ -400,12 +440,13 @@ async def async_change_ha_version(installer: Installer, updater: HaUpdater, targ
     if isinstance(left, dict) and left.get("from") == target:
         warnings.append(f"Home Assistant {target} was left automatically on {left.get('at')}: {left.get('domain')} did not set up on it "
                         f"({left.get('reason')}). It is smoke-tested again after this switch, and left again if it still does not set up")
-    note = {"keep": "", "restore": f"; configuration restored from {restore['name'] if restore else ''}",
+    note = {"keep": "", "restore": f"; configuration restored from {restore['name'] if restore else ''}" + (f" ({restore_why})" if restore_why else ""),
             "rebuild": f"; clean start, {installer.running or 'no integration'} rebuilt after the boot"}[mode]
     events.emit("ha", f"Home Assistant {target} wanted ({source}), backup {backup['name']}{note}; applied at the next restart",
                 version=target, backup=backup["name"], config=mode)
     return {"desired": state.get("desired"), "backup": backup["name"], "config": mode,
-            "restore": restore["name"] if restore else None, "rebuild": rebuild, "warnings": warnings}
+            "restore": restore["name"] if restore else None, **({"restore_why": restore_why} if restore_why else {}),
+            "rebuild": rebuild, "warnings": warnings}
 
 
 class HaActionView(ManagerView):
@@ -434,6 +475,11 @@ class HaActionView(ManagerView):
         ``update`` first resolves the target's pinned requirements against this
         image's Python (``check`` below) and refuses a version they cannot
         install with ``needs_force``; ``force: true`` schedules it anyway.
+        ``rollback`` goes to the previous version: the running integration is
+        checked against it the same way (``needs_force``), also when its venv
+        is still there.  With ``config: restore`` its optional ``backup`` names
+        the backup ``.storage`` comes from; by default the one the switch from
+        that version took (``restore_why`` says which was picked and why).
         ``check`` answers that report for one version and changes nothing.
         """
         if request.content_type != "application/json":
@@ -472,13 +518,23 @@ class HaActionView(ManagerView):
             else:
                 target = await hass.async_add_executor_job(self.updater.previous_version)
                 reinstall = target != HA_VERSION and not await hass.async_add_executor_job(self.updater._venv_for_this_python, target)  # noqa: SLF001
+                if body.get("backup") is not None and not isinstance(body["backup"], str):
+                    raise ValueError("backup must be the name of a backup")
                 if reinstall:
                     # its venv was removed (by hand on System, or by a newer image's Python): the rollback installs it
                     # again, so it gets the checks a switch to it gets
                     await self.updater.validate(target)
-                    if body.get("force") is not True and not (check := await async_switch_check(self.updater, self.installer, target))["ok"]:
-                        return self.json({"ok": False, "needs_force": True, "check": check,
-                                          "error": "; ".join(check["blockers"])})
+                # the running integration against the rollback target (attributes, requirements) and the smoke test's
+                # verdict on it, with the venv still there too: the venv being there says nothing about what runs on it
+                if target != HA_VERSION and body.get("force") is not True \
+                        and not (check := await async_switch_check(self.updater, self.installer, target, requirements=reinstall))["ok"]:
+                    advice = ""
+                    if check.get("integration_blockers"):
+                        domain, tag = self.installer.running, self.installer.running_tag or ""
+                        advice = (f"{domain} {tag} does not run on Home Assistant {target}: stop it first, or go back in this "
+                                  f"order: stop {domain}, roll back Home Assistant, then start the {domain} version that supports {target}")
+                    return self.json({"ok": False, "needs_force": True, "check": check, **({"advice": advice} if advice else {}),
+                                      "error": "; ".join(check["blockers"]) + (f". {advice}" if advice else "")})
             if target == HA_VERSION:
                 desired = (await hass.async_add_executor_job(self.updater._read)).get("desired")
                 if not desired or desired == HA_VERSION:
@@ -491,8 +547,9 @@ class HaActionView(ManagerView):
                 events.emit("ha", f"scheduled switch to Home Assistant {desired} cancelled" + (f"; dropped: {', '.join(dropped)}" if dropped else ""),
                             version=HA_VERSION)
                 return self.json({"ok": True, "desired": HA_VERSION, "cancelled": desired, "dropped": dropped})
-            result = await async_change_ha_version(self.installer, self.updater, target, str(body.get("config") or "keep"), action)
-            if (action == "update" or reinstall) and body.get("force") is True:
+            result = await async_change_ha_version(self.installer, self.updater, target, str(body.get("config") or "keep"), action,
+                                                   config_backup=body.get("backup") if action == "rollback" else None)
+            if body.get("force") is True:
                 events.emit("ha", f"Home Assistant {target} scheduled with its checks skipped (force)", version=target)
         except (ValueError, BadRequest) as err:
             return self.json({"ok": False, "error": str(err)})

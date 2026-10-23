@@ -106,7 +106,7 @@ function haPlan(v){
   const mode=was&&(was!=='restore'||b)?was:(b?'restore':'rebuild');
   const opt=(val,title,text,off)=>`<label style="display:flex;gap:6px;align-items:flex-start;margin:4px 0"><input type="radio" name="haconfig" value="${val}" ${val===mode?'checked':''} ${off?'disabled':''} style="margin-top:3px"><span><b>${title}</b> ${text}</span></label>`;
   box.innerHTML=`<div>Downgrade to ${esc(v)}. Home Assistant migrates its configuration forward only, so choose what ${esc(v)} starts with:</div>`
-   +opt('restore','Restore from a backup.',b?`The configuration (<code>.storage</code>) comes back from <b>${esc(b.name)}</b>, made on Home Assistant ${esc(b.ha_version)}. Changes made after that backup are lost.`:`Not available: no backup was made on Home Assistant ${esc(v)} or older.`,!b)
+   +opt('restore','Restore from a backup.',b?`The configuration (<code>.storage</code>) comes back from <b>${esc(b.name)}</b>, made on Home Assistant ${esc(b.ha_version)}${b.why?` (${esc(b.why)})`:''}. Changes made after that backup are lost.`:`Not available: no backup was made on Home Assistant ${esc(v)} or older.`,!b)
    +opt('rebuild','Start clean and rebuild the integration.',`Home Assistant ${esc(v)} starts like a fresh install. After it boots, the integration's config entries are created again with their data and options, its own store files are copied, and entity ids, names, icons, hidden and disabled flags and device names are applied again. Not carried over: areas, labels, other entity settings such as unit overrides, and the last known states.`)
    +opt('keep','Keep the current configuration.',`Works only when ${esc(v)} can read the newer storage formats; otherwise the boot fails and the container falls back to ${esc(HA.current)}.`);
   box.dataset.v=v; box.hidden=false; return mode;
@@ -127,7 +127,8 @@ async function haSet(v,action){
   let r=await post('api/ha/'+action,action==='update'?{version:v,config:mode}:{config:mode});
   if(!r.ok&&r.needs_force){
     HACHK[v]=r.check; haCheckShow(v);
-    if(!confirm(`Home Assistant ${v} is unlikely to install or to run the integration:\n\n- ${(r.check&&r.check.blockers||[r.error]).join('\n- ')}\n\nIf it does not install, the container falls back to ${HA.current}; if the integration does not set up on it, the smoke test switches back. Schedule it anyway?`)){log('ERROR: '+r.error);return;}
+    const stop=r.advice?`\n\n${r.advice}.`:'';
+    if(!confirm(`Home Assistant ${v} is unlikely to install or to run the integration:\n\n- ${(r.check&&r.check.blockers||[r.error]).join('\n- ')}${stop}\n\nIf it does not install, the container falls back to ${HA.current}; if the integration does not set up on it, the smoke test switches back. Schedule it anyway?`)){log('ERROR: '+r.error);return;}
     r=await post('api/ha/'+action,{version:v,config:mode,force:true});
   }
   if(!r.ok){log('ERROR: '+r.error);return;}
@@ -228,7 +229,7 @@ async function backups(){
   const t=$('#bklist'); t.querySelectorAll('tr:not(:first-child)').forEach(e=>e.remove());
   for(const b of r.backups){
     const tr=document.createElement('tr');
-    tr.innerHTML=`<td>${esc(b.name)}</td><td>${esc(b.label||'')}</td><td class="mut">${esc(b.ha_version||'—')}</td><td>${fmtB(b.bytes)}</td><td>${esc(b.files??'—')}</td>
+    tr.innerHTML=`<td>${esc(b.name)}${b.kept_because?`<br><span class="mut">kept because ${esc(b.kept_because)}</span>`:''}</td><td>${esc(b.label||'')}</td><td class="mut">${esc(b.ha_version||'—')}</td><td>${fmtB(b.bytes)}</td><td>${esc(b.files??'—')}</td>
       <td><a href="api/backups/${encodeURIComponent(b.name)}/download" download>download</a> <button data-a="restore" data-n="${esc(b.name)}">Restore</button> <button data-a="delete" data-n="${esc(b.name)}">Delete</button></td>`;
     t.appendChild(tr);
   }

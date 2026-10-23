@@ -94,12 +94,22 @@ Home Assistant migrates its configuration forward only: a newer version
 rewrites `.storage` in its own format and never converts it back. A downgrade
 therefore asks what the older version starts with:
 
-- **Restore from a backup.** `.storage` comes back from the newest backup made
-  on the target version or an older one while the integration that runs now
-  was running. Changes made after that backup are lost. A backup made while
-  another integration ran (or none) is not used, since only `.storage` comes
-  back and the manager stays as it is. When no backup qualifies, the refusal
-  says how many were skipped for that reason; choose rebuild or keep.
+- **Restore from a backup.** `.storage` comes back from the backup the switch
+  from the target version took (`<date>-pre-ha-<current>.zip`, made on the
+  target): the configuration as that version last ran it here. It is picked
+  whether the integration runs at the moment or not, and when it was made
+  while no integration or this container's ran. Without one, the newest backup
+  made on the target version or an older one while the integration that runs
+  now was running. Changes made after that backup are lost. A backup made while
+  another integration ran (or none) is not used then, since only `.storage`
+  comes back and the manager stays as it is. When no backup qualifies, the
+  refusal says how many were skipped for that reason; choose rebuild or keep.
+  The plan on **System** names the backup and why; `POST /api/ha/rollback`
+  takes another one in `backup` (made on the target or older, not a
+  pre-restore copy, not made while another integration ran), and its answer
+  and the timeline say which was restored and why. The backup a rollback would
+  restore is kept from pruning while that version is installed
+  ([Backups](backups.md#what-is-kept-beyond-the-count)).
 - **Start clean and rebuild the integration**, the default when there is no
   such backup. The older version starts like a fresh install. After it boots,
   the integration's config entries are created again with their data and
@@ -121,6 +131,21 @@ therefore asks what the older version starts with:
   Cancel the restore (or, after a full rollback, restart to finish it) first.
 
 The integration version and the manager state stay as they are in every case.
+
+**Roll back** checks the running integration against the previous version
+before anything is scheduled, the way an update does: a name it reads that the
+older Home Assistant does not have, requirements that conflict with its pins,
+or a version the smoke test switched back from is a blocker, with a choice to
+go ahead anyway. This runs also while the previous venv is still on the volume.
+When the running integration version is what blocks (it needs the newer Home
+Assistant), go back in this order:
+
+1. stop the integration;
+2. roll back Home Assistant;
+3. start the integration version that supports the older Home Assistant (a
+   **Full rollback** of the integration checks that version against the
+   running Home Assistant and says to roll Home Assistant back first when that
+   is what blocks).
 
 ## The floor and the version check
 

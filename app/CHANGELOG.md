@@ -3,6 +3,33 @@
 Every version's changes are in the
 [GitHub releases](https://github.com/trailro/hass-remote-integration/releases).
 
+## Unreleased
+
+- **The backup a Home Assistant rollback restores is kept beyond
+  `backup_keep`.** One rollback and update again made five backups, and *keep
+  5* pruned the backup the switch from the previous Home Assistant took, the
+  one a rollback restores. Kept now, whatever the count, while that version is
+  the previous one or its venv is on the volume (also for an older installed
+  version), as is the backup of a booting version change's smoke test. Kept as
+  before: the integration's recorded pre-update backup, the backup of a version
+  change, of a switch back still restoring, and what a scheduled restore, full
+  rollback or clean start uses. The backup list on **System** says why each of
+  them is kept (`kept_because` in `GET /api/backups`).
+- **Rolling Home Assistant back checks the running integration** also while the
+  previous venv is still on the volume (before, only when it had to be
+  installed again): a blocker answers `needs_force`, and when the running
+  integration is what blocks, the answer says to stop it first, or to go back
+  in this order: stop, roll Home Assistant back, start the integration version
+  that supports it.
+- **A rollback with *Restore from a backup* restores the switch's own backup**
+  (`<date>-pre-ha-<current>.zip`, made on the version it goes back to), whether
+  the integration runs or not: with ramses_cc running it picked a backup a
+  month old, and only when stopped the right one. `POST /api/ha/rollback` takes
+  another one in `backup` (made on that version or older, not a pre-restore
+  copy, not made while another integration ran), and its answer
+  (`restore_why`), the timeline and the plan on **System** (`config_backups.why`
+  in `GET /api/ha`) say which and why.
+
 ## 0.28.3
 
 - **A fresh volume told not to take the newest Home Assistant** (or without
