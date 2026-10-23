@@ -403,7 +403,7 @@ schedule it anyway on **System**. A switch started over MQTT refuses on blockers
 says why in its result; for the API's `force`, see [API](docs/api.md).
 
 No preflight runs for the deployed version, a release of an integration without
-a GitHub repository, a rollback or a restore. A dev build is always checked,
+a GitHub repository, an automatic rollback or a restore. A dev build is always checked,
 even for a domain with no repository, from its copy on the volume, and again
 after each upload. A preflight that cannot run (GitHub unreachable) does not
 stop the start, but a stored copy with no `manifest.json` for the domain
@@ -411,7 +411,13 @@ blocks.
 
 **Full rollback** on the Integration page brings back the previous version with
 the configuration from before the update; its restart is smoke-tested, without
-a further automatic rollback. The previous version is the one that actually
+a further automatic rollback. The previous version is checked first against the
+running Home Assistant, as a start of it is: a blocker (it reads a name this
+Home Assistant no longer has, its requirements conflict with its pins) refuses
+the rollback with a choice to go ahead anyway; when Home Assistant is the
+problem, roll back Home Assistant on **System** first and then start the old
+version. When no full rollback is possible, the refusal says why and what to
+do instead. The previous version is the one that actually
 ran: after two switches with no restart between them, the target and its backup
 are the version the process still runs. After an automatic rollback there is no
 target. One full rollback runs at a time. It is refused while a Home Assistant

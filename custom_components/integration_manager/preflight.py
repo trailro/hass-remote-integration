@@ -1133,6 +1133,14 @@ class _HaSource:
                 if (n.endswith(".py") and n != "__init__.py") or os.path.isfile(os.path.join(path, n, "__init__.py"))}
 
 
+def _target_venv_installed(target: str, config_dir: str) -> bool:
+    """Blocking: the venv of ``target`` is on the volume, finished (.ok, written last by the entrypoint) for this Python."""
+    if not _HA_VERSION_RE.fullmatch(target):
+        return False
+    site = os.path.join(config_dir, f"venv-{target}", "lib", f"python{sys.version_info[0]}.{sys.version_info[1]}", "site-packages")
+    return os.path.isfile(os.path.join(config_dir, f"venv-{target}", ".ok")) and os.path.isfile(os.path.join(site, "homeassistant", "__init__.py"))
+
+
 def _target_ha_root(target: str, python: str, config_dir: str) -> tuple[str | None, str | None, str]:
     """Blocking: (where the target's `homeassistant` package is: a directory, or the path of its wheel; a
     directory to remove afterwards; why there is none).  The running install for the running version, a venv
@@ -1145,7 +1153,7 @@ def _target_ha_root(target: str, python: str, config_dir: str) -> tuple[str | No
     if target == ha_version:
         return _running_ha_root(), None, ""
     site = os.path.join(config_dir, f"venv-{target}", "lib", f"python{sys.version_info[0]}.{sys.version_info[1]}", "site-packages")
-    if os.path.isfile(os.path.join(config_dir, f"venv-{target}", ".ok")) and os.path.isfile(os.path.join(site, "homeassistant", "__init__.py")):
+    if _target_venv_installed(target, config_dir):
         # .ok: the entrypoint finished that install (written last).  Read in place, with no lock against a removal by
         # hand on System (HaUpdater.remove_venv renames it away): a read that loses that race fails with an OSError,
         # which the callers report as "could not be read" (a warning), never as a verdict on the target
@@ -1568,12 +1576,16 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
                              "from_dependency": req in dep_reqs and req not in new_reqs})
         extra = [r for r in pip["install"] if str(r.get("name", "")).lower().replace("_", "-") not in
                  {_req_name(q).lower().replace("_", "-") for q in all_reqs}]
-        if target_pins is not None:
-            warnings.append(f"requirements were resolved against the pins of Home Assistant {target} (its package_constraints.txt and the "
-                            f"requirements of its components); the {target} venv is built at the restart and the requirements reinstalled there")
-        elif target != ha_version:
-            warnings.append(f"requirements were resolved against the running Home Assistant {ha_version}'s pins, not {target}'s ({pins_note}); "
-                            f"the {target} venv is built at the restart and the requirements reinstalled there")
+        if target != ha_version:
+            # the venv of the target may be on the volume already (a version switched away from, kept for a rollback)
+            venv = (f"the {target} venv is installed here, and the requirements are installed into it at the start"
+                    if await hass.async_add_executor_job(_target_venv_installed, target, installer.config_dir)
+                    else f"the {target} venv is built at the restart and the requirements reinstalled there")
+            if target_pins is not None:
+                warnings.append(f"requirements were resolved against the pins of Home Assistant {target} (its package_constraints.txt and the "
+                                f"requirements of its components); {venv}")
+            else:
+                warnings.append(f"requirements were resolved against the running Home Assistant {ha_version}'s pins, not {target}'s ({pins_note}); {venv}")
 
         # 5. patches against the new code and the new requirement versions
         rows = await hass.async_add_executor_job(

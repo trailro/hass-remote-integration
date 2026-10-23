@@ -2356,7 +2356,19 @@ class Installer:
         domain = domain or self.state.domain
         rec = self.state.installed.get(domain or "", {})
         if not rec.get("previous_tag") or not rec.get("pre_update_backup"):
-            return {"ok": False, "error": "no previous version + pre-update backup recorded for this integration"}
+            # what a full rollback needs is written by a start of another version: say which half is missing, and the way
+            # that is left (a plain start does not restore the configuration the older version ran with)
+            if not rec:
+                why = f"{domain or 'no integration'} is not installed here"
+            elif not rec.get("previous_tag"):
+                why = (f"no previous version of {domain} is recorded (none ran here before {rec.get('running_tag') or 'it'}, "
+                       "or an automatic rollback already went back and cleared it)")
+            else:
+                why = (f"no pre-update backup is recorded for going back to {rec['previous_tag']} (the start of "
+                       f"{rec.get('running_tag') or 'the running version'} did not take one)")
+            return {"ok": False, "error": f"full rollback not possible: {why}. Install the version you want to go back to "
+                                          "(Install page) and start it; to bring back its configuration too, restore a backup "
+                                          "made while it ran (Backup on System)"}
         # start() rewrites previous_tag / pre_update_backup on the same dict:
         # keep what the rollback needs before calling it
         prev_tag, backup, left_tag = rec["previous_tag"], rec["pre_update_backup"], rec.get("running_tag")
@@ -2367,7 +2379,9 @@ class Installer:
             if not await self.hass.async_add_executor_job(os.path.isfile, zip_path):
                 return {"ok": False, "error": f"the pre-update backup {backup} no longer exists (deleted?); only a plain start of {prev_tag} is possible"}
             if prev_tag not in rec.get("versions", {}):
-                return {"ok": False, "error": f"previous version {prev_tag} is no longer in the version store"}
+                return {"ok": False, "error": f"full rollback not possible: the previous version {prev_tag} was removed from the version "
+                                              f"store. Install {prev_tag} again (Install page) and start it; its pre-update backup "
+                                              f"{backup} can then be restored on System if its configuration is needed too"}
             try:
                 # validate BEFORE switching files/pip back: a corrupt zip must not leave a half rollback
                 await self.hass.async_add_executor_job(backupkit.validate, zip_path)
