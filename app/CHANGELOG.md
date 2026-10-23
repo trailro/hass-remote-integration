@@ -3,7 +3,7 @@
 Every version's changes are in the
 [GitHub releases](https://github.com/trailro/hass-remote-integration/releases).
 
-## Unreleased
+## 0.28.4
 
 - **The backup a Home Assistant rollback restores is kept beyond
   `backup_keep`.** One rollback and update again made five backups, and *keep
