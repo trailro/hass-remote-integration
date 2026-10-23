@@ -14,14 +14,18 @@ Every version's changes are in the
   before: the integration's recorded pre-update backup, the backup of a version
   change, of a switch back still restoring, and what a scheduled restore, full
   rollback or clean start uses. The backup list on **System** says why each of
-  them is kept (`kept_because` in `GET /api/backups`).
+  them is kept (`kept_because` in `GET /api/backups`), and so does a refused
+  deletion.
 - **A full rollback of the integration checks the version it goes back to.**
   `POST /api/installed/<domain>/rollback_full` (and **Full rollback**) runs that
   version's preflight against the running Home Assistant first, as a start of
   it does: ramses_cc 0.60.4 on Home Assistant 2026.10.2 (it reads `cv.vol`) was
   scheduled and failed. A blocker answers `needs_force` with the report;
-  `force: true` goes ahead. When Home Assistant is the problem, the answer says
-  to roll Home Assistant back first and then start the old version. Not on MQTT.
+  `force: true` goes ahead. When the old version reads a name this Home
+  Assistant no longer has, the answer says to roll Home Assistant back first and
+  then start it; when it needs a newer Home Assistant, it says so (the report's
+  `blocker_kinds` tells the two apart). A rollback that is not possible at all is
+  refused before the preflight runs. Not on MQTT.
 - **Rolling Home Assistant back checks the running integration** also while the
   previous venv is still on the volume (before, only when it had to be
   installed again): a blocker answers `needs_force`, and when the running
@@ -35,7 +39,10 @@ Every version's changes are in the
   another one in `backup` (made on that version or older, not a pre-restore
   copy, not made while another integration ran), and its answer
   (`restore_why`), the timeline and the plan on **System** (`config_backups.why`
-  in `GET /api/ha`) say which and why.
+  in `GET /api/ha`) say which and why. A switch backup made while no
+  integration was installed is not the default when another backup holds the
+  integration (it would come back without its config entries); when it is the
+  only one, the answer warns.
 - **Messages.** The environment builder's check no longer says a Home Assistant
   venv that is already installed "is built at the restart". A full rollback
   that is not possible says why (no previous version recorded, no pre-update
@@ -46,7 +53,8 @@ Every version's changes are in the
   answers at its own level (`raised`), every other logger as chosen. DEBUG lines
   go to `process-debug.log`, rotated on their own: a logger at DEBUG rotated the
   INFO, WARNING and ERROR lines of the last hours off the disk. Both files are
-  read as one log.
+  read as one log; a read takes only what was written before it began, so a
+  line written to one file while the other is read is never skipped.
 
 ## 0.28.3
 

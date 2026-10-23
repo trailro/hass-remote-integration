@@ -117,6 +117,26 @@ class BackupsARollbackNeedsTest(_Volume):
         self.assertIn(f"smoke test of Home Assistant {HA}", reasons[smoke])
         self.assertIn("scheduled restore", reasons[restore])
 
+    def test_a_refused_deletion_says_why(self):
+        pre_switch = self.backup(f"pre-ha-{HA}", OLD)
+        inst = self.installer()
+        inst.busy = False
+
+        async def job(fn, *args):
+            return fn(*args)
+
+        hass = SimpleNamespace(config=SimpleNamespace(config_dir=self.cfg, path=lambda *p: os.path.join(self.cfg, *p)),
+                               async_add_executor_job=job)
+        from custom_components.integration_manager import backup_views
+
+        view = backup_views.BackupActionView(hass, inst)
+        view.json = lambda d, *a, **k: d
+        r = asyncio.run(backup_views.BackupActionView.post.__wrapped__(view, None, {}, pre_switch, "delete"))
+        self.assertFalse(r["ok"])
+        self.assertIn(f"still needed: a rollback to Home Assistant {OLD} with config=restore restores it", r["error"])
+        self.assertIn(f"remove the venv of {OLD} to free it", r["error"])
+        self.assertTrue(os.path.isfile(os.path.join(self.cfg, backupkit.BACKUP_DIR, pre_switch)))
+
     def test_the_backups_list_says_why_a_backup_is_kept(self):
         pre_update = self.backup("pre-update", HA)
         other = self.backup("daily", HA)
@@ -166,6 +186,26 @@ class RestoreSourceTest(_Volume):
         b, why = self.source("ramses_cc")
         self.assertEqual(b["name"], self.month_old)
         self.assertIn("no backup taken before a switch", why)
+
+    def test_a_switch_backup_from_before_the_integration_was_installed_is_not_the_default(self):
+        os.remove(os.path.join(self.cfg, backupkit.BACKUP_DIR, self.pre_switch))
+        bare = self.backup(f"pre-ha-{HA}", OLD, domain=None, installed=())  # nothing installed at the switch
+        b, why = self.source("ramses_cc")
+        self.assertEqual(b["name"], self.month_old, "a .storage without ramses_cc's config entries was the default")
+        self.assertIn(f"{bare} was made before the integration was installed", why)
+
+    def test_when_it_is_the_only_one_it_is_restored_with_a_warning(self):
+        for name in (self.pre_switch, self.month_old):
+            os.remove(os.path.join(self.cfg, backupkit.BACKUP_DIR, name))
+        bare = self.backup(f"pre-ha-{HA}", OLD, domain=None, installed=())
+        b, why = self.source("ramses_cc")
+        self.assertEqual(b["name"], bare)
+        self.assertIn("Warning", why)
+        self.assertIn("ramses_cc's config entries are not in it", why)
+
+    def test_one_made_while_the_integration_was_stopped_says_so(self):
+        _b, why = self.source("ramses_cc")
+        self.assertIn("ramses_cc was installed but stopped", why)
 
     def test_the_plan_on_system_names_it_and_why(self):
         with open(os.path.join(self.cfg, backupkit.MARKER), "w", encoding="utf-8") as fh:
@@ -298,20 +338,26 @@ class FullRollbackPreflightTest(unittest.IsolatedAsyncioTestCase):
     """2: the version a full rollback goes back to is checked against the running Home Assistant first."""
 
     async def asyncSetUp(self):
-        self.inst = SimpleNamespace(hass=SimpleNamespace(), rollback_full=mock.AsyncMock(return_value={"ok": True, "tag": "0.60.4"}),
+        async def job(fn, *args):
+            return fn(*args)
+
+        self.refusal = None
+        self.inst = SimpleNamespace(hass=SimpleNamespace(async_add_executor_job=job), rollback_full_refusal=lambda d: self.refusal,
+                                    rollback_full=mock.AsyncMock(return_value={"ok": True, "tag": "0.60.4"}),
                                     state=SimpleNamespace(installed={"ramses_cc": {"previous_tag": "0.60.4", "running_tag": "0.61.1"}}))
         self.view = manage_views.InstalledActionView(self.inst, SimpleNamespace())
         self.view.json = lambda d, *a, **k: d
 
-    async def post(self, body, blockers):
-        report = {"ok": not blockers, "blockers": blockers, "warnings": []}
+    async def post(self, body, blockers, kinds=(), min_ha=None):
+        report = {"ok": not blockers, "blockers": blockers, "warnings": [], "blocker_kinds": list(kinds),
+                  "versions": {"min_ha": min_ha}}
         gate = mock.AsyncMock(return_value={"blocked": bool(blockers), "report": report, "skipped": None})
         with mock.patch.object(preflight, "gate", gate), mock.patch.object(manage_views.events, "emit") as emit:
             r = await manage_views.InstalledActionView.post.__wrapped__(self.view, None, body, "ramses_cc", "rollback_full")
         return r, gate, emit
 
-    async def test_a_version_that_does_not_run_on_this_home_assistant_needs_force(self):
-        r, gate, _emit = await self.post({}, [f"the integration uses names Home Assistant {HA} no longer has (cv.vol)"])
+    async def test_a_name_this_home_assistant_no_longer_has_advises_rolling_it_back_first(self):
+        r, gate, _emit = await self.post({}, [f"the integration uses names Home Assistant {HA} no longer has (cv.vol)"], ["ha_attributes"])
         self.assertFalse(r["ok"])
         self.assertTrue(r["needs_force"])
         self.assertIn("cv.vol", r["error"])
@@ -320,13 +366,32 @@ class FullRollbackPreflightTest(unittest.IsolatedAsyncioTestCase):
         gate.assert_awaited_with(self.inst.hass, self.inst, "ramses_cc", "0.60.4")
         self.inst.rollback_full.assert_not_awaited()
 
-    async def test_another_blocker_has_no_home_assistant_advice(self):
-        r, _gate, _emit = await self.post({}, ["the integration's code does not compile on Python 3.14"])
+    async def test_a_version_that_needs_a_newer_home_assistant_does_not_advise_a_rollback(self):
+        r, _gate, _emit = await self.post({}, [f"needs Home Assistant >= 2099.1.0, target is {HA}"], ["min_ha"], "2099.1.0")
+        self.assertTrue(r["needs_force"])
+        self.assertIn("needs a newer Home Assistant (2099.1.0 or later)", r["advice"])
+        self.assertNotIn("roll back Home Assistant", r["advice"])
+
+    async def test_a_requirement_this_home_assistant_pins_has_no_advice(self):
+        r, _gate, _emit = await self.post({}, [f"requirements cannot be resolved: x (serialx pinned by the running Home Assistant {HA}: ...)"],
+                                          ["ha_pins"])
         self.assertTrue(r["needs_force"])
         self.assertNotIn("advice", r)
 
+    async def test_text_that_names_home_assistant_alone_gives_no_advice(self):
+        r, _gate, _emit = await self.post({}, ["dependency 'usb' is not available in this Home Assistant"])
+        self.assertTrue(r["needs_force"])
+        self.assertNotIn("advice", r)
+
+    async def test_a_rollback_that_is_not_possible_is_refused_before_the_preflight(self):
+        self.refusal = "full rollback not possible: no pre-update backup is recorded for going back to 0.60.4"
+        r, gate, _emit = await self.post({}, ["x"], ["ha_attributes"])
+        self.assertEqual(r, {"ok": False, "error": self.refusal})
+        gate.assert_not_awaited()
+        self.inst.rollback_full.assert_not_awaited()
+
     async def test_force_skips_the_check_and_says_so(self):
-        r, gate, emit = await self.post({"force": True}, ["x Home Assistant y"])
+        r, gate, emit = await self.post({"force": True}, ["x"], ["ha_attributes"])
         self.assertTrue(r["ok"])
         gate.assert_not_awaited()
         self.inst.rollback_full.assert_awaited_with("ramses_cc")
@@ -336,6 +401,18 @@ class FullRollbackPreflightTest(unittest.IsolatedAsyncioTestCase):
         r, _gate, _emit = await self.post({}, [])
         self.assertTrue(r["ok"])
         self.inst.rollback_full.assert_awaited_with("ramses_cc")
+
+
+class PreflightBlockerKindsTest(_PinsBase):
+    """2: what the report says its blockers are about, for the advice above."""
+
+    def test_a_pin_of_the_running_home_assistant_is_ha_pins(self):
+        report = self.report()
+        self.assertIn("ha_pins", report["blocker_kinds"])
+        self.assertNotIn("ha_attributes", report["blocker_kinds"])
+
+    def test_a_clean_report_has_none(self):
+        self.assertEqual(self.report(PIN_TARGET)["blocker_kinds"], [])
 
 
 class RefusedFullRollbackSaysWhyTest(unittest.TestCase):
@@ -372,6 +449,26 @@ class RefusedFullRollbackSaysWhyTest(unittest.TestCase):
         err = asyncio.run(inst._rollback_full("ramses_cc", False))["error"]
         self.assertIn("0.60.4 was removed from the version store", err)
         self.assertIn("Install 0.60.4 again", err)
+
+
+class RollbackFullRefusalTest(unittest.TestCase):
+    """2: what the view asks before the preflight, from the record and the volume alone."""
+
+    def test_the_cheap_refusals(self):
+        cfg = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, cfg, True)
+        os.makedirs(os.path.join(cfg, backupkit.BACKUP_DIR))
+        inst = object.__new__(Installer)
+        inst.config_dir = cfg
+        rec = {"running_tag": "0.61.1", "previous_tag": "0.60.4", "pre_update_backup": "pre.zip", "versions": {"0.60.4": {}}}
+        inst.state = State(domain="ramses_cc", installed={"ramses_cc": rec})
+        self.assertIn("pre.zip no longer exists", inst.rollback_full_refusal("ramses_cc"))
+        open(os.path.join(cfg, backupkit.BACKUP_DIR, "pre.zip"), "wb").close()
+        self.assertIsNone(inst.rollback_full_refusal("ramses_cc"))
+        rec["versions"] = {}
+        self.assertIn("removed from the version store", inst.rollback_full_refusal("ramses_cc"))
+        rec["pre_update_backup"] = None
+        self.assertIn("no pre-update backup is recorded", inst.rollback_full_refusal(None))
 
 
 class BuilderVenvMessageTest(_PinsBase):
@@ -436,6 +533,52 @@ class DebugLoggerTest(unittest.TestCase):
                 r = self.log.api(level="DEBUG", limit=200, since_id=since)
                 self.assertNotIn("after", [x["message"] for x in r["records"]])
                 self.assertLessEqual(r["cursor"], last)
+
+    def follow(self, since):
+        shown = []
+        for _ in range(3):
+            r = self.log.api(level="DEBUG", limit=200, since_id=since)
+            shown += [x["message"] for x in r["records"]]
+            since = r["cursor"]
+        return shown
+
+    def test_a_line_written_to_the_file_read_first_is_not_skipped_on_a_follow(self):
+        self.log.write("start", level=logging.INFO)
+        since = self.log.api(level="DEBUG", limit=200)["cursor"]
+        for i, level in enumerate((logging.DEBUG, logging.INFO, logging.DEBUG, logging.INFO)):
+            self.log.write(f"line {i}", level=level)
+        real = logbuffer._oldest_first
+        calls = []
+
+        def hooked(handles, since_id):
+            calls.append(handles)
+            yield from real(handles, since_id)
+            if len(calls) == 2 and not getattr(hooked, "done", False):  # the DEBUG files are read to their end: two more lines come
+                hooked.done = True
+                self.log.write("late debug", level=logging.DEBUG)
+                self.log.write("late info", level=logging.INFO)
+
+        with mock.patch.object(logbuffer, "_oldest_first", hooked):
+            shown = self.follow(since)
+        self.assertEqual(shown, ["line 0", "line 1", "line 2", "line 3", "late debug", "late info"])
+
+    def test_a_line_written_to_the_file_read_first_is_not_skipped_on_a_page_load(self):
+        for i, level in enumerate((logging.INFO, logging.DEBUG, logging.INFO, logging.DEBUG)):
+            self.log.write(f"line {i}", level=level)
+        real = logbuffer._read_lines
+        state = {"done": False}
+
+        def hooked(path):
+            if path == self.log.handler.debug_path and not state["done"]:  # process.log is read: two more lines come
+                state["done"] = True
+                self.log.write("late info", level=logging.INFO)
+                self.log.write("late debug", level=logging.DEBUG)
+            return real(path)
+
+        with mock.patch.object(logbuffer, "_read_lines", hooked):
+            first = self.log.api(level="DEBUG", limit=200)
+        self.assertEqual([x["message"] for x in first["records"]], ["line 0", "line 1", "line 2", "line 3"])
+        self.assertEqual(self.follow(first["cursor"]), ["late info", "late debug"])
 
     def test_a_logger_set_to_debug_shows_its_debug_lines_under_a_higher_filter(self):
         async def payload():

@@ -390,13 +390,17 @@ class FileLogHandler(logging.Handler):
         # the DEBUG records the level leaves unread still move the cursor, as any record a filter leaves out: up to
         # what was written before this read, all of which the read of the other files saw
         skipped_to = written if len(sets) == 1 else 0
+        # two sets are read one after the other while records go on being written to both: a record written to the set
+        # read first after it was read would be passed by a newer one read from the other.  Only what was written
+        # before the read starts is taken; the rest, and the cursor, wait for the next read
+        merged = len(sets) > 1
         stopped = False
         # a record still being written at the end of one set must not be passed by the cursor while the other set
         # goes on: everything from its id on waits for the next read (with one set nothing comes after it anyway)
         ceiling: list[int] = []
         if not since_id:
             for c in heapq.merge(*(_newest_first(files, ceiling) for files in sets), key=lambda r: -r["id"]):
-                if ceiling and c["id"] >= min(ceiling) and len(sets) > 1:
+                if merged and (c["id"] > written or ceiling and c["id"] >= min(ceiling)):
                     continue
                 newest = max(newest, c["id"])
                 if (got := candidate(c)) is None or keep is not None and not keep(got[0]) or not got[1]:
@@ -424,9 +428,9 @@ class FileLogHandler(logging.Handler):
                             break  # this file holds since_id: the older ones hold nothing newer
                     gens.append(_oldest_first(list(reversed(handles)), since_id))
                 for rec in heapq.merge(*gens, key=lambda r: r["id"]):
-                    if rec.get("_writing"):
+                    if rec.get("_writing") or merged and rec["id"] > written:
                         stopped = True
-                        break  # a line still being written: what comes after it is read once it is whole
+                        break  # a line still being written, or written since this read began: read next time
                     if (c := candidate(rec)) is not None:
                         if len(out) >= limit:
                             truncated = True
@@ -439,6 +443,8 @@ class FileLogHandler(logging.Handler):
                     fh.close()
             if not truncated and not stopped:
                 newest = max(newest, skipped_to)
+        if merged:
+            newest = min(newest, max(written, since_id))
         if cursor is not None:
             cursor(newest)
         return out, truncated

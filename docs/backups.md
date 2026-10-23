@@ -140,12 +140,15 @@ whatever *keep* says; the backup list on **System** says why under its name
 - the backup a switch to an older Home Assistant with *Restore from a backup*
   restores, for the previous version and every older version whose venv is
   still on the volume: the backup the switch from that version took
-  (`<date>-pre-ha-<version>.zip`), else the newest one made on it or older
+  (`<date>-pre-ha-<version switched to>.zip`, made on the older version),
+  else the newest one made on it or older
   (what `config_backups` in `GET /api/ha` names). It goes back to the count
   once that version's venv is removed and it is no longer the previous one;
 - the backup of a scheduled or booting version change, of its smoke test, and
   of a switch back that is still restoring;
 - the backup a scheduled restore, a full rollback or a clean start uses.
+
+Deleting one of them is refused with the same reason.
 
 Before, *keep 5* pruned the switch's backup after one rollback and update
 again (five backups), and a later rollback had only an older configuration to

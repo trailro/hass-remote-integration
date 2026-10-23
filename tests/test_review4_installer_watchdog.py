@@ -524,12 +524,12 @@ class BackupViewsOffTheLoopTest(unittest.TestCase):
         name = "20260101-000000-daily.zip"
         with open(os.path.join(self.cfg, backupkit.BACKUP_DIR, name), "wb") as fh:
             fh.write(b"x")
-        protected = _Where(lambda: {name})
-        installer = SimpleNamespace(protected_backups=protected, busy=False)
+        protected = _Where(lambda: {name: "the full rollback of demo to 1.0 restores it"})
+        installer = SimpleNamespace(protected_backup_reasons=protected, busy=False)
         with mock.patch.object(backupkit, "restore_needs", return_value=set()):
             res = _body(asyncio.run(backup_views.BackupActionView(self.hass, installer).post(_request({}), name=name, action="delete")))
         self.assertFalse(res["ok"])
-        self.assertIn("still needed", res["error"])
+        self.assertIn("still needed: the full rollback of demo to 1.0 restores it", res["error"])
         self.assertEqual(protected.on_loop, [False])
 
     def test_the_daily_backup_prunes_in_the_executor(self):

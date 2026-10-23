@@ -97,8 +97,11 @@ therefore asks what the older version starts with:
 - **Restore from a backup.** `.storage` comes back from the backup the switch
   from the target version took (`<date>-pre-ha-<current>.zip`, made on the
   target): the configuration as that version last ran it here. It is picked
-  whether the integration runs at the moment or not, and when it was made
-  while no integration or this container's ran. Without one, the newest backup
+  whether the integration runs at the moment or not, when it was made while
+  this container's integration ran or was installed but stopped. One made
+  before the integration was installed here holds none of its config entries:
+  another backup that holds them is restored instead, and when there is none,
+  the switch backup is, with a warning. Without one, the newest backup
   made on the target version or an older one while the integration that runs
   now was running. Changes made after that backup are lost. A backup made while
   another integration ran (or none) is not used then, since only `.storage`
@@ -144,8 +147,8 @@ Assistant), go back in this order:
 2. roll back Home Assistant;
 3. start the integration version that supports the older Home Assistant (a
    **Full rollback** of the integration checks that version against the
-   running Home Assistant and says to roll Home Assistant back first when that
-   is what blocks).
+   running Home Assistant and says to roll Home Assistant back first when it
+   reads a name the running one no longer has).
 
 ## The floor and the version check
 

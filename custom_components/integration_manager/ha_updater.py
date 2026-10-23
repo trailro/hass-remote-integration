@@ -885,37 +885,74 @@ def pre_switch_backup(config_dir: str, version: str, current: str, backups: list
                       domains: set[Any]) -> dict[str, Any] | None:
     """Blocking: the newest backup a switch from ``version`` to ``current`` took right before it
     (views.async_change_ha_version: label ``pre-ha-<current>``, made on ``version``): the configuration as
-    ``version`` last ran it on this volume, so what going back to it restores.  Made while no integration
-    ran, or one of ``domains`` (the running and the installed one): whether the integration runs at the
-    moment of the rollback does not change which configuration ``version`` had."""
+    ``version`` last ran it on this volume, so what going back to it restores.  One made while one of ``domains``
+    (the running and the installed one) ran first; else one made while none ran (restore_source decides whether
+    that one will do)."""
     import backupkit
 
+    idle = None
     for b in backups:  # newest first
         name = str(b.get("name") or "")
         if b.get("ha_version") != version or str(b.get("label") or "") != f"pre-ha-{current}" or name.startswith("upload-"):
             continue
         domain = b["domain"] if "domain" in b else backupkit.backup_domain(config_dir, name)
-        if domain is not backupkit.UNKNOWN_DOMAIN and (domain is None or domain in domains):
+        if domain is not backupkit.UNKNOWN_DOMAIN and domain in domains:
             return b
-    return None
+        if domain is None and idle is None:
+            idle = b
+    return idle
+
+
+def _installed_in_backup(config_dir: str, name: str) -> set[str] | None:
+    """Blocking: the integrations the backup's state.json holds (installed, running or not); None when it cannot be read."""
+    import zipfile
+
+    import backupkit
+
+    try:
+        with zipfile.ZipFile(os.path.join(config_dir, backupkit.BACKUP_DIR, name)) as zf:
+            member = zf.getinfo(backupkit.MARKER)
+            if member.file_size > backupkit._STATE_MAX:  # noqa: SLF001
+                return None
+            state = json.loads(zf.read(member))
+    except (OSError, zipfile.BadZipFile, KeyError, ValueError):
+        return None
+    installed = state.get("installed") if isinstance(state, dict) else None
+    return {str(d) for d in installed} if isinstance(installed, dict) else set()
 
 
 def restore_source(config_dir: str, version: str, current: str, backups: list[dict[str, Any]] | None, running: Any,
                    installed: set[str], skipped: list[dict[str, Any]] | None = None) -> tuple[dict[str, Any] | None, str]:
     """Blocking: (the backup a switch from ``current`` to the older ``version`` with config=restore restores when no
     backup is chosen, why that one).  The switch's own backup first (pre_switch_backup), whatever runs now; else the
-    newest backup made on ``version`` or older while the running integration ran (config_backup_for)."""
+    newest backup made on ``version`` or older while the running integration ran (config_backup_for).  A switch backup
+    made while no integration ran holds this container's integration only if it was installed then (stopped): one
+    taken before it was installed would bring back a .storage without its config entries, so a backup that holds
+    them is preferred, and that switch backup is the last resort, said as such."""
     import backupkit
 
     listed = backups if backups is not None else backupkit.list_backups(config_dir)
     domains = {d for d in (running, *installed) if isinstance(d, str)}
-    if (b := pre_switch_backup(config_dir, version, current, listed, domains)) is not None:
-        return b, f"the backup taken before the switch from Home Assistant {version} to {current}"
+    pre = pre_switch_backup(config_dir, version, current, listed, domains)
+    switch_why = f"the backup taken before the switch from Home Assistant {version} to {current}"
+    if pre is not None:
+        domain = pre["domain"] if "domain" in pre else backupkit.backup_domain(config_dir, str(pre.get("name") or ""))
+        if domain is not None or not domains:  # made while this container's integration ran, or there is none to hold
+            return pre, switch_why
+        if held := domains & (_installed_in_backup(config_dir, str(pre.get("name") or "")) or set()):
+            return pre, f"{switch_why} (made while {', '.join(sorted(held))} was installed but stopped)"
     b = config_backup_for(config_dir, version, listed, running, skipped)
-    if b is None:
-        return None, ""
     who = "" if running is _ANY_DOMAIN else f" while {running or 'no integration'} ran"
-    return b, f"the newest backup made on Home Assistant {version} or older{who} (no backup taken before a switch from {version} to {current} is left)"
+    if b is not None:
+        if pre is not None:
+            return b, (f"the newest backup made on Home Assistant {version} or older{who}: the switch's own backup {pre['name']} "
+                       "was made before the integration was installed here, so its configuration is not in it")
+        return b, f"the newest backup made on Home Assistant {version} or older{who} (no backup taken before a switch from {version} to {current} is left)"
+    if pre is not None:
+        return pre, (f"{switch_why}. Warning: it was made while no integration was installed, so "
+                     f"{' and '.join(sorted(domains)) or 'the integration'}'s config entries are not in it; no other backup "
+                     f"made on {version} or older holds them")
+    return None, ""
 
 
 def _integration_stores(domain: str) -> tuple[str, ...]:

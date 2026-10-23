@@ -607,6 +607,34 @@ def _min_ha_ok(value: Any) -> str | None:
     return text if len(text) <= 32 and _MIN_HA_RE.fullmatch(text) else None
 
 
+def _rollback_record_refusal(domain: str | None, rec: dict[str, Any]) -> str | None:
+    """Why a full rollback of ``domain`` is not possible from what is recorded (``rec``, its installed record), or None.
+    What it needs is written by a start of another version: which half is missing, and the way that is left (a plain
+    start does not restore the configuration the older version ran with)."""
+    if rec.get("previous_tag") and rec.get("pre_update_backup"):
+        return None
+    if not rec:
+        why = f"{domain or 'no integration'} is not installed here"
+    elif not rec.get("previous_tag"):
+        why = (f"no previous version of {domain} is recorded (none ran here before {rec.get('running_tag') or 'it'}, "
+               "or an automatic rollback already went back and cleared it)")
+    else:
+        why = (f"no pre-update backup is recorded for going back to {rec['previous_tag']} (the start of "
+               f"{rec.get('running_tag') or 'the running version'} did not take one)")
+    return (f"full rollback not possible: {why}. Install the version you want to go back to (Install page) and start it; "
+            "to bring back its configuration too, restore a backup made while it ran (Backup on System)")
+
+
+def _rollback_backup_gone(prev_tag: str, backup: str) -> str:
+    return f"the pre-update backup {backup} no longer exists (deleted?); only a plain start of {prev_tag} is possible"
+
+
+def _rollback_version_gone(prev_tag: str, backup: str) -> str:
+    return (f"full rollback not possible: the previous version {prev_tag} was removed from the version store. Install "
+            f"{prev_tag} again (Install page) and start it; its pre-update backup {backup} can then be restored on System "
+            "if its configuration is needed too")
+
+
 def _within(stamp: Any, window_s: int) -> bool:
     """Whether an ha.json timestamp is younger than `window_s`; an unreadable
     one counts as young, so a missing date never drops a protection."""
@@ -1089,8 +1117,9 @@ class Installer:
         count toward backup_keep), and refused for deletion."""
         return set(Installer.protected_backup_reasons(self))  # also called unbound, on a stand-in
 
-    def protected_backup_reasons(self) -> dict[str, str]:
-        """Blocking: protected_backups with why each one is kept (GET /api/backups ``kept_because``)."""
+    def protected_backup_reasons(self, listed: list[dict[str, Any]] | None = None) -> dict[str, str]:
+        """Blocking: protected_backups with why each one is kept (GET /api/backups ``kept_because``, a refused
+        deletion).  ``listed``: backupkit.list_backups already read by the caller (it opens every archive)."""
         import backupkit
 
         out: dict[str, str] = {}
@@ -1129,7 +1158,7 @@ class Installer:
             # gone (deleted as soon as the restore succeeds).  Not pinned for good like the source the user
             # picked: ha.json keeps last_restore forever, so an automatic copy would hold a keep slot and
             # refuse deletion for the life of the instance
-            keep(last_restore["pre_restore"], "the copy taken before the last restore (kept 7 days)")
+            keep(last_restore["pre_restore"], "the copy taken before a restore in the last 7 days (the way back from what the last restore brought)")
         smoke_fallback = ha_state.get("smoke_fallback")
         if isinstance(smoke_fallback, dict) and smoke_fallback.get("saved") and _within(smoke_fallback.get("at"), PRE_RESTORE_GRACE_S):
             # the configuration as the version a smoke test left had it: the only copy of what changed there since the switch
@@ -1153,7 +1182,7 @@ class Installer:
                 keep(name, "a copy taken before a restore (its date cannot be read)")
                 continue
             if _within(stamp, PRE_RESTORE_GRACE_S):
-                keep(name, "a copy taken before a restore (kept 7 days)")
+                keep(name, "the copy taken before a restore in the last 7 days")
         plan = jsonio.read_json(os.path.join(self.state_dir, "rebuild-pending.json"), {}) or {}
         if isinstance(plan, dict):
             for key in ("backup", "boot_backup"):  # boot_backup: taken by the entrypoint right before the clean start
@@ -1174,13 +1203,14 @@ class Installer:
         if isinstance(previous, str) and ha_vkey(previous) < ha_vkey(current):
             older.add(previous)
         if older and names:
-            listed = backupkit.list_backups(cfg)
+            listed = listed if listed is not None else backupkit.list_backups(cfg)
             installed = set(self.state.installed)
             running = getattr(self.state, "domain", None)
             for v in sorted(older, key=ha_vkey):
                 b, _why = restore_source(cfg, v, current, listed, running, installed)
                 if b is not None:
-                    keep(b["name"], f"a rollback to Home Assistant {v} with config=restore restores it")
+                    keep(b["name"], f"a rollback to Home Assistant {v} with config=restore restores it, while {v} is "
+                                    + ("the previous version" if v == previous else "installed") + f" (remove the venv of {v} to free it)")
         for name in backupkit.restore_needs(cfg):
             keep(name, "a scheduled restore needs it")
         return out
@@ -2350,25 +2380,32 @@ class Installer:
 
         backupkit.cancel_restore(self.config_dir, only_zip=zip_name)
 
+    def rollback_full_refusal(self, domain: str | None) -> str | None:
+        """Blocking: why a full rollback of ``domain`` cannot happen, from what is recorded and on the volume alone (no
+        previous version or pre-update backup recorded, that backup gone, that version removed from the store), or None.
+        POST /api/installed/<domain>/rollback_full asks before its preflight, which can take a pip resolution."""
+        domain = domain or self.state.domain
+        rec = self.state.installed.get(domain or "", {})
+        return _rollback_record_refusal(domain, rec) or self._rollback_files_refusal(rec)
+
+    def _rollback_files_refusal(self, rec: dict[str, Any]) -> str | None:
+        """Blocking: the pre-update backup is gone, or the previous version is no longer in the store."""
+        import backupkit
+
+        prev_tag, backup = rec["previous_tag"], rec["pre_update_backup"]
+        if not os.path.isfile(os.path.join(self.config_dir, backupkit.BACKUP_DIR, backup)):
+            return _rollback_backup_gone(prev_tag, backup)
+        if prev_tag not in rec.get("versions", {}):
+            return _rollback_version_gone(prev_tag, backup)
+        return None
+
     async def _rollback_full(self, domain: str | None, rejected: bool) -> dict[str, Any]:
         import backupkit
 
         domain = domain or self.state.domain
         rec = self.state.installed.get(domain or "", {})
-        if not rec.get("previous_tag") or not rec.get("pre_update_backup"):
-            # what a full rollback needs is written by a start of another version: say which half is missing, and the way
-            # that is left (a plain start does not restore the configuration the older version ran with)
-            if not rec:
-                why = f"{domain or 'no integration'} is not installed here"
-            elif not rec.get("previous_tag"):
-                why = (f"no previous version of {domain} is recorded (none ran here before {rec.get('running_tag') or 'it'}, "
-                       "or an automatic rollback already went back and cleared it)")
-            else:
-                why = (f"no pre-update backup is recorded for going back to {rec['previous_tag']} (the start of "
-                       f"{rec.get('running_tag') or 'the running version'} did not take one)")
-            return {"ok": False, "error": f"full rollback not possible: {why}. Install the version you want to go back to "
-                                          "(Install page) and start it; to bring back its configuration too, restore a backup "
-                                          "made while it ran (Backup on System)"}
+        if (why := _rollback_record_refusal(domain, rec)):
+            return {"ok": False, "error": why}
         # start() rewrites previous_tag / pre_update_backup on the same dict:
         # keep what the rollback needs before calling it
         prev_tag, backup, left_tag = rec["previous_tag"], rec["pre_update_backup"], rec.get("running_tag")
@@ -2377,11 +2414,9 @@ class Installer:
 
         async with _HA_CHANGE_LOCK:  # free: rollback_full checked it, with no await since (every check that awaits is inside)
             if not await self.hass.async_add_executor_job(os.path.isfile, zip_path):
-                return {"ok": False, "error": f"the pre-update backup {backup} no longer exists (deleted?); only a plain start of {prev_tag} is possible"}
+                return {"ok": False, "error": _rollback_backup_gone(prev_tag, backup)}
             if prev_tag not in rec.get("versions", {}):
-                return {"ok": False, "error": f"full rollback not possible: the previous version {prev_tag} was removed from the version "
-                                              f"store. Install {prev_tag} again (Install page) and start it; its pre-update backup "
-                                              f"{backup} can then be restored on System if its configuration is needed too"}
+                return {"ok": False, "error": _rollback_version_gone(prev_tag, backup)}
             try:
                 # validate BEFORE switching files/pip back: a corrupt zip must not leave a half rollback
                 await self.hass.async_add_executor_job(backupkit.validate, zip_path)

@@ -1470,6 +1470,10 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
         raise ValueError(f"{domain}: no GitHub repository known (registry)")
     blockers: list[str] = []
     warnings: list[str] = []
+    # what the blockers are about, for a caller that advises on them (manage_views: a full rollback): "min_ha" (needs a
+    # newer Home Assistant), "ha_pins" (a requirement pinned by that Home Assistant), "ha_attributes" (reads a name that
+    # Home Assistant no longer has)
+    kinds: list[str] = []
     pins_file = ""
 
     # 1. the release: the stored copy, or the archive (by its commit when known) into a scratch directory
@@ -1495,6 +1499,7 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
         target = target_ha or ha_version
         if min_ha and ha_vkey(str(min_ha)) > ha_vkey(target):
             blockers.append(f"needs Home Assistant >= {min_ha}, target is {target}")
+            kinds.append("min_ha")
 
         # 2b. another Home Assistant than the running one: its own pins (package_constraints.txt and the
         # requirements of its built-in components), or the running ones when the target's cannot be read
@@ -1538,6 +1543,7 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
                 warnings.append(f"the requirements were not checked against Home Assistant {target}'s pins ({pins_note}); against the "
                                 f"running {ha_version}'s they conflict on {', '.join(ha_pinned)}, which {ha_version} pins: {reason}")
             elif target == ha_version and ha_pinned and not _pip_unreachable(err):
+                kinds.append("ha_pins")
                 blockers.append(f"requirements cannot be resolved: {reason} ({', '.join(ha_pinned)} pinned by the running Home Assistant "
                                 f"{ha_version}: a newer Home Assistant may pin a version that fits. Check this version together with "
                                 "that Home Assistant in the environment builder (Install page), whose Prepare switches Home Assistant "
@@ -1633,6 +1639,7 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
         ha_attributes, ha_attributes_note = await hass.async_add_executor_job(
             _ha_attribute_checks, scratch, target, sys.executable, installer.config_dir)
         if ha_attributes:
+            kinds.append("ha_attributes")
             blockers.append(f"the integration uses names Home Assistant {target} no longer has ({'; '.join(ha_attributes[:3])}): "
                             "it fails with an AttributeError when that code runs"
                             + (f" (+{len(ha_attributes) - 3} more)" if len(ha_attributes) > 3 else ""))
@@ -1670,7 +1677,7 @@ async def run(hass: HomeAssistant, installer, domain: str, ref: str, target_ha: 
 
         return {
             "domain": domain, "ref": ref, "repo": repo, "target_ha": target, "current_ha": ha_version,
-            "ok": not blockers, "blockers": blockers, "warnings": warnings,
+            "ok": not blockers, "blockers": blockers, "warnings": warnings, "blocker_kinds": kinds,
             "versions": {"running": old.get("version"), "running_tag": (installer.state.installed.get(domain) or {}).get("running_tag"),
                          "new": manifest.get("version"), "min_ha": min_ha},
             "requirements": req_rows, "also_installed": extra, "pip_ok": pip["ok"], "pip_error": pip["stderr"],

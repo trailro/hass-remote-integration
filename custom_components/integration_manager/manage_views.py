@@ -91,6 +91,22 @@ class RunView(ManagerView):
         return self.json(res)
 
 
+def _rollback_advice(domain: str, tag: str, report: dict[str, Any]) -> str:
+    """What to do about a full rollback whose version does not run on this Home Assistant, from what its blockers are
+    about (preflight's blocker_kinds), never from their text: rolling Home Assistant back helps a version that reads a
+    name this one no longer has; one that needs a newer Home Assistant needs the opposite; a requirement this one pins
+    is not known to fit an older one."""
+    kinds = set(report.get("blocker_kinds") or [])
+    if "min_ha" in kinds:
+        min_ha = (report.get("versions") or {}).get("min_ha")
+        return (f"{domain} {tag} needs a newer Home Assistant ({min_ha} or later) than the one running: a Home Assistant "
+                "rollback does not help; update Home Assistant first, or start another version")
+    if "ha_attributes" in kinds:
+        return (f"{domain} {tag} does not run on this Home Assistant: switch Home Assistant first (roll back Home Assistant "
+                f"on System to a version {tag} supports), then start {tag}")
+    return ""
+
+
 class InstalledActionView(ManagerView):
     """POST /api/installed/{domain}/{uninstall|rollback_full|remove_version}.  ``rollback_full`` runs the preflight of
     the previous version against the running Home Assistant first (as a start of it): blockers refuse it with
@@ -130,16 +146,18 @@ class InstalledActionView(ManagerView):
             # the version it goes back to starts on the running Home Assistant: checked like a start of it (preflight.gate),
             # before anything is scheduled.  Not for the automatic rollback (the smoke test), which goes back to what ran here
             force = body.get("force") is True
+            # what refuses it anyway first: the preflight below can take a pip resolution
+            if (why := await self.installer.hass.async_add_executor_job(self.installer.rollback_full_refusal, domain)):
+                return self.json({"ok": False, "error": why})
             prev = (self.installer.state.installed.get(domain) or {}).get("previous_tag")
             gate = await preflight.gate(self.installer.hass, self.installer, domain, prev) if prev and not force else None
             if gate and gate["blocked"]:
-                blockers = gate["report"].get("blockers") or []
-                res = {"ok": False, "needs_force": True, "preflight": gate["report"],
-                       "error": f"preflight of {domain} {prev} on the running Home Assistant: " + "; ".join(blockers)}
-                if any("Home Assistant" in str(b) for b in blockers):
-                    res["advice"] = (f"{domain} {prev} does not run on this Home Assistant: switch Home Assistant first (roll back "
-                                     f"Home Assistant on System to a version {prev} supports), then start {prev}")
-                    res["error"] += f". {res['advice']}"
+                report = gate["report"]
+                res = {"ok": False, "needs_force": True, "preflight": report,
+                       "error": f"preflight of {domain} {prev} on the running Home Assistant: " + "; ".join(report.get("blockers") or [])}
+                if advice := _rollback_advice(domain, prev, report):
+                    res["advice"] = advice
+                    res["error"] += f". {advice}"
                 return self.json(res)
             res = await self.installer.rollback_full(domain)
             if force and res.get("ok"):
