@@ -350,7 +350,9 @@ renames and the disabled flag.
 See [Logs and log files](logs.md).
 
 - `GET /api/logs`: `limit` 1–2000, `since_id` 0–2^63-1, otherwise `400`. The
-  answer's `cursor` is the next `since_id`.
+  answer's `cursor` is the next `since_id`. A logger set below `level` with
+  `POST /api/logs/level` (and the loggers under it) answers at its own level;
+  those loggers are in `raised` (name → level).
 - `POST /api/logs/level` (`{"logger": …, "level": …}`) takes any existing
   logger; a new one (a library imported later) needs a dotted Python name, at
   most 50 created.

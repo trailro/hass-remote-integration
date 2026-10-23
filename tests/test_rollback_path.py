@@ -16,6 +16,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import sys
@@ -25,9 +26,11 @@ from types import SimpleNamespace
 from unittest import mock
 
 import backupkit
-from custom_components.integration_manager import ha_updater, manage_views, preflight, views
+import logbuffer
+from custom_components.integration_manager import ha_updater, logs_page, manage_views, preflight, views
 from custom_components.integration_manager.ha_updater import HaUpdater
 from custom_components.integration_manager.installer import Installer, State
+from tests.test_log_follow import _Log
 from tests.test_preflight_target_pins import TARGET as PIN_TARGET, _Base as _PinsBase
 from tests.test_review_backup import _volume
 
@@ -383,6 +386,82 @@ class BuilderVenvMessageTest(_PinsBase):
         report = self.report(PIN_TARGET)
         self.assertTrue(any(f"the {PIN_TARGET} venv is installed here" in w for w in report["warnings"]), report["warnings"])
         self.assertFalse(any("built at the restart" in w for w in report["warnings"]), report["warnings"])
+
+
+class DebugLoggerTest(unittest.TestCase):
+    """6"""
+
+    def setUp(self):
+        self.log = _Log(self, max_bytes=4000, keep=1)
+        logs_page._SET_LEVELS.clear()
+        self.addCleanup(logs_page._SET_LEVELS.clear)
+
+    def test_a_debug_flood_does_not_rotate_the_info_lines_away(self):
+        self.log.write("INFO kept", logger="other.lib", level=logging.INFO)
+        self.log.write("WARNING kept", logger="ramses_tx.transport", level=logging.WARNING)
+        for i in range(200):  # many times what the INFO files hold
+            self.log.write(f"frame {i}", logger="ramses_tx.transport", level=logging.DEBUG)
+        self.log.write("INFO after", logger="ramses_tx.transport", level=logging.INFO)
+        info = [r["message"] for r in self.log.api(level="INFO", limit=50)["records"]]
+        self.assertEqual(info, ["INFO kept", "WARNING kept", "INFO after"])
+        self.assertTrue(os.path.isfile(self.log.handler.debug_path))
+        debug = self.log.api(level="DEBUG", limit=5)["records"]
+        self.assertEqual([r["message"] for r in debug], ["frame 196", "frame 197", "frame 198", "frame 199", "INFO after"])
+        self.assertEqual([r["id"] for r in debug], sorted(r["id"] for r in debug))
+
+    def test_a_follower_reads_both_files_in_order_and_never_skips_a_line(self):
+        for i in range(6):
+            self.log.write(f"line {i}", level=logging.DEBUG if i % 2 else logging.INFO)
+        first = self.log.api(level="DEBUG", limit=200)
+        self.assertEqual([r["message"] for r in first["records"]], [f"line {i}" for i in range(6)])
+        since = first["records"][1]["id"]
+        page = self.log.api(level="DEBUG", limit=2, since_id=since)
+        self.assertEqual([r["message"] for r in page["records"]], ["line 2", "line 3"])
+        self.assertTrue(page["truncated"])
+        rest = self.log.api(level="DEBUG", limit=200, since_id=page["cursor"])
+        self.assertEqual([r["message"] for r in rest["records"]], ["line 4", "line 5"])
+        quiet = self.log.api(level="WARNING", limit=200, since_id=0)
+        self.assertEqual(quiet["cursor"], rest["records"][-1]["id"], "lines a level leaves out still move the cursor")
+
+    def test_a_line_still_being_written_holds_the_cursor_before_it(self):
+        self.log.write("info", level=logging.INFO)
+        self.log.write("debug", level=logging.DEBUG)
+        last = self.log.api(level="DEBUG", limit=200)["records"][-1]["id"]
+        with open(self.log.handler.path, "a", encoding="utf-8") as fh:
+            fh.write(f'{{"id": {last + 1}, "ts": "2026')  # cut while it is written
+        with open(self.log.handler.debug_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"id": last + 2, "ts": "t", "level": "DEBUG", "levelno": 10, "logger": "x", "message": "after"}) + "\n")
+        for since in (0, last):
+            with self.subTest(since=since):
+                r = self.log.api(level="DEBUG", limit=200, since_id=since)
+                self.assertNotIn("after", [x["message"] for x in r["records"]])
+                self.assertLessEqual(r["cursor"], last)
+
+    def test_a_logger_set_to_debug_shows_its_debug_lines_under_a_higher_filter(self):
+        async def payload():
+            return {"logger": "ramses_tx", "level": "DEBUG"}
+
+        resp = asyncio.run(logs_page.LogLevelView().post(SimpleNamespace(content_type="application/json", json=payload)))
+        self.addCleanup(logging.getLogger("ramses_tx").setLevel, logging.NOTSET)
+        self.assertEqual(json.loads(resp.body)["level"], "DEBUG")
+        self.log.write("other info", logger="other.lib", level=logging.INFO)
+        self.log.write("other debug", logger="other.lib", level=logging.DEBUG)
+        self.log.write("ramses debug", logger="ramses_tx.transport", level=logging.DEBUG)
+        self.log.write("ramses info", logger="ramses_tx.transport", level=logging.INFO)
+        self.log.write("ramses warning", logger="ramses_tx.transport", level=logging.WARNING)
+        r = self.log.api(level="INFO", limit=200)
+        self.assertEqual([x["message"] for x in r["records"]], ["other info", "ramses debug", "ramses info", "ramses warning"])
+        self.assertEqual(r["raised"], {"ramses_tx": "DEBUG"})
+        r = self.log.api(level="WARNING", limit=200, prefix="ramses_tx")
+        self.assertEqual([x["message"] for x in r["records"]], ["ramses debug", "ramses info", "ramses warning"])
+
+        async def back():
+            return {"logger": "ramses_tx", "level": None}
+
+        asyncio.run(logs_page.LogLevelView().post(SimpleNamespace(content_type="application/json", json=back)))
+        r = self.log.api(level="INFO", limit=200)
+        self.assertEqual([x["message"] for x in r["records"]], ["other info", "ramses info", "ramses warning"])
+        self.assertNotIn("raised", r)
 
 
 if __name__ == "__main__":

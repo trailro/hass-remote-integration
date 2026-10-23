@@ -41,6 +41,12 @@ Every version's changes are in the
   that is not possible says why (no previous version recorded, no pre-update
   backup recorded, the previous version removed from the store) and what to do
   instead (install that version and start it).
+- **A logger set to DEBUG shows its DEBUG lines, and they no longer push the
+  others out.** On **Logs** (`GET /api/logs`) a logger set below the chosen level
+  answers at its own level (`raised`), every other logger as chosen. DEBUG lines
+  go to `process-debug.log`, rotated on their own: a logger at DEBUG rotated the
+  INFO, WARNING and ERROR lines of the last hours off the disk. Both files are
+  read as one log.
 
 ## 0.28.3
 

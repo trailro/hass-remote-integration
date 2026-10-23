@@ -15,9 +15,16 @@ lines matched only inside masked values or a level or logger filter matched
 nothing, and a follower that fell behind reads on at once.
 
 **Log levels.** Loggers listed in the registry's `quiet_loggers` start at
-WARNING; raise one at runtime while you investigate. The root logger cannot be
-set, since it would silence or flood every logger at once: raise the
-integration's own logger instead.
+WARNING; raise one at runtime while you investigate. A logger set below the
+level chosen on the page (DEBUG under the default WARNING) shows its lines at
+its own level, and so do the loggers under it; every other logger is filtered
+as chosen. The root logger cannot be set, since it would silence or flood every
+logger at once: raise the integration's own logger instead.
+
+DEBUG lines are kept apart, in `process-debug.log` next to `process.log`, with
+the same size and rotation. A logger at DEBUG can write thousands of lines a
+minute: in one file they rotated the INFO, WARNING and ERROR lines of the last
+hours off the disk. The page reads both as one log, in order.
 
 No single line can end the log: text that is not valid UTF-8 (a file name an
 `OSError` brings into a message) is stored with those characters escaped, and

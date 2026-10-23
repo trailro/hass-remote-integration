@@ -37,6 +37,9 @@ _LOGGER_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)
 MAX_LOGGER_NAME = 200
 MAX_NEW_LOGGERS = 50
 _NEW_LOGGERS: set[str] = set()
+# loggers raised or lowered here (POST /api/logs/level), name -> level: GET /api/logs shows a logger set below the
+# level asked for at its own level (a logger raised to DEBUG shows its DEBUG lines under the page's WARNING filter)
+_SET_LEVELS: dict[str, int] = {}
 ROOT_LOGGER = "root"
 MAX_SINCE_ID = 2**63 - 1  # record ids are counted up from 1: none comes near
 
@@ -74,9 +77,23 @@ def _query_masked(handler, **kwargs: Any) -> tuple[list[dict[str, Any]], bool, i
     records match once masked.
     """
     text = str(kwargs.pop("text", "") or "").lower()
+    floors: dict[str, int] = kwargs.pop("floors", None) or {}
     seen = int(kwargs.get("since_id") or 0)
+    asked = int(kwargs.get("min_level") or logging.DEBUG)
+    if floors:
+        kwargs["min_level"] = min(asked, *floors.values())
+
+    def level_ok(rec: dict[str, Any]) -> bool:
+        level = int(rec.get("levelno") or 0)
+        if level >= asked:
+            return True
+        name = str(rec.get("logger") or "")
+        own = max((lg for lg in floors if name == lg or name.startswith(lg + ".")), key=len, default=None)
+        return own is not None and level >= floors[own]
 
     def keep(rec: dict[str, Any]) -> bool:
+        if floors and not level_ok(rec):
+            return False
         if not text:
             return True
         masked = scrub_lines([str(rec.get("message") or "")])[0]  # also when the logger name matches: the same work for every record
@@ -195,20 +212,25 @@ class LogsApiView(ManagerView):
             return self.json_message(f"limit must be between 1 and {MAX_LIMIT}", status_code=400)
         if not 0 <= since_id <= MAX_SINCE_ID:  # the cursor echoes it back, and the JSON encoder takes 64-bit integers only
             return self.json_message(f"since_id must be between 0 and {MAX_SINCE_ID}", status_code=400)
+        min_level = getattr(logging, level, logging.DEBUG)
+        # a logger set here below the level asked for shows its records at its own level; every other logger's
+        # records are filtered as asked, so raising one logger never takes another one's lines off the page
+        floors = {name: lv for name, lv in _SET_LEVELS.items() if lv < min_level}
         recs, truncated, cursor = await self.hass.async_add_executor_job(
             functools.partial(
                 _query_masked,
                 handler,
                 prefixes=tuple(q.getall("prefix", [])),
-                min_level=getattr(logging, level, logging.DEBUG),
+                min_level=min_level,
                 text=q.get("q", ""),
                 since_id=since_id,
                 limit=limit,
+                floors=floors,
             )
         )
         # cursor: where the next follow poll continues (since_id), also when no record on this page survived the search
         return self.json({"records": recs, "capacity": handler.capacity, "path": handler.path, "truncated": truncated,
-                          "cursor": cursor})
+                          "cursor": cursor, **({"raised": {n: logging.getLevelName(lv) for n, lv in floors.items()}} if floors else {})})
 
 
 class LoggersApiView(ManagerView):
@@ -255,5 +277,9 @@ class LogLevelView(ManagerView):
                 return self.json_message(f"at most {MAX_NEW_LOGGERS} loggers that do not exist yet can be set", status_code=400)
             _NEW_LOGGERS.add(name)
         logging.getLogger(name).setLevel(logging.NOTSET if level is None else getattr(logging, str(level).upper()))
+        if level is None:
+            _SET_LEVELS.pop(name, None)
+        else:
+            _SET_LEVELS[name] = getattr(logging, str(level).upper())
         logging.getLogger(__name__).info("log level %s -> %s (from UI)", name, level or "inherited")
         return self.json({"ok": True, "logger": name, "level": level})
