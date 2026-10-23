@@ -24,7 +24,11 @@ logger at once: raise the integration's own logger instead.
 DEBUG lines are kept apart, in `process-debug.log` next to `process.log`, with
 the same size and rotation. A logger at DEBUG can write thousands of lines a
 minute: in one file they rotated the INFO, WARNING and ERROR lines of the last
-hours off the disk. The page reads both as one log, in order.
+hours off the disk. The page reads both as one log, in order. When it reads
+both (DEBUG asked for, or a logger raised to it), a read takes only the lines
+written before it began, so a line written to one file while the other is read
+shows at the next read instead of being skipped. A DEBUG line a crash cut short
+is closed off at the next start.
 
 No single line can end the log: text that is not valid UTF-8 (a file name an
 `OSError` brings into a message) is stored with those characters escaped, and

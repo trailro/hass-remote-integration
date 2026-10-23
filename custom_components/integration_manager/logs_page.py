@@ -229,7 +229,8 @@ class LogsApiView(ManagerView):
             )
         )
         # cursor: where the next follow poll continues (since_id), also when no record on this page survived the search
-        return self.json({"records": recs, "capacity": handler.capacity, "path": handler.path, "truncated": truncated,
+        return self.json({"records": recs, "capacity": handler.capacity, "path": handler.path,
+                          "debug_path": getattr(handler, "debug_path", None), "truncated": truncated,
                           "cursor": cursor, **({"raised": {n: logging.getLevelName(lv) for n, lv in floors.items()}} if floors else {})})
 
 

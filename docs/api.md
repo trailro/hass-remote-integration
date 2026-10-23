@@ -136,8 +136,10 @@ another broker ([MQTT](mqtt.md#when-the-cleanup-cannot-run)).
 
 `POST /api/installed/<domain>/rollback_full` takes `force`. A rollback that is
 not possible (no previous version or pre-update backup recorded, that backup
-gone, that version removed from the store) is refused at once, saying why and
-what to do. Otherwise, without `force`, the previous version's preflight runs
+gone or made on a newer Home Assistant than the one that boots next, that
+version removed from the store, a switch of Home Assistant scheduled) is
+refused at once, saying why and what to do. A rollback whose target changed
+between its check and its schedule (a start finished meanwhile) is refused too. Otherwise, without `force`, the previous version's preflight runs
 against the running Home Assistant first: blockers answer `needs_force` with the
 report in `preflight` (its `blocker_kinds`: `ha_attributes`, `min_ha`,
 `ha_pins`) and, when they call for it, an `advice`: roll Home Assistant back
@@ -277,7 +279,8 @@ resolved again. Blocked without `force`: `needs_force`, `check`, the blockers in
 order: stop it, roll back Home Assistant, start the integration version that
 supports the older one. With `config: restore`, `backup` names the backup whose
 `.storage` the older version starts with: a backup on this volume made on that
-version or older, not a pre-restore copy, made while no integration or this
+version or older (one that does not record its Home Assistant version is
+refused), not a pre-restore copy, made while no integration or this
 container's ran; anything else is refused before a backup is taken. Without
 it, the backup the switch from that version took
 (`<date>-pre-ha-<current>.zip`, made on it) is restored whether the integration
@@ -362,7 +365,8 @@ See [Logs and log files](logs.md).
 - `GET /api/logs`: `limit` 1–2000, `since_id` 0–2^63-1, otherwise `400`. The
   answer's `cursor` is the next `since_id`. A logger set below `level` with
   `POST /api/logs/level` (and the loggers under it) answers at its own level;
-  those loggers are in `raised` (name → level).
+  those loggers are in `raised` (name → level). `path` is `process.log`,
+  `debug_path` the file of the DEBUG lines (`process-debug.log`).
 - `POST /api/logs/level` (`{"logger": …, "level": …}`) takes any existing
   logger; a new one (a library imported later) needs a dotted Python name, at
   most 50 created.

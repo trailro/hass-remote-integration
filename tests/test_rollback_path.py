@@ -344,7 +344,8 @@ class FullRollbackPreflightTest(unittest.IsolatedAsyncioTestCase):
         self.refusal = None
         self.inst = SimpleNamespace(hass=SimpleNamespace(async_add_executor_job=job), rollback_full_refusal=lambda d: self.refusal,
                                     rollback_full=mock.AsyncMock(return_value={"ok": True, "tag": "0.60.4"}),
-                                    state=SimpleNamespace(installed={"ramses_cc": {"previous_tag": "0.60.4", "running_tag": "0.61.1"}}))
+                                    state=SimpleNamespace(installed={"ramses_cc": {"previous_tag": "0.60.4", "running_tag": "0.61.1",
+                                                                                   "pre_update_backup": "pre.zip"}}))
         self.view = manage_views.InstalledActionView(self.inst, SimpleNamespace())
         self.view.json = lambda d, *a, **k: d
 
@@ -394,13 +395,13 @@ class FullRollbackPreflightTest(unittest.IsolatedAsyncioTestCase):
         r, gate, emit = await self.post({"force": True}, ["x"], ["ha_attributes"])
         self.assertTrue(r["ok"])
         gate.assert_not_awaited()
-        self.inst.rollback_full.assert_awaited_with("ramses_cc")
+        self.inst.rollback_full.assert_awaited_with("ramses_cc", expect=("0.60.4", "pre.zip"))
         self.assertIn("overridden", emit.call_args.args[1])
 
     async def test_a_version_that_runs_here_goes_through(self):
         r, _gate, _emit = await self.post({}, [])
         self.assertTrue(r["ok"])
-        self.inst.rollback_full.assert_awaited_with("ramses_cc")
+        self.inst.rollback_full.assert_awaited_with("ramses_cc", expect=("0.60.4", "pre.zip"))
 
 
 class PreflightBlockerKindsTest(_PinsBase):
@@ -449,6 +450,36 @@ class RefusedFullRollbackSaysWhyTest(unittest.TestCase):
         err = asyncio.run(inst._rollback_full("ramses_cc", False))["error"]
         self.assertIn("0.60.4 was removed from the version store", err)
         self.assertIn("Install 0.60.4 again", err)
+
+
+class FullRollbackRefusalsOnTheVolumeTest(_Volume):
+    """F2, F4: a pre-update backup made on a newer Home Assistant than the one that boots next; a switch scheduled."""
+
+    def refusal(self, made_on):
+        backup = self.backup("pre-update", made_on)
+        inst = self.installer(ramses_cc={"running_tag": "0.61.1", "previous_tag": "0.60.4", "pre_update_backup": backup,
+                                         "versions": {"0.60.4": {}, "0.61.1": {}}})
+        return inst.rollback_full_refusal("ramses_cc"), backup
+
+    def test_a_backup_made_on_a_newer_home_assistant_is_refused_at_once(self):
+        why, backup = self.refusal("2099.1.0")
+        self.assertIn("Only a plain start of 0.60.4 is possible here", why)
+        self.assertIn(f"its pre-update backup {backup} can be restored once Home Assistant is 2099.1.0 again", why)
+        self.assertIsNone(self.refusal(HA)[0])
+
+    def test_a_scheduled_switch_is_refused(self):
+        self.ha({"current": HA, "previous": OLD, "desired": "2099.1.0"})
+        why, _backup = self.refusal(HA)
+        self.assertIn("a switch to Home Assistant 2099.1.0 is scheduled", why)
+
+    def test_a_target_that_changed_since_its_check_is_refused(self):
+        backup = self.backup("pre-update", HA)
+        inst = self.installer(ramses_cc={"running_tag": "0.61.1", "previous_tag": "0.60.4", "pre_update_backup": backup,
+                                         "versions": {"0.60.4": {}, "0.61.1": {}}})
+        inst.hass = SimpleNamespace(async_add_executor_job=lambda fn, *a: asyncio.sleep(0, fn(*a)))
+        r = asyncio.run(inst._rollback_full("ramses_cc", False, expect=("0.59.0", "older.zip")))
+        self.assertFalse(r["ok"])
+        self.assertIn("changed while it was checked (now 0.60.4", r["error"])
 
 
 class RollbackFullRefusalTest(unittest.TestCase):
@@ -579,6 +610,23 @@ class DebugLoggerTest(unittest.TestCase):
             first = self.log.api(level="DEBUG", limit=200)
         self.assertEqual([x["message"] for x in first["records"]], ["line 0", "line 1", "line 2", "line 3"])
         self.assertEqual(self.follow(first["cursor"]), ["late info", "late debug"])
+
+    def test_a_debug_line_torn_by_a_crash_does_not_blank_the_view_after_a_restart(self):
+        self.log.write("before", level=logging.INFO)
+        self.log.write("debug before", level=logging.DEBUG)
+        path = self.log.handler.path
+        self.log.handler.close()
+        with open(self.log.handler.debug_path, "a", encoding="utf-8") as fh:
+            fh.write('{"id": 3, "ts": "2026')  # killed while writing; no DEBUG record comes after the restart
+        self.log.handler = logbuffer.FileLogHandler(path, max_bytes=4000, keep=1)
+        self.addCleanup(self.log.handler.close)
+        first = self.log.api(level="DEBUG", limit=200)
+        self.log.write("after 1", level=logging.INFO)
+        self.log.write("after 2", level=logging.INFO)
+        shown = self.follow(first["cursor"])
+        self.assertEqual(shown, ["after 1", "after 2"])
+        self.assertEqual([x["message"] for x in self.log.api(level="DEBUG", limit=200)["records"]],
+                         ["before", "debug before", "after 1", "after 2"])
 
     def test_a_logger_set_to_debug_shows_its_debug_lines_under_a_higher_filter(self):
         async def payload():

@@ -25,7 +25,13 @@ Every version's changes are in the
   Assistant no longer has, the answer says to roll Home Assistant back first and
   then start it; when it needs a newer Home Assistant, it says so (the report's
   `blocker_kinds` tells the two apart). A rollback that is not possible at all is
-  refused before the preflight runs. Not on MQTT.
+  refused before the preflight runs: nothing recorded, its backup or version
+  gone, its backup made on a newer Home Assistant than the one that boots next
+  (after a Home Assistant rollback: start the old version plainly, and restore
+  its backup once Home Assistant is that version again), or a switch of Home
+  Assistant scheduled (the restore would boot on that one). So is one whose
+  target changed while it was checked. A forced full rollback puts a line on the
+  timeline. Not on MQTT.
 - **Rolling Home Assistant back checks the running integration** also while the
   previous venv is still on the volume (before, only when it had to be
   installed again): a blocker answers `needs_force`, and when the running
@@ -53,8 +59,9 @@ Every version's changes are in the
   answers at its own level (`raised`), every other logger as chosen. DEBUG lines
   go to `process-debug.log`, rotated on their own: a logger at DEBUG rotated the
   INFO, WARNING and ERROR lines of the last hours off the disk. Both files are
-  read as one log; a read takes only what was written before it began, so a
-  line written to one file while the other is read is never skipped.
+  read as one log; when a read takes both, it takes only what was written before
+  it began, so a line written to one file while the other is read is never
+  skipped. A DEBUG line a crash cut short is closed off at the next start.
 
 ## 0.28.3
 

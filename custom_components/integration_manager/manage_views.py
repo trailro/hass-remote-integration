@@ -149,7 +149,8 @@ class InstalledActionView(ManagerView):
             # what refuses it anyway first: the preflight below can take a pip resolution
             if (why := await self.installer.hass.async_add_executor_job(self.installer.rollback_full_refusal, domain)):
                 return self.json({"ok": False, "error": why})
-            prev = (self.installer.state.installed.get(domain) or {}).get("previous_tag")
+            rec = self.installer.state.installed.get(domain) or {}
+            prev, backup = rec.get("previous_tag"), rec.get("pre_update_backup")
             gate = await preflight.gate(self.installer.hass, self.installer, domain, prev) if prev and not force else None
             if gate and gate["blocked"]:
                 report = gate["report"]
@@ -159,7 +160,8 @@ class InstalledActionView(ManagerView):
                     res["advice"] = advice
                     res["error"] += f". {advice}"
                 return self.json(res)
-            res = await self.installer.rollback_full(domain)
+            # what was checked is what goes back: a start finishing meanwhile records another previous version
+            res = await self.installer.rollback_full(domain, expect=(prev, backup))
             if force and res.get("ok"):
                 events.emit("rollback", f"{domain} full rollback to {res.get('tag')} scheduled with preflight blockers overridden",
                             domain=domain, tag=res.get("tag"))

@@ -2332,9 +2332,11 @@ class Installer:
     # the restart undoes the rollback, restore included.  In memory: the restart that ends this process applies it
     _rollback_undo: tuple[str, str, str] | None = None
 
-    async def rollback_full(self, domain: str | None = None, rejected: bool = False) -> dict[str, Any]:
+    async def rollback_full(self, domain: str | None = None, rejected: bool = False,
+                            expect: tuple[str, str] | None = None) -> dict[str, Any]:
         """Previous version AND the backup taken before the switch (registries,
-        config entry as it was), applied at the restart the caller triggers."""
+        config entry as it was), applied at the restart the caller triggers.  ``expect``: the (previous version,
+        pre-update backup) the caller checked (its preflight); refused when the record names others by now."""
         from .views import _ha_change_lock_taken
 
         if self._rollback_running:
@@ -2350,7 +2352,7 @@ class Installer:
         self._rollback_running = True  # before the first await
         self.busy = True
         try:
-            return await self._rollback_full(domain, rejected)
+            return await self._rollback_full(domain, rejected, expect)
         finally:
             self._rollback_running = False
             self.busy = False
@@ -2384,9 +2386,38 @@ class Installer:
         """Blocking: why a full rollback of ``domain`` cannot happen, from what is recorded and on the volume alone (no
         previous version or pre-update backup recorded, that backup gone, that version removed from the store), or None.
         POST /api/installed/<domain>/rollback_full asks before its preflight, which can take a pip resolution."""
+        import backupkit
+
         domain = domain or self.state.domain
         rec = self.state.installed.get(domain or "", {})
-        return _rollback_record_refusal(domain, rec) or self._rollback_files_refusal(rec)
+        if (why := _rollback_record_refusal(domain, rec) or self._rollback_files_refusal(rec)):
+            return why
+        # a switch scheduled with keep (the environment builder's Prepare): the restore would boot on that version, not
+        # on the one the preflight checks the previous version against (a restore or a clean start is refused later)
+        ha_state = jsonio.read_json(os.path.join(self.config_dir, backupkit.STATE_DIR, "ha.json"), {})
+        desired = ha_state.get("desired") if isinstance(ha_state, dict) else None
+        if desired and desired != homeassistant.const.__version__:
+            return (f"a switch to Home Assistant {desired} is scheduled: the full rollback's restore would boot on it, not on the "
+                    f"running {homeassistant.const.__version__} its check is made against. Restart to finish that switch first, "
+                    "or cancel it on System (choose the running version)")
+        return self._rollback_made_on_refusal(rec)
+
+    def _rollback_made_on_refusal(self, rec: dict[str, Any]) -> str | None:
+        """Blocking: the pre-update backup was made on a Home Assistant newer than the one that boots next (Home Assistant
+        was rolled back since): its .storage cannot be restored there (backupkit.schedule_restore refuses it)."""
+        import backupkit
+
+        prev_tag, backup = rec["previous_tag"], rec["pre_update_backup"]
+        try:
+            made_on = backupkit.describe(self.config_dir, backup).get("ha_version")
+        except OSError:
+            return None  # gone: said by _rollback_files_refusal, or by the schedule
+        boot = backupkit.boot_version(self.config_dir) or homeassistant.const.__version__
+        if made_on and ha_vkey(made_on) > ha_vkey(boot):
+            return (f"full rollback not possible: its pre-update backup {backup} was made on Home Assistant {made_on}, newer than "
+                    f"{boot} that boots next. Only a plain start of {prev_tag} is possible here; its pre-update backup {backup} can "
+                    f"be restored once Home Assistant is {made_on} again")
+        return None
 
     def _rollback_files_refusal(self, rec: dict[str, Any]) -> str | None:
         """Blocking: the pre-update backup is gone, or the previous version is no longer in the store."""
@@ -2399,7 +2430,7 @@ class Installer:
             return _rollback_version_gone(prev_tag, backup)
         return None
 
-    async def _rollback_full(self, domain: str | None, rejected: bool) -> dict[str, Any]:
+    async def _rollback_full(self, domain: str | None, rejected: bool, expect: tuple[str, str] | None = None) -> dict[str, Any]:
         import backupkit
 
         domain = domain or self.state.domain
@@ -2409,6 +2440,10 @@ class Installer:
         # start() rewrites previous_tag / pre_update_backup on the same dict:
         # keep what the rollback needs before calling it
         prev_tag, backup, left_tag = rec["previous_tag"], rec["pre_update_backup"], rec.get("running_tag")
+        if expect is not None and (prev_tag, backup) != tuple(expect):
+            # a start finished between the caller's check and now: its preflight was about another version
+            return {"ok": False, "error": f"the full rollback target of {domain} changed while it was checked (now {prev_tag}, "
+                                          f"backup {backup}): try again"}
         zip_path = os.path.join(self.config_dir, backupkit.BACKUP_DIR, backup)  # backups live in <config>/backups
         from .views import _HA_CHANGE_LOCK
 
@@ -2417,6 +2452,8 @@ class Installer:
                 return {"ok": False, "error": _rollback_backup_gone(prev_tag, backup)}
             if prev_tag not in rec.get("versions", {}):
                 return {"ok": False, "error": _rollback_version_gone(prev_tag, backup)}
+            if (why := await self.hass.async_add_executor_job(self._rollback_made_on_refusal, rec)):
+                return {"ok": False, "error": why}
             try:
                 # validate BEFORE switching files/pip back: a corrupt zip must not leave a half rollback
                 await self.hass.async_add_executor_job(backupkit.validate, zip_path)
