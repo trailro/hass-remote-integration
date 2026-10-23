@@ -23,7 +23,9 @@ function renderVersions(x){
   });
 }
 $('#relrefresh').onclick=()=>{$('#relrefresh').disabled=true; loadReleases(true).finally(()=>{$('#relrefresh').disabled=false;});};
-$('#rollbackfull').onclick=async()=>{ if(!confirm(`Full rollback of ${DOM}: start the previous version AND schedule the pre-update backup for the restart that follows?`)) return; const r=await post(`api/installed/${DOM}/rollback_full`); if(!r.ok){log('ERROR: '+r.error);return;} const rr=await post('api/restart'); if(!rr.ok){log('ERROR: '+rr.error);return;} log(`back to ${r.tag}; restoring ${r.restore} at restart…`); setTimeout(()=>location.reload(),10000); };
+$('#rollbackfull').onclick=async()=>{ if(!confirm(`Full rollback of ${DOM}: start the previous version AND schedule the pre-update backup for the restart that follows?`)) return; let r=await post(`api/installed/${DOM}/rollback_full`);
+  if(!r.ok&&r.needs_force){ if(!confirm(`The previous version is unlikely to run on this Home Assistant:\n\n- ${((r.preflight||{}).blockers||[r.error]).join('\n- ')}${r.advice?`\n\n${r.advice}.`:''}\n\nRoll back anyway?`)){log('ERROR: '+r.error);return;} r=await post(`api/installed/${DOM}/rollback_full`,{force:true}); }
+  if(!r.ok){log('ERROR: '+r.error);return;} const rr=await post('api/restart'); if(!rr.ok){log('ERROR: '+rr.error);return;} log(`back to ${r.tag}; restoring ${r.restore} at restart…`); setTimeout(()=>location.reload(),10000); };
 async function loadReleases(force){
   const t=$('#rels'); t.querySelectorAll('tr:not(:first-child)').forEach(e=>e.remove()); $('#relprev').textContent=''; if(!DOM) return;
   let r=[]; try{ r=await (await fetch('api/releases?domain='+encodeURIComponent(DOM)+(force?'&refresh=1':''),{headers:{'X-Requested-With':'fetch'}})).json(); }catch(e){ return; }

@@ -15,6 +15,13 @@ Every version's changes are in the
   change, of a switch back still restoring, and what a scheduled restore, full
   rollback or clean start uses. The backup list on **System** says why each of
   them is kept (`kept_because` in `GET /api/backups`).
+- **A full rollback of the integration checks the version it goes back to.**
+  `POST /api/installed/<domain>/rollback_full` (and **Full rollback**) runs that
+  version's preflight against the running Home Assistant first, as a start of
+  it does: ramses_cc 0.60.4 on Home Assistant 2026.10.2 (it reads `cv.vol`) was
+  scheduled and failed. A blocker answers `needs_force` with the report;
+  `force: true` goes ahead. When Home Assistant is the problem, the answer says
+  to roll Home Assistant back first and then start the old version. Not on MQTT.
 - **Rolling Home Assistant back checks the running integration** also while the
   previous venv is still on the volume (before, only when it had to be
   installed again): a blocker answers `needs_force`, and when the running
@@ -29,6 +36,11 @@ Every version's changes are in the
   copy, not made while another integration ran), and its answer
   (`restore_why`), the timeline and the plan on **System** (`config_backups.why`
   in `GET /api/ha`) say which and why.
+- **Messages.** The environment builder's check no longer says a Home Assistant
+  venv that is already installed "is built at the restart". A full rollback
+  that is not possible says why (no previous version recorded, no pre-update
+  backup recorded, the previous version removed from the store) and what to do
+  instead (install that version and start it).
 
 ## 0.28.3
 

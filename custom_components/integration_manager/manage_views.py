@@ -92,7 +92,9 @@ class RunView(ManagerView):
 
 
 class InstalledActionView(ManagerView):
-    """POST /api/installed/{domain}/{uninstall|rollback_full|remove_version}"""
+    """POST /api/installed/{domain}/{uninstall|rollback_full|remove_version}.  ``rollback_full`` runs the preflight of
+    the previous version against the running Home Assistant first (as a start of it): blockers refuse it with
+    ``needs_force`` and the report, unless ``force``."""
 
     url = "/api/installed/{domain}/{action}"
 
@@ -125,7 +127,25 @@ class InstalledActionView(ManagerView):
                         res["retained_cleanup_other_broker"] = True
             return self.json(res)
         if action == "rollback_full":
-            return self.json(await self.installer.rollback_full(domain))
+            # the version it goes back to starts on the running Home Assistant: checked like a start of it (preflight.gate),
+            # before anything is scheduled.  Not for the automatic rollback (the smoke test), which goes back to what ran here
+            force = body.get("force") is True
+            prev = (self.installer.state.installed.get(domain) or {}).get("previous_tag")
+            gate = await preflight.gate(self.installer.hass, self.installer, domain, prev) if prev and not force else None
+            if gate and gate["blocked"]:
+                blockers = gate["report"].get("blockers") or []
+                res = {"ok": False, "needs_force": True, "preflight": gate["report"],
+                       "error": f"preflight of {domain} {prev} on the running Home Assistant: " + "; ".join(blockers)}
+                if any("Home Assistant" in str(b) for b in blockers):
+                    res["advice"] = (f"{domain} {prev} does not run on this Home Assistant: switch Home Assistant first (roll back "
+                                     f"Home Assistant on System to a version {prev} supports), then start {prev}")
+                    res["error"] += f". {res['advice']}"
+                return self.json(res)
+            res = await self.installer.rollback_full(domain)
+            if force and res.get("ok"):
+                events.emit("rollback", f"{domain} full rollback to {res.get('tag')} scheduled with preflight blockers overridden",
+                            domain=domain, tag=res.get("tag"))
+            return self.json(res)
         if action == "remove_version":
             tag = str(body.get("tag", ""))
             if not _tag_ok(tag):

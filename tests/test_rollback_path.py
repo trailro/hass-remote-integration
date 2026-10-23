@@ -19,14 +19,16 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest import mock
 
 import backupkit
-from custom_components.integration_manager import ha_updater, views
+from custom_components.integration_manager import ha_updater, manage_views, preflight, views
 from custom_components.integration_manager.ha_updater import HaUpdater
 from custom_components.integration_manager.installer import Installer, State
+from tests.test_preflight_target_pins import TARGET as PIN_TARGET, _Base as _PinsBase
 from tests.test_review_backup import _volume
 
 HA = views.HA_VERSION
@@ -287,6 +289,100 @@ class HaRollbackChecksTheIntegrationTest(_Rollback):
         self.blockers = []
         r = self.rollback(config="keep")
         self.assertTrue(r["ok"], r)
+
+
+class FullRollbackPreflightTest(unittest.IsolatedAsyncioTestCase):
+    """2: the version a full rollback goes back to is checked against the running Home Assistant first."""
+
+    async def asyncSetUp(self):
+        self.inst = SimpleNamespace(hass=SimpleNamespace(), rollback_full=mock.AsyncMock(return_value={"ok": True, "tag": "0.60.4"}),
+                                    state=SimpleNamespace(installed={"ramses_cc": {"previous_tag": "0.60.4", "running_tag": "0.61.1"}}))
+        self.view = manage_views.InstalledActionView(self.inst, SimpleNamespace())
+        self.view.json = lambda d, *a, **k: d
+
+    async def post(self, body, blockers):
+        report = {"ok": not blockers, "blockers": blockers, "warnings": []}
+        gate = mock.AsyncMock(return_value={"blocked": bool(blockers), "report": report, "skipped": None})
+        with mock.patch.object(preflight, "gate", gate), mock.patch.object(manage_views.events, "emit") as emit:
+            r = await manage_views.InstalledActionView.post.__wrapped__(self.view, None, body, "ramses_cc", "rollback_full")
+        return r, gate, emit
+
+    async def test_a_version_that_does_not_run_on_this_home_assistant_needs_force(self):
+        r, gate, _emit = await self.post({}, [f"the integration uses names Home Assistant {HA} no longer has (cv.vol)"])
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["needs_force"])
+        self.assertIn("cv.vol", r["error"])
+        self.assertIn("switch Home Assistant first", r["advice"])
+        self.assertIn("then start 0.60.4", r["advice"])
+        gate.assert_awaited_with(self.inst.hass, self.inst, "ramses_cc", "0.60.4")
+        self.inst.rollback_full.assert_not_awaited()
+
+    async def test_another_blocker_has_no_home_assistant_advice(self):
+        r, _gate, _emit = await self.post({}, ["the integration's code does not compile on Python 3.14"])
+        self.assertTrue(r["needs_force"])
+        self.assertNotIn("advice", r)
+
+    async def test_force_skips_the_check_and_says_so(self):
+        r, gate, emit = await self.post({"force": True}, ["x Home Assistant y"])
+        self.assertTrue(r["ok"])
+        gate.assert_not_awaited()
+        self.inst.rollback_full.assert_awaited_with("ramses_cc")
+        self.assertIn("overridden", emit.call_args.args[1])
+
+    async def test_a_version_that_runs_here_goes_through(self):
+        r, _gate, _emit = await self.post({}, [])
+        self.assertTrue(r["ok"])
+        self.inst.rollback_full.assert_awaited_with("ramses_cc")
+
+
+class RefusedFullRollbackSaysWhyTest(unittest.TestCase):
+    """5b"""
+
+    def refusal(self, rec):
+        inst = object.__new__(Installer)
+        inst.state = State(domain="ramses_cc", installed={"ramses_cc": rec})
+        inst.config_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, inst.config_dir, True)
+        inst.hass = SimpleNamespace(async_add_executor_job=lambda fn, *a: asyncio.sleep(0, fn(*a)))
+        return asyncio.run(inst._rollback_full("ramses_cc", False))["error"]
+
+    def test_no_previous_version(self):
+        err = self.refusal({"running_tag": "0.60.4", "versions": {"0.60.4": {}}})
+        self.assertIn("no previous version of ramses_cc is recorded", err)
+        self.assertIn("Install the version you want to go back to", err)
+
+    def test_no_pre_update_backup(self):
+        err = self.refusal({"running_tag": "0.61.1", "previous_tag": "0.60.4", "versions": {}})
+        self.assertIn("no pre-update backup is recorded for going back to 0.60.4", err)
+        self.assertIn("start it", err)
+
+    def test_the_previous_version_was_removed_from_the_store(self):
+        inst_cfg = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, inst_cfg, True)
+        os.makedirs(os.path.join(inst_cfg, backupkit.BACKUP_DIR))
+        open(os.path.join(inst_cfg, backupkit.BACKUP_DIR, "pre.zip"), "wb").close()
+        inst = object.__new__(Installer)
+        inst.state = State(domain="ramses_cc", installed={"ramses_cc": {"running_tag": "0.61.1", "previous_tag": "0.60.4",
+                                                                        "pre_update_backup": "pre.zip", "versions": {"0.61.1": {}}}})
+        inst.config_dir = inst_cfg
+        inst.hass = SimpleNamespace(async_add_executor_job=lambda fn, *a: asyncio.sleep(0, fn(*a)))
+        err = asyncio.run(inst._rollback_full("ramses_cc", False))["error"]
+        self.assertIn("0.60.4 was removed from the version store", err)
+        self.assertIn("Install 0.60.4 again", err)
+
+
+class BuilderVenvMessageTest(_PinsBase):
+    """5a: the Check of the environment builder for a Home Assistant whose venv is on the volume."""
+
+    def test_a_target_venv_not_installed_is_built_at_the_restart(self):
+        report = self.report(PIN_TARGET)
+        self.assertTrue(any(f"the {PIN_TARGET} venv is built at the restart" in w for w in report["warnings"]), report["warnings"])
+
+    def test_an_installed_target_venv_is_said_to_be_installed(self):
+        _venv(self.inst.config_dir, PIN_TARGET)
+        report = self.report(PIN_TARGET)
+        self.assertTrue(any(f"the {PIN_TARGET} venv is installed here" in w for w in report["warnings"]), report["warnings"])
+        self.assertFalse(any("built at the restart" in w for w in report["warnings"]), report["warnings"])
 
 
 if __name__ == "__main__":
