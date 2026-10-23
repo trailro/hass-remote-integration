@@ -1,6 +1,10 @@
 """The process log on disk, one JSON object per line:
 ``<config>/integration_manager/process.log`` (rotated at MAX_BYTES, KEEP
-older files kept).  Installed by run.py on the root logger before Home
+older files kept), and the DEBUG records apart in ``process-debug.log``
+(rotated the same way): a logger raised to DEBUG can write thousands of
+lines a minute, and in one file those rotated every INFO, WARNING and ERROR
+line of the last hours off the disk.  The ids are one sequence over both, so a
+query reads them as one log.  Installed by run.py on the root logger before Home
 Assistant boots, so the manager UI (/logs) shows what every integration
 and HA itself logged from the first line, and the log survives a restart
 or a crash.  Nothing is held in memory but a per-logger record counter.
@@ -17,6 +21,7 @@ HA's bootstrap does with homeassistant.util.logging: the thread that logs
 from __future__ import annotations
 
 import copy
+import heapq
 import itertools
 import json
 import logging
@@ -36,6 +41,7 @@ KEEP = 2  # process.log.1, process.log.2
 QUEUE_MAX = 50_000
 _TAIL = 8192  # bytes read from the end of a file to find the last id
 _TORN_ID = re.compile(r'\{"id":\s*(\d+)')  # the id at the start of a record whose line a crash cut short
+_WHOLE_ID = re.compile(r'\{"id":\s*(\d+),')  # ... when all of its digits were written
 
 # A URL in a log line: aiohttp.access writes the request line of every request (and its Referer), HA's http security
 # filter the raw path of a request it refuses.  The log searches send what the user typed as ?q= (someone checking
@@ -143,67 +149,131 @@ def _no_lone_surrogates(text: str) -> str:
     return text.encode("utf-8", "backslashreplace").decode("utf-8")
 
 
+class _Stream:
+    """One rotated set of files the handler writes (the records at INFO and above, or the DEBUG ones)."""
+
+    def __init__(self, path: str, max_bytes: int, keep: int) -> None:
+        self.path = path
+        self.max_bytes = max_bytes
+        self.keep = keep
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        self.fh = open(path, "a", encoding="utf-8")
+        self.size = self.fh.tell()
+        if self.size and not _ends_with_newline(path):
+            # a crash cut the last record short: the next one starts on a line of its own instead of joining
+            # that line, which no query can read (the torn bytes stay, skipped like any line that is not JSON)
+            self.fh.write("\n")
+            self.fh.flush()
+            self.size += 1
+
+    def files(self) -> list[str]:
+        """Newest first."""
+        return _rotated(self.path, self.keep)
+
+    def write(self, data: str, size: int) -> None:
+        if self.size + size > self.max_bytes:
+            self.rotate()
+        if self.fh.closed:
+            self.fh = open(self.path, "a", encoding="utf-8")
+        self.fh.write(data)
+        self.fh.flush()
+        self.size += size
+
+    def rotate(self) -> None:
+        try:
+            self.fh.close()
+            for i in range(self.keep, 0, -1):
+                src = self.path if i == 1 else f"{self.path}.{i - 1}"
+                if os.path.exists(src):
+                    os.replace(src, f"{self.path}.{i}")
+        finally:
+            self.fh = open(self.path, "a", encoding="utf-8")  # always an open file afterwards, rotated or not
+            self.size = self.fh.tell()
+
+    def close(self) -> None:
+        try:
+            self.fh.close()
+        except OSError:
+            pass
+
+
+def _rotated(path: str, keep: int) -> list[str]:
+    return [path] + [f"{path}.{i}" for i in range(1, keep + 1)]
+
+
+def _ends_with_newline(path: str) -> bool:
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(-1, os.SEEK_END)
+            return fh.read(1) == b"\n"
+    except OSError:
+        return True  # unreadable: nothing to repair that can be seen, and the log must still open
+
+
+def _last_id(files: list[str]) -> int:
+    """The id of the newest record in ``files`` (newest first), 0 when there is none."""
+    for p in files:
+        try:
+            with open(p, "rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                span = _TAIL
+                while True:  # a last record longer than the tail (a traceback) needs a longer look back
+                    start = max(0, size - span)
+                    fh.seek(start)
+                    lines = fh.read(size - start).decode("utf-8", "replace").splitlines()
+                    if start > 0:
+                        lines = lines[1:]  # cut in the middle
+                    for line in reversed(lines):
+                        try:
+                            return int(json.loads(line)["id"])
+                        except (ValueError, KeyError, TypeError):
+                            # a torn record: a page may have shown it before the crash cut it short, so its id is not given out again
+                            if (torn := _TORN_ID.match(line)) is not None:
+                                return int(torn.group(1))
+                            continue
+                    if start == 0:
+                        break
+                    span *= 4
+        except OSError:
+            continue
+    return 0
+
+
+def debug_path_for(path: str) -> str:
+    """Where the DEBUG records of the log at ``path`` go: process.log -> process-debug.log."""
+    root, ext = os.path.splitext(path)
+    return f"{root}-debug{ext}"
+
+
 class FileLogHandler(logging.Handler):
     def __init__(self, path: str, max_bytes: int = MAX_BYTES, keep: int = KEEP) -> None:
         super().__init__(level=logging.DEBUG)
         self.path = path
+        self.debug_path = debug_path_for(path)
         self.max_bytes = max_bytes
         self.keep = keep
         self.loggers: dict[str, int] = {}  # logger name -> record count since boot
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        self._fh = open(path, "a", encoding="utf-8")
-        self._size = self._fh.tell()
-        self._ids = itertools.count(self._last_id() + 1)  # ids keep growing across restarts
-        if self._size and not self._ends_with_newline():
-            # a crash cut the last record short: the next one starts on a line of its own instead of joining
-            # that line, which no query can read (the torn bytes stay, skipped like any line that is not JSON)
-            self._fh.write("\n")
-            self._fh.flush()
-            self._size += 1
-
-    def _ends_with_newline(self) -> bool:
-        try:
-            with open(self.path, "rb") as fh:
-                fh.seek(-1, os.SEEK_END)
-                return fh.read(1) == b"\n"
-        except OSError:
-            return True  # unreadable: nothing to repair that can be seen, and the log must still open
+        self._main = _Stream(path, max_bytes, keep)
+        self._debug: _Stream | None = None  # opened with the first DEBUG record: most instances never write one
+        # ids keep growing across restarts, over both sets of files
+        self._written = max(_last_id(self._files()), _last_id(self._debug_files()))
+        self._ids = itertools.count(self._written + 1)
 
     @property
     def capacity(self) -> str:
-        return f"{self.max_bytes // 1_000_000} MB × {self.keep + 1} files on disk"
+        return f"{self.max_bytes // 1_000_000} MB × {self.keep + 1} files on disk, DEBUG lines apart in as many again"
 
     def _files(self) -> list[str]:
-        """Newest first."""
-        return [self.path] + [f"{self.path}.{i}" for i in range(1, self.keep + 1)]
+        """The files of the records at INFO and above, newest first."""
+        return self._main.files()
 
-    def _last_id(self) -> int:
-        for p in self._files():
-            try:
-                with open(p, "rb") as fh:
-                    fh.seek(0, os.SEEK_END)
-                    size = fh.tell()
-                    span = _TAIL
-                    while True:  # a last record longer than the tail (a traceback) needs a longer look back
-                        start = max(0, size - span)
-                        fh.seek(start)
-                        lines = fh.read(size - start).decode("utf-8", "replace").splitlines()
-                        if start > 0:
-                            lines = lines[1:]  # cut in the middle
-                        for line in reversed(lines):
-                            try:
-                                return int(json.loads(line)["id"])
-                            except (ValueError, KeyError, TypeError):
-                                # a torn record: a page may have shown it before the crash cut it short, so its id is not given out again
-                                if (torn := _TORN_ID.match(line)) is not None:
-                                    return int(torn.group(1))
-                                continue
-                        if start == 0:
-                            break
-                        span *= 4
-            except OSError:
-                continue
-        return 0
+    def _debug_files(self) -> list[str]:
+        """The files of the DEBUG records, newest first."""
+        return _rotated(self.debug_path, self.keep)
+
+    def _rotate(self) -> None:
+        self._main.rotate()
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -222,7 +292,7 @@ class FileLogHandler(logging.Handler):
             "exc": mask_query_secrets(exc) if exc else exc,
         }
         with self.lock:
-            rec["id"] = next(self._ids)  # under the lock: ids grow in file order, also when a direct write at exit meets the listener
+            rec["id"] = self._written = next(self._ids)  # under the lock: ids grow in file order, also when a direct write at exit meets the listener
             self.loggers[record.name] = self.loggers.get(record.name, 0) + 1
             try:
                 data = json.dumps(rec, ensure_ascii=False, default=str) + "\n"
@@ -236,33 +306,21 @@ class FileLogHandler(logging.Handler):
                     rec = {k: _no_lone_surrogates(v) if isinstance(v, str) else v for k, v in rec.items()}
                     data = json.dumps(rec, ensure_ascii=False, default=str) + "\n"
                     size = len(data.encode("utf-8"))
-                if self._size + size > self.max_bytes:
-                    self._rotate()
-                if self._fh.closed:
-                    self._fh = open(self.path, "a", encoding="utf-8")
-                self._fh.write(data)
-                self._fh.flush()
-                self._size += size
+                if record.levelno >= logging.INFO:
+                    stream = self._main
+                else:
+                    if self._debug is None:
+                        self._debug = _Stream(self.debug_path, self.max_bytes, self.keep)
+                    stream = self._debug
+                stream.write(data, size)
             except (OSError, ValueError):
                 pass  # a full disk or a failed reopen must never take the process (or a caller's log line) down
 
-    def _rotate(self) -> None:
-        try:
-            self._fh.close()
-            for i in range(self.keep, 0, -1):
-                src = self.path if i == 1 else f"{self.path}.{i - 1}"
-                if os.path.exists(src):
-                    os.replace(src, f"{self.path}.{i}")
-        finally:
-            self._fh = open(self.path, "a", encoding="utf-8")  # always an open file afterwards, rotated or not
-            self._size = self._fh.tell()
-
     def close(self) -> None:
         with self.lock:
-            try:
-                self._fh.close()
-            except OSError:
-                pass
+            self._main.close()
+            if self._debug is not None:
+                self._debug.close()
         super().close()
 
     def query(
@@ -323,70 +381,115 @@ class FileLogHandler(logging.Handler):
                 rec = {**rec, "message": "", "exc": None}
             return rec, matched
 
-        # ids grow in file order: one not below (above) the last read is a record read already, from a file that
-        # rotated between two reads (process.log read, then read again as process.log.1).  Dropped rather than
-        # rotations locked out: the lock is emit's, and the reads are long
+        # the DEBUG records live in their own files: read, and merged by id, only when the level asks for them
+        with self.lock:
+            written = self._written  # every record up to this id is whole in its file: emit writes it under the lock
+        sets = [self._files()]
+        if min_level < logging.INFO and any(os.path.exists(p) for p in self._debug_files()):
+            sets.append(self._debug_files())
+        # the DEBUG records the level leaves unread still move the cursor, as any record a filter leaves out: up to
+        # what was written before this read, all of which the read of the other files saw
+        skipped_to = written if len(sets) == 1 else 0
+        stopped = False
+        # a record still being written at the end of one set must not be passed by the cursor while the other set
+        # goes on: everything from its id on waits for the next read (with one set nothing comes after it anyway)
+        ceiling: list[int] = []
         if not since_id:
-            below: int | None = None
-            for p in self._files():
-                lines = _read_lines(p)
-                done = False
-                for line in reversed(lines):
-                    rec = _record(line)
-                    if rec is None:
-                        continue  # a line still being written, or a torn one
-                    if rec.get("id", 0) <= 0:
-                        done = True
-                        break
-                    if below is not None and rec["id"] >= below:
-                        continue
-                    below = rec["id"]
-                    newest = max(newest, rec["id"])
-                    if (c := candidate(rec)) is None or keep is not None and not keep(c[0]) or not c[1]:
-                        continue
-                    out.append(c[0])
-                    if len(out) >= limit:
-                        done = True
-                        break
-                if done:
+            for c in heapq.merge(*(_newest_first(files, ceiling) for files in sets), key=lambda r: -r["id"]):
+                if ceiling and c["id"] >= min(ceiling) and len(sets) > 1:
+                    continue
+                newest = max(newest, c["id"])
+                if (got := candidate(c)) is None or keep is not None and not keep(got[0]) or not got[1]:
+                    continue
+                out.append(got[0])
+                if len(out) >= limit:
                     break
             out.reverse()
+            newest = max(newest, skipped_to)
         else:
             # oldest first from the line after since_id, a line at a time: what is held is the page, not the log
-            files: list[Any] = []
+            opened: list[Any] = []
             try:
-                for p in self._files():
-                    try:
-                        fh = open(p, encoding="utf-8", errors="replace")
-                    except OSError:
-                        continue
-                    files.append(fh)
-                    if _first_id(fh) <= since_id:
-                        break  # this file holds since_id: the older ones hold nothing newer
-                done_to = since_id
-                for fh in reversed(files):
-                    fh.seek(0)
-                    for line in fh:
-                        if (rid := _line_id(line)) is not None and rid <= done_to:
+                gens = []
+                for files in sets:
+                    handles: list[Any] = []
+                    for p in files:
+                        try:
+                            fh = open(p, encoding="utf-8", errors="replace")
+                        except OSError:
                             continue
-                        if (rec := _record(line)) is None:
-                            continue  # a line still being written (its id is not passed: it is shown once it is whole)
-                        if (c := candidate(rec)) is not None:
-                            if len(out) >= limit:
-                                truncated = True
-                                break
-                            if (keep is None or keep(c[0])) and c[1]:
-                                out.append(c[0])
-                        newest = rec.get("id", newest)
-                        done_to = max(done_to, newest)
-                    if truncated:
-                        break
+                        handles.append(fh)
+                        opened.append(fh)
+                        if _first_id(fh) <= since_id:
+                            break  # this file holds since_id: the older ones hold nothing newer
+                    gens.append(_oldest_first(list(reversed(handles)), since_id))
+                for rec in heapq.merge(*gens, key=lambda r: r["id"]):
+                    if rec.get("_writing"):
+                        stopped = True
+                        break  # a line still being written: what comes after it is read once it is whole
+                    if (c := candidate(rec)) is not None:
+                        if len(out) >= limit:
+                            truncated = True
+                            break
+                        if (keep is None or keep(c[0])) and c[1]:
+                            out.append(c[0])
+                    newest = max(newest, rec["id"])
             finally:
-                for fh in files:
+                for fh in opened:
                     fh.close()
+            if not truncated and not stopped:
+                newest = max(newest, skipped_to)
         if cursor is not None:
             cursor(newest)
         return out, truncated
+
+
+def _newest_first(files: list[str], writing: list[int]) -> Any:
+    """The records of one set of files (newest first), newest first.  ids grow in file order: one not below the
+    last read is a record read already, from a file that rotated between two reads (process.log read, then read
+    again as process.log.1).  Dropped rather than rotations locked out: the lock is emit's, and the reads are long.
+    The id of a last line still being written goes into ``writing``."""
+    below: int | None = None
+    for n, p in enumerate(files):
+        lines = _read_lines(p)
+        partial = lines[-1] if n == 0 and lines and lines[-1] and _record(lines[-1]) is None else None
+        if partial is not None and (whole := _WHOLE_ID.match(partial)) is not None:
+            writing.append(int(whole.group(1)))
+            partial = None
+        for line in reversed(lines):
+            rec = _record(line)
+            if rec is None:
+                continue  # a line still being written, or a torn one
+            if not isinstance(rec.get("id"), int) or rec["id"] <= 0:
+                return
+            if partial is not None:  # cut before its id was written: it is the one after this record
+                writing.append(rec["id"] + 1)
+                partial = None
+            if below is not None and rec["id"] >= below:
+                continue
+            below = rec["id"]
+            yield rec
+
+
+def _oldest_first(handles: list[Any], since_id: int) -> Any:
+    """The records of one set of open files (oldest first) newer than since_id, oldest first; a last line still being
+    written ends it with a marker ({"id", "_writing"}) that stops the merge there."""
+    done_to = since_id
+    for fh in handles:
+        fh.seek(0)
+        for line in fh:
+            if not line.endswith("\n") and _record(line) is None:
+                whole = _WHOLE_ID.match(line)
+                yield {"id": max(int(whole.group(1)) if whole else 0, done_to + 1), "_writing": True}
+                return
+            if (rid := _line_id(line)) is not None and rid <= done_to:
+                continue
+            if (rec := _record(line)) is None:
+                continue  # a torn line (a crash): skipped like any line that is not a record
+            if not isinstance(rec.get("id"), int):
+                continue
+            done_to = max(done_to, rec["id"])
+            yield rec
 
 
 def _read_lines(path: str) -> list[str]:

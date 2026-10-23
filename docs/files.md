@@ -44,6 +44,7 @@ All under `/config`. *Backup* says whether a backup holds the file
 | `ha-backup-running` | in the Home Assistant app, set while Home Assistant backs up the app: pruning and deleting backups wait; ignored after 2 hours | no |
 | `events.jsonl` | timeline | no |
 | `process.log` | process log, rotated to `process.log.1` and `.2` | no |
+| `process-debug.log` | its DEBUG lines, rotated the same way | no |
 | `ha-install.log` | since the last boot that installed Home Assistant: pip output of its installs and the manager's requirements, then every entrypoint line (the container log has them, without pip's) | no |
 | `apt-install.log` | apt output of the last boot that installed `HRI_APT_PACKAGES` | no |
 
