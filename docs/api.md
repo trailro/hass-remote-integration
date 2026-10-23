@@ -134,6 +134,16 @@ or `retained_cleanup_deferred` (MQTT disabled), plus `retained_cleanup_broker`
 (`host:port`) and `retained_cleanup_other_broker` when the settings name
 another broker ([MQTT](mqtt.md#when-the-cleanup-cannot-run)).
 
+`POST /api/installed/<domain>/rollback_full` takes `force`. A rollback that is
+not possible (no previous version or pre-update backup recorded, that backup
+gone, that version removed from the store) is refused at once, saying why and
+what to do. Otherwise, without `force`, the previous version's preflight runs
+against the running Home Assistant first: blockers answer `needs_force` with the
+report in `preflight` (its `blocker_kinds`: `ha_attributes`, `min_ha`,
+`ha_pins`) and, when they call for it, an `advice`: roll Home Assistant back
+first (it reads a name this one no longer has), or update it (it needs a newer
+one).
+
 An unknown entry id, in `/api/entries/<entry_id>/…` or a `reconfigure` flow
 start, answers `404` with a message.
 

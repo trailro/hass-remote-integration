@@ -26,7 +26,7 @@ from tests.test_review_backup import _hass, _volume, _zip
 def _view(cfg, running=None):
     from custom_components.integration_manager import backup_views
 
-    installer = SimpleNamespace(busy=False, protected_backups=set, running=running, state=SimpleNamespace(rollback_backup=None))
+    installer = SimpleNamespace(busy=False, protected_backups=set, protected_backup_reasons=dict, running=running, state=SimpleNamespace(rollback_backup=None))
     view = backup_views.BackupActionView(_hass(cfg), installer)
     view.json = lambda d: d
     return view

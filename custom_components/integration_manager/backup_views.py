@@ -55,9 +55,12 @@ class BackupsView(ManagerView):
 
     async def get(self, request: web.Request) -> web.Response:
         cfg = self.hass.config.config_dir
-        items, pending, parts, last, kept = await self.hass.async_add_executor_job(
-            lambda: (backupkit.list_backups(cfg), backupkit.pending(cfg), backupkit.pending_parts(cfg) if backupkit.pending(cfg) else None,
-                     _last_restore(self.hass), self.installer.protected_backup_reasons()))
+        def read() -> tuple[Any, ...]:
+            items = backupkit.list_backups(cfg)
+            return (items, backupkit.pending(cfg), backupkit.pending_parts(cfg) if backupkit.pending(cfg) else None,
+                    _last_restore(self.hass), self.installer.protected_backup_reasons(items))
+
+        items, pending, parts, last, kept = await self.hass.async_add_executor_job(read)
         # why a backup is never pruned (and refused for deletion): the rest go oldest first beyond "keep"
         items = [{**b, "kept_because": kept[b["name"]]} if b.get("name") in kept else b for b in items]
         boot, venvs, ha_state = await self.hass.async_add_executor_job(
@@ -200,9 +203,14 @@ class BackupActionView(ManagerView):
                     return self.json({"ok": False, "error": "another action is running: wait for it to finish before deleting a backup"})
                 self.installer.busy = True
                 try:
-                    if await self.hass.async_add_executor_job(lambda: name in self.installer.protected_backups() | backupkit.restore_needs(cfg)):
-                        return self.json({"ok": False, "error": "this backup is still needed: it is the way back of a full rollback, of a scheduled or failed Home Assistant version change or clean start, "
-                                                            "of a scheduled restore or a restore that could not be put back, or the copy taken before a restore in the last 7 days"})
+                    def needed() -> str | None:
+                        reasons = self.installer.protected_backup_reasons()
+                        if name in reasons:
+                            return reasons[name]
+                        return "a scheduled restore, or a restore that could not be put back, needs it" if name in backupkit.restore_needs(cfg) else None
+
+                    if (why := await self.hass.async_add_executor_job(needed)):
+                        return self.json({"ok": False, "error": f"this backup is still needed: {why}"})
                     if await self.hass.async_add_executor_job(backupkit.app_backup_running, cfg):
                         return self.json({"ok": False, "error": "a Home Assistant backup of the app is running and reads this folder: try again in a few minutes"})
                     unlink = asyncio.ensure_future(self.hass.async_add_executor_job(os.remove, path))

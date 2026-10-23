@@ -414,10 +414,12 @@ the configuration from before the update; its restart is smoke-tested, without
 a further automatic rollback. The previous version is checked first against the
 running Home Assistant, as a start of it is: a blocker (it reads a name this
 Home Assistant no longer has, its requirements conflict with its pins) refuses
-the rollback with a choice to go ahead anyway; when Home Assistant is the
-problem, roll back Home Assistant on **System** first and then start the old
-version. When no full rollback is possible, the refusal says why and what to
-do instead. The previous version is the one that actually
+the rollback with a choice to go ahead anyway. When it reads a name this Home
+Assistant no longer has, the answer says to roll back Home Assistant on
+**System** first and then start the old version; when it needs a newer Home
+Assistant, it says that instead. When no full rollback is possible (nothing
+recorded, its backup or version gone), the refusal comes at once, before any
+check, and says why and what to do instead. The previous version is the one that actually
 ran: after two switches with no restart between them, the target and its backup
 are the version the process still runs. After an automatic rollback there is no
 target. One full rollback runs at a time. It is refused while a Home Assistant
