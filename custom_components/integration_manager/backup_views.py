@@ -55,9 +55,11 @@ class BackupsView(ManagerView):
 
     async def get(self, request: web.Request) -> web.Response:
         cfg = self.hass.config.config_dir
-        items, pending, parts, last = await self.hass.async_add_executor_job(
+        items, pending, parts, last, kept = await self.hass.async_add_executor_job(
             lambda: (backupkit.list_backups(cfg), backupkit.pending(cfg), backupkit.pending_parts(cfg) if backupkit.pending(cfg) else None,
-                     _last_restore(self.hass)))
+                     _last_restore(self.hass), self.installer.protected_backup_reasons()))
+        # why a backup is never pruned (and refused for deletion): the rest go oldest first beyond "keep"
+        items = [{**b, "kept_because": kept[b["name"]]} if b.get("name") in kept else b for b in items]
         boot, venvs, ha_state = await self.hass.async_add_executor_job(
             lambda: (backupkit.boot_version(cfg), self.updater._installed_venvs() if self.updater else [],  # noqa: SLF001
                      self.updater._read() if self.updater else {}))  # noqa: SLF001

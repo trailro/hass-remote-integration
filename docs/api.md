@@ -214,6 +214,7 @@ What the floor and the check mean is in
 | `verdicts` | version → its `check`, where known without resolving (a cached report, or the Python a release needs) |
 | `change` | the scheduled or booting version change until its version booted (`to`, `mode`, `backup`, `at`, `applied`, `parts`; `smoke`: the config entries a keep switch smoke-tests) |
 | `smoke` | the smoke test the booting version change still owes the integration (`version`, `from`, `domain`, `entries`, `loaded`, `backup`, `parts`, `switched`, `at`); `null` when none |
+| `config_backups` | older version → the backup a switch to it with `config: restore` takes `.storage` from when none is chosen (`name`, `created`, `label`, `ha_version`; `why`: the backup the switch from that version took, or the newest one made on it or older while the running integration ran) |
 | `smoke_fallback` | the last automatic switch back after that smoke test failed (`from`, `to`, `domain`, `reason`, `at`; `saved`: the backup of the configuration as the version left had it; `restored`: the `.storage` files taken from the switch's backup; `integration`: `from`/`to` when the integration version the environment builder started went back too); cleared when the version left passes it later |
 
 `?all=1` reads the release list in memory: no PyPI call, no
@@ -256,8 +257,29 @@ a version below `HA_VERSION_MIN`, one the image's Python cannot run
 (force)* on the timeline. The manager device's *Install Home
 Assistant* refuses the same and has no force.
 
+`POST /api/ha/rollback` (`{"config": …, "backup"?: …, "force"?: …}`) goes to
+`previous`. It checks the running integration against that version as an update
+does (attributes, requirements, a version the smoke test left), also while the
+previous venv is still on the volume; a previous venv that was removed is also
+resolved again. Blocked without `force`: `needs_force`, `check`, the blockers in
+`error`, and when the running integration is what blocks (its blockers are in
+`check.integration_blockers`) an `advice`: stop it first, or go back in this
+order: stop it, roll back Home Assistant, start the integration version that
+supports the older one. With `config: restore`, `backup` names the backup whose
+`.storage` the older version starts with: a backup on this volume made on that
+version or older, not a pre-restore copy, made while no integration or this
+container's ran; anything else is refused before a backup is taken. Without
+it, the backup the switch from that version took
+(`<date>-pre-ha-<current>.zip`, made on it) is restored whether the integration
+runs or not, else the newest made on it or older while the running integration
+ran. The answer's `restore` names it and `restore_why` says why; the timeline
+says it too.
+
 ### Backups
 
+- `GET /api/backups` gives a backup that is kept beyond `keep` a
+  `kept_because` (what still needs it: a rollback, a switch, a restore); see
+  [Backups](backups.md#what-is-kept-beyond-the-count).
 - `POST /api/backups/<name>/restore` takes `force`: a backup that does not
   record its Home Assistant version answers `needs_force` when `.storage` is
   restored.

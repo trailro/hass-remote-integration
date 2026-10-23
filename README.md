@@ -473,10 +473,15 @@ and stores from the switch's backup, the rest of the configuration as it is). Th
 plus every version the box has (*Show all versions* for the rest). Versions
 below the image's floor (`HA_VERSION_MIN`, 2026.5.0) or whose pins have no wheel
 for the image's Python (`python:3.14`) are refused. A downgrade asks whether to
-restore from a backup, start clean and rebuild, or keep the configuration.
-Once you are happy with an upgrade, *Remove HA <version> venv* next to *Roll
-back* frees the previous version's venv (0.7-1 GB): a later rollback installs
-it again from PyPI (it needs the network and takes a few minutes). See
+restore from a backup, start clean and rebuild, or keep the configuration;
+the backup restored is the one the switch from that version took (it is kept
+from pruning while that version is installed), or one chosen through the API.
+*Roll back* checks the running integration against the previous version too;
+when it does not run there, stop it first (stop, roll back Home Assistant, then
+start the integration version that supports it). Once you are happy with an
+upgrade, *Remove HA <version> venv* next to *Roll back* frees the previous
+version's venv (0.7-1 GB): a later rollback installs it again from PyPI (it
+needs the network and takes a few minutes). See
 [Home Assistant and Python versions](docs/home-assistant-versions.md).
 
 ### Backups

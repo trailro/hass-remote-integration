@@ -1085,37 +1085,60 @@ class Installer:
         return out
 
     def protected_backups(self) -> set[str]:
-        """Backups a full rollback still needs: never pruned automatically."""
-        out = {rec["pre_update_backup"] for rec in self.state.installed.values() if rec.get("pre_update_backup")}
-        if self.state.rollback_backup:
-            out.add(self.state.rollback_backup)
+        """Backups a rollback, a restore or a version change still needs: never pruned automatically (they still
+        count toward backup_keep), and refused for deletion."""
+        return set(Installer.protected_backup_reasons(self))  # also called unbound, on a stand-in
+
+    def protected_backup_reasons(self) -> dict[str, str]:
+        """Blocking: protected_backups with why each one is kept (GET /api/backups ``kept_because``)."""
+        import backupkit
+
+        out: dict[str, str] = {}
+
+        def keep(name: Any, why: str) -> None:
+            if name:
+                out.setdefault(str(name), why)
+
+        for dom, rec in self.state.installed.items():
+            if rec.get("pre_update_backup"):
+                keep(rec["pre_update_backup"], f"the full rollback of {dom} to {rec.get('previous_tag') or 'its previous version'} restores it")
+        keep(self.state.rollback_backup, "the last full rollback restores it (until that restore is over)")
+        pending_rollback = getattr(self.state, "pending_rollback", None)
+        if isinstance(pending_rollback, dict):
+            keep(pending_rollback.get("backup"), f"a full rollback of {pending_rollback.get('domain')} is being finished")
         # a scheduled Home Assistant version change: its pre-change backup is the
         # way back after a failed boot, and a clean start rebuilds from it
         ha_state = jsonio.read_json(os.path.join(self.state_dir, "ha.json"), {}) or {}
-        change = ha_state.get("change") if isinstance(ha_state, dict) else None
+        ha_state = ha_state if isinstance(ha_state, dict) else {}
+        change = ha_state.get("change")
         if isinstance(change, dict) and change.get("backup"):
-            out.add(str(change["backup"]))
-        recovery = ha_state.get("recovery") if isinstance(ha_state, dict) else None
+            keep(change["backup"], f"the switch to Home Assistant {change.get('to')} took it (the way back if that version fails)")
+        smoke = ha_state.get("smoke")
+        if isinstance(smoke, dict) and smoke.get("backup"):
+            # the smoke test of the last switch goes back with it when the integration does not set up on the new version
+            keep(smoke["backup"], f"the smoke test of Home Assistant {smoke.get('version')} switches back with it")
+        recovery = ha_state.get("recovery")
         if isinstance(recovery, dict) and recovery.get("backup"):
-            out.add(str(recovery["backup"]))
+            keep(recovery["backup"], f"the switch back to Home Assistant {recovery.get('for')} restores it")
         # the backup the last restore came from needs nothing once that restore is over (applied, failed and put
         # back, or dropped at the boot): what it brought back is on the volume, and a restore still scheduled or
         # retried is covered by backupkit.restore_needs.  Pinned by name here, ha.json kept it for good.
-        last_restore = ha_state.get("last_restore") if isinstance(ha_state, dict) else None
+        last_restore = ha_state.get("last_restore")
         if isinstance(last_restore, dict) and last_restore.get("pre_restore") and _within(last_restore.get("at"), PRE_RESTORE_GRACE_S):
             # the copy of what the restore replaced: the only way back from it once restore-pending.json is
             # gone (deleted as soon as the restore succeeds).  Not pinned for good like the source the user
             # picked: ha.json keeps last_restore forever, so an automatic copy would hold a keep slot and
             # refuse deletion for the life of the instance
-            out.add(str(last_restore["pre_restore"]))
-        smoke_fallback = ha_state.get("smoke_fallback") if isinstance(ha_state, dict) else None
+            keep(last_restore["pre_restore"], "the copy taken before the last restore (kept 7 days)")
+        smoke_fallback = ha_state.get("smoke_fallback")
         if isinstance(smoke_fallback, dict) and smoke_fallback.get("saved") and _within(smoke_fallback.get("at"), PRE_RESTORE_GRACE_S):
             # the configuration as the version a smoke test left had it: the only copy of what changed there since the switch
-            out.add(str(smoke_fallback["saved"]))
+            keep(smoke_fallback["saved"], f"the configuration as Home Assistant {smoke_fallback.get('from')} left it when the smoke test switched back (kept 7 days)")
         # every pre-restore copy of the last 7 days, not only the last restore's: a later restore that was dropped or
         # failed before taking its own copy replaces last_restore, and the copy of the restore before it (the only
         # way back from what that one brought) lost its protection with it.  Dated by the name backupkit gives it.
-        bdir = os.path.join(os.path.dirname(self.state_dir), "backups")
+        cfg = os.path.dirname(self.state_dir)
+        bdir = os.path.join(cfg, "backups")
         try:
             names = os.listdir(bdir)
         except OSError:
@@ -1127,15 +1150,39 @@ class Installer:
             try:
                 stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.strptime(m.group(1), "%Y%m%d-%H%M%S"))
             except ValueError:  # 20260931-...: no date, so no way to tell it is old; kept like an unreadable stamp
-                out.add(name)
+                keep(name, "a copy taken before a restore (its date cannot be read)")
                 continue
             if _within(stamp, PRE_RESTORE_GRACE_S):
-                out.add(name)
+                keep(name, "a copy taken before a restore (kept 7 days)")
         plan = jsonio.read_json(os.path.join(self.state_dir, "rebuild-pending.json"), {}) or {}
         if isinstance(plan, dict):
             for key in ("backup", "boot_backup"):  # boot_backup: taken by the entrypoint right before the clean start
-                if plan.get(key):
-                    out.add(str(plan[key]))
+                keep(plan.get(key), "the scheduled clean start rebuilds the integration from it")
+        # what going back to an older Home Assistant restores while that version is still here (its venv, or the
+        # previous version ha.json records): the backup the switch from it took, else the one GET /api/ha names
+        # in config_backups.  Pruned by count, a rollback after a few more backups (a round trip takes five) had
+        # only a month-old configuration left to restore
+        from .ha_updater import restore_source, venv_installed
+
+        current = homeassistant.const.__version__
+        previous = ha_state.get("previous")
+        try:
+            entries = os.listdir(cfg)
+        except OSError:
+            entries = []
+        older = {n[5:] for n in entries if n.startswith("venv-") and venv_installed(cfg, n[5:]) and ha_vkey(n[5:]) < ha_vkey(current)}
+        if isinstance(previous, str) and ha_vkey(previous) < ha_vkey(current):
+            older.add(previous)
+        if older and names:
+            listed = backupkit.list_backups(cfg)
+            installed = set(self.state.installed)
+            running = getattr(self.state, "domain", None)
+            for v in sorted(older, key=ha_vkey):
+                b, _why = restore_source(cfg, v, current, listed, running, installed)
+                if b is not None:
+                    keep(b["name"], f"a rollback to Home Assistant {v} with config=restore restores it")
+        for name in backupkit.restore_needs(cfg):
+            keep(name, "a scheduled restore needs it")
         return out
 
     def _patch_summary(self, rows: list[dict[str, Any]] | None) -> str | None:

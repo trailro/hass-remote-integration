@@ -95,11 +95,7 @@ class HaUpdater:
 
     def _venv_for_this_python(self, version: str) -> bool:
         """What entrypoint.venv_ok checks: installed completely, for the Python this image runs."""
-        if not _VERSION.fullmatch(version):
-            return False
-        venv = self.hass.config.path(f"venv-{version}")
-        site = os.path.join(venv, "lib", f"python{sys.version_info[0]}.{sys.version_info[1]}", "site-packages", "homeassistant", "__init__.py")
-        return all(os.path.isfile(p) for p in (os.path.join(venv, ".ok"), os.path.join(venv, "bin", "python"), site))
+        return venv_installed(self.hass.config.path(), version)
 
     def venv_removal_refusal(self, version: str) -> VenvRemovalRefused | None:
         """Blocking: why the venv of ``version`` must stay, or None.  Called under views._HA_CHANGE_LOCK with the
@@ -203,29 +199,25 @@ class HaUpdater:
         ran qualifies, since only its .storage is restored and the manager
         state stays.  ``skipped`` collects the backups that fitted the version
         but were made while another integration ran (or none), or say nothing."""
+        cfg = self.hass.config.config_dir if backups is None or running is not _ANY_DOMAIN else None
+        return config_backup_for(cfg, version, backups, running, skipped)
+
+    def restore_source(self, version: str, running: Any, backups: list[dict[str, Any]] | None = None,
+                       skipped: list[dict[str, Any]] | None = None) -> tuple[dict[str, Any] | None, str]:
+        """Blocking: the backup a switch to the older ``version`` with config=restore restores when none is chosen, and
+        why that one (restore_source below).  ``running``: the integration that runs now (None: none)."""
+        cfg = self.hass.config.config_dir
+        return restore_source(cfg, version, HA_VERSION, backups, running, self.installed_domains(), skipped)
+
+    def installed_domains(self) -> set[str]:
+        """Blocking: the integrations state.json on the volume holds (installed, running or not)."""
         import backupkit
 
-        cfg = self.hass.config.config_dir if backups is None or running is not _ANY_DOMAIN else None
-        listed = backups if backups is not None else backupkit.list_backups(cfg)  # newest first
-        # a pre-restore copy holds whatever was on the volume at that moment (a half-migrated or crashed
-        # configuration too): never the configuration a downgrade restores
-        fits = [b for b in listed if b.get("ha_version") and _key(b["ha_version"]) <= _key(version)
-                and "pre-restore" not in str(b.get("name") or "")]
-        # this volume's own backups first: an uploaded one comes from somewhere else
-        own = [b for b in fits if not str(b.get("name") or "").startswith("upload-")]
-        for b in own + [b for b in fits if b not in own]:
-            if running is _ANY_DOMAIN:
-                return b
-            # recorded in backup-info.json (describe); an older backup's state.json is opened, only while
-            # nothing newer qualified.  An archive that does not say is never picked on its own: a wrong pick
-            # restores another integration's configuration, a refusal only asks for rebuild or keep
-            domain = b["domain"] if "domain" in b else backupkit.backup_domain(cfg, str(b.get("name") or ""))
-            if domain is not backupkit.UNKNOWN_DOMAIN and domain == running:
-                return b
-            if skipped is not None:
-                skipped.append({**b, "domain": None if domain is backupkit.UNKNOWN_DOMAIN else domain,
-                                "domain_known": domain is not backupkit.UNKNOWN_DOMAIN})
-        return None
+        from jsonio import read_json
+
+        state = read_json(self.hass.config.path(backupkit.MARKER), {})
+        installed = state.get("installed") if isinstance(state, dict) else None
+        return {str(d) for d in installed} if isinstance(installed, dict) else set()
 
     def running_domain(self) -> Any:
         """Blocking: the integration state.json on the volume names as running (the installer saves every change
@@ -241,10 +233,13 @@ class HaUpdater:
 
         backups = backupkit.list_backups(self.hass.config.config_dir)
         running = self.running_domain()  # what a switch with restore picks (views.async_change_ha_version)
+        installed = self.installed_domains()
         out = {}
         for v in versions:
-            if _key(v) < _key(current) and (b := self.config_backup_for(v, backups, running)):
-                out[v] = {k: b.get(k) for k in ("name", "created", "label", "ha_version")}
+            if _key(v) < _key(current):
+                b, why = restore_source(self.hass.config.config_dir, v, current, backups, running, installed)
+                if b:
+                    out[v] = {**{k: b.get(k) for k in ("name", "created", "label", "ha_version")}, "why": why}
         return out
 
     def previous_version(self) -> str:
@@ -380,16 +375,18 @@ class HaUpdater:
                     "missing": [], "python": sys.version.split()[0]}
         return await preflight.ha_version_report(self.hass, version)
 
-    async def switch_blockers(self, installer: Any, version: str) -> tuple[list[str], list[str]]:
+    async def switch_blockers(self, installer: Any, version: str, integration: list[str] | None = None) -> tuple[list[str], list[str]]:
         """(blockers, warnings) of a switch to ``version`` beyond its requirements: the running integration reads
         an attribute of a Home Assistant module ``version`` does not have (the preflight's check, against that
         version's own source), its requirements do not resolve against ``version``'s pins
         (preflight.switch_requirement_checks), or the smoke test left ``version`` before.  Refused unless forced
-        from the UI."""
+        from the UI.  ``integration`` collects the blockers that are the running integration's (stopping it, or
+        switching it to another version, removes them)."""
         from . import preflight
 
         version = version.strip()
         blockers: list[str] = []
+        integration = integration if integration is not None else []
         warnings: list[str] = []
         left = (await self.hass.async_add_executor_job(self._read)).get("smoke_fallback")
         if isinstance(left, dict) and left.get("from") == version:
@@ -401,13 +398,14 @@ class HaUpdater:
             hits, note = await self.hass.async_add_executor_job(
                 preflight._ha_attribute_checks, comp, version, sys.executable, installer.config_dir)  # noqa: SLF001
             if hits:
-                blockers.append(f"{domain} {installer.running_tag or ''} uses names Home Assistant {version} no longer has "
-                                f"({'; '.join(hits[:3])}" + (f" (+{len(hits) - 3} more)" if len(hits) > 3 else "")
-                                + f"): it fails with an AttributeError there; switch {domain} to a release that supports {version} first")
+                integration.append(f"{domain} {installer.running_tag or ''} uses names Home Assistant {version} no longer has "
+                                   f"({'; '.join(hits[:3])}" + (f" (+{len(hits) - 3} more)" if len(hits) > 3 else "")
+                                   + f"): it fails with an AttributeError there; switch {domain} to a release that supports {version} first")
             if note:
                 warnings.append(f"the attributes {domain} reads from Home Assistant's modules were not checked against {version}: {note}")
             req_blockers, req_warnings = await preflight.switch_requirement_checks(self.hass, installer, version)
-            blockers += req_blockers
+            integration += req_blockers
+            blockers += integration
             warnings += req_warnings
         return blockers, warnings
 
@@ -845,6 +843,79 @@ def read_ha_json_for_update(path: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("ha.json is unreadable: restart the container, the entrypoint rebuilds it from the volume")
     return data
+
+
+def venv_installed(config_dir: str, version: str) -> bool:
+    """Blocking: what entrypoint.venv_ok checks: ``version`` installed completely, for the Python this image runs."""
+    if not _VERSION.fullmatch(version):
+        return False
+    venv = os.path.join(config_dir, f"venv-{version}")
+    site = os.path.join(venv, "lib", f"python{sys.version_info[0]}.{sys.version_info[1]}", "site-packages", "homeassistant", "__init__.py")
+    return all(os.path.isfile(p) for p in (os.path.join(venv, ".ok"), os.path.join(venv, "bin", "python"), site))
+
+
+def config_backup_for(config_dir: str | None, version: str, backups: list[dict[str, Any]] | None = None,
+                      running: Any = _ANY_DOMAIN, skipped: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    """HaUpdater.config_backup_for, for a caller without the updater (Installer.protected_backup_reasons)."""
+    import backupkit
+
+    listed = backups if backups is not None else backupkit.list_backups(config_dir)  # newest first
+    # a pre-restore copy holds whatever was on the volume at that moment (a half-migrated or crashed
+    # configuration too): never the configuration a downgrade restores
+    fits = [b for b in listed if b.get("ha_version") and _key(b["ha_version"]) <= _key(version)
+            and "pre-restore" not in str(b.get("name") or "")]
+    # this volume's own backups first: an uploaded one comes from somewhere else
+    own = [b for b in fits if not str(b.get("name") or "").startswith("upload-")]
+    for b in own + [b for b in fits if b not in own]:
+        if running is _ANY_DOMAIN:
+            return b
+        # recorded in backup-info.json (describe); an older backup's state.json is opened, only while
+        # nothing newer qualified.  An archive that does not say is never picked on its own: a wrong pick
+        # restores another integration's configuration, a refusal only asks for rebuild or keep
+        domain = b["domain"] if "domain" in b else backupkit.backup_domain(config_dir, str(b.get("name") or ""))
+        if domain is not backupkit.UNKNOWN_DOMAIN and domain == running:
+            return b
+        if skipped is not None:
+            skipped.append({**b, "domain": None if domain is backupkit.UNKNOWN_DOMAIN else domain,
+                            "domain_known": domain is not backupkit.UNKNOWN_DOMAIN})
+    return None
+
+
+def pre_switch_backup(config_dir: str, version: str, current: str, backups: list[dict[str, Any]],
+                      domains: set[Any]) -> dict[str, Any] | None:
+    """Blocking: the newest backup a switch from ``version`` to ``current`` took right before it
+    (views.async_change_ha_version: label ``pre-ha-<current>``, made on ``version``): the configuration as
+    ``version`` last ran it on this volume, so what going back to it restores.  Made while no integration
+    ran, or one of ``domains`` (the running and the installed one): whether the integration runs at the
+    moment of the rollback does not change which configuration ``version`` had."""
+    import backupkit
+
+    for b in backups:  # newest first
+        name = str(b.get("name") or "")
+        if b.get("ha_version") != version or str(b.get("label") or "") != f"pre-ha-{current}" or name.startswith("upload-"):
+            continue
+        domain = b["domain"] if "domain" in b else backupkit.backup_domain(config_dir, name)
+        if domain is not backupkit.UNKNOWN_DOMAIN and (domain is None or domain in domains):
+            return b
+    return None
+
+
+def restore_source(config_dir: str, version: str, current: str, backups: list[dict[str, Any]] | None, running: Any,
+                   installed: set[str], skipped: list[dict[str, Any]] | None = None) -> tuple[dict[str, Any] | None, str]:
+    """Blocking: (the backup a switch from ``current`` to the older ``version`` with config=restore restores when no
+    backup is chosen, why that one).  The switch's own backup first (pre_switch_backup), whatever runs now; else the
+    newest backup made on ``version`` or older while the running integration ran (config_backup_for)."""
+    import backupkit
+
+    listed = backups if backups is not None else backupkit.list_backups(config_dir)
+    domains = {d for d in (running, *installed) if isinstance(d, str)}
+    if (b := pre_switch_backup(config_dir, version, current, listed, domains)) is not None:
+        return b, f"the backup taken before the switch from Home Assistant {version} to {current}"
+    b = config_backup_for(config_dir, version, listed, running, skipped)
+    if b is None:
+        return None, ""
+    who = "" if running is _ANY_DOMAIN else f" while {running or 'no integration'} ran"
+    return b, f"the newest backup made on Home Assistant {version} or older{who} (no backup taken before a switch from {version} to {current} is left)"
 
 
 def _integration_stores(domain: str) -> tuple[str, ...]:
