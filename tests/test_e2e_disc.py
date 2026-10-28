@@ -27,6 +27,7 @@ _CLASSES = {  # platform -> (module, entity class, schema)
     "update": ("update", "MqttUpdate", "DISCOVERY_SCHEMA"),
     "vacuum": ("vacuum", "MqttStateVacuum", "DISCOVERY_SCHEMA"),
     "water_heater": ("water_heater", "MqttWaterHeater", "DISCOVERY_SCHEMA"),
+    "climate": ("climate", "MqttClimate", "DISCOVERY_SCHEMA"),
     "text": ("text", "MqttTextEntity", "DISCOVERY_SCHEMA"),
     "lawn_mower": ("lawn_mower", "MqttLawnMower", "DISCOVERY_SCHEMA"),
     "select": ("select", "MqttSelect", "DISCOVERY_SCHEMA"),
@@ -445,6 +446,39 @@ class WaterHeaterPowerTest(_HassCase):
         self.assertEqual(int(without.entity.supported_features), 1 | 2)  # away mode (4) has no MQTT counterpart
         with self.assertRaises(ValueError):
             disc.command_to_service("water_heater", "tank", "power", "TOGGLE")
+
+
+class ClimateSetpointsTest(_HassCase):
+    """From HA 2026.10.0 the main HA's MQTT climate parks the range when a single setpoint arrives and the single
+    setpoint when a low/high arrives (modes with heat_cool and heat or cool).  Every document carries all three,
+    so one kind showed null there whatever the source's mode."""
+
+    ATTRS = {"supported_features": 1 | 2, "hvac_modes": ["off", "heat", "cool", "heat_cool"],
+             "temperature": 23.5, "target_temp_low": 18, "target_temp_high": 24}
+
+    def setpoints(self, consumer):
+        ent = consumer.entity
+        return ent.target_temperature, ent.target_temperature_low, ent.target_temperature_high
+
+    async def test_the_source_mode_decides_which_kind_shows(self):
+        consumer = Consumer(self.hass, State("climate.t", "heat", self.ATTRS))
+        for mode, expected in (("heat", (23.5, None, None)), ("heat_cool", (None, 18, 24)),
+                               ("cool", (23.5, None, None)), ("heat_cool", (None, 18, 24))):
+            with self.subTest(mode=mode):
+                self.assertQuiet(consumer, State("climate.t", mode, self.ATTRS))
+                self.assertEqual(self.setpoints(consumer), expected)
+
+    async def test_a_single_setpoint_in_heat_cool_still_shows(self):
+        consumer = Consumer(self.hass, State("climate.t", "heat_cool", self.ATTRS))
+        attrs = {**self.ATTRS, "target_temp_low": None, "target_temp_high": None}
+        self.assertQuiet(consumer, State("climate.t", "heat_cool", attrs))
+        self.assertEqual(self.setpoints(consumer), (23.5, None, None))
+
+    async def test_unavailable_clears_everything(self):
+        consumer = Consumer(self.hass, State("climate.t", "heat", self.ATTRS))
+        self.assertQuiet(consumer, State("climate.t", "heat", self.ATTRS))
+        self.assertQuiet(consumer, State("climate.t", "unavailable", {}))
+        self.assertEqual(self.setpoints(consumer), (None, None, None))
 
 
 def tracker_state(consumer) -> str | None:
