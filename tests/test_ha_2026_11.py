@@ -62,3 +62,36 @@ class FailedRegistryLoadTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SerializeSchemaTest(unittest.TestCase):
+    """2026.10 removed homeassistant.helpers.data_entry_flow.to_field_list (its flow views call probatio's): the
+    fallback to voluptuous_serialize then answered "UNSUPPORTED" and every form failed.  Run on the installed HA."""
+
+    def test_a_form_serialises_on_this_home_assistant(self):
+        import voluptuous as vol
+
+        from custom_components.integration_manager import flows
+
+        out = flows._serialize_schema(vol.Schema({vol.Required("name"): str, vol.Optional("initial", default=1): int}))
+        self.assertIsInstance(out, list)
+        self.assertEqual([f["name"] for f in out], ["name", "initial"])
+
+    def test_visible_conditions_reach_the_form(self):
+        from homeassistant import data_entry_flow
+
+        if not hasattr(data_entry_flow, "add_visible_conditions_to_serialized_schema"):
+            self.skipTest("Home Assistant < 2026.11 has no visible conditions")
+        from custom_components.integration_manager import flows
+
+        out = flows._serialize_schema(self._visible_schema())
+        self.assertNotIn("visible", out[0])
+        self.assertIs(out[1]["visible"], True)
+
+    @staticmethod
+    def _visible_schema():
+        import voluptuous as vol
+
+        from homeassistant import data_entry_flow
+
+        return vol.Schema({data_entry_flow.Required("mode"): str, data_entry_flow.Optional("level", visible=True): int})

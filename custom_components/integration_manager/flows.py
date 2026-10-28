@@ -44,13 +44,23 @@ def prepare_result(result: data_entry_flow.FlowResult) -> dict[str, Any]:
 def _serialize_schema(schema: Any) -> Any:
     """HA 2026.9 replaced voluptuous with probatio: voluptuous_serialize
     returns the string "UNSUPPORTED" for its schemas; HA's own helper
-    (to_field_list) knows them.  Older HA: voluptuous_serialize."""
+    (to_field_list) knows them.  2026.10 dropped that helper and its flow
+    views call probatio.to_field_list, which 2026.11 follows with the fields'
+    `visible` conditions (add_visible_conditions_to_serialized_schema): the
+    same here.  Older HA: voluptuous_serialize."""
     try:
-        from homeassistant.helpers.data_entry_flow import to_field_list  # HA >= 2026.9
+        from homeassistant.helpers.data_entry_flow import to_field_list  # HA 2026.9
     except ImportError:
-        to_field_list = None
+        try:
+            from probatio import to_field_list  # HA >= 2026.10, as its flow views
+        except ImportError:
+            to_field_list = None
     if to_field_list is not None:
-        return to_field_list(schema, custom_serializer=cv.custom_serializer)  # errors surface to the UI, not an empty form
+        out = to_field_list(schema, custom_serializer=cv.custom_serializer)  # errors surface to the UI, not an empty form
+        add_visible = getattr(data_entry_flow, "add_visible_conditions_to_serialized_schema", None)  # HA >= 2026.11
+        if add_visible is not None and isinstance(out, list):
+            add_visible(schema, out)
+        return out
     import voluptuous_serialize  # HA < 2026.9 only
 
     out = voluptuous_serialize.convert(schema, custom_serializer=cv.custom_serializer)
