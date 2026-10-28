@@ -552,6 +552,25 @@ def build_component(
                     "temperature_low_command_topic": f"{cmd}/temperature_low",
                 }
             )
+        # Since HA 2026.10.0 the main HA's MQTT climate, when its modes hold heat_cool and also heat or cool,
+        # keeps one setpoint kind at a time: a non-None single setpoint parks (clears) the range and a
+        # non-None low/high parks the single one.  The document carries all three, so whichever topic it
+        # handles last wins and the other kind shows null whatever the source's mode.  Send exactly one
+        # non-None kind per message, picked by the rule of the main HA's own mode swap (only heat_cool is the
+        # range mode); a source that has only one kind still shows it.  Other climates are left as they were.
+        modes = comp["modes"]
+        if "heat_cool" in modes and ("heat" in modes or "cool" in modes):
+            in_range = "value_json.state == 'heat_cool'"
+            comp["temperature_state_template"] = _tpl(
+                f"None if {in_range} and (value_json.attributes.get('target_temp_low') is not none"
+                " or value_json.attributes.get('target_temp_high') is not none)"
+                " else value_json.attributes.get('temperature', None)")
+            for key, name in (("temperature_high_state_template", "target_temp_high"),
+                              ("temperature_low_state_template", "target_temp_low")):
+                if key in comp:
+                    comp[key] = _tpl(
+                        f"None if not ({in_range}) and value_json.attributes.get('temperature') is not none"
+                        f" else value_json.attributes.get('{name}', None)")
         # MQTT climate reserves "none" as the implicit no-preset value and
         # rejects the whole component if it appears in the list.
         presets = [p for p in (attrs.get("preset_modes") or []) if str(p).lower() != "none"]
