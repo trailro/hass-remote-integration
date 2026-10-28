@@ -221,8 +221,8 @@ class ConfigEntityCategoryTest(unittest.TestCase):
         root = pathlib.Path(components.__file__).parent
         refused = set()
         for domain in set(disc.NATIVE) | mr.CONFIG_CATEGORY_REFUSED:
-            init = root / domain / "__init__.py"
-            if init.exists() and "entity category is set to config" in init.read_text(encoding="utf-8"):
+            # __init__.py up to 2026.10, entity.py from 2026.11: any module of the domain's package
+            if any("entity category is set to config" in f.read_text(encoding="utf-8") for f in (root / domain).glob("*.py")):
                 refused.add(domain)
         self.assertEqual(refused, set(mr.CONFIG_CATEGORY_REFUSED))
 

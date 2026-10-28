@@ -14,12 +14,12 @@ from unittest import mock
 
 import backupkit
 from homeassistant import config_entries as ce, core, loader
-from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 import custom_components.integration_manager as im
 from custom_components.integration_manager import backup_views, views
 from custom_components.integration_manager.ha_updater import HaUpdater
 from custom_components.integration_manager.installer import Installer, State
+from tests.registries import load_registries
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PKG = os.path.join(ROOT, "custom_components", "integration_manager")
@@ -32,11 +32,7 @@ class _RealEntries:
     async def __aenter__(self):
         self.hass = core.HomeAssistant(tempfile.mkdtemp())
         loader.async_setup(self.hass)
-        dr.async_setup(self.hass)
-        await dr.async_load(self.hass, load_empty=True)
-        await er.async_load(self.hass, load_empty=True)
-        self.hass.config_entries = ce.ConfigEntries(self.hass, {})
-        await self.hass.config_entries.async_initialize()
+        await load_registries(self.hass)
         return self
 
     def add(self, state, domain="demo", disabled_by=None):

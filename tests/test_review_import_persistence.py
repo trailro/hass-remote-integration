@@ -13,12 +13,11 @@ from unittest import mock
 
 from homeassistant import config_entries as ce
 from homeassistant import core, loader
-from homeassistant.helpers import device_registry as dr
-from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import storage
 from homeassistant.util.file import WriteError
 
 from custom_components.integration_manager import ha_import
+from tests.registries import load_registries
 
 
 class RealPersistenceTest(unittest.IsolatedAsyncioTestCase):
@@ -26,11 +25,7 @@ class RealPersistenceTest(unittest.IsolatedAsyncioTestCase):
         self.hass = core.HomeAssistant(tempfile.mkdtemp(prefix="hri-import-persist-"))
         self.addCleanup(shutil.rmtree, self.hass.config.config_dir, True)
         loader.async_setup(self.hass)
-        dr.async_setup(self.hass)
-        await dr.async_load(self.hass, load_empty=True)
-        await er.async_load(self.hass, load_empty=True)
-        self.hass.config_entries = ce.ConfigEntries(self.hass, {})
-        await self.hass.config_entries.async_initialize()
+        await load_registries(self.hass)
         self.addAsyncCleanup(self.hass.async_stop, force=True)
         self.entry = ce.ConfigEntry(domain="demo", title="Demo", data={"token": "imported"}, source="import", version=2,
                                     minor_version=1, options={"scan": 30}, unique_id=None, discovery_keys={},
@@ -50,7 +45,8 @@ class RealPersistenceTest(unittest.IsolatedAsyncioTestCase):
 
         async def job(fn, *args):
             result = await real(fn, *args)
-            if getattr(fn, "__name__", "").startswith("_write_") and not writes:
+            # Store._write_data / _write_prepared_data up to 2026.10, its file backend's _write from 2026.11
+            if getattr(fn, "__name__", "").startswith("_write") and not writes:
                 writes.append(fn)
                 self.hass.config_entries.async_update_entry(self.entry, **changes)
             return result

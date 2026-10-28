@@ -26,10 +26,11 @@ from types import SimpleNamespace
 from unittest import mock
 
 from homeassistant import config_entries as ce, core, loader
-from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers import entity_registry as er
 
 from custom_components.integration_manager import ha_import
 from tests.fakes import entrypoint_for
+from tests.registries import load_registries
 
 ORIGINAL = "this volume's own"
 IMPORTED = "from the backup"
@@ -169,11 +170,7 @@ class RealConfigEntriesSaveTest(unittest.IsolatedAsyncioTestCase):
         hass = core.HomeAssistant(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, hass.config.config_dir, True)
         loader.async_setup(hass)
-        dr.async_setup(hass)
-        await dr.async_load(hass, load_empty=True)
-        await er.async_load(hass, load_empty=True)
-        hass.config_entries = ce.ConfigEntries(hass, {})
-        await hass.config_entries.async_initialize()
+        await load_registries(hass)
         self.addAsyncCleanup(hass.async_stop, force=True)
         entry = ce.ConfigEntry(domain="demo", title="Demo", data={}, source="user", version=1, minor_version=1, options={},
                                unique_id=None, discovery_keys={}, subentries_data=None)
@@ -226,9 +223,7 @@ class PruneOldMapTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(shutil.rmtree, cfg, True)
         os.makedirs(os.path.join(cfg, ha_import.STATE_DIR))
         hass = core.HomeAssistant(cfg)
-        dr.async_setup(hass)
-        await dr.async_load(hass, load_empty=True)
-        await er.async_load(hass, load_empty=True)
+        await load_registries(hass)
         self.addAsyncCleanup(hass.async_stop)
         reg = er.async_get(hass)
         reg.async_get_or_create("binary_sensor", "ramses_cc", "10:056759-bit_2_4", suggested_object_id="b24")
