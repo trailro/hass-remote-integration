@@ -32,13 +32,14 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from homeassistant.config_entries import ConfigEntryState
+from homeassistant.config_entries import ConfigEntry, ConfigEntryDisabler, ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import frame
 
 from custom_components.integration_manager import ha_import
+from tests.registries import load_registries
 
 DISABLER = er.RegistryEntryDisabler
 
@@ -57,9 +58,7 @@ class RegistryCase(unittest.IsolatedAsyncioTestCase):
         os.makedirs(os.path.join(self.cfg, ha_import.STATE_DIR))
         self.hass = HomeAssistant(self.cfg)
         frame.async_setup(self.hass)
-        dr.async_setup(self.hass)
-        await dr.async_load(self.hass, load_empty=True)
-        await er.async_load(self.hass, load_empty=True)
+        await load_registries(self.hass)
         self.reg = er.async_get(self.hass)
         self.addAsyncCleanup(self.hass.async_stop)
 
@@ -72,9 +71,24 @@ class RegistryCase(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(lambda: al._save_handle and al._save_handle.cancel())
         return al
 
-    def create(self, unique_id="uid1", object_id="signal_strength", disabled_by=DISABLER.INTEGRATION, domain="sensor"):
+    def create(self, unique_id="uid1", object_id="signal_strength", disabled_by=DISABLER.INTEGRATION, domain="sensor", **kw):
         return self.reg.async_get_or_create(domain, "demo", unique_id, suggested_object_id=object_id,
-                                            disabled_by=disabled_by)
+                                            disabled_by=disabled_by, **kw)
+
+    def cause_of(self, flag, unique_id):
+        """What makes Home Assistant set ``flag`` itself: from 2026.11 it derives CONFIG_ENTRY and DEVICE from the
+        config entry and the device, and a flag passed with neither disabled behind it comes out as None."""
+        if flag not in (DISABLER.CONFIG_ENTRY, DISABLER.DEVICE):
+            return {}
+        entry = ConfigEntry(domain="demo", title="Demo", data={}, source="user", version=1, minor_version=1, options={},
+                            unique_id=unique_id, discovery_keys={}, subentries_data=None,
+                            disabled_by=ConfigEntryDisabler.USER if flag is DISABLER.CONFIG_ENTRY else None)
+        self.hass.config_entries._entries[entry.entry_id] = entry  # noqa: SLF001 - no integration to set up
+        if flag is DISABLER.CONFIG_ENTRY:
+            return {"config_entry": entry}
+        device = dr.async_get(self.hass).async_get_or_create(config_entry_id=entry.entry_id, identifiers={("demo", unique_id)},
+                                                             disabled_by=dr.DeviceEntryDisabler.USER)
+        return {"config_entry": entry, "device_id": device.id}
 
     def entry_for(self, unique_id="uid1", domain="sensor"):
         eid = self.reg.async_get_entity_id(domain, "demo", unique_id)
@@ -133,7 +147,7 @@ class EnableOnCreateTest(RegistryCase):
             with self.subTest(flag=flag):
                 uid = f"uid-{flag.value}"
                 self.aligner({f"sensor:{uid}": _want(f"sensor.{flag.value}_one")})
-                self.create(unique_id=uid, object_id=f"{flag.value}_one", disabled_by=flag)
+                self.create(unique_id=uid, object_id=f"{flag.value}_one", disabled_by=flag, **self.cause_of(flag, uid))
                 await self.hass.async_block_till_done()
                 self.assertIs(self.entry_for(uid).disabled_by, flag)
 
