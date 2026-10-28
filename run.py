@@ -699,8 +699,16 @@ CORE_INTEGRATIONS = ("homeassistant", "persistent_notification")  # bootstrap.CO
 
 
 async def _mount_local_lib_path(config_dir: str) -> str:
-    """bootstrap.async_mount_local_lib_path without importing bootstrap."""
-    from homeassistant.util.package import async_get_user_site
+    """bootstrap.async_mount_local_lib_path without importing bootstrap.
+
+    Home Assistant 2026.11 dropped <config>/deps altogether (pip no longer
+    gets a target, bootstrap no longer mounts it, async_get_user_site is
+    gone): nothing is installed there, so there is nothing to mount.  HRI
+    sets skip_pip and installs into the venv on every version anyway."""
+    try:
+        from homeassistant.util.package import async_get_user_site
+    except ImportError:  # Home Assistant >= 2026.11
+        return ""
 
     deps_dir = os.path.join(config_dir, "deps")
     if (lib_dir := await async_get_user_site(deps_dir)) not in sys.path:
@@ -742,25 +750,31 @@ async def _load_base_functionality(hass) -> bool:
         is_official_image()
         is_docker_env()
 
+    # Kept in a list and cancelled when the gather raises, as bootstrap does
+    # since Home Assistant 2026.11: there entity_registry.async_load waits for
+    # the config entries, and would wait forever once their load has failed.
+    tasks = [
+        create_eager_task(get_internal_store_manager(hass).async_initialize()),
+        create_eager_task(area_registry.async_load(hass)),
+        create_eager_task(category_registry.async_load(hass)),
+        create_eager_task(device_registry.async_load(hass)),
+        create_eager_task(entity_registry.async_load(hass)),
+        create_eager_task(floor_registry.async_load(hass)),
+        create_eager_task(issue_registry.async_load(hass)),
+        create_eager_task(label_registry.async_load(hass)),
+        hass.async_add_executor_job(_blocking_io_warmup),
+        create_eager_task(template.async_load_custom_templates(hass)),
+        create_eager_task(restore_state.async_load(hass)),
+        create_eager_task(hass.config_entries.async_initialize()),
+        create_eager_task(async_get_system_info(hass)),
+        create_eager_task(condition.async_setup(hass)),
+        create_eager_task(trigger.async_setup(hass)),
+    ]
     try:
-        await asyncio.gather(
-            create_eager_task(get_internal_store_manager(hass).async_initialize()),
-            create_eager_task(area_registry.async_load(hass)),
-            create_eager_task(category_registry.async_load(hass)),
-            create_eager_task(device_registry.async_load(hass)),
-            create_eager_task(entity_registry.async_load(hass)),
-            create_eager_task(floor_registry.async_load(hass)),
-            create_eager_task(issue_registry.async_load(hass)),
-            create_eager_task(label_registry.async_load(hass)),
-            hass.async_add_executor_job(_blocking_io_warmup),
-            create_eager_task(template.async_load_custom_templates(hass)),
-            create_eager_task(restore_state.async_load(hass)),
-            create_eager_task(hass.config_entries.async_initialize()),
-            create_eager_task(async_get_system_info(hass)),
-            create_eager_task(condition.async_setup(hass)),
-            create_eager_task(trigger.async_setup(hass)),
-        )
+        await asyncio.gather(*tasks)
     except Exception:  # noqa: BLE001
+        for task in tasks:
+            task.cancel()
         _LOGGER.exception("loading the registries failed")
         return False
     return True
