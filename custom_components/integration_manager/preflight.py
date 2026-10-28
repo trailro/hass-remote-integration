@@ -398,6 +398,8 @@ _REMOVED_HA_SYMBOLS: dict[str, dict[str, tuple[str, str]]] = {
     },
     "homeassistant.helpers.data_entry_flow": {
         "voluptuous_serialize": ("2026.9.3", "the voluptuous-serialize package"),
+        # 2026.9 only re-exported probatio's; checked against the 2026.10.0 wheel
+        "to_field_list": ("2026.10.0", "probatio.to_field_list"),
     },
     "homeassistant.runner": {
         "HassEventLoopPolicy": ("2026.9.3", "homeassistant.runner.create_event_loop"),
