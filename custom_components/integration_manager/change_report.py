@@ -36,7 +36,7 @@ DELAY_S = 120
 ENTITY_KEYS = ("unit_of_measurement", "device_class", "state_class", "entity_category")
 
 
-TARGET_KEYS = frozenset({"entity_id", "device_id", "area_id", "floor_id", "label_id", "metadata"})  # added by Home Assistant to entity services
+TARGET_KEYS = frozenset({"entity_id", "device_id", "area_id", "floor_id", "label_id", "metadata", "exclude"})  # added by Home Assistant to entity services (exclude: 2026.11)
 
 
 def _schema_keys(schema: Any, depth: int = 0) -> list[str]:
