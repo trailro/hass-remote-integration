@@ -151,7 +151,9 @@ start, answers `404` with a message.
 
 ### Configuration
 
-The config flow page renders each selector as its control. A number shows as
+The config flow page renders each selector as its control. A field with a
+`visible` condition (Home Assistant 2026.11) is always shown; the condition is
+not evaluated here. A number shows as
 a box, or as a slider when it asks for one and gives both ends, with its unit
 next to the label. A text field that takes several values, and the typed
 values of a multi-select that allows them, show one box per item; an item may

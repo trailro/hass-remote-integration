@@ -3,6 +3,26 @@
 Every version's changes are in the
 [GitHub releases](https://github.com/trailro/hass-remote-integration/releases).
 
+## 0.28.5
+
+- **Home Assistant 2026.11 boots.** 2026.11 no longer has a `deps` folder
+  (`async_get_user_site` is gone), and HRI's Home Assistant stopped at every
+  boot with an ImportError. The folder is only mounted where Home Assistant
+  still has it.
+- **Config flows work again on Home Assistant 2026.10 and newer.** 2026.10
+  removed the helper HRI used to send a form to the page, so every config and
+  options flow answered HTTP 500 ("cannot serialise this form"). Forms are
+  serialised the way Home Assistant's own flow views do, including 2026.11's
+  `visible` conditions in the field list (the page still shows every field).
+- **A thermostat with both a target temperature and a range shows both right
+  on a main Home Assistant 2026.10 or newer.** That MQTT climate keeps only one
+  kind of setpoint at a time for a thermostat whose modes hold `heat_cool` and
+  also `heat` or `cool`, and HRI sent both, so one showed as empty. HRI now
+  sends the range in `heat_cool` and the single target otherwise.
+- The change report no longer lists 2026.11's `exclude` target as a field of
+  every entity service, and the preflight warns about integrations that import
+  `homeassistant.helpers.data_entry_flow.to_field_list` (removed in 2026.10.0).
+
 ## 0.28.4
 
 - **The backup a Home Assistant rollback restores is kept beyond

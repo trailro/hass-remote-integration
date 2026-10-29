@@ -283,7 +283,9 @@ catches: a version that does not set up is rolled back automatically.
   published wheel), such as `CLOUD_NEVER_EXPOSED_ENTITIES` (2026.6) or the
   `helpers.service` names moved to `helpers.target` (2026.8). The 2026.9
   entries were diffed against the 2026.9.3 wheel, so a target of 2026.9.0 to
-  2026.9.2 stays quiet. The warning names the file and line, the removing
+  2026.9.2 stays quiet; the 2026.10 one
+  (`homeassistant.helpers.data_entry_flow.to_field_list`, now
+  `probatio.to_field_list`) against the 2026.10.0 wheel. The warning names the file and line, the removing
   version and where the name moved (`removed in 2026.8.0, now
   homeassistant.helpers.target.async_extract_referenced_entity_ids`), and
   lists the first three hits and counts the rest. A name is reported only when

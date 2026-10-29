@@ -730,7 +730,11 @@ the shape, and its registry entry fills in what the state cannot carry:
   no install button);
 - an alarm panel offers only the modes it can arm;
 - a thermostat gets a temperature range, a target humidity and an on/off switch
-  only where the source declares them;
+  only where the source declares them. One whose modes hold `heat_cool` and also
+  `heat` or `cool` sends one setpoint kind per state message (the range in
+  `heat_cool`, the single target otherwise): from 2026.10 the main Home
+  Assistant keeps only one kind at a time for such a thermostat, and showed the
+  other as empty when both arrived;
 - a fan offers the same speed steps.
 
 Home Assistant composes an entity's name from the device's and its own, so the
