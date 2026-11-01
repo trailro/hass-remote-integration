@@ -1,5 +1,5 @@
 # pinned by digest: a rebuild gets the same base, Dependabot proposes the updates
-FROM python:3.14-slim@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d
+FROM python:3.15-slim@sha256:94d3426f1def7db4a106a232ac121bfd975393e5dfd40a619b955fae45fe7913
 
 # Home Assistant is NOT baked in: entrypoint.py installs the wanted version
 # into /config/venv-<version> (on the volume) at start, so the manager UI
