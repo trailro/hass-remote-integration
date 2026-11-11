@@ -9,4 +9,4 @@ voluptuous-serialize>=2.7.0,<3
 # regex: the Log files format is matched with a time limit (the stdlib re has none); date-versioned, no major to cap
 regex>=2026.9.29
 # isal: aiohttp's zlib accelerator, otherwise aiohttp_fast_zlib warns at every boot
-isal>=1.8.0,<2
+isal>=1.9.1,<2
