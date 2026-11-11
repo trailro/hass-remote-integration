@@ -25,3 +25,9 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    # paho-mqtt is pinned by Home Assistant itself (package_constraints.txt and
+    # the MQTT integration), and requirements.txt is installed under those
+    # constraints: it moves when Home Assistant moves it, never ahead of it
+    # (2.2.0 could not install on any supported Home Assistant).
+    ignore:
+      - dependency-name: paho-mqtt
