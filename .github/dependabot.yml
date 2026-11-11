@@ -15,6 +15,11 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    # The base image's Python runs Home Assistant's venv, so it moves only
+    # when Home Assistant supports the next Python.
+    ignore:
+      - dependency-name: python
+        versions: [">=3.15"]
 
   - package-ecosystem: pip
     directory: /
