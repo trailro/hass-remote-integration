@@ -7,6 +7,6 @@ paho-mqtt==2.1.0
 # voluptuous-serialize: renders config-flow schemas (not a core dependency since HA 2026.9; 2026.8.x pins 2.7.0)
 voluptuous-serialize>=2.7.0,<3
 # regex: the Log files format is matched with a time limit (the stdlib re has none); date-versioned, no major to cap
-regex>=2026.9.10
+regex>=2026.9.29
 # isal: aiohttp's zlib accelerator, otherwise aiohttp_fast_zlib warns at every boot
 isal>=1.8.0,<2
