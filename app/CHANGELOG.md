@@ -3,6 +3,18 @@
 Every version's changes are in the
 [GitHub releases](https://github.com/trailro/hass-remote-integration/releases).
 
+## 0.28.6
+
+Maintenance.
+
+- **The image's own Home Assistant is 2026.11.0** (was 2026.10.2). A fresh volume
+  installs the newest stable release from PyPI as before. 2026.11.0 is what it
+  installs with `HA_VERSION_LATEST=0`, or when PyPI cannot be reached.
+- The app is checked on Home Assistant OS 18.4, Supervisor 2026.10.5 and Core
+  2026.11.0 (the canary's record, `.github/app_versions.json`).
+- `regex` 2026.9.29 or newer; updated GitHub Actions; Dependabot keeps the
+  image's Python at 3.14 until Home Assistant supports 3.15.
+
 ## 0.28.5
 
 - **Home Assistant 2026.11 boots.** 2026.11 no longer has a `deps` folder

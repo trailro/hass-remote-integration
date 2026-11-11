@@ -83,7 +83,8 @@ those projects.
   the same host name is out of scope; see
   [Password and sessions](docs/security.md#password-and-sessions).
 - **GitHub Actions are pinned to commit SHAs and the base image to a digest**,
-  both updated by Dependabot. The exceptions are the app checks, which run
+  both updated by Dependabot (which keeps the image's Python at 3.14 until Home
+  Assistant supports the next one). The exceptions are the app checks, which run
   upstream code on purpose, in jobs with read-only repository access: CI runs
   the Supervisor's own validation at the version in
   `.github/app_versions.json`, and the weekly app canary the newest app linter
