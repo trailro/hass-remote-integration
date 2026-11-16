@@ -1,7 +1,7 @@
 {
-  "supervisor": "2026.10.5",
+  "supervisor": "2026.11.0",
   "haos": "18.4",
-  "core": "2026.11.0",
+  "core": "2026.11.1",
   "linter": "v2.21.2",
   "linter_sha": "d51677290aef26cdfc835271dd3c7343ce502809",
   "configuration_md_sha256": "39027b0506b8e9ea0701f758ccf7d436270dab0bfb94205893f2d3b63c0fcd81"
